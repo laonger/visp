@@ -1659,6 +1659,7 @@ name = "vbw-llm"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "futures",
  "reqwest",
  "serde",
@@ -1682,6 +1683,7 @@ name = "vbw-tools"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "serde_json",
  "tempfile",
  "tokio",
  "vbw-core",
