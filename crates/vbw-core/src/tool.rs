@@ -7,6 +7,24 @@ use std::path::PathBuf;
 pub struct ToolContext {
     /// 当前工作目录
     pub working_dir: PathBuf,
+    /// 会话 ID（用于日志追踪和 bash 确认模式判断）
+    pub session_id: Option<String>,
+}
+
+#[cfg(test)]
+mod tests_toolcontext {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_toolcontext_default_session_id() {
+        let ctx = ToolContext {
+            working_dir: PathBuf::from("/tmp"),
+            session_id: None,
+        };
+        assert_eq!(ctx.session_id, None);
+        assert_eq!(ctx.working_dir, Path::new("/tmp"));
+    }
 }
 
 /// 工具执行结果
