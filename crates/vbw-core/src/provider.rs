@@ -13,6 +13,8 @@ pub struct LlmConfig {
     pub temperature: f64,
     /// 最大 token 数
     pub max_tokens: u32,
+    /// 扩展参数（provider 特定参数）
+    pub extra: std::collections::HashMap<String, String>,
 }
 
 impl Default for LlmConfig {
@@ -21,7 +23,29 @@ impl Default for LlmConfig {
             model: "claude-sonnet-4-20250514".to_string(),
             temperature: 0.7,
             max_tokens: 4096,
+            extra: std::collections::HashMap::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests_llmconfig {
+    use super::*;
+
+    #[test]
+    fn test_llmconfig_default() {
+        let config = LlmConfig::default();
+        assert_eq!(config.model, "claude-sonnet-4-20250514");
+        assert_eq!(config.temperature, 0.7);
+        assert_eq!(config.max_tokens, 4096);
+        assert!(config.extra.is_empty());
+    }
+
+    #[test]
+    fn test_llmconfig_extra() {
+        let mut config = LlmConfig::default();
+        config.extra.insert("key".to_string(), "value".to_string());
+        assert_eq!(config.extra.get("key").unwrap(), "value");
     }
 }
 
