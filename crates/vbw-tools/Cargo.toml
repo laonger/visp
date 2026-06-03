@@ -1,0 +1,9 @@
+[package]
+name = "vbw-tools"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+vbw-core = { path = "../vbw-core" }
+tokio.workspace = true
+async-trait.workspace = true

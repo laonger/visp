@@ -2,7 +2,9 @@
 resolver = "2"
 members = [
     "crates/vbw-core",
+    "crates/vbw-llm",
     "crates/vbw-proto",
+    "crates/vbw-tools",
 ]
 
 [workspace.package]
