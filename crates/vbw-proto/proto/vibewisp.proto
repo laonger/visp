@@ -1,0 +1,178 @@
+syntax = "proto3";
+package vibewisp;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+// ============ Session ============
+message Session {
+    string session_id = 1;
+    SessionStatus status = 2;
+    string project_path = 3;
+    google.protobuf.Timestamp created_at = 4;
+}
+
+enum SessionStatus {
+    IDLE = 0;
+    RUNNING = 1;
+    COMPLETED = 2;
+    ERROR = 3;
+}
+
+message CreateSessionRequest {
+    string project_path = 1;
+    map<string, string> config = 2;
+}
+
+message ListSessionsResponse {
+    repeated Session sessions = 1;
+}
+
+message DeleteSessionRequest {
+    string session_id = 1;
+}
+
+// ============ Chat (双向流) ============
+message ClientMessage {
+    oneof payload {
+        UserInput user_input = 1;
+        ConfigUpdate config_update = 2;
+    }
+}
+
+message UserInput {
+    string text = 1;
+    string session_id = 2;
+}
+
+message ConfigUpdate {
+    string session_id = 1;
+    map<string, string> config = 2;
+}
+
+message ServerMessage {
+    oneof payload {
+        TextDelta text_delta = 1;
+        ToolCall tool_call = 2;
+        ToolResult tool_result = 3;
+        StatusUpdate status_update = 4;
+        Error error = 5;
+        Done done = 6;
+    }
+}
+
+message TextDelta {
+    string delta = 1;
+    string session_id = 2;
+}
+
+message ToolCall {
+    string call_id = 1;
+    string tool_name = 2;
+    string arguments = 3; // JSON string
+    string session_id = 4;
+}
+
+message ToolResult {
+    string call_id = 1;
+    string content = 2;
+    bool is_error = 3;
+    string session_id = 4;
+}
+
+message StatusUpdate {
+    string message = 1;
+    string session_id = 2;
+}
+
+message Error {
+    string code = 1;
+    string message = 2;
+    string session_id = 3;
+}
+
+message Done {
+    string session_id = 1;
+}
+
+// ============ File ============
+message ReadFileRequest {
+    string path = 1;
+    string session_id = 2;
+}
+
+message ReadFileResponse {
+    string content = 1;
+    string path = 2;
+}
+
+// ============ CodeGraph ============
+message SearchSymbolsRequest {
+    string query = 1;
+    string project_path = 2;
+    int32 limit = 3;
+}
+
+message SymbolInfo {
+    string name = 1;
+    string kind = 2;
+    string file_path = 3;
+    uint32 line = 4;
+    uint32 column = 5;
+    string signature = 6;
+}
+
+message SearchSymbolsResponse {
+    repeated SymbolInfo symbols = 1;
+}
+
+message GetSymbolDetailsRequest {
+    string symbol_name = 1;
+    string project_path = 2;
+}
+
+message SymbolDetails {
+    string name = 1;
+    string kind = 2;
+    string file_path = 3;
+    uint32 line = 4;
+    uint32 column = 5;
+    string signature = 6;
+    string docstring = 7;
+    string source = 8;
+    repeated string callers = 9;
+    repeated string callees = 10;
+}
+
+// ============ Daemon ============
+message HealthStatus {
+    bool alive = 1;
+    string version = 2;
+    uint64 uptime_seconds = 3;
+}
+
+message ShutdownRequest {
+    bool force = 1;
+}
+
+// ============ Service ============
+service CoderDaemon {
+    // Session management
+    rpc CreateSession(CreateSessionRequest) returns (Session);
+    rpc ListSessions(google.protobuf.Empty) returns (ListSessionsResponse);
+    rpc DeleteSession(DeleteSessionRequest) returns (google.protobuf.Empty);
+
+    // Core conversation (bidirectional streaming)
+    rpc Chat(stream ClientMessage) returns (stream ServerMessage);
+
+    // Fast file access
+    rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
+
+    // Code intelligence
+    rpc SearchSymbols(SearchSymbolsRequest) returns (SearchSymbolsResponse);
+    rpc GetSymbolDetails(GetSymbolDetailsRequest) returns (SymbolDetails);
+
+    // Daemon control
+    rpc HealthCheck(google.protobuf.Empty) returns (HealthStatus);
+    rpc Shutdown(ShutdownRequest) returns (google.protobuf.Empty);
+}
