@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use futures::stream::Stream;
 use std::pin::Pin;
 
+use crate::error::LlmError;
 use crate::message::{Message, ToolDefinition};
 
 /// LLM 配置参数
@@ -74,5 +75,5 @@ pub trait LlmProvider: Send + Sync {
         messages: &[Message],
         tools: &[ToolDefinition],
         config: &LlmConfig,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, String>> + Send>>, String>;
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>;
 }
