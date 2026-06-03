@@ -53,7 +53,9 @@ mod tests_llmerror {
 
     #[test]
     fn test_llmerror_ratelimit_display() {
-        let err = LlmError::RateLimit { retry_after_secs: 30 };
+        let err = LlmError::RateLimit {
+            retry_after_secs: 30,
+        };
         assert_eq!(err.to_string(), "Rate limited, retry after 30s");
     }
 
@@ -65,7 +67,10 @@ mod tests_llmerror {
 
     #[test]
     fn test_llmerror_api_display() {
-        let err = LlmError::Api { status: 500, message: "internal error".into() };
+        let err = LlmError::Api {
+            status: 500,
+            message: "internal error".into(),
+        };
         assert_eq!(err.to_string(), "API error (status 500): internal error");
     }
 
