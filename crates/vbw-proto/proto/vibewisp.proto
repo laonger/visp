@@ -37,6 +37,7 @@ message ClientMessage {
     oneof payload {
         UserInput user_input = 1;
         ConfigUpdate config_update = 2;
+        UserResponse user_response = 3;
     }
 }
 
@@ -47,7 +48,21 @@ message UserInput {
 
 message ConfigUpdate {
     string session_id = 1;
-    map<string, string> config = 2;
+    optional string model = 2;
+    optional double temperature = 3;
+    optional uint32 max_tokens = 4;
+    map<string, string> extra = 5;
+}
+
+message UserResponse {
+    string query_id = 1;
+    bool approved = 2;
+}
+
+message UserQuery {
+    string query_id = 1;
+    string message = 2;
+    string session_id = 3;
 }
 
 message ServerMessage {
@@ -58,6 +73,7 @@ message ServerMessage {
         StatusUpdate status_update = 4;
         Error error = 5;
         Done done = 6;
+        UserQuery user_query = 7;
     }
 }
 
