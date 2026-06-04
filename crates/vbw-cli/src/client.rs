@@ -98,7 +98,9 @@ impl ChatHandle {
             })),
         };
         let tx = self.request_tx.clone();
-        tokio::spawn(async move { let _ = tx.send(msg).await; });
+        tokio::spawn(async move {
+            let _ = tx.send(msg).await;
+        });
     }
 
     pub fn send_cancel(&self) {
@@ -108,7 +110,9 @@ impl ChatHandle {
             })),
         };
         let tx = self.request_tx.clone();
-        tokio::spawn(async move { let _ = tx.send(msg).await; });
+        tokio::spawn(async move {
+            let _ = tx.send(msg).await;
+        });
     }
 
     pub fn send_config_update(&self, config: LlmConfig) {
@@ -119,7 +123,9 @@ impl ChatHandle {
             })),
         };
         let tx = self.request_tx.clone();
-        tokio::spawn(async move { let _ = tx.send(msg).await; });
+        tokio::spawn(async move {
+            let _ = tx.send(msg).await;
+        });
     }
 
     pub async fn recv(&mut self) -> Option<ServerMessage> {

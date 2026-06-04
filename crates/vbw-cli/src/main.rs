@@ -2,6 +2,7 @@ mod app;
 mod client;
 mod display;
 mod repl;
+mod ui;
 
 use clap::Parser;
 use vbw_proto::vibewisp::LlmConfig;
