@@ -6,8 +6,8 @@ pub mod store;
 pub mod watcher;
 
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use crate::index::{CodeGraphConfig, Indexer};
 use crate::query::{QueryEngine, SymbolDetails, SymbolInfo};
@@ -124,7 +124,11 @@ mod tests {
         let (_tmp, project) = setup_project();
         let cg = CodeGraph::open(&project).unwrap();
 
-        write_ts_file(&project, "src/main.ts", "export function hello() { return 1; }\n");
+        write_ts_file(
+            &project,
+            "src/main.ts",
+            "export function hello() { return 1; }\n",
+        );
 
         let config = CodeGraphConfig::default();
         cg.build_full(&project, &config).await.unwrap();
@@ -157,6 +161,9 @@ mod tests {
 
         // Database file should still exist after shutdown
         let db_path = project.join(".vibewisp").join("codegraph.db");
-        assert!(db_path.exists(), "Database file should persist after shutdown");
+        assert!(
+            db_path.exists(),
+            "Database file should persist after shutdown"
+        );
     }
 }

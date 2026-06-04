@@ -5,12 +5,12 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tonic::{Request, Response, Status, Streaming};
 
 use vbw_codegraph::CodeGraph;
 use vbw_core::{
-    agent::{run_agent_loop, AgentConfig, AgentEvent},
+    agent::{AgentConfig, AgentEvent, run_agent_loop},
     message::Message,
     provider::{LlmConfig, LlmProvider},
     rules::RuleEngine,
@@ -18,7 +18,7 @@ use vbw_core::{
     tool::ToolContext,
     tool_registry::ToolRegistry,
 };
-use vbw_proto::vibewisp::{coder_daemon_server::CoderDaemon, self as proto};
+use vbw_proto::vibewisp::{self as proto, coder_daemon_server::CoderDaemon};
 
 type ResponseStream =
     Pin<Box<dyn futures::Stream<Item = Result<proto::ServerMessage, tonic::Status>> + Send>>;
@@ -368,7 +368,11 @@ impl CoderDaemon for CoderDaemonService {
         let req = request.into_inner();
         let project_path = req.project_path;
         let query = req.query;
-        let limit = if req.limit <= 0 { 20 } else { req.limit as usize };
+        let limit = if req.limit <= 0 {
+            20
+        } else {
+            req.limit as usize
+        };
 
         let cg = self.get_codegraph(&project_path).await?;
         let symbols = cg.search(&query, limit).map_err(Status::internal)?;
@@ -397,9 +401,7 @@ impl CoderDaemon for CoderDaemonService {
         let symbol_name = req.symbol_name;
 
         let cg = self.get_codegraph(&project_path).await?;
-        let mut details = cg
-            .get_details(&symbol_name)
-            .map_err(Status::internal)?;
+        let mut details = cg.get_details(&symbol_name).map_err(Status::internal)?;
 
         let d = details
             .drain(..)
@@ -504,10 +506,12 @@ fn agent_event_to_server_message(event: AgentEvent, session_id: &str) -> proto::
     let sid = session_id.to_owned();
     match event {
         AgentEvent::TextDelta(delta) => proto::ServerMessage {
-            payload: Some(proto::server_message::Payload::TextDelta(proto::TextDelta {
-                delta,
-                session_id: sid,
-            })),
+            payload: Some(proto::server_message::Payload::TextDelta(
+                proto::TextDelta {
+                    delta,
+                    session_id: sid,
+                },
+            )),
         },
         AgentEvent::ToolCallRequest {
             call_id,
@@ -526,18 +530,22 @@ fn agent_event_to_server_message(event: AgentEvent, session_id: &str) -> proto::
             content,
             is_error,
         } => proto::ServerMessage {
-            payload: Some(proto::server_message::Payload::ToolResult(proto::ToolResult {
-                call_id,
-                content,
-                is_error,
-                session_id: sid,
-            })),
+            payload: Some(proto::server_message::Payload::ToolResult(
+                proto::ToolResult {
+                    call_id,
+                    content,
+                    is_error,
+                    session_id: sid,
+                },
+            )),
         },
         AgentEvent::StatusUpdate(message) => proto::ServerMessage {
-            payload: Some(proto::server_message::Payload::StatusUpdate(proto::StatusUpdate {
-                message,
-                session_id: sid,
-            })),
+            payload: Some(proto::server_message::Payload::StatusUpdate(
+                proto::StatusUpdate {
+                    message,
+                    session_id: sid,
+                },
+            )),
         },
         AgentEvent::UserQuery { .. } => {
             // Handled separately in the chat handler (sender extraction)

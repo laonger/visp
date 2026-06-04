@@ -1,5 +1,5 @@
-use tonic::transport::Server;
 use crate::service::CoderDaemonService;
+use tonic::transport::Server;
 
 pub async fn start_server(
     addr: &str,

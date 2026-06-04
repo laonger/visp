@@ -11,7 +11,11 @@ use vbw_core::{
     tool_registry::ToolRegistry,
 };
 use vbw_llm::anthropic::AnthropicProvider;
-use vbw_tools::{bash::Bash, file::{EditFile, ReadFile, WriteFile}, search::{Glob, Grep}};
+use vbw_tools::{
+    bash::Bash,
+    file::{EditFile, ReadFile, WriteFile},
+    search::{Glob, Grep},
+};
 
 use crate::config::DaemonConfig;
 use crate::service::CoderDaemonService;
@@ -21,38 +25,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Init tracing
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
     // 2. Load config
-    let config_path = std::env::args()
-        .nth(1)
-        .map(std::path::PathBuf::from);
-    let config: DaemonConfig = config::load_config(config_path.as_deref())
-        .map_err(|e| format!("config: {e}"))?;
+    let config_path = std::env::args().nth(1).map(std::path::PathBuf::from);
+    let config: DaemonConfig =
+        config::load_config(config_path.as_deref()).map_err(|e| format!("config: {e}"))?;
 
     tracing::info!(listen_addr = %config.daemon.listen_addr, "starting vbw-daemon");
 
     // 3. Create LLM provider
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .map_err(|_| "ANTHROPIC_API_KEY not set".to_string())?;
-    let provider = Arc::new(AnthropicProvider::new(api_key)) as Arc<dyn vbw_core::provider::LlmProvider>;
+    let api_key =
+        std::env::var("ANTHROPIC_API_KEY").map_err(|_| "ANTHROPIC_API_KEY not set".to_string())?;
+    let provider =
+        Arc::new(AnthropicProvider::new(api_key)) as Arc<dyn vbw_core::provider::LlmProvider>;
 
     // 4. Create tool registry
     let mut tool_registry = ToolRegistry::new();
-    tool_registry.register(Box::new(ReadFile))
+    tool_registry
+        .register(Box::new(ReadFile))
         .map_err(|e| format!("register read_file: {e}"))?;
-    tool_registry.register(Box::new(WriteFile))
+    tool_registry
+        .register(Box::new(WriteFile))
         .map_err(|e| format!("register write_file: {e}"))?;
-    tool_registry.register(Box::new(EditFile))
+    tool_registry
+        .register(Box::new(EditFile))
         .map_err(|e| format!("register edit_file: {e}"))?;
-    tool_registry.register(Box::new(Bash))
+    tool_registry
+        .register(Box::new(Bash))
         .map_err(|e| format!("register bash: {e}"))?;
-    tool_registry.register(Box::new(Grep))
+    tool_registry
+        .register(Box::new(Grep))
         .map_err(|e| format!("register grep: {e}"))?;
-    tool_registry.register(Box::new(Glob))
+    tool_registry
+        .register(Box::new(Glob))
         .map_err(|e| format!("register glob: {e}"))?;
     let tool_registry = Arc::new(tool_registry);
 
