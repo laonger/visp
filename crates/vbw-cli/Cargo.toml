@@ -7,8 +7,10 @@ repository.workspace = true
 
 [dependencies]
 vbw-proto = { path = "../vbw-proto" }
-tonic.workspace = true
+tonic = { workspace = true, features = ["transport"] }
 prost.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+futures.workspace = true
+tokio-stream.workspace = true
 clap = { version = "4", features = ["derive"] }
 rustyline = { version = "14", default-features = false, features = ["with-file-history"] }

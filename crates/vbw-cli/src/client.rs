@@ -1,0 +1,134 @@
+#![allow(dead_code)]
+
+use std::pin::Pin;
+
+use futures::StreamExt;
+use tokio::sync::mpsc;
+use tonic::transport::Channel;
+
+use vbw_proto::vibewisp::{
+    coder_daemon_client::CoderDaemonClient, client_message, Cancel, ClientMessage, ConfigUpdate,
+    CreateSessionRequest, LlmConfig, ServerMessage, Session, UserInput, UserResponse,
+};
+
+pub struct VbwClient {
+    client: CoderDaemonClient<Channel>,
+}
+
+pub struct ChatHandle {
+    request_tx: mpsc::Sender<ClientMessage>,
+    pub response_stream:
+        Pin<Box<dyn futures::Stream<Item = Result<ServerMessage, tonic::Status>> + Send>>,
+    session_id: String,
+}
+
+impl VbwClient {
+    pub async fn connect(addr: &str) -> Result<Self, String> {
+        let client = CoderDaemonClient::connect(format!("http://{}", addr))
+            .await
+            .map_err(|e| format!("failed to connect: {}", e))?;
+        Ok(Self { client })
+    }
+
+    pub async fn health_check(&mut self) -> Result<bool, String> {
+        let resp = self
+            .client
+            .health_check(())
+            .await
+            .map_err(|e| format!("health check: {}", e))?;
+        Ok(resp.into_inner().alive)
+    }
+
+    pub async fn create_session(
+        &mut self,
+        project_path: &str,
+        config: Option<LlmConfig>,
+    ) -> Result<Session, String> {
+        let req = CreateSessionRequest {
+            project_path: project_path.to_string(),
+            config,
+        };
+        let resp = self
+            .client
+            .create_session(req)
+            .await
+            .map_err(|e| format!("create session: {}", e))?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn chat(&mut self, session_id: &str) -> Result<ChatHandle, String> {
+        let (tx, rx) = mpsc::channel::<ClientMessage>(16);
+        let request_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        let response = self
+            .client
+            .chat(request_stream)
+            .await
+            .map_err(|e| format!("chat: {}", e))?;
+        let response_stream = response.into_inner();
+        Ok(ChatHandle {
+            request_tx: tx,
+            response_stream: Box::pin(response_stream),
+            session_id: session_id.to_string(),
+        })
+    }
+}
+
+impl ChatHandle {
+    pub fn send_input(&self, text: &str) {
+        let msg = ClientMessage {
+            payload: Some(client_message::Payload::UserInput(UserInput {
+                text: text.to_string(),
+                session_id: self.session_id.clone(),
+            })),
+        };
+        let _ = self.request_tx.try_send(msg);
+    }
+
+    pub fn send_response(&self, query_id: &str, approved: bool) {
+        let msg = ClientMessage {
+            payload: Some(client_message::Payload::UserResponse(UserResponse {
+                query_id: query_id.to_string(),
+                approved,
+            })),
+        };
+        let _ = self.request_tx.try_send(msg);
+    }
+
+    pub fn send_cancel(&self) {
+        let msg = ClientMessage {
+            payload: Some(client_message::Payload::Cancel(Cancel {
+                session_id: self.session_id.clone(),
+            })),
+        };
+        let _ = self.request_tx.try_send(msg);
+    }
+
+    pub fn send_config_update(&self, config: LlmConfig) {
+        let msg = ClientMessage {
+            payload: Some(client_message::Payload::ConfigUpdate(ConfigUpdate {
+                session_id: self.session_id.clone(),
+                config: Some(config),
+            })),
+        };
+        let _ = self.request_tx.try_send(msg);
+    }
+
+    pub async fn recv(&mut self) -> Option<ServerMessage> {
+        match self.response_stream.next().await {
+            Some(Ok(msg)) => Some(msg),
+            Some(Err(_)) => None,
+            None => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_client_connect_invalid_addr() {
+        let result = VbwClient::connect("invalid:0").await;
+        assert!(result.is_err());
+    }
+}
