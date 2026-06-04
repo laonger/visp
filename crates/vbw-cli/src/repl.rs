@@ -1,9 +1,7 @@
 #![allow(dead_code)]
 
-use std::sync::{Arc, Mutex};
+use std::io::{self, BufRead};
 use std::time::{Duration, Instant};
-
-use rustyline::DefaultEditor;
 
 use crate::client::ChatHandle;
 use crate::display;
@@ -77,41 +75,45 @@ pub async fn run(
     session_id: String,
     mut chat_handle: ChatHandle,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let editor = Arc::new(Mutex::new(DefaultEditor::new()?));
-    let mut input_mode = InputMode::Normal;
     let mut last_ctrl_c: Option<Instant> = None;
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel::<Option<String>>();
+
+    // 独立 readline task（临时 stdin 实现），Ctrl+D 发 None 退出
+    tokio::task::spawn_blocking(move || {
+        let stdin = io::stdin();
+        for line in stdin.lock().lines() {
+            match line {
+                Ok(l) => {
+                    let _ = input_tx.send(Some(l));
+                }
+                Err(_) => {
+                    let _ = input_tx.send(None);
+                    break;
+                }
+            }
+        }
+        let _ = input_tx.send(None);
+    });
 
     println!("vibewisp REPL — type /help for commands, /quit to exit");
 
     loop {
         tokio::select! {
             // 分支 1：键盘输入
-            result = tokio::task::spawn_blocking({
-                let editor = editor.clone();
-                let p = prompt(&input_mode).to_string();
-                move || editor.lock().unwrap().readline(&p)
-            }) => {
-                let input = match result {
-                    Err(_) => break,
-                    Ok(Err(_)) => break,
-                    Ok(Ok(line)) => line,
-                };
-                match &input_mode {
-                    InputMode::Normal => {
-                        let trimmed = input.trim();
+            input = input_rx.recv() => {
+                match input {
+                    None | Some(None) => break,  // 通道关闭或 Ctrl+D: 退出
+                    Some(Some(line)) => {
+                        let trimmed = line.trim();
                         if trimmed.is_empty() { continue; }
                         if trimmed.starts_with('/') {
                             if !handle_command(trimmed, &session_id, &chat_handle) {
                                 break;
                             }
                         } else {
+                            eprintln!("[CLI] sending UserInput: {}", trimmed);
                             chat_handle.send_input(trimmed);
                         }
-                    }
-                    InputMode::ConfirmQuery { query_id } => {
-                        let approved = input.trim().to_lowercase() == "y";
-                        chat_handle.send_response(query_id, approved);
-                        input_mode = InputMode::Normal;
                     }
                 }
             }
@@ -139,15 +141,19 @@ pub async fn run(
                             }
                             Some(server_message::Payload::UserQuery(uq)) => {
                                 display::print_query(&uq.message);
-                                input_mode = InputMode::ConfirmQuery {
-                                    query_id: uq.query_id.clone(),
-                                };
+                                // 等待用户输入 y/n
+                                eprintln!("[CLI] waiting for UserQuery response (y/n)");
+                                if let Some(answer) = input_rx.recv().await {
+                                    let approved = answer.map(|s| s.trim().to_lowercase() == "y").unwrap_or(false);
+                                    chat_handle.send_response(&uq.query_id, approved);
+                                }
                             }
                             Some(server_message::Payload::Error(err)) => {
                                 display::print_daemon_error(&err.code, &err.message);
                             }
                             Some(server_message::Payload::Done(_)) => {
                                 display::print_done();
+                                println!(); // 空行分隔，确保下次 prompt 正常显示
                             }
                             None => {}
                         }

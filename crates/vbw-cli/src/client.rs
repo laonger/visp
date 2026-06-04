@@ -81,7 +81,13 @@ impl ChatHandle {
                 session_id: self.session_id.clone(),
             })),
         };
-        let _ = self.request_tx.try_send(msg);
+        let tx = self.request_tx.clone();
+        tokio::spawn(async move {
+            match tx.send(msg).await {
+                Ok(_) => eprintln!("[CLI] send_input: OK"),
+                Err(e) => eprintln!("[CLI] send_input: FAILED (receiver dropped): {:?}", e),
+            }
+        });
     }
 
     pub fn send_response(&self, query_id: &str, approved: bool) {
@@ -91,7 +97,8 @@ impl ChatHandle {
                 approved,
             })),
         };
-        let _ = self.request_tx.try_send(msg);
+        let tx = self.request_tx.clone();
+        tokio::spawn(async move { let _ = tx.send(msg).await; });
     }
 
     pub fn send_cancel(&self) {
@@ -100,7 +107,8 @@ impl ChatHandle {
                 session_id: self.session_id.clone(),
             })),
         };
-        let _ = self.request_tx.try_send(msg);
+        let tx = self.request_tx.clone();
+        tokio::spawn(async move { let _ = tx.send(msg).await; });
     }
 
     pub fn send_config_update(&self, config: LlmConfig) {
@@ -110,7 +118,8 @@ impl ChatHandle {
                 config: Some(config),
             })),
         };
-        let _ = self.request_tx.try_send(msg);
+        let tx = self.request_tx.clone();
+        tokio::spawn(async move { let _ = tx.send(msg).await; });
     }
 
     pub async fn recv(&mut self) -> Option<ServerMessage> {

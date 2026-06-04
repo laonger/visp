@@ -1,3 +1,4 @@
+mod app;
 mod client;
 mod display;
 mod repl;
