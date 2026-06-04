@@ -14,7 +14,7 @@ pub enum Role {
 }
 
 /// 工具调用（来自 LLM）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolCallRequest {
     pub id: String,
     pub name: String,
@@ -22,7 +22,7 @@ pub struct ToolCallRequest {
 }
 
 /// 对话中的一条消息
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Message {
     pub role: Role,
     pub content: String,

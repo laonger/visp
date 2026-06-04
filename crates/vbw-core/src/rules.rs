@@ -128,7 +128,11 @@ mod tests {
         let rules_dir = dir.path().join(".vibewisp").join("rules");
         fs::create_dir_all(&rules_dir).unwrap();
 
-        fs::write(rules_dir.join("test.md"), "# Just a regular file\nno marker here").unwrap();
+        fs::write(
+            rules_dir.join("test.md"),
+            "# Just a regular file\nno marker here",
+        )
+        .unwrap();
 
         let engine = RuleEngine::new(dir.path()).unwrap();
         assert!(engine.get_active_rules().is_empty());
@@ -140,7 +144,11 @@ mod tests {
         let rules_dir = dir.path().join(".vibewisp").join("rules");
         fs::create_dir_all(&rules_dir).unwrap();
 
-        fs::write(rules_dir.join("test.txt"), "alwaysApply: true\nText content").unwrap();
+        fs::write(
+            rules_dir.join("test.txt"),
+            "alwaysApply: true\nText content",
+        )
+        .unwrap();
         fs::write(rules_dir.join("test.md"), "alwaysApply: true\n# Real rule").unwrap();
 
         let engine = RuleEngine::new(dir.path()).unwrap();
@@ -184,8 +192,16 @@ mod tests {
         let project_dir = tempdir().unwrap();
         let global_dir = tempdir().unwrap();
 
-        fs::write(project_dir.path().join("a.md"), "alwaysApply: true\n# Project rule").unwrap();
-        fs::write(global_dir.path().join("a.md"), "alwaysApply: true\n# Global rule").unwrap();
+        fs::write(
+            project_dir.path().join("a.md"),
+            "alwaysApply: true\n# Project rule",
+        )
+        .unwrap();
+        fs::write(
+            global_dir.path().join("a.md"),
+            "alwaysApply: true\n# Global rule",
+        )
+        .unwrap();
 
         let mut files = Vec::new();
         collect_rules(project_dir.path(), &mut files).unwrap();

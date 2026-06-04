@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use crate::error::AgentErrorCode;
-use crate::provider::LlmConfig;
 use crate::message::Message;
+use crate::provider::LlmConfig;
 
 /// Agent 事件，用于流式通知外部（TUI/WS）
 pub enum AgentEvent {
@@ -133,9 +133,7 @@ mod tests {
         };
         match evt {
             AgentEvent::UserQuery {
-                query_id,
-                message,
-                ..
+                query_id, message, ..
             } => {
                 assert_eq!(query_id, "q1");
                 assert_eq!(message, "confirm?");

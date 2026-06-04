@@ -6,7 +6,7 @@ use crate::error::LlmError;
 use crate::message::{Message, ToolDefinition};
 
 /// LLM 配置参数
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LlmConfig {
     /// 模型名称
     pub model: String,
