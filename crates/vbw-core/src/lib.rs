@@ -6,6 +6,7 @@ pub mod provider;
 pub mod rules;
 pub mod session;
 pub mod tool;
+pub mod tool_registry;
 
 // Re-export 常用类型
 pub use error::{CoreError, LlmError, SessionError};
