@@ -595,14 +595,20 @@ mod tests {
         let session = mgr.create(Path::new("/tmp"), LlmConfig::default()).unwrap();
         let ctx = mgr.start_loop(&session.id).unwrap();
         let token = ctx.cancel_token.clone();
-        assert!(!token.is_cancelled(), "token should not be cancelled initially");
+        assert!(
+            !token.is_cancelled(),
+            "token should not be cancelled initially"
+        );
 
         // Simulate Cancel handler: retrieve session, check Running, cancel agent
         let s = mgr.get(&session.id).unwrap();
         assert_eq!(s.status, CoreStatus::Running);
         mgr.cancel_agent(&session.id);
 
-        assert!(token.is_cancelled(), "token should be cancelled after cancel_agent");
+        assert!(
+            token.is_cancelled(),
+            "token should be cancelled after cancel_agent"
+        );
     }
 
     #[tokio::test]
@@ -618,7 +624,11 @@ mod tests {
         mgr.cancel_agent(&session.id);
 
         let s = mgr.get(&session.id).unwrap();
-        assert_eq!(s.status, CoreStatus::Idle, "idle session should remain idle after cancel");
+        assert_eq!(
+            s.status,
+            CoreStatus::Idle,
+            "idle session should remain idle after cancel"
+        );
     }
 
     #[test]
