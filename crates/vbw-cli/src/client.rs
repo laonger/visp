@@ -16,10 +16,10 @@ pub struct VbwClient {
 }
 
 pub struct ChatHandle {
-    request_tx: mpsc::Sender<ClientMessage>,
+    pub(crate) request_tx: mpsc::Sender<ClientMessage>,
     pub response_stream:
         Pin<Box<dyn futures::Stream<Item = Result<ServerMessage, tonic::Status>> + Send>>,
-    session_id: String,
+    pub(crate) session_id: String,
 }
 
 impl VbwClient {
