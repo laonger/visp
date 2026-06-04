@@ -93,6 +93,78 @@ pub enum SessionError {
     #[error("Session is not running: {0}")]
     NotRunning(String),
 
+    #[error("Session busy: {session_id}")]
+    SessionBusy { session_id: String },
+
+    #[error("Protocol error: {message}")]
+    ProtocolError { message: String },
+
     #[error("{0}")]
     Other(String),
+}
+
+/// Agent 内部错误码，用于 AgentEvent::Error
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentErrorCode {
+    LlmAuth,
+    LlmRateLimit,
+    LlmApi,
+    LlmNetwork,
+    LlmStream,
+    MaxIterations,
+    Cancelled,
+    Internal,
+}
+
+impl std::fmt::Display for AgentErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentErrorCode::LlmAuth => write!(f, "LLM authentication error"),
+            AgentErrorCode::LlmRateLimit => write!(f, "LLM rate limit exceeded"),
+            AgentErrorCode::LlmApi => write!(f, "LLM API error"),
+            AgentErrorCode::LlmNetwork => write!(f, "LLM network error"),
+            AgentErrorCode::LlmStream => write!(f, "LLM stream error"),
+            AgentErrorCode::MaxIterations => write!(f, "Maximum iterations reached"),
+            AgentErrorCode::Cancelled => write!(f, "Operation cancelled"),
+            AgentErrorCode::Internal => write!(f, "Internal error"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_session {
+    use super::*;
+
+    #[test]
+    fn test_session_busy_display() {
+        let err = SessionError::SessionBusy {
+            session_id: "x".into(),
+        };
+        assert!(err.to_string().contains("x"));
+    }
+
+    #[test]
+    fn test_session_protocol_error_display() {
+        let err = SessionError::ProtocolError {
+            message: "mismatch".into(),
+        };
+        assert!(err.to_string().contains("mismatch"));
+    }
+
+    #[test]
+    fn test_agent_error_code_display() {
+        let cases: Vec<(AgentErrorCode, &str)> = vec![
+            (AgentErrorCode::LlmAuth, "LLM authentication error"),
+            (AgentErrorCode::LlmRateLimit, "LLM rate limit exceeded"),
+            (AgentErrorCode::LlmApi, "LLM API error"),
+            (AgentErrorCode::LlmNetwork, "LLM network error"),
+            (AgentErrorCode::LlmStream, "LLM stream error"),
+            (AgentErrorCode::MaxIterations, "Maximum iterations reached"),
+            (AgentErrorCode::Cancelled, "Operation cancelled"),
+            (AgentErrorCode::Internal, "Internal error"),
+        ];
+        for (code, expected) in cases {
+            assert_eq!(code.to_string(), expected);
+        }
+    }
 }
