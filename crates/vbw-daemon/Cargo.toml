@@ -9,9 +9,13 @@ vbw-core = { path = "../vbw-core" }
 vbw-proto = { path = "../vbw-proto" }
 vbw-llm = { path = "../vbw-llm" }
 vbw-tools = { path = "../vbw-tools" }
+serde.workspace = true
 tonic.workspace = true
 prost.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

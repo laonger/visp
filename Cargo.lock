@@ -2019,6 +2019,8 @@ name = "vbw-daemon"
 version = "0.1.0"
 dependencies = [
  "prost",
+ "serde",
+ "tempfile",
  "tokio",
  "toml",
  "tonic",
