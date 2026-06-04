@@ -2018,14 +2018,19 @@ dependencies = [
 name = "vbw-daemon"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "prost",
+ "prost-types",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "toml",
  "tonic",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+ "vbw-codegraph",
  "vbw-core",
  "vbw-llm",
  "vbw-proto",
