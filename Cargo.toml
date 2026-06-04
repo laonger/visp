@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/vbw-codegraph",
     "crates/vbw-core",
+    "crates/vbw-daemon",
     "crates/vbw-llm",
     "crates/vbw-proto",
     "crates/vbw-tools",

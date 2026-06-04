@@ -1,0 +1,17 @@
+[package]
+name = "vbw-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vbw-core = { path = "../vbw-core" }
+vbw-proto = { path = "../vbw-proto" }
+vbw-llm = { path = "../vbw-llm" }
+vbw-tools = { path = "../vbw-tools" }
+tonic.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+toml = "0.8"
