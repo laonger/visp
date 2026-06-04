@@ -38,6 +38,7 @@ message ClientMessage {
         UserInput user_input = 1;
         ConfigUpdate config_update = 2;
         UserResponse user_response = 3;
+        Cancel cancel = 4;
     }
 }
 
@@ -108,6 +109,10 @@ message Error {
 }
 
 message Done {
+    string session_id = 1;
+}
+
+message Cancel {
     string session_id = 1;
 }
 
