@@ -29,6 +29,10 @@ pub struct LlmSection {
     pub temperature: f64,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -105,6 +109,8 @@ pub fn load_config(config_path: Option<&Path>) -> Result<DaemonConfig, String> {
                 model: default_model(),
                 temperature: default_temperature(),
                 max_tokens: default_max_tokens(),
+                api_key: None,
+                base_url: None,
             },
             tools: ToolsSection {
                 bash_timeout_secs: default_bash_timeout(),
@@ -125,6 +131,28 @@ pub fn load_config(config_path: Option<&Path>) -> Result<DaemonConfig, String> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn test_llm_section_with_api_key() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+api_key = "sk-test-key"
+base_url = "https://custom.api.com"
+
+[tools]
+
+[agent]
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.llm.api_key.as_deref(), Some("sk-test-key"));
+        assert_eq!(
+            config.llm.base_url.as_deref(),
+            Some("https://custom.api.com")
+        );
+    }
 
     #[test]
     fn test_load_config_from_file() {
