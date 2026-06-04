@@ -19,9 +19,16 @@ enum SessionStatus {
     ERROR = 3;
 }
 
+message LlmConfig {
+    optional string model = 1;
+    optional double temperature = 2;
+    optional uint32 max_tokens = 3;
+    map<string, string> extra = 4;
+}
+
 message CreateSessionRequest {
     string project_path = 1;
-    map<string, string> config = 2;
+    LlmConfig config = 2;
 }
 
 message ListSessionsResponse {
@@ -49,10 +56,7 @@ message UserInput {
 
 message ConfigUpdate {
     string session_id = 1;
-    optional string model = 2;
-    optional double temperature = 3;
-    optional uint32 max_tokens = 4;
-    map<string, string> extra = 5;
+    LlmConfig config = 2;
 }
 
 message UserResponse {

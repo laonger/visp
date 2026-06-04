@@ -95,7 +95,7 @@ impl CoderDaemon for CoderDaemonService {
         request: Request<proto::CreateSessionRequest>,
     ) -> Result<Response<proto::Session>, Status> {
         let req = request.into_inner();
-        let config = map_to_llm_config(&req.config);
+        let config = req.config.as_ref().map(map_llm_config).unwrap_or_default();
         let session = self
             .session_mgr
             .create(Path::new(&req.project_path), config)
@@ -287,16 +287,20 @@ impl CoderDaemon for CoderDaemonService {
                         }
 
                         let mut config = session.config.clone();
-                        if let Some(model) = update.model {
-                            config.model = model;
+                        if let Some(update_config) = &update.config {
+                            if let Some(model) = &update_config.model {
+                                config.model = model.clone();
+                            }
+                            if let Some(temp) = update_config.temperature {
+                                config.temperature = temp;
+                            }
+                            if let Some(tokens) = update_config.max_tokens {
+                                config.max_tokens = tokens;
+                            }
+                            if !update_config.extra.is_empty() {
+                                config.extra.extend(update_config.extra.clone());
+                            }
                         }
-                        if let Some(temp) = update.temperature {
-                            config.temperature = temp;
-                        }
-                        if let Some(max_tokens) = update.max_tokens {
-                            config.max_tokens = max_tokens;
-                        }
-                        config.extra.extend(update.extra);
 
                         if let Err(e) = session_mgr.update_config(&session_id, config) {
                             let _ = tx
@@ -480,27 +484,19 @@ fn session_to_proto(session: &vbw_core::session::Session) -> proto::Session {
     }
 }
 
-fn map_to_llm_config(config: &HashMap<String, String>) -> LlmConfig {
-    let mut llm = LlmConfig::default();
-    for (key, value) in config {
-        match key.as_str() {
-            "model" => llm.model = value.clone(),
-            "temperature" => {
-                if let Ok(v) = value.parse::<f64>() {
-                    llm.temperature = v;
-                }
-            }
-            "max_tokens" => {
-                if let Ok(v) = value.parse::<u32>() {
-                    llm.max_tokens = v;
-                }
-            }
-            _ => {
-                llm.extra.insert(key.clone(), value.clone());
-            }
-        }
+fn map_llm_config(proto: &proto::LlmConfig) -> LlmConfig {
+    let mut config = LlmConfig::default();
+    if let Some(model) = &proto.model {
+        config.model = model.clone();
     }
-    llm
+    if let Some(temperature) = proto.temperature {
+        config.temperature = temperature;
+    }
+    if let Some(max_tokens) = proto.max_tokens {
+        config.max_tokens = max_tokens;
+    }
+    config.extra = proto.extra.clone();
+    config
 }
 
 fn session_error_msg(code: &str, message: &str, session_id: &str) -> proto::ServerMessage {
@@ -632,23 +628,31 @@ mod tests {
     }
 
     #[test]
-    fn test_map_to_llm_config_empty() {
-        let config = HashMap::new();
-        let llm = map_to_llm_config(&config);
+    fn test_map_llm_config_empty() {
+        let config = proto::LlmConfig {
+            model: None,
+            temperature: None,
+            max_tokens: None,
+            extra: HashMap::new(),
+        };
+        let llm = map_llm_config(&config);
         assert_eq!(llm.model, "claude-sonnet-4-20250514");
         assert!((llm.temperature - 0.7).abs() < f64::EPSILON);
         assert_eq!(llm.max_tokens, 4096);
     }
 
     #[test]
-    fn test_map_to_llm_config_full() {
-        let mut config = HashMap::new();
-        config.insert("model".into(), "gpt-4".into());
-        config.insert("temperature".into(), "0.5".into());
-        config.insert("max_tokens".into(), "2048".into());
-        config.insert("custom_key".into(), "custom_val".into());
+    fn test_map_llm_config_full() {
+        let mut extra = HashMap::new();
+        extra.insert("custom_key".into(), "custom_val".into());
+        let config = proto::LlmConfig {
+            model: Some("gpt-4".into()),
+            temperature: Some(0.5),
+            max_tokens: Some(2048),
+            extra,
+        };
 
-        let llm = map_to_llm_config(&config);
+        let llm = map_llm_config(&config);
         assert_eq!(llm.model, "gpt-4");
         assert!((llm.temperature - 0.5).abs() < f64::EPSILON);
         assert_eq!(llm.max_tokens, 2048);
@@ -656,12 +660,16 @@ mod tests {
     }
 
     #[test]
-    fn test_map_to_llm_config_invalid_values() {
-        let mut config = HashMap::new();
-        config.insert("temperature".into(), "not-a-number".into());
-        config.insert("max_tokens".into(), "not-a-number".into());
+    fn test_map_llm_config_partial() {
+        let config = proto::LlmConfig {
+            model: Some("gpt-4".into()),
+            temperature: None,
+            max_tokens: None,
+            extra: HashMap::new(),
+        };
 
-        let llm = map_to_llm_config(&config);
+        let llm = map_llm_config(&config);
+        assert_eq!(llm.model, "gpt-4");
         assert!((llm.temperature - 0.7).abs() < f64::EPSILON);
         assert_eq!(llm.max_tokens, 4096);
     }
