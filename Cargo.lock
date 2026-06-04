@@ -1877,10 +1877,12 @@ dependencies = [
  "futures",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",
  "uuid",
+ "vbw-llm",
 ]
 
 [[package]]
