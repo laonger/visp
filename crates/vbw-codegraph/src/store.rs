@@ -1,6 +1,6 @@
+use rusqlite::Connection;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use rusqlite::Connection;
 
 use crate::graph::{Edge, EdgeKind, Symbol, SymbolKind};
 
@@ -18,7 +18,9 @@ impl Store {
         }
         let conn = Connection::open(db_path)?;
         Self::init_schema(&conn)?;
-        Ok(Store { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Store {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -98,7 +100,10 @@ impl Store {
     pub fn delete_by_file(&self, path: &str) -> rusqlite::Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        tx.execute("DELETE FROM symbols WHERE file_path = ?1", rusqlite::params![path])?;
+        tx.execute(
+            "DELETE FROM symbols WHERE file_path = ?1",
+            rusqlite::params![path],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -164,10 +169,7 @@ impl Store {
             "SELECT id, name, kind, file_path, line, column, signature, docstring
              FROM symbols WHERE name LIKE ?1 LIMIT ?2",
         )?;
-        let rows = stmt.query_map(
-            rusqlite::params![pattern, limit as i64],
-            row_to_symbol,
-        )?;
+        let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], row_to_symbol)?;
         let mut symbols = Vec::new();
         for row in rows {
             symbols.push(row?);
@@ -270,6 +272,19 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM files WHERE path = ?1", rusqlite::params![path])?;
         Ok(())
+    }
+
+    pub fn get_symbol(&self, id: u64) -> rusqlite::Result<Option<Symbol>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, kind, file_path, line, column, signature, docstring
+             FROM symbols WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![id as i64], row_to_symbol)?;
+        match rows.next() {
+            Some(Ok(sym)) => Ok(Some(sym)),
+            _ => Ok(None),
+        }
     }
 
     pub fn list_indexed_files(&self) -> rusqlite::Result<Vec<String>> {

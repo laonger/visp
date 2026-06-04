@@ -1862,6 +1862,7 @@ version = "0.1.0"
 dependencies = [
  "notify",
  "rusqlite",
+ "tempfile",
  "tokio",
  "tree-sitter",
  "tree-sitter-typescript",
