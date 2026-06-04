@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/vbw-cli",
     "crates/vbw-codegraph",
     "crates/vbw-core",
     "crates/vbw-daemon",
