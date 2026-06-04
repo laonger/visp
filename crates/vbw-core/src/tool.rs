@@ -67,4 +67,38 @@ pub trait Tool: Send + Sync {
 
     /// 执行工具
     async fn execute(&self, arguments: serde_json::Value, context: &ToolContext) -> ToolResult;
+
+    /// 是否需要用户确认才能执行（默认 false）
+    fn requires_approval(&self) -> bool {
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests_tool_approval {
+    use super::*;
+
+    struct NoApprovalTool;
+
+    #[async_trait]
+    impl Tool for NoApprovalTool {
+        fn name(&self) -> &str {
+            "no_approval"
+        }
+        fn description(&self) -> &str {
+            "test tool"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn execute(&self, _args: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::success("ok")
+        }
+    }
+
+    #[test]
+    fn test_tool_default_requires_approval() {
+        let tool = NoApprovalTool;
+        assert!(!tool.requires_approval());
+    }
 }
