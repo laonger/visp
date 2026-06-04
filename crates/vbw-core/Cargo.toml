@@ -10,3 +10,5 @@ async-trait.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 futures.workspace = true
+tokio.workspace = true
+tokio-util = "0.7"
