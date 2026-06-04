@@ -245,6 +245,13 @@ impl AnthropicProvider {
             api_url: "https://api.anthropic.com".to_string(),
         }
     }
+
+    pub fn with_base_url(api_key: String, base_url: String) -> Self {
+        Self {
+            api_key,
+            api_url: base_url,
+        }
+    }
 }
 
 #[async_trait]
@@ -372,6 +379,21 @@ fn byte_stream_to_chat_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- AnthropicProvider 构造测试 ---
+
+    #[test]
+    fn test_provider_with_base_url() {
+        let provider =
+            AnthropicProvider::with_base_url("test-key".into(), "https://custom.api.com".into());
+        assert_eq!(provider.api_url, "https://custom.api.com");
+    }
+
+    #[test]
+    fn test_provider_default_url() {
+        let provider = AnthropicProvider::new("test-key".into());
+        assert_eq!(provider.api_url, "https://api.anthropic.com");
+    }
 
     // --- parse_anthropic_event 测试 ---
 
