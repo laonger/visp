@@ -13,4 +13,6 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 futures.workspace = true
 tokio-stream.workspace = true
 clap = { version = "4", features = ["derive"] }
-rustyline = { version = "14", default-features = false, features = ["with-file-history"] }
+ratatui = { version = "0.28", features = ["crossterm"] }
+crossterm = "0.28"
+tui-textarea = "0.7"
