@@ -237,9 +237,7 @@ fn collect_files(
 
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             let dot_ext = format!(".{}", ext);
-            if config
-                .supported_extensions
-                .contains(&dot_ext)
+            if config.supported_extensions.contains(&dot_ext)
                 || config.supported_extensions.contains(&ext.to_string())
             {
                 files.push(path.to_path_buf());
@@ -274,10 +272,7 @@ fn resolve_cross_file_edges(store: &Store) -> Result<(), Box<dyn std::error::Err
 ///
 /// Returns `None` if no matching file is found.
 #[allow(dead_code)]
-fn resolve_import_source(
-    importer_dir: &Path,
-    import_source: &str,
-) -> Option<PathBuf> {
+fn resolve_import_source(importer_dir: &Path, import_source: &str) -> Option<PathBuf> {
     let base = importer_dir.join(import_source);
 
     let trials = [
@@ -395,11 +390,7 @@ mod tests {
         std::fs::create_dir_all(&project).unwrap();
 
         write_file(&project, "a.ts", "export function foo() {}\n");
-        write_file(
-            &project,
-            "b.ts",
-            "import { foo } from './a';\nfoo();\n",
-        );
+        write_file(&project, "b.ts", "import { foo } from './a';\nfoo();\n");
 
         let store = Arc::new(create_store(&tmp));
         let indexer = create_indexer(&store);
@@ -425,11 +416,7 @@ mod tests {
         std::fs::create_dir_all(&project).unwrap();
 
         write_file(&project, "valid.ts", "export function fine() {}\n");
-        write_file(
-            &project,
-            "broken.ts",
-            "export function { bad syntax here\n",
-        );
+        write_file(&project, "broken.ts", "export function { bad syntax here\n");
 
         let store = Arc::new(create_store(&tmp));
         let indexer = create_indexer(&store);

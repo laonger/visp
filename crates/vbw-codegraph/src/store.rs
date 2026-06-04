@@ -26,6 +26,7 @@ impl Store {
     pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch("PRAGMA journal_mode = WAL;")?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        conn.execute_batch("PRAGMA case_sensitive_like = ON;")?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS symbols (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
