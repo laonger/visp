@@ -2,6 +2,7 @@ pub mod agent;
 pub mod error;
 pub mod message;
 pub mod provider;
+pub mod rules;
 pub mod tool;
 
 // Re-export 常用类型
