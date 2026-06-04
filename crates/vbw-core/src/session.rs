@@ -250,6 +250,14 @@ impl SessionManager {
         let session = store.get(id)?;
         Ok(session.clone())
     }
+
+    /// 取消运行中的 agent（取消 CancellationToken）
+    /// 如果 session 未在运行中，则为 no-op
+    pub fn cancel_agent(&self, id: &str) {
+        if let Some(token) = self.running_tokens.lock().unwrap().remove(id) {
+            token.cancel();
+        }
+    }
 }
 
 #[cfg(test)]

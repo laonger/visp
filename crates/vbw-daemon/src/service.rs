@@ -314,6 +314,17 @@ impl CoderDaemon for CoderDaemonService {
                             let _ = sender.send(resp.approved);
                         }
                     }
+                    Some(proto::client_message::Payload::Cancel(cancel)) => {
+                        let sid = &cancel.session_id;
+                        match session_mgr.get(sid) {
+                            Ok(s) if s.status == SessionStatus::Running => {
+                                session_mgr.cancel_agent(sid);
+                            }
+                            _ => {
+                                // 不存在或非 Running 状态 → 静默忽略
+                            }
+                        }
+                    }
                     None => {}
                 }
             }
@@ -571,7 +582,44 @@ fn agent_event_to_server_message(event: AgentEvent, session_id: &str) -> proto::
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc as StdArc;
+    use vbw_core::session::InMemorySessionStore;
     use vbw_core::session::Session;
+    use vbw_core::session::SessionStatus as CoreStatus;
+
+    // ── Cancel tests ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_cancel_during_agent_loop() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = mgr.create(Path::new("/tmp"), LlmConfig::default()).unwrap();
+        let ctx = mgr.start_loop(&session.id).unwrap();
+        let token = ctx.cancel_token.clone();
+        assert!(!token.is_cancelled(), "token should not be cancelled initially");
+
+        // Simulate Cancel handler: retrieve session, check Running, cancel agent
+        let s = mgr.get(&session.id).unwrap();
+        assert_eq!(s.status, CoreStatus::Running);
+        mgr.cancel_agent(&session.id);
+
+        assert!(token.is_cancelled(), "token should be cancelled after cancel_agent");
+    }
+
+    #[tokio::test]
+    async fn test_cancel_idle_session() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = mgr.create(Path::new("/tmp"), LlmConfig::default()).unwrap();
+
+        // Simulate Cancel handler: retrieve session, check status
+        let s = mgr.get(&session.id).unwrap();
+        assert_eq!(s.status, CoreStatus::Idle);
+
+        // Even if cancel_agent were called on idle session, it should be no-op
+        mgr.cancel_agent(&session.id);
+
+        let s = mgr.get(&session.id).unwrap();
+        assert_eq!(s.status, CoreStatus::Idle, "idle session should remain idle after cancel");
+    }
 
     #[test]
     fn test_map_to_llm_config_empty() {
