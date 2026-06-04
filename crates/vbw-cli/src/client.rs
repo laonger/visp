@@ -7,8 +7,8 @@ use tokio::sync::mpsc;
 use tonic::transport::Channel;
 
 use vbw_proto::vibewisp::{
-    coder_daemon_client::CoderDaemonClient, client_message, Cancel, ClientMessage, ConfigUpdate,
-    CreateSessionRequest, LlmConfig, ServerMessage, Session, UserInput, UserResponse,
+    Cancel, ClientMessage, ConfigUpdate, CreateSessionRequest, LlmConfig, ServerMessage, Session,
+    UserInput, UserResponse, client_message, coder_daemon_client::CoderDaemonClient,
 };
 
 pub struct VbwClient {

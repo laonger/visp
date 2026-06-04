@@ -7,7 +7,7 @@ use rustyline::DefaultEditor;
 
 use crate::client::ChatHandle;
 use crate::display;
-use vbw_proto::vibewisp::{server_message, LlmConfig};
+use vbw_proto::vibewisp::{LlmConfig, server_message};
 
 enum InputMode {
     Normal,
@@ -176,7 +176,10 @@ pub async fn run(
 mod tests {
     use super::*;
 
-    fn mock_chat_handle() -> (ChatHandle, tokio::sync::mpsc::Receiver<vbw_proto::vibewisp::ClientMessage>) {
+    fn mock_chat_handle() -> (
+        ChatHandle,
+        tokio::sync::mpsc::Receiver<vbw_proto::vibewisp::ClientMessage>,
+    ) {
         let (tx, rx) = tokio::sync::mpsc::channel(16);
         let handle = ChatHandle {
             request_tx: tx,
