@@ -1,6 +1,7 @@
 mod app;
 mod client;
 mod display;
+mod event;
 mod repl;
 mod ui;
 
