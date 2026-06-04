@@ -37,6 +37,14 @@ pub struct Edge {
     pub kind: EdgeKind,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileInfo {
+    pub path: String,
+    pub language: String,
+    pub symbol_count: u32,
+    pub last_indexed_at: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,6 +92,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    // --- FileInfo tests ---
+
+    #[test]
+    fn test_file_info_creation() {
+        let info = FileInfo {
+            path: "src/lib.rs".into(),
+            language: "rust".into(),
+            symbol_count: 42,
+            last_indexed_at: 1700000000,
+        };
+        assert_eq!(info.path, "src/lib.rs");
+        assert_eq!(info.language, "rust");
+        assert_eq!(info.symbol_count, 42);
+        assert_eq!(info.last_indexed_at, 1700000000);
     }
 
     // --- Edge tests ---
