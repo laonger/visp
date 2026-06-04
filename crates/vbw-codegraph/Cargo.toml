@@ -1,0 +1,13 @@
+[package]
+name = "vbw-codegraph"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+vbw-core = { path = "../vbw-core" }
+tokio.workspace = true
+notify.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }
+walkdir = "2"
+tree-sitter = "0.24"
+tree-sitter-typescript = "0.23"
