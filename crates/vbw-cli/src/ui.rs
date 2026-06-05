@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use crate::app::{AppState, MessageCache, pad_to_width, wrap_text};
+use crate::app::{AppState, LineType, MessageCache, pad_to_width, wrap_text};
 
 pub fn render(app: &mut AppState, f: &mut Frame) {
     let area = f.area().inner(ratatui::layout::Margin::new(1, 0));
@@ -146,7 +146,10 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     let total = app.messages.iter().map(|m| {
         app.message_caches.iter()
             .find(|c| c.msg_id == m.id)
-            .map_or(0, |c| c.line_count + 3) // +3: 1 padding + 2 separators
+            .map_or(0, |c| {
+                let pad = if m.line_type == LineType::Assistant { 1 } else { 0 };
+                c.line_count + 3 + pad
+            })
     }).sum::<u16>();
     let stream_lines = if app.streaming_text.is_empty() { 0 }
         else { app.streaming_text.lines().count() as u16 + 2 };
@@ -165,7 +168,9 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
 
     for msg in &app.messages {
         if let Some(cache) = app.message_caches.iter().find(|c| c.msg_id == msg.id) {
-            let total_h = cache.line_count + 3; // 1 padding top + content + 2 separators
+            let is_assistant = msg.line_type == LineType::Assistant;
+            let pad = if is_assistant { 1u16 } else { 0 };
+            let total_h = cache.line_count + 3 + pad; // 1 top + content + 2 separators + pad
 
             if y + total_h > scroll_y && y < scroll_y + visible {
                 let rel_y = area.y + y.saturating_sub(scroll_y);
@@ -177,11 +182,13 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                 }
 
                 // Render message content
+                let content_x = area.x + pad;
+                let content_w_adj = content_w.saturating_sub(pad * 2);
                 let p = Paragraph::new(Text::from(cache.lines.clone()));
-                f.render_widget(p, Rect::new(area.x, rel_y + 1, content_w, cache.line_count.min(actual_h)));
+                f.render_widget(p, Rect::new(content_x, rel_y + 1 + pad, content_w_adj, cache.line_count.min(actual_h)));
 
                 // Render separator lines below message
-                let sep_start = rel_y + cache.line_count + 1;
+                let sep_start = rel_y + cache.line_count + 1 + pad;
                 let sep_end = (rel_y + total_h).min(area.bottom());
                 for sep_y in sep_start..sep_end {
                     f.render_widget(
@@ -194,14 +201,15 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                 let buf = f.buffer_mut();
                 let shadow_x = area.x + area.width.saturating_sub(1);
                 let right = area.right();
+                let shadow_y_start = rel_y + 1 + pad;
                 // Right-edge shadow on content rows
-                for row in (rel_y + 1)..(rel_y + 1 + cache.line_count).min(buf.area().bottom()) {
+                for row in shadow_y_start..(shadow_y_start + cache.line_count).min(buf.area().bottom()) {
                     if shadow_x < right {
                         buf[(shadow_x, row)].set_bg(shadow_color);
                     }
                 }
                 // Bottom shadow row (first separator line)
-                let bottom_y = rel_y + cache.line_count + 1;
+                let bottom_y = rel_y + cache.line_count + 1 + pad;
                 if bottom_y < buf.area().bottom() {
                     for x in (area.x + 1)..right {
                         if x < buf.area().right() {
