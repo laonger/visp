@@ -139,8 +139,9 @@ pub struct AppState {
     // 对话
     pub messages: Vec<ChatLine>,
     pub message_caches: Vec<MessageCache>,
-    pub frozen_cache: Vec<Line<'static>>,
     pub streaming_text: String,
+    pub streaming_rendered_len: usize,
+    pub streaming_rendered_lines: Vec<Line<'static>>,
     pub scroll_following: bool,
     pub scroll_state: tui_scrollview::ScrollViewState,
     pub cache_width: u16,
@@ -154,6 +155,7 @@ pub struct AppState {
     pub generating: bool,
     pub needs_render: bool,
     pub last_scroll_time: Option<std::time::Instant>,
+    pub last_stream_render: Option<std::time::Instant>,
     pub next_message_id: u64,
     pub confirm: Option<ConfirmState>,
     pub model: String,
@@ -168,8 +170,9 @@ impl AppState {
         Self {
             messages: Vec::new(),
             message_caches: Vec::new(),
-            frozen_cache: Vec::new(),
             streaming_text: String::new(),
+            streaming_rendered_len: 0,
+            streaming_rendered_lines: Vec::new(),
             scroll_following: true,
             scroll_state: tui_scrollview::ScrollViewState::default(),
             cache_width: 0,
@@ -179,6 +182,7 @@ impl AppState {
             generating: false,
             needs_render: true,
             last_scroll_time: None,
+            last_stream_render: None,
             next_message_id: 0,
             confirm: None,
             model,
@@ -206,7 +210,8 @@ impl AppState {
         if !self.streaming_text.is_empty() {
             let text = std::mem::take(&mut self.streaming_text);
             self.add_message(LineType::Assistant, text);
-            self.frozen_cache.clear();
+            self.streaming_rendered_len = 0;
+            self.streaming_rendered_lines.clear();
         }
     }
 
@@ -222,6 +227,18 @@ impl AppState {
         true
     }
 
+    pub fn try_begin_stream_render(&mut self) -> bool {
+        const COOLDOWN_MS: u128 = 30;
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_stream_render
+            && now.duration_since(last).as_millis() < COOLDOWN_MS
+        {
+            return false;
+        }
+        self.last_stream_render = Some(now);
+        true
+    }
+
     pub fn update_message(&mut self, id: u64, content: String) {
         if let Some(msg) = self.messages.iter_mut().find(|m| m.id == id) {
             msg.content = content;
@@ -232,6 +249,8 @@ impl AppState {
     pub fn clear_messages(&mut self) {
         self.messages.clear();
         self.message_caches.clear();
+        self.streaming_rendered_len = 0;
+        self.streaming_rendered_lines.clear();
     }
 }
 

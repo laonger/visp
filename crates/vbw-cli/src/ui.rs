@@ -54,58 +54,59 @@ fn build_text_stack(app: &mut AppState, width: u16) -> Text<'static> {
         app.cache_width = width;
     }
 
-    // 1. 确保每条消息有对应的缓存（惰性创建/更新）
+    // 1. 构建 msg_id → cache_index 的 HashMap
+    let mut cache_map: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    for (i, cache) in app.message_caches.iter().enumerate() {
+        cache_map.insert(cache.msg_id, i);
+    }
+
+    // 2. 确保每条消息有对应缓存 + 组装行
+    let mut text_lines: Vec<Line> = Vec::new();
     for msg in &app.messages {
-        if !app.message_caches.iter().any(|c| c.matches(msg, width)) {
-            if let Some(existing_pos) = app.message_caches.iter().position(|c| c.msg_id == msg.id) {
-                app.message_caches[existing_pos] = MessageCache::from_message(msg, width);
-            } else {
-                app.message_caches
-                    .push(MessageCache::from_message(msg, width));
+        if let Some(&idx) = cache_map.get(&msg.id) {
+            if !app.message_caches[idx].matches(msg, width) {
+                app.message_caches[idx] = MessageCache::from_message(msg, width);
             }
+            text_lines.extend(app.message_caches[idx].lines.clone());
+        } else {
+            let idx = app.message_caches.len();
+            app.message_caches
+                .push(MessageCache::from_message(msg, width));
+            text_lines.extend(app.message_caches[idx].lines.clone());
         }
     }
 
-    // 2. 清理残留缓存（消息已删除但缓存还在的）
+    // 3. 清理残留缓存（消息已删除但缓存还在的）
     app.message_caches
         .retain(|c| app.messages.iter().any(|m| m.id == c.msg_id));
 
-    // 3. 组装所有消息行
-    let mut text_lines: Vec<Line> = Vec::new();
-    for msg in &app.messages {
-        if let Some(cache) = app.message_caches.iter().find(|c| c.msg_id == msg.id) {
-            text_lines.extend(cache.lines.clone());
-        }
-    }
-
-    // 4. 流式文本处理
+    // 4. 流式文本处理（增量渲染）
     if !app.streaming_text.is_empty() {
         let style = Style::default()
             .fg(Color::White)
             .bg(Color::from_u32(0x001A1A2E));
-        let total_lines = app.streaming_text.lines().count();
-        const FREEZE_THRESHOLD: usize = 200;
-        const TAIL_LINES: usize = 50;
 
-        if total_lines > FREEZE_THRESHOLD {
-            // 冻结前段
-            if app.frozen_cache.is_empty() {
-                let all_stream_lines: Vec<String> = wrap_text(&app.streaming_text, width);
-                let freeze_count = all_stream_lines.len().saturating_sub(TAIL_LINES);
-                app.frozen_cache = all_stream_lines[..freeze_count]
-                    .iter()
-                    .map(|s| Line::styled(pad_to_width(s, width as usize), style))
-                    .collect();
+        if app.streaming_text.len() != app.streaming_rendered_len || app.streaming_rendered_len == 0
+        {
+            // 找到重新渲染的起始位置：上一个已渲染部分的最后一个换行符之后
+            let rewrap_from = if app.streaming_rendered_len == 0 {
+                0
+            } else {
+                app.streaming_text[..app.streaming_rendered_len]
+                    .rfind('\n')
+                    .map_or(0, |p| p + 1)
+            };
+
+            // 截断缓存中属于重新渲染起点的行
+            if app.streaming_rendered_len > 0 {
+                let keep_lines: usize = app.streaming_text[..rewrap_from].lines().count();
+                app.streaming_rendered_lines.truncate(keep_lines);
             }
-            // 只渲染尾巴
-            let tail_text: String = app
-                .streaming_text
-                .lines()
-                .skip(total_lines.saturating_sub(TAIL_LINES))
-                .collect::<Vec<_>>()
-                .join("\n");
-            for wl in wrap_text(&tail_text, width) {
-                text_lines.push(Line::styled(
+
+            // 增量渲染从 rewrap_from 开始的文本
+            let tail = &app.streaming_text[rewrap_from..];
+            for wl in wrap_text(tail, width) {
+                app.streaming_rendered_lines.push(Line::styled(
                     if wl.is_empty() {
                         " ".repeat(width as usize)
                     } else {
@@ -114,27 +115,12 @@ fn build_text_stack(app: &mut AppState, width: u16) -> Text<'static> {
                     style,
                 ));
             }
-        } else {
-            app.frozen_cache.clear();
-            // 正常渲染全部流式文本
-            for wl in wrap_text(&app.streaming_text, width) {
-                text_lines.push(Line::styled(
-                    if wl.is_empty() {
-                        " ".repeat(width as usize)
-                    } else {
-                        pad_to_width(&wl, width as usize)
-                    },
-                    style,
-                ));
-            }
+
+            app.streaming_rendered_len = app.streaming_text.len();
         }
 
-        // 拼接 frozen_cache
-        if !app.frozen_cache.is_empty() {
-            let mut combined = app.frozen_cache.clone();
-            combined.extend(text_lines);
-            text_lines = combined;
-        }
+        // 拼接已渲染的流式行
+        text_lines.extend(app.streaming_rendered_lines.clone());
     }
 
     Text::from(text_lines)

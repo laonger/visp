@@ -48,8 +48,13 @@ pub async fn run(session_id: String, mut chat_handle: ChatHandle, model: String)
             break;
         }
         if app.needs_render {
-            let _ = terminal.draw(|f| render(&mut app, f));
-            app.needs_render = false;
+            if app.generating && !app.try_begin_stream_render() {
+                app.needs_render = false;
+            }
+            if app.needs_render {
+                let _ = terminal.draw(|f| render(&mut app, f));
+                app.needs_render = false;
+            }
         }
     }
 
