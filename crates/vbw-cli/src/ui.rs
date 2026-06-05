@@ -146,10 +146,13 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     let total = app.messages.iter().map(|m| {
         app.message_caches.iter()
             .find(|c| c.msg_id == m.id)
-            .map_or(0, |c| c.line_count + 3)
+            .map_or(0, |c| {
+                let inset: u16 = if m.line_type == LineType::Assistant { 2 } else { 0 };
+                c.line_count + inset * 2 + 1 // 1 empty + inset top + content + inset bottom
+            })
     }).sum::<u16>();
     let stream_lines = if app.streaming_text.is_empty() { 0 }
-        else { app.streaming_text.lines().count() as u16 + 2 };
+        else { app.streaming_text.lines().count() as u16 + 5 }; // matches assistant layout
     let total_lines = total + stream_lines;
     let visible = area.height;
     let max_scroll = total_lines.saturating_sub(visible);
@@ -166,7 +169,10 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     for msg in &app.messages {
         if let Some(cache) = app.message_caches.iter().find(|c| c.msg_id == msg.id) {
             let is_assistant = msg.line_type == LineType::Assistant;
-            let total_h = cache.line_count + 3; // 1 top + content + 2 separators
+            // Block layout: 1 empty top + (inset pad rows) + content + (inset pad rows) + separators
+            let inset = if is_assistant { 2u16 } else { 0 };
+            let bottom_pad = inset;
+            let total_h = cache.line_count + inset + bottom_pad + 1; // 1 empty + inset + content + bottom_pad
 
             if y + total_h > scroll_y && y < scroll_y + visible {
                 let rel_y = area.y + y.saturating_sub(scroll_y);
@@ -177,13 +183,29 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                     continue;
                 }
 
-                // Render message content (slightly inset for assistant)
-                let inset = if is_assistant { 2u16 } else { 0 };
+                // Render message content (inset for assistant)
+                let content_x = area.x + inset;
+                let content_y = rel_y + 1 + inset; // 1 empty + inset top pad
+                let content_w_adj = content_w.saturating_sub(inset * 2);
                 let p = Paragraph::new(Text::from(cache.lines.clone()));
-                f.render_widget(p, Rect::new(area.x + inset, rel_y + 1 + inset, content_w.saturating_sub(inset * 2), cache.line_count.min(actual_h)));
+                f.render_widget(p, Rect::new(content_x, content_y, content_w_adj, cache.line_count.min(actual_h)));
 
-                // Render separator lines below message
-                let sep_start = rel_y + cache.line_count + 1;
+                // Fill block background (before separators so fill can overwrite later)
+                if is_assistant {
+                    let pad_bg = Color::from_u32(0x00222A3E);
+                    let buf = f.buffer_mut();
+                    let end_x = (area.x + content_w).min(buf.area().right());
+                    // Fill from first pad row through content + bottom pad
+                    let fill_end = (rel_y + 1 + inset + cache.line_count + bottom_pad).min(buf.area().bottom());
+                    for row in (rel_y + 1)..fill_end {
+                        for x in area.x..end_x {
+                            buf[(x, row)].set_bg(pad_bg);
+                        }
+                    }
+                }
+
+                // Render separator lines below block
+                let sep_start = rel_y + 1 + inset + cache.line_count + bottom_pad;
                 let sep_end = (rel_y + total_h).min(area.bottom());
                 for sep_y in sep_start..sep_end {
                     f.render_widget(
@@ -192,34 +214,20 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                     );
                 }
 
-                // Fill assistant block background (overwrites separator bg if needed)
-                if is_assistant {
-                    let pad_bg = Color::from_u32(0x00222A3E);
-                    let buf = f.buffer_mut();
-                    let end_x = (area.x + content_w).min(buf.area().right());
-                    let end_y = (rel_y + cache.line_count + 2).min(buf.area().bottom());
-                    for row in (rel_y + 1)..end_y {
-                        for x in area.x..end_x {
-                            buf[(x, row)].set_bg(pad_bg);
-                        }
-                    }
-                }
-
                 // Drop shadow: right column + bottom row
                 let buf = f.buffer_mut();
                 let shadow_x = area.x + area.width.saturating_sub(1);
                 let right = area.right();
-                let shadow_y_start = rel_y + 1 + inset;
                 // Right-edge shadow on content rows
-                for row in shadow_y_start..(shadow_y_start + cache.line_count).min(buf.area().bottom()) {
+                for row in content_y..(content_y + cache.line_count).min(buf.area().bottom()) {
                     if shadow_x < right {
                         buf[(shadow_x, row)].set_bg(shadow_color);
                     }
                 }
-                // Bottom shadow row (first separator line)
-                let bottom_y = rel_y + cache.line_count + 1;
+                // Bottom shadow row (first separator/pad row below content)
+                let bottom_y = rel_y + 1 + inset + cache.line_count;
                 if bottom_y < buf.area().bottom() {
-                    for x in area.x..right {
+                    for x in (area.x + 1)..right {
                         if x < buf.area().right() {
                             buf[(x, bottom_y)].set_bg(shadow_color);
                         }
@@ -230,28 +238,28 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
         }
     }
 
-    // 流式文本渲染（与 assistant message 相同 padding）
+    // 流式文本渲染（与 assistant message 相同布局）
     if !app.streaming_text.is_empty() {
         let stream_lines_count = app.streaming_text.lines().count() as u16;
-        let stream_h = stream_lines_count + 2;
+        let stream_h = stream_lines_count + 5; // matches assistant: 1 empty + 2 inset + 2 bottom pad
         if y + stream_h > scroll_y && y < scroll_y + visible {
             let pad_bg = Color::from_u32(0x00222A3E);
             let style = Style::default().fg(Color::White).bg(pad_bg);
             let rel_y = area.y + y.saturating_sub(scroll_y);
 
-            // Fill streaming block background
+            // Fill background
             {
                 let buf = f.buffer_mut();
                 let end_x = (area.x + content_w).min(buf.area().right());
-                let end_y = (rel_y + stream_lines_count + 1).min(buf.area().bottom());
-                for row in (rel_y + 1)..end_y {
+                let fill_end = (rel_y + 1 + 2 + stream_lines_count + 2).min(buf.area().bottom());
+                for row in (rel_y + 1)..fill_end {
                     for x in area.x..end_x {
                         buf[(x, row)].set_bg(pad_bg);
                     }
                 }
             }
 
-            // Render streaming content (inset same as assistant)
+            // Render content (inset by 2)
             let stream_w = content_w.saturating_sub(4);
             let mut stream_text: Vec<Line> = Vec::new();
             for line in app.streaming_text.lines() {
@@ -259,7 +267,7 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
             }
             f.render_widget(
                 Paragraph::new(Text::from(stream_text)),
-                Rect::new(area.x + 2, rel_y + 2, stream_w, stream_lines_count),
+                Rect::new(area.x + 2, rel_y + 3, stream_w, stream_lines_count),
             );
         }
     }
