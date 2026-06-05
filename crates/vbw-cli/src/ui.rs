@@ -185,7 +185,9 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                     let buf = f.buffer_mut();
                     let accent = Color::from_u32(0x00444A5E);
                     for row in rel_y..(rel_y + cache.line_count).min(buf.area().bottom()) {
-                        buf[(area.x, row)].set_bg(accent);
+                        let cell = &mut buf[(area.x, row)];
+                        cell.set_symbol("▏");
+                        cell.set_fg(accent);
                     }
                 }
 
