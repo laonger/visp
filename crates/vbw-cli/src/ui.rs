@@ -230,19 +230,37 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
         }
     }
 
-    // 流式文本渲染
+    // 流式文本渲染（与 assistant message 相同 padding）
     if !app.streaming_text.is_empty() {
         let stream_lines_count = app.streaming_text.lines().count() as u16;
         let stream_h = stream_lines_count + 2;
         if y + stream_h > scroll_y && y < scroll_y + visible {
-            let style = Style::default().fg(Color::White).bg(Color::from_u32(0x00222A3E));
+            let pad_bg = Color::from_u32(0x00222A3E);
+            let style = Style::default().fg(Color::White).bg(pad_bg);
             let rel_y = area.y + y.saturating_sub(scroll_y);
-            let stream_area = Rect::new(area.x, rel_y + 1, content_w, stream_lines_count);
+
+            // Fill streaming block background
+            {
+                let buf = f.buffer_mut();
+                let end_x = (area.x + content_w).min(buf.area().right());
+                let end_y = (rel_y + stream_lines_count + 1).min(buf.area().bottom());
+                for row in (rel_y + 1)..end_y {
+                    for x in area.x..end_x {
+                        buf[(x, row)].set_bg(pad_bg);
+                    }
+                }
+            }
+
+            // Render streaming content (inset same as assistant)
+            let stream_w = content_w.saturating_sub(2);
             let mut stream_text: Vec<Line> = Vec::new();
             for line in app.streaming_text.lines() {
-                stream_text.push(Line::styled(pad_to_width(line, content_w as usize), style));
+                stream_text.push(Line::styled(pad_to_width(line, stream_w as usize), style));
             }
-            f.render_widget(Paragraph::new(Text::from(stream_text)), stream_area);
+            f.render_widget(
+                Paragraph::new(Text::from(stream_text)),
+                Rect::new(area.x + 1, rel_y + 2, stream_w, stream_lines_count),
+            );
         }
     }
 }
