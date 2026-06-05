@@ -221,7 +221,7 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
         if y + stream_h > scroll_y && y < scroll_y + visible {
             let style = Style::default().fg(Color::White).bg(Color::from_u32(0x00222A3E));
             let rel_y = area.y + y.saturating_sub(scroll_y);
-            let stream_area = Rect::new(area.x, rel_y + 1, content_w, stream_lines_count);
+            let stream_area = Rect::new(area.x, rel_y, content_w, stream_lines_count);
             let mut stream_text: Vec<Line> = Vec::new();
             for line in app.streaming_text.lines() {
                 stream_text.push(Line::styled(pad_to_width(line, content_w as usize), style));
