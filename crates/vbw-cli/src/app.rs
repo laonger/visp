@@ -357,4 +357,30 @@ mod tests {
         };
         assert!(!cache.matches(&msg3, 80));
     }
+
+    #[test]
+    fn test_cache_user_message_has_top_bottom_padding() {
+        let msg = ChatLine {
+            id: 0,
+            version: 0,
+            line_type: LineType::User,
+            content: "hello".into(),
+        };
+        let cache = MessageCache::from_message(&msg, 80);
+        // User 消息上下各有一行空行，至少 3 行
+        assert!(cache.line_count >= 3);
+    }
+
+    #[test]
+    fn test_cache_tool_result_truncation() {
+        let msg = ChatLine {
+            id: 0,
+            version: 0,
+            line_type: LineType::ToolResult,
+            content: "line1\nline2\nline3\nline4\nline5\nline6\nline7".into(),
+        };
+        let cache = MessageCache::from_message(&msg, 80);
+        // 截断为 5 行（4+省略）
+        assert_eq!(cache.line_count, 5);
+    }
 }
