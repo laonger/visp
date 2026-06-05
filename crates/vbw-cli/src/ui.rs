@@ -20,41 +20,32 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
         .constraints([
             Constraint::Min(1),
             Constraint::Length(1),
-            Constraint::Length(if app.confirm.is_some() { 8 } else { 7 }),
+            Constraint::Length(if app.confirm.is_some() { 6 } else { 5 }),
         ])
         .split(area);
 
-    let chat_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(1)])
-        .split(main_chunks[0]);
-    render_chat_area(app, f, chat_chunks[1]);
+    render_chat_area(app, f, main_chunks[0]);
 
     let bottom_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if app.confirm.is_some() {
             vec![
                 Constraint::Length(1),
-                Constraint::Length(2),
                 Constraint::Length(4),
                 Constraint::Length(1),
             ]
         } else {
-            vec![
-                Constraint::Length(2),
-                Constraint::Length(4),
-                Constraint::Length(1),
-            ]
+            vec![Constraint::Length(4), Constraint::Length(1)]
         })
         .split(main_chunks[2]);
 
     if app.confirm.is_some() {
         render_confirm_bar(app, f, bottom_chunks[0]);
-        render_input_area(app, f, bottom_chunks[2]);
-        render_status_bar(app, f, bottom_chunks[3]);
-    } else {
         render_input_area(app, f, bottom_chunks[1]);
         render_status_bar(app, f, bottom_chunks[2]);
+    } else {
+        render_input_area(app, f, bottom_chunks[0]);
+        render_status_bar(app, f, bottom_chunks[1]);
     }
 }
 
@@ -211,22 +202,25 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     let content_w = area.width.saturating_sub(1);
     ensure_all_caches(app, content_w);
 
+    const CHAT_PAD: u16 = 2;
+
     // 计算总高度
-    let total: u16 = app
-        .messages
-        .iter()
-        .map(|m| {
-            let style = match m.line_type {
-                LineType::User => USER_STYLE,
-                LineType::Assistant => ASSISTANT_STYLE,
-                _ => TOOL_STYLE,
-            };
-            app.message_caches
-                .iter()
-                .find(|c| c.msg_id == m.id)
-                .map_or(0, |c| style.total_height(c.line_count))
-        })
-        .sum();
+    let total: u16 = CHAT_PAD
+        + app
+            .messages
+            .iter()
+            .map(|m| {
+                let style = match m.line_type {
+                    LineType::User => USER_STYLE,
+                    LineType::Assistant => ASSISTANT_STYLE,
+                    _ => TOOL_STYLE,
+                };
+                app.message_caches
+                    .iter()
+                    .find(|c| c.msg_id == m.id)
+                    .map_or(0, |c| style.total_height(c.line_count))
+            })
+            .sum::<u16>();
     let stream_lines = if app.streaming_text.is_empty() {
         0
     } else {
@@ -243,7 +237,14 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     let scroll_y = app.scroll_state.offset().y.min(max_scroll);
 
     // 统一渲染循环
-    let mut y: u16 = 0;
+    let sep_style = Style::default().bg(Color::from_u32(0x001A1A2E));
+    for row in 0..CHAT_PAD {
+        f.render_widget(
+            Paragraph::new(Line::styled(" ".repeat(content_w as usize), sep_style)),
+            Rect::new(area.x, area.y + row, content_w, 1),
+        );
+    }
+    let mut y: u16 = CHAT_PAD;
     for msg in &app.messages {
         let style = match msg.line_type {
             LineType::User => USER_STYLE,
@@ -312,7 +313,9 @@ fn render_input_area(app: &AppState, f: &mut Frame, area: Rect) {
             .border_style(Style::default().fg(Color::DarkGray))
             .style(Style::default().bg(Color::from_u32(0x00111111))),
     );
-    f.render_widget(&textarea, area);
+    // 2 rows of top padding inside input area
+    let input_area = Rect::new(area.x, area.y + 2, area.width, area.height.saturating_sub(2));
+    f.render_widget(&textarea, input_area);
 }
 
 fn render_status_bar(app: &AppState, f: &mut Frame, area: Rect) {
