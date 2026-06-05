@@ -170,15 +170,12 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
             if msg_y + h > scroll_y && msg_y < scroll_y + visible {
                 let rel_y = area.y + msg_y.saturating_sub(scroll_y);
                 let buf = f.buffer_mut();
-                let right = (area.x + 1 + area.width).min(buf.area().right());
-                let shadow_top = (rel_y + 1).max(area.y);
-                let shadow_bottom = (rel_y + 1 + cache.line_count).min(buf.area().bottom());
-                for y in shadow_top..shadow_bottom {
-                    for x in (area.x + 1)..right {
-                        let cell = &buf[(x, y)];
-                        if cell.symbol() == " " {
-                            buf[(x, y)].set_bg(shadow_color);
-                        }
+                // Shadow only in the gap below message, not overlapping content
+                let gap_start = rel_y + cache.line_count;
+                let gap_end = rel_y + cache.line_count + 2;
+                for y in gap_start..gap_end.min(buf.area().bottom()) {
+                    for x in (area.x + 1)..(area.x + area.width).min(buf.area().right()) {
+                        buf[(x, y)].set_bg(shadow_color);
                     }
                 }
             }
