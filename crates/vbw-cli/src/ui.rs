@@ -178,7 +178,7 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                 }
 
                 // Render message content (slightly inset for assistant)
-                let inset = if is_assistant { 1u16 } else { 0 };
+                let inset = if is_assistant { 2u16 } else { 0 };
                 let p = Paragraph::new(Text::from(cache.lines.clone()));
                 f.render_widget(p, Rect::new(area.x + inset, rel_y + 1 + inset, content_w.saturating_sub(inset * 2), cache.line_count.min(actual_h)));
 
@@ -219,7 +219,7 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                 // Bottom shadow row (first separator line)
                 let bottom_y = rel_y + cache.line_count + 1;
                 if bottom_y < buf.area().bottom() {
-                    for x in (area.x + 1)..right {
+                    for x in area.x..right {
                         if x < buf.area().right() {
                             buf[(x, bottom_y)].set_bg(shadow_color);
                         }
@@ -252,14 +252,14 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
             }
 
             // Render streaming content (inset same as assistant)
-            let stream_w = content_w.saturating_sub(2);
+            let stream_w = content_w.saturating_sub(4);
             let mut stream_text: Vec<Line> = Vec::new();
             for line in app.streaming_text.lines() {
                 stream_text.push(Line::styled(pad_to_width(line, stream_w as usize), style));
             }
             f.render_widget(
                 Paragraph::new(Text::from(stream_text)),
-                Rect::new(area.x + 1, rel_y + 2, stream_w, stream_lines_count),
+                Rect::new(area.x + 2, rel_y + 2, stream_w, stream_lines_count),
             );
         }
     }
