@@ -12,6 +12,8 @@ pub enum LineType {
 
 #[derive(Debug, Clone)]
 pub struct ChatLine {
+    pub id: u64,
+    pub version: u64,
     pub line_type: LineType,
     pub content: String,
 }
@@ -26,8 +28,8 @@ pub struct AppState {
     // 对话
     pub messages: Vec<ChatLine>,
     pub streaming_text: String,
-    pub scroll_offset: usize,
     pub scroll_following: bool,
+    pub scroll_state: tui_scrollview::ScrollViewState,
 
     // 输入
     pub textarea: tui_textarea::TextArea<'static>,
@@ -36,6 +38,9 @@ pub struct AppState {
 
     // 状态
     pub generating: bool,
+    pub needs_render: bool,
+    pub last_scroll_time: Option<std::time::Instant>,
+    pub next_message_id: u64,
     pub confirm: Option<ConfirmState>,
     pub model: String,
     pub session_id: String,
@@ -49,12 +54,15 @@ impl AppState {
         Self {
             messages: Vec::new(),
             streaming_text: String::new(),
-            scroll_offset: 0,
             scroll_following: true,
+            scroll_state: tui_scrollview::ScrollViewState::default(),
             textarea,
             input_history: Vec::new(),
             history_index: None,
             generating: false,
+            needs_render: true,
+            last_scroll_time: None,
+            next_message_id: 0,
             confirm: None,
             model,
             session_id,
@@ -63,7 +71,14 @@ impl AppState {
     }
 
     pub fn add_message(&mut self, line_type: LineType, content: String) {
-        self.messages.push(ChatLine { line_type, content });
+        let id = self.next_message_id;
+        self.next_message_id += 1;
+        self.messages.push(ChatLine {
+            id,
+            version: 0,
+            line_type,
+            content,
+        });
     }
 
     pub fn append_streaming(&mut self, delta: &str) {
@@ -72,11 +87,21 @@ impl AppState {
 
     pub fn flush_streaming(&mut self) {
         if !self.streaming_text.is_empty() {
-            self.messages.push(ChatLine {
-                line_type: LineType::Assistant,
-                content: std::mem::take(&mut self.streaming_text),
-            });
+            let text = std::mem::take(&mut self.streaming_text);
+            self.add_message(LineType::Assistant, text);
         }
+    }
+
+    pub fn try_begin_scroll(&mut self) -> bool {
+        const COOLDOWN_MS: u128 = 30;
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_scroll_time
+            && now.duration_since(last).as_millis() < COOLDOWN_MS
+        {
+            return false;
+        }
+        self.last_scroll_time = Some(now);
+        true
     }
 }
 
@@ -95,6 +120,10 @@ mod tests {
         assert!(app.confirm.is_none());
         assert!(!app.should_quit);
         assert!(app.scroll_following);
+        assert_eq!(
+            app.scroll_state.offset(),
+            ratatui::layout::Position::new(0, 0)
+        );
     }
 
     #[test]
@@ -104,6 +133,22 @@ mod tests {
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.messages[0].content, "hello");
         assert_eq!(app.messages[0].line_type, LineType::User);
+    }
+
+    #[test]
+    fn test_add_message_id_increments() {
+        let mut app = AppState::new("s".into(), "m".into());
+        app.add_message(LineType::User, "a".into());
+        app.add_message(LineType::Assistant, "b".into());
+        assert_eq!(app.messages[0].id, 0);
+        assert_eq!(app.messages[1].id, 1);
+    }
+
+    #[test]
+    fn test_add_message_version_initial() {
+        let mut app = AppState::new("s".into(), "m".into());
+        app.add_message(LineType::User, "hello".into());
+        assert_eq!(app.messages[0].version, 0);
     }
 
     #[test]
