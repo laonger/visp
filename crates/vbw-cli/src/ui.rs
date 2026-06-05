@@ -11,7 +11,7 @@ use ratatui::{
 use crate::app::{AppState, MessageCache, pad_to_width, wrap_text};
 
 pub fn render(app: &mut AppState, f: &mut Frame) {
-    let area = f.area().inner(ratatui::layout::Margin::new(1, 1));
+    let area = f.area().inner(ratatui::layout::Margin::new(1, 0));
     let bg = Block::default().style(Style::default().bg(Color::from_u32(0x001A1A2E)));
     f.render_widget(Paragraph::new("").block(bg), f.area());
 
@@ -20,7 +20,7 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
         .constraints([
             Constraint::Min(1),
             Constraint::Length(1),
-            Constraint::Length(if app.confirm.is_some() { 7 } else { 6 }),
+            Constraint::Length(if app.confirm.is_some() { 6 } else { 5 }),
         ])
         .split(area);
 
