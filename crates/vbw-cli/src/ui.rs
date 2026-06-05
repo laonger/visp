@@ -140,77 +140,68 @@ fn build_text_stack(app: &mut AppState, width: u16) -> Text<'static> {
 }
 
 fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
-    // 更新消息缓存（副作用），不再使用返回值
-    let border_w: u16 = 2; // 左右边框各占 1 列
-    let content_w = area.width.saturating_sub(border_w + 1); // -1 for right shadow column
+    let content_w = area.width.saturating_sub(1); // -1 for right shadow column
     let _ = build_text_stack(app, content_w);
 
-    let total: u16 = app
-        .messages
-        .iter()
-        .map(|m| {
-            if let Some(c) = app.message_caches.iter().find(|c| c.msg_id == m.id) {
-                c.line_count + 2 + 2 // border(2) + 2 separator lines
-            } else {
-                0
-            }
-        })
-        .sum();
-    // 加上流式文本行数
-    let stream_lines = if app.streaming_text.is_empty() {
-        0
-    } else {
-        app.streaming_text.lines().count() as u16 + 2
-    }; // +2 for separators
+    let total = app.messages.iter().map(|m| {
+        app.message_caches.iter()
+            .find(|c| c.msg_id == m.id)
+            .map_or(0, |c| c.line_count + 2) // +2 separator lines
+    }).sum::<u16>();
+    let stream_lines = if app.streaming_text.is_empty() { 0 }
+        else { app.streaming_text.lines().count() as u16 + 2 };
     let total_lines = total + stream_lines;
     let visible = area.height;
     let max_scroll = total_lines.saturating_sub(visible);
 
     if app.scroll_following {
-        app.scroll_state
-            .set_offset(ratatui::layout::Position::new(0, max_scroll));
+        app.scroll_state.set_offset(ratatui::layout::Position::new(0, max_scroll));
     }
     let scroll_y = app.scroll_state.offset().y.min(max_scroll);
 
     let shadow_color = Color::from_u32(0x000D0D17);
-    let border_style = Style::default().fg(Color::White);
+    let sep_style = Style::default().bg(Color::from_u32(0x001A1A2E));
     let mut y: u16 = 0;
 
     for msg in &app.messages {
         if let Some(cache) = app.message_caches.iter().find(|c| c.msg_id == msg.id) {
-            let block_h = cache.line_count + 2; // border top(1) + content + border bottom(1)
-            let total_h = block_h + 2; // +2 separator lines
+            let total_h = cache.line_count + 2; // content + 2 separators
 
             if y + total_h > scroll_y && y < scroll_y + visible {
                 let rel_y = area.y + y.saturating_sub(scroll_y);
                 let max_h = area.bottom().saturating_sub(rel_y);
-                let actual_h = block_h.min(max_h);
+                let actual_h = total_h.min(max_h);
                 if actual_h == 0 {
                     y += total_h;
                     continue;
                 }
-                let msg_area = Rect::new(area.x, rel_y, area.width, actual_h);
 
-                // 白边框 Block
-                let block = Block::bordered().border_style(border_style);
-                let inner = block.inner(msg_area);
+                // Render message content (without border)
                 let p = Paragraph::new(Text::from(cache.lines.clone()));
-                f.render_widget(block, msg_area);
-                f.render_widget(p, inner);
+                f.render_widget(p, Rect::new(area.x, rel_y, content_w, cache.line_count.min(actual_h)));
 
-                // Drop shadow: right edge column + bottom row
+                // Render separator lines below message
+                let sep_start = rel_y + cache.line_count;
+                let sep_end = (rel_y + total_h).min(area.bottom());
+                for sep_y in sep_start..sep_end {
+                    f.render_widget(
+                        Paragraph::new(Line::styled(" ".repeat(content_w as usize), sep_style)),
+                        Rect::new(area.x, sep_y, content_w, 1),
+                    );
+                }
+
+                // Drop shadow: right column + bottom row
                 let buf = f.buffer_mut();
                 let shadow_x = area.x + area.width.saturating_sub(1);
                 let right = area.right();
-                // Right-edge shadow (only on content rows, skip border rows)
-                let shadow_end = (rel_y + actual_h - 1).min(buf.area().bottom());
-                for row in (rel_y + 1)..shadow_end {
+                // Right-edge shadow on content rows
+                for row in rel_y..(rel_y + cache.line_count).min(buf.area().bottom()) {
                     if shadow_x < right {
                         buf[(shadow_x, row)].set_bg(shadow_color);
                     }
                 }
-                // Bottom shadow row (below the block, first separator line)
-                let bottom_y = rel_y + actual_h;
+                // Bottom shadow row (first separator line)
+                let bottom_y = rel_y + cache.line_count;
                 if bottom_y < buf.area().bottom() {
                     for x in (area.x + 1)..right {
                         if x < buf.area().right() {
@@ -223,14 +214,12 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
         }
     }
 
-    // 流式文本渲染（如有）
+    // 流式文本渲染
     if !app.streaming_text.is_empty() {
         let stream_lines_count = app.streaming_text.lines().count() as u16;
-        let stream_h = stream_lines_count + 2; // +2 separator
+        let stream_h = stream_lines_count + 2;
         if y + stream_h > scroll_y && y < scroll_y + visible {
-            let style = Style::default()
-                .fg(Color::White)
-                .bg(Color::from_u32(0x001A1A2E));
+            let style = Style::default().fg(Color::White).bg(Color::from_u32(0x001A1A2E));
             let rel_y = area.y + y.saturating_sub(scroll_y);
             let stream_area = Rect::new(area.x, rel_y + 1, content_w, stream_lines_count);
             let mut stream_text: Vec<Line> = Vec::new();
