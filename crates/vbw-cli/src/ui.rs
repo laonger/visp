@@ -63,7 +63,14 @@ fn build_text_stack(app: &mut AppState, width: u16) -> Text<'static> {
 
     // 2. 确保每条消息有对应缓存 + 组装行
     let mut text_lines: Vec<Line> = Vec::new();
-    for msg in &app.messages {
+    let sep = Line::styled(
+        " ".repeat(width as usize),
+        Style::default().bg(Color::from_u32(0x001A1A2E)),
+    );
+    for (i, msg) in app.messages.iter().enumerate() {
+        if i > 0 {
+            text_lines.push(sep.clone());
+        }
         if let Some(&idx) = cache_map.get(&msg.id) {
             if !app.message_caches[idx].matches(msg, width) {
                 app.message_caches[idx] = MessageCache::from_message(msg, width);
@@ -83,6 +90,9 @@ fn build_text_stack(app: &mut AppState, width: u16) -> Text<'static> {
 
     // 4. 流式文本处理（增量渲染）
     if !app.streaming_text.is_empty() {
+        if !app.messages.is_empty() {
+            text_lines.push(sep.clone());
+        }
         let style = Style::default()
             .fg(Color::White)
             .bg(Color::from_u32(0x001A1A2E));
