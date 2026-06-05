@@ -94,7 +94,7 @@ impl MessageCache {
     }
 }
 
-fn wrap_text(text: &str, screen_width: u16) -> Vec<String> {
+pub(crate) fn wrap_text(text: &str, screen_width: u16) -> Vec<String> {
     let mut result = Vec::new();
     let sw = screen_width as usize;
     if sw == 0 {
@@ -126,7 +126,7 @@ fn wrap_text(text: &str, screen_width: u16) -> Vec<String> {
     result
 }
 
-fn pad_to_width(s: &str, width: usize) -> String {
+pub(crate) fn pad_to_width(s: &str, width: usize) -> String {
     let len: usize = s.chars().map(|c| if c > '\u{2000}' { 2 } else { 1 }).sum();
     if len < width {
         format!("{}{}", s, " ".repeat(width - len))
@@ -139,9 +139,11 @@ pub struct AppState {
     // 对话
     pub messages: Vec<ChatLine>,
     pub message_caches: Vec<MessageCache>,
+    pub frozen_cache: Vec<Line<'static>>,
     pub streaming_text: String,
     pub scroll_following: bool,
     pub scroll_state: tui_scrollview::ScrollViewState,
+    pub cache_width: u16,
 
     // 输入
     pub textarea: tui_textarea::TextArea<'static>,
@@ -166,9 +168,11 @@ impl AppState {
         Self {
             messages: Vec::new(),
             message_caches: Vec::new(),
+            frozen_cache: Vec::new(),
             streaming_text: String::new(),
             scroll_following: true,
             scroll_state: tui_scrollview::ScrollViewState::default(),
+            cache_width: 0,
             textarea,
             input_history: Vec::new(),
             history_index: None,
@@ -202,6 +206,7 @@ impl AppState {
         if !self.streaming_text.is_empty() {
             let text = std::mem::take(&mut self.streaming_text);
             self.add_message(LineType::Assistant, text);
+            self.frozen_cache.clear();
         }
     }
 
@@ -392,7 +397,8 @@ mod tests {
         let mut app = AppState::new("s".into(), "m".into());
         app.add_message(LineType::User, "hello".into());
         // 手动添加一个 cache 模拟渲染后的状态
-        app.message_caches.push(MessageCache::from_message(&app.messages[0], 80));
+        app.message_caches
+            .push(MessageCache::from_message(&app.messages[0], 80));
         assert_eq!(app.message_caches.len(), 1);
         app.clear_messages();
         assert!(app.messages.is_empty());
