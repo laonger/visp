@@ -20,32 +20,41 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
         .constraints([
             Constraint::Min(1),
             Constraint::Length(1),
-            Constraint::Length(if app.confirm.is_some() { 6 } else { 5 }),
+            Constraint::Length(if app.confirm.is_some() { 8 } else { 7 }),
         ])
         .split(area);
 
-    render_chat_area(app, f, main_chunks[0]);
+    let chat_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(1)])
+        .split(main_chunks[0]);
+    render_chat_area(app, f, chat_chunks[1]);
 
     let bottom_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if app.confirm.is_some() {
             vec![
                 Constraint::Length(1),
+                Constraint::Length(2),
                 Constraint::Length(4),
                 Constraint::Length(1),
             ]
         } else {
-            vec![Constraint::Length(4), Constraint::Length(1)]
+            vec![
+                Constraint::Length(2),
+                Constraint::Length(4),
+                Constraint::Length(1),
+            ]
         })
         .split(main_chunks[2]);
 
     if app.confirm.is_some() {
         render_confirm_bar(app, f, bottom_chunks[0]);
+        render_input_area(app, f, bottom_chunks[2]);
+        render_status_bar(app, f, bottom_chunks[3]);
+    } else {
         render_input_area(app, f, bottom_chunks[1]);
         render_status_bar(app, f, bottom_chunks[2]);
-    } else {
-        render_input_area(app, f, bottom_chunks[0]);
-        render_status_bar(app, f, bottom_chunks[1]);
     }
 }
 
