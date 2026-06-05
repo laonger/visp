@@ -144,11 +144,14 @@ fn render_block(
     let content_x = area.x + style.inset;
     let content_y = rel_y + 1 + style.inset;
     let content_w_adj = content_w.saturating_sub(style.inset * 2);
-    let p = Paragraph::new(Text::from(lines.to_vec()));
-    f.render_widget(
-        p,
-        Rect::new(content_x, content_y, content_w_adj, line_count),
-    );
+    let actual_lines = line_count.min(area.bottom().saturating_sub(content_y));
+    if actual_lines > 0 {
+        let p = Paragraph::new(Text::from(lines[..actual_lines as usize].to_vec()));
+        f.render_widget(
+            p,
+            Rect::new(content_x, content_y, content_w_adj, actual_lines),
+        );
+    }
 
     // Shadow
     if style.shadow {
