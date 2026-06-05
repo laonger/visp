@@ -18,7 +18,7 @@ impl Tool for ReadFile {
     }
 
     fn description(&self) -> &str {
-        "读取文件内容"
+        "读取文件内容。必须提供 path 参数。"
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -95,7 +95,7 @@ impl Tool for WriteFile {
     }
 
     fn description(&self) -> &str {
-        "写入文件（覆盖）"
+        "写入文件（覆盖）。必须提供 path 和 content 参数。"
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -156,7 +156,7 @@ impl Tool for EditFile {
     }
 
     fn description(&self) -> &str {
-        "精确字符串替换编辑"
+        "在文件中进行精确字符串替换。必须提供 path, old_string, new_string 参数。"
     }
 
     fn parameters(&self) -> serde_json::Value {

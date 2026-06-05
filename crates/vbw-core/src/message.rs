@@ -30,6 +30,9 @@ pub struct Message {
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallRequest>>,
+    /// 额外的原始内容块（如 thinking），以 JSON Value 存储
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_blocks: Option<Vec<serde_json::Value>>,
 }
 
 impl Message {
@@ -39,6 +42,7 @@ impl Message {
             content: content.into(),
             tool_call_id: None,
             tool_calls: None,
+            extra_blocks: None,
         }
     }
 
@@ -48,6 +52,7 @@ impl Message {
             content: content.into(),
             tool_call_id: None,
             tool_calls: None,
+            extra_blocks: None,
         }
     }
 
@@ -57,6 +62,7 @@ impl Message {
             content: content.into(),
             tool_call_id: None,
             tool_calls: None,
+            extra_blocks: None,
         }
     }
 
@@ -66,6 +72,7 @@ impl Message {
             content: content.into(),
             tool_call_id: Some(call_id.into()),
             tool_calls: None,
+            extra_blocks: None,
         }
     }
 }

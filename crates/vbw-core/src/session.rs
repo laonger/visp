@@ -210,10 +210,10 @@ impl SessionManager {
     }
 
     /// 结束 agent 循环，切换会话状态，清理 token
-    pub fn finish_loop(&self, id: &str, status: SessionStatus) -> Result<(), SessionError> {
+    pub fn finish_loop(&self, id: &str, _status: SessionStatus) -> Result<(), SessionError> {
         let mut store = self.store.lock().unwrap();
         let mut session = store.get(id)?.clone();
-        session.status = status;
+        session.status = SessionStatus::Idle;
         store.update(session)?;
         drop(store);
 
@@ -367,7 +367,7 @@ mod tests {
             .unwrap();
 
         let s = manager.get(&session.id).unwrap();
-        assert_eq!(s.status, SessionStatus::Completed);
+        assert_eq!(s.status, SessionStatus::Idle);
     }
 
     #[test]
@@ -397,6 +397,7 @@ mod tests {
             content: "hello".into(),
             tool_call_id: None,
             tool_calls: None,
+            extra_blocks: None,
         };
         manager.append_message(&session.id, msg.clone()).unwrap();
 

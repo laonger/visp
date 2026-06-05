@@ -443,8 +443,7 @@ vbw-daemon/
 **DaemonConfig 结构**包含所有可配置项：
 
 - **daemon 配置**：监听地址（默认 `[::1]:50051`）、日志级别
-- **LLM 配置**：provider 类型、API key、模型名称、温度、最大 token
-  - API key 支持从环境变量读取（如 `ANTHROPIC_API_KEY`）
+- **LLM 配置**：provider 类型、API key（可选，支持环境变量 `ANTHROPIC_API_KEY`）、base_url（可选，支持自定义 API 代理）、模型名称、温度、最大 token
 - **工具配置**：bash 超时、文件大小限制
 - **Agent 配置**：最大迭代次数、重试次数
 - **Rule 配置**：额外规则目录列表
@@ -467,7 +466,10 @@ provider = "anthropic"
 model = "claude-sonnet-4-20250514"
 temperature = 0.7
 max_tokens = 4096
-# api_key 从 ANTHROPIC_API_KEY 环境变量读取，不写入配置文件
+# api_key 可选，未配置则从 ANTHROPIC_API_KEY 环境变量读取
+# api_key = "sk-ant-xxx"
+# base_url 可选，未配置则使用默认值 https://api.anthropic.com
+# base_url = "https://api.anthropic.com"
 
 [tools]
 bash_timeout_secs = 120
@@ -480,7 +482,8 @@ llm_retry_base_delay_ms = 1000
 ```
 
 **设计决策**：
-- API key 不从配置文件读取，必须通过环境变量传入（安全考虑）
+- API key 优先从配置文件读取，未配置则 fallback 到环境变量（如 `ANTHROPIC_API_KEY`）
+- base_url 可选，未配置则使用 provider 默认值（`https://api.anthropic.com`）
 - 配置加载失败（如找不到配置文件）使用内置默认值继续运行
 - 配置热重载不做（需重启 daemon 生效）
 
@@ -492,7 +495,7 @@ llm_retry_base_delay_ms = 1000
 1. 解析 CLI 参数（`--config` 指定配置文件路径、`--listen-addr` 覆盖监听地址）
 2. 加载配置文件（TOML → DaemonConfig）并合并命令行参数
 3. 初始化日志（`tracing-subscriber`，按 `log_level` 配置）
-4. 创建 `LlmProvider`（根据 `provider` 配置选择实现，API key 从环境变量读取）
+4. 创建 `LlmProvider`（根据 `provider` 配置选择实现，API key 优先从配置文件读取，fallback 环境变量；base_url 可选配置）
 5. 创建 `ToolRegistry`，注册所有工具实例（构造时注入超时、大小限制等配置参数）
 6. 创建 `RuleEngine`（启动规则目录的 notify 监听）
 7. 创建 `SessionManager`（初始化 `InMemorySessionStore`）

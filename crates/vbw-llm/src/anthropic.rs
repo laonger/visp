@@ -80,32 +80,24 @@ fn build_anthropic_messages(messages: &[&Message]) -> Vec<serde_json::Value> {
 
     for msg in messages {
         if msg.role == Role::Tool {
-            // 找到最近一条 user 消息，添加 tool_result content block
-            if let Some(pos) = result.iter().rposition(|m| m["role"] == "user") {
-                let tool_result = serde_json::json!({
-                    "type": "tool_result",
-                    "tool_use_id": msg.tool_call_id.as_deref().unwrap_or(""),
-                    "content": msg.content,
-                });
-                result[pos]["content"]
-                    .as_array_mut()
-                    .unwrap()
-                    .push(tool_result);
-
-                // 若 user 不在末尾，移到末尾（tool 消息在时间线上在 assistant 之后）
-                if pos != result.len() - 1 {
-                    let user_msg = result.remove(pos);
-                    result.push(user_msg);
-                }
+            let tool_result = serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": msg.tool_call_id.as_deref().unwrap_or(""),
+                "content": msg.content,
+            });
+            // 如果上一条消息已经是 user(tool_result)，追加到同一消息
+            // (Anthropic 要求所有 tool_result 在同一 user 消息中)
+            if let Some(last) = result.last_mut()
+                && last["role"] == "user"
+                && last["content"]
+                    .as_array()
+                    .map_or(false, |a| a.iter().all(|b| b["type"] == "tool_result"))
+            {
+                last["content"].as_array_mut().unwrap().push(tool_result);
             } else {
-                // 没有前置 user 消息时创建新的 user 消息
                 result.push(serde_json::json!({
                     "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": msg.tool_call_id.as_deref().unwrap_or(""),
-                        "content": msg.content,
-                    }]
+                    "content": [tool_result],
                 }));
             }
             continue;
@@ -118,8 +110,13 @@ fn build_anthropic_messages(messages: &[&Message]) -> Vec<serde_json::Value> {
             _ => unreachable!(),
         };
 
-        // 构建 content blocks：text + tool_use（如果有）
+        // 构建 content blocks：extra_blocks + text + tool_use
         let mut content_blocks: Vec<serde_json::Value> = Vec::new();
+
+        // 来自 API 的额外内容块（如 thinking），原样保留
+        if let Some(ref blocks) = msg.extra_blocks {
+            content_blocks.extend(blocks.iter().cloned());
+        }
 
         // text block
         if !msg.content.is_empty() {
@@ -181,46 +178,147 @@ fn build_anthropic_messages(messages: &[&Message]) -> Vec<serde_json::Value> {
     result
 }
 
-/// Anthropic SSE 事件解析
+/// SSE 解析中间结果
+#[derive(Debug)]
+pub(crate) enum ParsedEvent {
+    Emit(ChatEvent),
+    /// 工具输入增量: (index, tool_id, tool_name, partial_input_json)
+    ToolInputDelta {
+        index: u64,
+        id: String,
+        name: String,
+        partial: String,
+    },
+    /// 内容块结束（工具或思考）: index
+    BlockStop {
+        index: u64,
+    },
+    /// 思考增量: (index, partial_text, signature)
+    ThinkingDelta {
+        index: u64,
+        partial: String,
+        signature: String,
+    },
+    Skip,
+}
+
+/// Anthropic SSE 事件解析（带工具输入增量累积）
 ///
-/// 将 SSE 事件名和 JSON data 映射为 ChatEvent。
-/// - `content_block_delta` + `text_delta` → `ChatEvent::TextDelta`
-/// - `content_block_start` + `tool_use` → `ChatEvent::ToolCall`
-/// - `message_stop` → `ChatEvent::Done`
-/// - 其他事件（ping, message_start, content_block_stop, message_delta 等）→ `None`
-pub fn parse_anthropic_event(event_name: &str, data: &str) -> Result<Option<ChatEvent>, LlmError> {
+/// 将 SSE 事件名和 JSON data 映射为 ParsedEvent。
+/// - `content_block_delta` + `text_delta` → `Emit(ChatEvent::TextDelta)`
+/// - `content_block_delta` + `input_json_delta` → `ToolInputDelta { index, .. }`
+/// - `content_block_start` + `tool_use` → `ToolInputDelta { id, name, partial: initial_input }`
+/// - `content_block_stop` → `ToolBlockStop { index }`
+/// - `message_stop` → `Emit(ChatEvent::Done)`
+/// - 其他事件 → `Skip`
+pub fn parse_anthropic_event(event_name: &str, data: &str) -> Result<ParsedEvent, LlmError> {
     match event_name {
-        "message_stop" => Ok(Some(ChatEvent::Done)),
+        "message_stop" => Ok(ParsedEvent::Emit(ChatEvent::Done)),
         "content_block_delta" => {
             let v: serde_json::Value = serde_json::from_str(data)
                 .map_err(|e| LlmError::Stream(format!("parse content_block_delta: {e}")))?;
-            if v["delta"]["type"] == "text_delta" {
-                let text = v["delta"]["text"].as_str().unwrap_or("").to_string();
-                Ok(Some(ChatEvent::TextDelta(text)))
-            } else {
-                Ok(None)
+            let delta_type = v["delta"]["type"].as_str().unwrap_or("");
+            let index = v["index"].as_u64().unwrap_or(0);
+            match delta_type {
+                "text_delta" => {
+                    let text = v["delta"]["text"].as_str().unwrap_or("").to_string();
+                    Ok(ParsedEvent::Emit(ChatEvent::TextDelta(text)))
+                }
+                "input_json_delta" => {
+                    let partial = v["delta"]["partial_json"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+                    Ok(ParsedEvent::ToolInputDelta {
+                        index,
+                        id: String::new(),
+                        name: String::new(),
+                        partial,
+                    })
+                }
+                _ => Ok(ParsedEvent::Skip),
             }
         }
         "content_block_start" => {
             let v: serde_json::Value = serde_json::from_str(data)
                 .map_err(|e| LlmError::Stream(format!("parse content_block_start: {e}")))?;
-            if v["content_block"]["type"] == "tool_use" {
-                let id = v["content_block"]["id"].as_str().unwrap_or("").to_string();
-                let name = v["content_block"]["name"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
-                let arguments = v["content_block"]["input"].to_string();
-                Ok(Some(ChatEvent::ToolCall {
-                    id,
-                    name,
-                    arguments,
-                }))
-            } else {
-                Ok(None)
+            let index = v["index"].as_u64().unwrap_or(0);
+            let block_type = v["content_block"]["type"].as_str().unwrap_or("");
+            match block_type {
+                "tool_use" => {
+                    let id = v["content_block"]["id"].as_str().unwrap_or("").to_string();
+                    let name = v["content_block"]["name"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+                    // 流式下 content_block_start 的 input 通常为 {}，真正的参数通过 input_json_delta 发送
+                    // 舍弃初始 input，从空字符串开始累积
+                    Ok(ParsedEvent::ToolInputDelta {
+                        index,
+                        id,
+                        name,
+                        partial: String::new(),
+                    })
+                }
+                "thinking" => {
+                    let signature = v["content_block"]["signature"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+                    let thinking = v["content_block"]["thinking"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+                    Ok(ParsedEvent::ThinkingDelta {
+                        index,
+                        partial: thinking,
+                        signature,
+                    })
+                }
+                _ => Ok(ParsedEvent::Skip),
             }
         }
-        _ => Ok(None),
+        "content_block_delta" => {
+            let v: serde_json::Value = serde_json::from_str(data)
+                .map_err(|e| LlmError::Stream(format!("parse content_block_delta: {e}")))?;
+            let delta_type = v["delta"]["type"].as_str().unwrap_or("");
+            let index = v["index"].as_u64().unwrap_or(0);
+            match delta_type {
+                "text_delta" => {
+                    let text = v["delta"]["text"].as_str().unwrap_or("").to_string();
+                    Ok(ParsedEvent::Emit(ChatEvent::TextDelta(text)))
+                }
+                "input_json_delta" => {
+                    let partial = v["delta"]["partial_json"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+                    Ok(ParsedEvent::ToolInputDelta {
+                        index,
+                        id: String::new(),
+                        name: String::new(),
+                        partial,
+                    })
+                }
+                "thinking_delta" => {
+                    let partial = v["delta"]["thinking"].as_str().unwrap_or("").to_string();
+                    Ok(ParsedEvent::ThinkingDelta {
+                        index,
+                        partial,
+                        signature: String::new(),
+                    })
+                }
+                _ => Ok(ParsedEvent::Skip),
+            }
+        }
+        "content_block_stop" => {
+            let v: serde_json::Value = serde_json::from_str(data)
+                .map_err(|e| LlmError::Stream(format!("parse content_block_stop: {e}")))?;
+            let index = v["index"].as_u64().unwrap_or(0);
+            // 同时触发 thinking 和 tool_use 的 flush（由 byte_stream 按 index 区分）
+            Ok(ParsedEvent::BlockStop { index })
+        }
+        _ => Ok(ParsedEvent::Skip),
     }
 }
 
@@ -306,72 +404,143 @@ impl LlmProvider for AnthropicProvider {
 fn byte_stream_to_chat_events(
     byte_stream: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
 ) -> Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>> {
-    let buf = String::new();
+    use std::collections::HashMap;
+
+    struct ToolAcc {
+        name: String,
+        input: String,
+    }
+    let tools: HashMap<String, ToolAcc> = HashMap::new();
     let stream = Box::pin(byte_stream);
+    let buf = String::new();
 
-    let event_stream = stream::unfold((stream, buf), |(mut stream, mut buf)| async move {
-        loop {
-            // 尝试从缓冲区提取一个完整的 SSE 事件 (以 \n\n 分隔)
-            if let Some(pos) = buf.find("\n\n") {
-                let chunk = buf[..pos].to_string();
-                buf = buf[pos + 2..].to_string();
+    let event_stream = stream::unfold(
+        (stream, buf, tools),
+        |(mut stream, mut buf, mut tools)| async move {
+            loop {
+                if let Some(pos) = buf.find("\n\n") {
+                    let chunk = buf[..pos].to_string();
+                    buf = buf[pos + 2..].to_string();
 
-                let sse_events = crate::streaming::parse_sse_events(&chunk);
-                for sse in sse_events {
-                    let event_name = sse.event.as_deref().unwrap_or("");
-                    let data = sse.data.as_deref().unwrap_or("");
-                    match parse_anthropic_event(event_name, data) {
-                        Ok(Some(chat_event)) => {
-                            return Some((Ok(chat_event), (stream, buf)));
-                        }
-                        Ok(None) => continue,
-                        Err(e) => {
-                            return Some((Err(e), (stream, buf)));
-                        }
-                    }
-                }
-                continue;
-            }
-
-            // 需要更多数据
-            match stream.next().await {
-                Some(Ok(bytes)) => {
-                    if let Ok(s) = std::str::from_utf8(&bytes) {
-                        buf.push_str(s);
-                    } else {
-                        return Some((
-                            Err(LlmError::Stream("Invalid UTF-8 in stream".into())),
-                            (stream, buf),
-                        ));
-                    }
-                }
-                Some(Err(e)) => {
-                    return Some((Err(LlmError::Stream(e.to_string())), (stream, buf)));
-                }
-                None => {
-                    // 流结束，处理剩余的 buffer
-                    if !buf.is_empty() {
-                        let sse_events = crate::streaming::parse_sse_events(&buf);
-                        buf.clear();
-                        for sse in sse_events {
-                            let event_name = sse.event.as_deref().unwrap_or("");
-                            let data = sse.data.as_deref().unwrap_or("");
-                            match parse_anthropic_event(event_name, data) {
-                                Ok(Some(chat_event)) => {
-                                    return Some((Ok(chat_event), (stream, buf)));
+                    let sse_events = crate::streaming::parse_sse_events(&chunk);
+                    for sse in sse_events {
+                        let event_name = sse.event.as_deref().unwrap_or("");
+                        let data = sse.data.as_deref().unwrap_or("");
+                        match parse_anthropic_event(event_name, data) {
+                            Ok(ParsedEvent::Emit(chat_event)) => {
+                                return Some((Ok(chat_event), (stream, buf, tools)));
+                            }
+                            Ok(ParsedEvent::ThinkingDelta {
+                                index,
+                                partial,
+                                signature,
+                            }) => {
+                                let key = format!("thinking_{}", index);
+                                let entry = tools.entry(key).or_insert_with(|| ToolAcc {
+                                    name: String::new(),
+                                    input: String::new(),
+                                });
+                                if !signature.is_empty() {
+                                    entry.name = signature;
                                 }
-                                Ok(None) => continue,
-                                Err(e) => {
-                                    return Some((Err(e), (stream, buf)));
+                                entry.input.push_str(&partial);
+                            }
+                            Ok(ParsedEvent::Emit(chat_event)) => {
+                                return Some((Ok(chat_event), (stream, buf, tools)));
+                            }
+                            Ok(ParsedEvent::ToolInputDelta {
+                                index,
+                                id,
+                                name,
+                                partial,
+                            }) => {
+                                let key = index.to_string();
+                                if !name.is_empty() {
+                                    // content_block_start: new tool
+                                    tools.insert(
+                                        key,
+                                        ToolAcc {
+                                            name,
+                                            input: partial,
+                                        },
+                                    );
+                                } else if let Some(acc) = tools.get_mut(&key) {
+                                    // input_json_delta: append
+                                    acc.input.push_str(&partial);
                                 }
+                            }
+                            Ok(ParsedEvent::BlockStop { index }) => {
+                                // flush thinking block
+                                let tkey = format!("thinking_{}", index);
+                                if let Some(acc) = tools.remove(&tkey) {
+                                    let block = serde_json::json!({
+                                        "type": "thinking",
+                                        "thinking": acc.input,
+                                        "signature": acc.name,
+                                    });
+                                    return Some((
+                                        Ok(ChatEvent::ThinkingBlock(block)),
+                                        (stream, buf, tools),
+                                    ));
+                                }
+                                // flush tool block
+                                let key = index.to_string();
+                                if let Some(acc) = tools.remove(&key) {
+                                    let evt = ChatEvent::ToolCall {
+                                        id: format!("tool_call_{}", index),
+                                        name: acc.name,
+                                        arguments: acc.input,
+                                    };
+                                    return Some((Ok(evt), (stream, buf, tools)));
+                                }
+                            }
+                            Ok(ParsedEvent::Skip) => continue,
+                            Err(e) => {
+                                return Some((Err(e), (stream, buf, tools)));
                             }
                         }
                     }
-                    return None;
+                    continue;
+                }
+
+                match stream.next().await {
+                    Some(Ok(bytes)) => {
+                        if let Ok(s) = std::str::from_utf8(&bytes) {
+                            buf.push_str(s);
+                        } else {
+                            return Some((
+                                Err(LlmError::Stream("Invalid UTF-8".into())),
+                                (stream, buf, tools),
+                            ));
+                        }
+                    }
+                    Some(Err(e)) => {
+                        return Some((Err(LlmError::Stream(e.to_string())), (stream, buf, tools)));
+                    }
+                    None => {
+                        // 流结束，处理剩余 buffer
+                        if !buf.is_empty() {
+                            let sse_events = crate::streaming::parse_sse_events(&buf);
+                            for sse in sse_events {
+                                let event_name = sse.event.as_deref().unwrap_or("");
+                                let data = sse.data.as_deref().unwrap_or("");
+                                match parse_anthropic_event(event_name, data) {
+                                    Ok(ParsedEvent::Emit(chat_event)) => {
+                                        return Some((Ok(chat_event), (stream, buf, tools)));
+                                    }
+                                    Ok(_) => continue,
+                                    Err(e) => {
+                                        return Some((Err(e), (stream, buf, tools)));
+                                    }
+                                }
+                            }
+                        }
+                        return None;
+                    }
                 }
             }
-        }
-    });
+        },
+    );
 
     Box::pin(event_stream)
 }
@@ -400,49 +569,57 @@ mod tests {
     #[test]
     fn test_parse_text_delta() {
         let data = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
-        let result = parse_anthropic_event("content_block_delta", data);
-        let event = result.unwrap().expect("expected Some event");
-        assert!(matches!(&event, ChatEvent::TextDelta(t) if t == "Hello"));
+        let result = parse_anthropic_event("content_block_delta", data).unwrap();
+        match result {
+            ParsedEvent::Emit(ChatEvent::TextDelta(t)) => assert_eq!(t, "Hello"),
+            _ => panic!("expected TextDelta, got {:?}", result),
+        }
     }
 
     #[test]
-    fn test_parse_tool_use() {
+    fn test_parse_tool_use_start() {
         let data = r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_123","name":"get_weather","input":{"city":"Tokyo"}}}"#;
-        let result = parse_anthropic_event("content_block_start", data);
-        let event = result.unwrap().expect("expected Some event");
-        match &event {
-            ChatEvent::ToolCall {
+        let result = parse_anthropic_event("content_block_start", data).unwrap();
+        match result {
+            ParsedEvent::ToolInputDelta {
+                index,
                 id,
                 name,
-                arguments,
+                partial,
             } => {
                 assert_eq!(id, "toolu_123");
                 assert_eq!(name, "get_weather");
-                assert_eq!(arguments, r#"{"city":"Tokyo"}"#);
+                assert_eq!(index, 0);
+                assert!(
+                    partial.is_empty(),
+                    "content_block_start tool input should be discarded in streaming mode"
+                );
             }
-            _ => panic!("expected ToolCall, got {:?}", event),
+            _ => panic!("expected ToolInputDelta, got {:?}", result),
         }
     }
 
     #[test]
     fn test_parse_message_stop() {
-        let result = parse_anthropic_event("message_stop", r#"{"type":"message_stop"}"#);
-        let event = result.unwrap().expect("expected Some event");
-        assert!(matches!(event, ChatEvent::Done));
+        let result = parse_anthropic_event("message_stop", r#"{"type":"message_stop"}"#).unwrap();
+        match result {
+            ParsedEvent::Emit(ChatEvent::Done) => {}
+            _ => panic!("expected Done, got {:?}", result),
+        }
     }
 
     #[test]
-    fn test_parse_unknown_event_returns_none() {
-        let result = parse_anthropic_event("ping", "{}");
-        assert!(result.unwrap().is_none());
+    fn test_parse_unknown_event_returns_skip() {
+        let result = parse_anthropic_event("ping", "{}").unwrap();
+        assert!(matches!(result, ParsedEvent::Skip));
     }
 
     #[test]
-    fn test_parse_content_block_start_text_returns_none() {
+    fn test_parse_text_block_start_returns_skip() {
         let data =
             r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
-        let result = parse_anthropic_event("content_block_start", data);
-        assert!(result.unwrap().is_none());
+        let result = parse_anthropic_event("content_block_start", data).unwrap();
+        assert!(matches!(result, ParsedEvent::Skip));
     }
 
     // --- parse_retry_after 测试 ---
@@ -512,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_message_merged_into_user() {
+    fn test_tool_message_creates_new_user() {
         let msgs = vec![
             Message::user("Check the weather"),
             Message::assistant("Let me look that up"),
@@ -521,17 +698,16 @@ mod tests {
         let config = LlmConfig::default();
         let req = build_anthropic_request(&msgs, &[], &config);
         let msgs_arr = req["messages"].as_array().unwrap();
-        assert_eq!(msgs_arr.len(), 2);
-        // Last message should be user with text + tool_result
-        let last = &msgs_arr[1];
-        assert_eq!(last["role"], "user");
-        let content = last["content"].as_array().unwrap();
-        assert_eq!(content.len(), 2);
-        assert_eq!(content[0]["type"], "text");
-        assert_eq!(content[0]["text"], "Check the weather");
-        assert_eq!(content[1]["type"], "tool_result");
-        assert_eq!(content[1]["tool_use_id"], "toolu_abc123");
-        assert_eq!(content[1]["content"], "Sunny 22°C");
+        // tool 消息创建独立 user 消息，3 条：user, assistant, user(tool_result)
+        assert_eq!(msgs_arr.len(), 3);
+        assert_eq!(msgs_arr[0]["role"], "user");
+        assert_eq!(msgs_arr[1]["role"], "assistant");
+        assert_eq!(msgs_arr[2]["role"], "user");
+        let content = msgs_arr[2]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "tool_result");
+        assert_eq!(content[0]["tool_use_id"], "toolu_abc123");
+        assert_eq!(content[0]["content"], "Sunny 22°C");
     }
 
     #[test]

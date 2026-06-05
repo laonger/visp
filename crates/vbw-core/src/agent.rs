@@ -88,7 +88,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 50,
+            max_iterations: 10,
             llm_retry_attempts: 3,
             llm_retry_base_delay_ms: 1000,
             bash_confirm_mode: true,
@@ -229,6 +229,7 @@ pub async fn run_agent_loop(
         // e. Collect events
         let mut text_buffer = String::new();
         let mut tool_calls: Vec<ToolCallRequest> = Vec::new();
+        let mut thinking_blocks: Vec<serde_json::Value> = Vec::new();
 
         let mut pin_stream = Box::pin(stream);
         while let Some(event) = pin_stream.next().await {
@@ -236,6 +237,9 @@ pub async fn run_agent_loop(
                 Ok(ChatEvent::TextDelta(delta)) => {
                     text_buffer.push_str(&delta);
                     try_send!(AgentEvent::TextDelta(delta));
+                }
+                Ok(ChatEvent::ThinkingBlock(block)) => {
+                    thinking_blocks.push(block);
                 }
                 Ok(ChatEvent::ToolCall {
                     id,
@@ -265,6 +269,7 @@ pub async fn run_agent_loop(
                 content: text_buffer,
                 tool_call_id: None,
                 tool_calls: None,
+                extra_blocks: None,
             };
             ctx.history.push(assistant_msg.clone());
             if let Err(e) = session_mgr.append_message(&ctx.session_id, assistant_msg) {
@@ -286,6 +291,11 @@ pub async fn run_agent_loop(
             content: text_buffer,
             tool_call_id: None,
             tool_calls: Some(tool_calls.clone()),
+            extra_blocks: if thinking_blocks.is_empty() {
+                None
+            } else {
+                Some(thinking_blocks.clone())
+            },
         };
         ctx.history.push(assistant_msg.clone());
         if let Err(e) = session_mgr.append_message(&ctx.session_id, assistant_msg) {
@@ -604,7 +614,7 @@ mod tests {
     #[test]
     fn test_agent_config_default() {
         let cfg = AgentConfig::default();
-        assert_eq!(cfg.max_iterations, 50);
+        assert_eq!(cfg.max_iterations, 10);
         assert_eq!(cfg.llm_retry_attempts, 3);
         assert_eq!(cfg.llm_retry_base_delay_ms, 1000);
         assert!(cfg.bash_confirm_mode);
@@ -673,7 +683,7 @@ mod tests {
         assert_eq!(ctx.session_id, "sess-1");
         assert!(ctx.history.is_empty());
         assert_eq!(ctx.working_dir, Path::new("/tmp"));
-        assert_eq!(ctx.config.model, "claude-sonnet-4-20250514");
+        assert_eq!(ctx.config.model, "claude-3-7-sonnet-20250219");
     }
 
     // ── New agent loop tests ───────────────────────────────────────────────

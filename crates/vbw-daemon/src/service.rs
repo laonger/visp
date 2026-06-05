@@ -157,6 +157,7 @@ impl CoderDaemon for CoderDaemonService {
                     Some(proto::client_message::Payload::UserInput(input)) => {
                         let session_id = input.session_id;
                         let text = input.text;
+                        tracing::info!(session_id = %session_id, text = %text, "[DAEMON] received UserInput");
 
                         // Validate session exists and is Idle
                         let session = match session_mgr.get(&session_id) {
@@ -225,12 +226,19 @@ impl CoderDaemon for CoderDaemonService {
                         let sid = session_id.clone();
                         let pq = pending_queries.clone();
 
+                        let sid2 = sid.clone();
                         tokio::spawn(async move {
+                            tracing::info!(session_id = %sid, "[DAEMON] agent loop started");
                             run_agent_loop(p, tr, re, sm, ctx, &ac, user_msg, agent_tx).await;
+                            tracing::info!(session_id = %sid, "[DAEMON] agent loop finished");
                         });
 
                         tokio::spawn(async move {
                             while let Some(event) = agent_rx.recv().await {
+                                let is_done = matches!(event, AgentEvent::Done);
+                                if is_done {
+                                    tracing::info!(session_id = %sid2, "[DAEMON] forwarding Done to client");
+                                }
                                 let msg = match event {
                                     AgentEvent::UserQuery {
                                         query_id,
@@ -244,13 +252,13 @@ impl CoderDaemon for CoderDaemonService {
                                                     proto::UserQuery {
                                                         query_id,
                                                         message,
-                                                        session_id: sid.clone(),
+                                                        session_id: sid2.clone(),
                                                     },
                                                 ),
                                             ),
                                         }
                                     }
-                                    _ => agent_event_to_server_message(event, &sid),
+                                    _ => agent_event_to_server_message(event, &sid2),
                                 };
                                 if tx_events.send(Ok(msg)).await.is_err() {
                                     break;
@@ -636,7 +644,7 @@ mod tests {
             extra: HashMap::new(),
         };
         let llm = map_llm_config(&config);
-        assert_eq!(llm.model, "claude-sonnet-4-20250514");
+        assert_eq!(llm.model, "claude-3-7-sonnet-20250219");
         assert!((llm.temperature - 0.7).abs() < f64::EPSILON);
         assert_eq!(llm.max_tokens, 4096);
     }

@@ -21,7 +21,7 @@ pub struct LlmConfig {
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
-            model: "claude-sonnet-4-20250514".to_string(),
+            model: "claude-3-7-sonnet-20250219".to_string(),
             temperature: 0.7,
             max_tokens: 4096,
             extra: std::collections::HashMap::new(),
@@ -36,7 +36,7 @@ mod tests_llmconfig {
     #[test]
     fn test_llmconfig_default() {
         let config = LlmConfig::default();
-        assert_eq!(config.model, "claude-sonnet-4-20250514");
+        assert_eq!(config.model, "claude-3-7-sonnet-20250219");
         assert_eq!(config.temperature, 0.7);
         assert_eq!(config.max_tokens, 4096);
         assert!(config.extra.is_empty());
@@ -61,6 +61,8 @@ pub enum ChatEvent {
         name: String,
         arguments: String, // JSON string
     },
+    /// 思考块（如 DeepSeek thinking mode），原样 JSON
+    ThinkingBlock(serde_json::Value),
     /// 流结束
     Done,
 }

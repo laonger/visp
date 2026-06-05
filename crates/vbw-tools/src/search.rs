@@ -101,7 +101,7 @@ impl Tool for Grep {
     }
 
     fn description(&self) -> &str {
-        "内容搜索（正则）"
+        "内容搜索（正则）。必须提供 pattern 参数。"
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -182,7 +182,7 @@ impl Tool for Glob {
     }
 
     fn description(&self) -> &str {
-        "文件名搜索（通配符）"
+        "文件名搜索（通配符）。必须提供 pattern 参数。"
     }
 
     fn parameters(&self) -> serde_json::Value {

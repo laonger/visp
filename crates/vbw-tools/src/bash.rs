@@ -25,7 +25,7 @@ impl Tool for Bash {
     }
 
     fn description(&self) -> &str {
-        "执行 shell 命令"
+        "执行 shell 命令。必须提供 command 参数指定要执行的命令。"
     }
 
     fn parameters(&self) -> serde_json::Value {
