@@ -103,6 +103,17 @@ impl AppState {
         self.last_scroll_time = Some(now);
         true
     }
+
+    pub fn update_message(&mut self, id: u64, content: String) {
+        if let Some(msg) = self.messages.iter_mut().find(|m| m.id == id) {
+            msg.content = content;
+            msg.version += 1;
+        }
+    }
+
+    pub fn clear_messages(&mut self) {
+        self.messages.clear();
+    }
 }
 
 #[cfg(test)]
@@ -162,5 +173,35 @@ mod tests {
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.messages[0].line_type, LineType::Assistant);
         assert_eq!(app.messages[0].content, "Hello world");
+    }
+
+    #[test]
+    fn test_update_message_increments_version() {
+        let mut app = AppState::new("s".into(), "m".into());
+        app.add_message(LineType::Assistant, "original".into());
+        let id = app.messages[0].id;
+        app.update_message(id, "updated".into());
+        assert_eq!(app.messages[0].version, 1);
+        assert_eq!(app.messages[0].content, "updated");
+    }
+
+    #[test]
+    fn test_update_message_id_not_found_does_nothing() {
+        let mut app = AppState::new("s".into(), "m".into());
+        app.add_message(LineType::Assistant, "original".into());
+        let original_version = app.messages[0].version;
+        app.update_message(999, "nope".into());
+        assert_eq!(app.messages[0].version, original_version);
+        assert_eq!(app.messages[0].content, "original");
+    }
+
+    #[test]
+    fn test_clear_messages() {
+        let mut app = AppState::new("s".into(), "m".into());
+        app.add_message(LineType::User, "hello".into());
+        app.add_message(LineType::Assistant, "world".into());
+        assert_eq!(app.messages.len(), 2);
+        app.clear_messages();
+        assert!(app.messages.is_empty());
     }
 }
