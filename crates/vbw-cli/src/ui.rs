@@ -152,27 +152,6 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
 
     let scroll_y = app.scroll_state.offset().y.min(max_scroll);
 
-    // Draw DOS Turbo Vision-style dropshadow for each visible message block
-    let shadow_color = Color::from_u32(0x000D0D17);
-    let mut msg_y: u16 = 0;
-    for msg in &app.messages {
-        if let Some(cache) = app.message_caches.iter().find(|c| c.msg_id == msg.id) {
-            let h = cache.line_count + 2; // message + 2 separator lines
-            if msg_y + h > scroll_y && msg_y < scroll_y + visible {
-                let rel_y = area.y + msg_y.saturating_sub(scroll_y);
-                let buf = f.buffer_mut();
-                let right = (area.x + 1 + area.width).min(buf.area().right());
-                let bottom = (rel_y + 1 + cache.line_count).min(buf.area().bottom());
-                for y in (rel_y + 1)..bottom {
-                    for x in (area.x + 1)..right {
-                        buf[(x, y)].set_bg(shadow_color);
-                    }
-                }
-            }
-            msg_y += h;
-        }
-    }
-
     let scroll_y_usize = scroll_y as usize;
     let end = (scroll_y_usize + visible as usize).min(text.lines.len());
     if scroll_y_usize < end {
@@ -181,6 +160,31 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
 
     let p = Paragraph::new(text).block(Block::default());
     f.render_widget(p, area);
+
+    // Draw drop shadow AFTER Paragraph so it's not overwritten by separator lines
+    let shadow_color = Color::from_u32(0x000D0D17);
+    let mut msg_y: u16 = 0;
+    for msg in app.messages.iter() {
+        if let Some(cache) = app.message_caches.iter().find(|c| c.msg_id == msg.id) {
+            let h = cache.line_count + 2;
+            if msg_y + h > scroll_y && msg_y < scroll_y + visible {
+                let rel_y = area.y + msg_y.saturating_sub(scroll_y);
+                let buf = f.buffer_mut();
+                let right = (area.x + 1 + area.width).min(buf.area().right());
+                let shadow_top = (rel_y + 1).max(area.y);
+                let shadow_bottom = (rel_y + 1 + cache.line_count).min(buf.area().bottom());
+                for y in shadow_top..shadow_bottom {
+                    for x in (area.x + 1)..right {
+                        let cell = &buf[(x, y)];
+                        if cell.symbol() == " " {
+                            buf[(x, y)].set_bg(shadow_color);
+                        }
+                    }
+                }
+            }
+            msg_y += h;
+        }
+    }
 }
 
 fn render_confirm_bar(app: &AppState, f: &mut Frame, area: Rect) {
