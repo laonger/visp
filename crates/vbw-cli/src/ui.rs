@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use crate::app::{AppState, LineType, MessageCache, pad_to_width, wrap_text};
+use crate::app::{AppState, MessageCache, pad_to_width, wrap_text};
 
 pub fn render(app: &mut AppState, f: &mut Frame) {
     let area = f.area().inner(ratatui::layout::Margin::new(1, 1));
@@ -179,23 +179,6 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                 // Render message content (without border)
                 let p = Paragraph::new(Text::from(cache.lines.clone()));
                 f.render_widget(p, Rect::new(area.x, rel_y, content_w, cache.line_count.min(actual_h)));
-
-                // Left + top accent lines for assistant messages
-                if msg.line_type == LineType::Assistant {
-                    let buf = f.buffer_mut();
-                    let accent = Color::from_u32(0x00444A5E);
-                    for row in rel_y..(rel_y + cache.line_count).min(buf.area().bottom()) {
-                        let cell = &mut buf[(area.x, row)];
-                        cell.set_symbol("▏");
-                        cell.set_fg(accent);
-                    }
-                    let end = (area.x + content_w).min(buf.area().right());
-                    for col in area.x..end {
-                        let cell = &mut buf[(col, rel_y)];
-                        cell.set_symbol("▔");
-                        cell.set_fg(accent);
-                    }
-                }
 
                 // Render separator lines below message
                 let sep_start = rel_y + cache.line_count;

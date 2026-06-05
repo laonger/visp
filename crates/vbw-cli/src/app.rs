@@ -42,7 +42,7 @@ impl MessageCache {
     pub fn from_message(msg: &ChatLine, width: u16) -> Self {
         let (fg, bg) = match msg.line_type {
             LineType::User => (Color::Cyan, Color::from_u32(0x001A3A5E)),
-            LineType::Assistant => (Color::White, Color::from_u32(0x001A1A2E)),
+            LineType::Assistant => (Color::White, Color::from_u32(0x00222A3E)),
             LineType::ToolCall => (Color::Yellow, Color::from_u32(0x001A1A2E)),
             LineType::ToolResult => (Color::DarkGray, Color::from_u32(0x00222222)),
             LineType::Error => (Color::Red, Color::from_u32(0x001A1A2E)),
