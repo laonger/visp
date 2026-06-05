@@ -177,19 +177,6 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                     continue;
                 }
 
-                // Fill assistant block background (including separator area)
-                if is_assistant {
-                    let pad_bg = Color::from_u32(0x00222A3E);
-                    let buf = f.buffer_mut();
-                    let end_x = (area.x + content_w).min(buf.area().right());
-                    let end_y = (rel_y + cache.line_count + 1).min(buf.area().bottom());
-                    for row in (rel_y + 1)..end_y {
-                        for x in area.x..end_x {
-                            buf[(x, row)].set_bg(pad_bg);
-                        }
-                    }
-                }
-
                 // Render message content (slightly inset for assistant)
                 let inset = if is_assistant { 1u16 } else { 0 };
                 let p = Paragraph::new(Text::from(cache.lines.clone()));
@@ -203,6 +190,19 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                         Paragraph::new(Line::styled(" ".repeat(content_w as usize), sep_style)),
                         Rect::new(area.x, sep_y, content_w, 1),
                     );
+                }
+
+                // Fill assistant block background (overwrites separator bg if needed)
+                if is_assistant {
+                    let pad_bg = Color::from_u32(0x00222A3E);
+                    let buf = f.buffer_mut();
+                    let end_x = (area.x + content_w).min(buf.area().right());
+                    let end_y = (rel_y + cache.line_count + 2).min(buf.area().bottom());
+                    for row in (rel_y + 1)..end_y {
+                        for x in area.x..end_x {
+                            buf[(x, row)].set_bg(pad_bg);
+                        }
+                    }
                 }
 
                 // Drop shadow: right column + bottom row
