@@ -176,10 +176,10 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                 for y in rel_y..(rel_y + cache.line_count).min(buf.area().bottom()) {
                     buf[(shadow_x, y)].set_bg(shadow_color);
                 }
-                // Bottom shadow row
+                // Bottom shadow row (full width, 1-column right offset)
                 let bottom_y = rel_y + cache.line_count;
                 if bottom_y < buf.area().bottom() {
-                    for x in shadow_x..right {
+                    for x in (area.x + 1)..right {
                         buf[(x, bottom_y)].set_bg(shadow_color);
                     }
                 }
