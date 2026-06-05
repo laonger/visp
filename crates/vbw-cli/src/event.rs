@@ -1,79 +1,73 @@
 #![allow(dead_code)]
 
-use std::io;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use vbw_proto::vibewisp::{server_message, LlmConfig};
-use crate::app::{AppState, LineType, ConfirmState};
+use crate::app::{AppState, ConfirmState, LineType};
 use crate::client::ChatHandle;
 use crate::ui::render;
+use crossterm::event::{Event, KeyCode, KeyModifiers, MouseEventKind};
+use std::io;
+use vbw_proto::vibewisp::{LlmConfig, server_message};
 
-pub async fn run(
-    session_id: String,
-    mut chat_handle: ChatHandle,
-    model: String,
-) -> io::Result<()> {
+pub async fn run(session_id: String, mut chat_handle: ChatHandle, model: String) -> io::Result<()> {
     crossterm::terminal::enable_raw_mode()?;
+    crossterm::execute!(io::stdout(), crossterm::event::EnableMouseCapture)?;
     let mut terminal = ratatui::init();
     let mut app = AppState::new(session_id.clone(), model);
 
+    // 独立长驻键盘任务，不随 select! 取消（解决 spawn_blocking 僵尸问题）
+    let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+    std::thread::spawn(move || {
+        while let Ok(event) = crossterm::event::read() {
+            // MouseMoved 在源头过滤，不进入 channel
+            if matches!(event, Event::Mouse(ref m) if m.kind == MouseEventKind::Moved) {
+                continue;
+            }
+            if key_tx.send(event).is_err() {
+                break;
+            }
+        }
+    });
+
+    let _ = terminal.draw(|f| render(&mut app, f));
+
     loop {
         tokio::select! {
-            crossterm_event = tokio::task::spawn_blocking(|| {
-                event::read()
-            }) => {
-                match crossterm_event {
-                    Ok(Ok(event)) => {
-                        if handle_key_event(event, &mut app, &chat_handle) {
-                            break;
-                        }
-                    }
-                    _ => break,
+            event = key_rx.recv() => {
+                match event {
+                    Some(e) => { if handle_key_event(e, &mut app, &chat_handle) { break; } }
+                    None => break,
                 }
             }
-
             msg = chat_handle.recv() => {
                 match msg {
-                    Some(msg) => {
-                        handle_grpc_message(msg, &mut app, &chat_handle);
-                    }
-                    None => {
-                        app.add_message(LineType::Status, "Daemon disconnected".into());
-                        app.should_quit = true;
-                    }
+                    Some(msg) => handle_grpc_message(msg, &mut app, &chat_handle),
+                    None => { app.should_quit = true; }
                 }
             }
         }
-
         if app.should_quit {
             break;
         }
-
-        let _ = terminal.draw(|f| render(&app, f));
+        if app.needs_render {
+            let _ = terminal.draw(|f| render(&mut app, f));
+            app.needs_render = false;
+        }
     }
 
     ratatui::restore();
+    let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture);
     Ok(())
 }
 
 fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &ChatHandle) -> bool {
+    app.needs_render = true;
     match event {
         Event::Key(key) => {
-            // Confirm 区优先
             if app.confirm.is_some() {
-                match key.code {
-                    KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        let q = app.confirm.take().unwrap();
-                        chat_handle.send_response(&q.query_id, true);
-                    }
-                    _ => {
-                        let q = app.confirm.take().unwrap();
-                        chat_handle.send_response(&q.query_id, false);
-                    }
-                }
+                let q = app.confirm.take().unwrap();
+                let approved = matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'));
+                chat_handle.send_response(&q.query_id, approved);
                 return false;
             }
-
-            // Ctrl+C / Ctrl+D
             if key.modifiers.contains(KeyModifiers::CONTROL) {
                 match key.code {
                     KeyCode::Char('c') => {
@@ -86,15 +80,11 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &ChatHandle) 
                     _ => {}
                 }
             }
-
-            // generating：忽略其他键
             if app.generating {
                 return false;
             }
-
-            // Enter：发送
             if key.code == KeyCode::Enter {
-                let text = app.textarea.lines().join("\n");
+                let text: String = app.textarea.lines().join("\n");
                 app.textarea = tui_textarea::TextArea::default();
                 app.textarea.set_placeholder_text("Type your message...");
                 if text.trim().is_empty() {
@@ -112,15 +102,14 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &ChatHandle) 
                 }
                 return false;
             }
-
-            // ↑↓ 历史, PageUp/PageDown 滚动
             match key.code {
                 KeyCode::Up => {
                     if !app.input_history.is_empty() {
-                        let idx = app.history_index.map_or(
-                            app.input_history.len().saturating_sub(1),
-                            |i| i.saturating_sub(1),
-                        );
+                        let idx = app
+                            .history_index
+                            .map_or(app.input_history.len().saturating_sub(1), |i| {
+                                i.saturating_sub(1)
+                            });
                         app.history_index = Some(idx);
                         app.textarea = tui_textarea::TextArea::default();
                         app.textarea.insert_str(&app.input_history[idx]);
@@ -128,34 +117,58 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &ChatHandle) 
                 }
                 KeyCode::Down => {
                     if let Some(idx) = app.history_index {
-                        let new_idx = idx + 1;
-                        if new_idx >= app.input_history.len() {
+                        let ni = idx + 1;
+                        if ni >= app.input_history.len() {
                             app.history_index = None;
                             app.textarea = tui_textarea::TextArea::default();
                             app.textarea.set_placeholder_text("Type your message...");
                         } else {
-                            app.history_index = Some(new_idx);
+                            app.history_index = Some(ni);
                             app.textarea = tui_textarea::TextArea::default();
-                            app.textarea.insert_str(&app.input_history[new_idx]);
+                            app.textarea.insert_str(&app.input_history[ni]);
                         }
                     }
                 }
                 KeyCode::PageUp => {
-                    app.scroll_offset = app.scroll_offset.saturating_add(5);
+                    let y = app.scroll_state.offset().y;
+                    app.scroll_state
+                        .set_offset(ratatui::layout::Position::new(0, y.saturating_sub(10)));
                     app.scroll_following = false;
                 }
                 KeyCode::PageDown => {
-                    app.scroll_offset = app.scroll_offset.saturating_sub(5);
-                    if app.scroll_offset == 0 {
-                        app.scroll_following = true;
-                    }
+                    let y = app.scroll_state.offset().y;
+                    app.scroll_state
+                        .set_offset(ratatui::layout::Position::new(0, y.saturating_add(10)));
                 }
                 _ => {
-                    app.textarea.input(key);
+                    if let Event::Key(k) = event {
+                        app.textarea.input(Event::Key(k));
+                    }
                 }
             }
         }
-        Event::Resize(_, _) => {}
+        Event::Mouse(m) => match m.kind {
+            MouseEventKind::ScrollUp => {
+                if app.try_begin_scroll() {
+                    app.scroll_state.scroll_up();
+                    app.scroll_state.scroll_up();
+                    app.scroll_state.scroll_up();
+                    app.scroll_following = false;
+                } else {
+                    app.needs_render = false;
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if app.try_begin_scroll() {
+                    app.scroll_state.scroll_down();
+                    app.scroll_state.scroll_down();
+                    app.scroll_state.scroll_down();
+                } else {
+                    app.needs_render = false;
+                }
+            }
+            _ => {}
+        },
         _ => {}
     }
     false
@@ -166,22 +179,23 @@ fn handle_grpc_message(
     app: &mut AppState,
     _chat_handle: &ChatHandle,
 ) {
+    app.needs_render = true;
     match msg.payload {
-        Some(server_message::Payload::TextDelta(delta)) => {
-            app.append_streaming(&delta.delta);
-        }
-        Some(server_message::Payload::ToolCall(tc)) => {
-            app.add_message(
-                LineType::ToolCall,
-                format!("🔧 {}({})", tc.tool_name, tc.arguments),
-            );
-        }
-        Some(server_message::Payload::ToolResult(tr)) => {
-            let prefix = if tr.is_error { "❌" } else { "📄" };
-            app.add_message(LineType::ToolResult, format!("{} {}", prefix, tr.content));
-        }
+        Some(server_message::Payload::TextDelta(delta)) => app.append_streaming(&delta.delta),
+        Some(server_message::Payload::ToolCall(tc)) => app.add_message(
+            LineType::ToolCall,
+            format!("{} {}", tc.tool_name, tc.arguments),
+        ),
+        Some(server_message::Payload::ToolResult(tr)) => app.add_message(
+            LineType::ToolResult,
+            format!(
+                "{}: {}",
+                if tr.is_error { "Error" } else { "Output" },
+                tr.content
+            ),
+        ),
         Some(server_message::Payload::StatusUpdate(su)) => {
-            app.add_message(LineType::Status, su.message);
+            app.add_message(LineType::Status, su.message)
         }
         Some(server_message::Payload::UserQuery(uq)) => {
             app.confirm = Some(ConfirmState {
@@ -204,12 +218,12 @@ fn handle_grpc_message(
 fn handle_command(text: &str, app: &mut AppState, chat_handle: &ChatHandle) {
     let parts: Vec<&str> = text.splitn(2, ' ').collect();
     match parts[0] {
-        "/clear" => app.messages.clear(),
+        "/clear" => app.clear_messages(),
         "/help" => {
-            app.add_message(LineType::Status, "/clear — clear screen".into());
-            app.add_message(LineType::Status, "/temp <val> — set temperature".into());
-            app.add_message(LineType::Status, "/model <name> — set model".into());
-            app.add_message(LineType::Status, "/help — this message".into());
+            app.add_message(
+                LineType::Status,
+                "/clear /temp <val> /model <name> /help".into(),
+            );
         }
         "/temp" if parts.len() >= 2 => {
             if let Ok(temp) = parts[1].parse::<f64>() {
