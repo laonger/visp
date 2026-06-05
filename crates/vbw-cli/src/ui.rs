@@ -20,7 +20,7 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
         .constraints([
             Constraint::Min(1),
             Constraint::Length(1),
-            Constraint::Length(if app.confirm.is_some() { 6 } else { 5 }),
+            Constraint::Length(if app.confirm.is_some() { 7 } else { 6 }),
         ])
         .split(area);
 
@@ -31,11 +31,11 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
         .constraints(if app.confirm.is_some() {
             vec![
                 Constraint::Length(1),
-                Constraint::Length(3),
+                Constraint::Length(4),
                 Constraint::Length(1),
             ]
         } else {
-            vec![Constraint::Length(3), Constraint::Length(1)]
+            vec![Constraint::Length(4), Constraint::Length(1)]
         })
         .split(main_chunks[2]);
 
