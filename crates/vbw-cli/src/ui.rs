@@ -196,8 +196,8 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                 let buf = f.buffer_mut();
                 let shadow_x = area.x + area.width.saturating_sub(1);
                 let right = area.right();
-                // Right-edge shadow (on the right border column and beyond)
-                for row in rel_y..(rel_y + block_h).min(buf.area().bottom()) {
+                // Right-edge shadow (only on content rows, skip border rows)
+                for row in (rel_y + 1)..(rel_y + block_h - 1).min(buf.area().bottom()) {
                     if shadow_x < right {
                         buf[(shadow_x, row)].set_bg(shadow_color);
                     }
