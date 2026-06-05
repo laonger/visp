@@ -140,53 +140,95 @@ fn build_text_stack(app: &mut AppState, width: u16) -> Text<'static> {
 }
 
 fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
-    let content_w = area.width.saturating_sub(1);
-    let mut text = build_text_stack(app, content_w);
-    let total = text.lines.len() as u16;
+    // 更新消息缓存（副作用），不再使用返回值
+    let border_w: u16 = 2; // 左右边框各占 1 列
+    let content_w = area.width.saturating_sub(border_w + 1); // -1 for right shadow column
+    let _ = build_text_stack(app, content_w);
+
+    let total: u16 = app
+        .messages
+        .iter()
+        .map(|m| {
+            if let Some(c) = app.message_caches.iter().find(|c| c.msg_id == m.id) {
+                c.line_count + 2 + 2 // border(2) + 2 separator lines
+            } else {
+                0
+            }
+        })
+        .sum();
+    // 加上流式文本行数
+    let stream_lines = if app.streaming_text.is_empty() {
+        0
+    } else {
+        app.streaming_text.lines().count() as u16 + 2
+    }; // +2 for separators
+    let total_lines = total + stream_lines;
     let visible = area.height;
-    let max_scroll = total.saturating_sub(visible);
+    let max_scroll = total_lines.saturating_sub(visible);
 
     if app.scroll_following {
         app.scroll_state
             .set_offset(ratatui::layout::Position::new(0, max_scroll));
     }
-
     let scroll_y = app.scroll_state.offset().y.min(max_scroll);
 
-    let scroll_y_usize = scroll_y as usize;
-    let end = (scroll_y_usize + visible as usize).min(text.lines.len());
-    if scroll_y_usize < end {
-        text.lines = text.lines[scroll_y_usize..end].to_vec();
-    }
-
-    let content_area = Rect::new(area.x, area.y, content_w, area.height);
-    let p = Paragraph::new(text).block(Block::default());
-    f.render_widget(p, content_area);
-
-    // Draw drop shadow: right-edge column + 1 bottom row for each message
     let shadow_color = Color::from_u32(0x000D0D17);
-    let mut msg_y: u16 = 0;
-    for msg in app.messages.iter() {
+    let border_style = Style::default().fg(Color::White);
+    let mut y: u16 = 0;
+
+    for msg in &app.messages {
         if let Some(cache) = app.message_caches.iter().find(|c| c.msg_id == msg.id) {
-            let h = cache.line_count + 2;
-            if msg_y + h > scroll_y && msg_y < scroll_y + visible {
-                let rel_y = area.y + msg_y.saturating_sub(scroll_y);
+            let block_h = cache.line_count + 2; // border top(1) + content + border bottom(1)
+            let total_h = block_h + 2; // +2 separator lines
+
+            if y + total_h > scroll_y && y < scroll_y + visible {
+                let rel_y = area.y + y.saturating_sub(scroll_y);
+                let msg_area = Rect::new(area.x, rel_y, area.width, block_h);
+
+                // 白边框 Block
+                let block = Block::bordered().border_style(border_style);
+                let inner = block.inner(msg_area);
+                let p = Paragraph::new(Text::from(cache.lines.clone()));
+                f.render_widget(block, msg_area);
+                f.render_widget(p, inner);
+
+                // Drop shadow: right edge column + bottom row
                 let buf = f.buffer_mut();
-                let shadow_x = area.x + content_w;
+                let shadow_x = area.x + area.width.saturating_sub(1);
                 let right = area.right();
-                // Right-edge shadow column
-                for y in rel_y..(rel_y + cache.line_count).min(buf.area().bottom()) {
-                    buf[(shadow_x, y)].set_bg(shadow_color);
+                // Right-edge shadow (on the right border column and beyond)
+                for row in rel_y..(rel_y + block_h).min(buf.area().bottom()) {
+                    if shadow_x < right {
+                        buf[(shadow_x, row)].set_bg(shadow_color);
+                    }
                 }
-                // Bottom shadow row (full width, 1-column right offset)
-                let bottom_y = rel_y + cache.line_count;
+                // Bottom shadow row (below the block, first separator line)
+                let bottom_y = rel_y + block_h;
                 if bottom_y < buf.area().bottom() {
                     for x in (area.x + 1)..right {
                         buf[(x, bottom_y)].set_bg(shadow_color);
                     }
                 }
             }
-            msg_y += h;
+            y += total_h;
+        }
+    }
+
+    // 流式文本渲染（如有）
+    if !app.streaming_text.is_empty() {
+        let stream_lines_count = app.streaming_text.lines().count() as u16;
+        let stream_h = stream_lines_count + 2; // +2 separator
+        if y + stream_h > scroll_y && y < scroll_y + visible {
+            let style = Style::default()
+                .fg(Color::White)
+                .bg(Color::from_u32(0x001A1A2E));
+            let rel_y = area.y + y.saturating_sub(scroll_y);
+            let stream_area = Rect::new(area.x, rel_y + 1, content_w, stream_lines_count);
+            let mut stream_text: Vec<Line> = Vec::new();
+            for line in app.streaming_text.lines() {
+                stream_text.push(Line::styled(pad_to_width(line, content_w as usize), style));
+            }
+            f.render_widget(Paragraph::new(Text::from(stream_text)), stream_area);
         }
     }
 }
