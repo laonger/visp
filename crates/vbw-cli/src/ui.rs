@@ -187,6 +187,27 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                 let p = Paragraph::new(Text::from(cache.lines.clone()));
                 f.render_widget(p, Rect::new(content_x, rel_y + 1 + pad, content_w_adj, cache.line_count.min(actual_h)));
 
+                // Fill padding area with assistant background
+                if is_assistant {
+                    let pad_bg = Color::from_u32(0x00222A3E);
+                    let buf = f.buffer_mut();
+                    // Top padding row
+                    let top_y = rel_y + 1;
+                    if top_y < buf.area().bottom() {
+                        for x in area.x..(area.x + content_w).min(buf.area().right()) {
+                            buf[(x, top_y)].set_bg(pad_bg);
+                        }
+                    }
+                    // Left + right padding columns
+                    for row in (rel_y + 2)..(rel_y + 2 + cache.line_count).min(buf.area().bottom()) {
+                        buf[(area.x, row)].set_bg(pad_bg);
+                        let right_x = area.x + content_w.saturating_sub(1);
+                        if right_x < buf.area().right() {
+                            buf[(right_x, row)].set_bg(pad_bg);
+                        }
+                    }
+                }
+
                 // Render separator lines below message
                 let sep_start = rel_y + cache.line_count + 1 + pad;
                 let sep_end = (rel_y + total_h).min(area.bottom());
