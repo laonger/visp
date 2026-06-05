@@ -138,6 +138,7 @@ fn pad_to_width(s: &str, width: usize) -> String {
 pub struct AppState {
     // 对话
     pub messages: Vec<ChatLine>,
+    pub message_caches: Vec<MessageCache>,
     pub streaming_text: String,
     pub scroll_following: bool,
     pub scroll_state: tui_scrollview::ScrollViewState,
@@ -164,6 +165,7 @@ impl AppState {
         textarea.set_placeholder_text("Type your message...");
         Self {
             messages: Vec::new(),
+            message_caches: Vec::new(),
             streaming_text: String::new(),
             scroll_following: true,
             scroll_state: tui_scrollview::ScrollViewState::default(),
@@ -224,6 +226,7 @@ impl AppState {
 
     pub fn clear_messages(&mut self) {
         self.messages.clear();
+        self.message_caches.clear();
     }
 }
 
@@ -382,5 +385,17 @@ mod tests {
         let cache = MessageCache::from_message(&msg, 80);
         // 截断为 5 行（4+省略）
         assert_eq!(cache.line_count, 5);
+    }
+
+    #[test]
+    fn test_clear_messages_also_clears_caches() {
+        let mut app = AppState::new("s".into(), "m".into());
+        app.add_message(LineType::User, "hello".into());
+        // 手动添加一个 cache 模拟渲染后的状态
+        app.message_caches.push(MessageCache::from_message(&app.messages[0], 80));
+        assert_eq!(app.message_caches.len(), 1);
+        app.clear_messages();
+        assert!(app.messages.is_empty());
+        assert!(app.message_caches.is_empty());
     }
 }
