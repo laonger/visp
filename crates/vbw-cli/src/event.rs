@@ -187,12 +187,13 @@ fn handle_grpc_message(
     app.needs_render = true;
     match msg.payload {
         Some(server_message::Payload::TextDelta(delta)) => app.append_streaming(&delta.delta),
-        Some(server_message::Payload::ToolCall(tc)) => app.add_message(
+        Some(server_message::Payload::ToolCall(tc)) => app.add_tool_line(
             LineType::ToolCall,
             format!("{} {}", tc.tool_name, tc.arguments),
+            &tc.call_id,
         ),
-        Some(server_message::Payload::ToolResult(tr)) => app.add_message(
-            LineType::ToolResult,
+        Some(server_message::Payload::ToolResult(tr)) => app.insert_tool_result(
+            &tr.call_id,
             format!(
                 "{}: {}",
                 if tr.is_error { "Error" } else { "Output" },

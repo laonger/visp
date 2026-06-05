@@ -21,6 +21,7 @@ pub struct ChatLine {
     pub version: u64,
     pub line_type: LineType,
     pub content: String,
+    pub call_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -199,7 +200,40 @@ impl AppState {
             version: 0,
             line_type,
             content,
+            call_id: None,
         });
+    }
+
+    pub fn add_tool_line(&mut self, line_type: LineType, content: String, call_id: &str) {
+        let id = self.next_message_id;
+        self.next_message_id += 1;
+        self.messages.push(ChatLine {
+            id,
+            version: 0,
+            line_type,
+            content,
+            call_id: Some(call_id.to_string()),
+        });
+    }
+
+    pub fn insert_tool_result(&mut self, call_id: &str, content: String) {
+        let insert_pos = self.messages.iter().rposition(|m| {
+            m.line_type == LineType::ToolCall && m.call_id.as_deref() == Some(call_id)
+        });
+        let id = self.next_message_id;
+        self.next_message_id += 1;
+        let msg = ChatLine {
+            id,
+            version: 0,
+            line_type: LineType::ToolResult,
+            content,
+            call_id: Some(call_id.to_string()),
+        };
+        if let Some(pos) = insert_pos {
+            self.messages.insert(pos + 1, msg);
+        } else {
+            self.messages.push(msg);
+        }
     }
 
     pub fn append_streaming(&mut self, delta: &str) {
@@ -350,6 +384,7 @@ mod tests {
             version: 0,
             line_type: LineType::User,
             content: "hello world".into(),
+            call_id: None,
         };
         let cache = MessageCache::from_message(&msg, 80);
         assert_eq!(cache.msg_id, 0);
@@ -366,6 +401,7 @@ mod tests {
             version: 0,
             line_type: LineType::User,
             content: "hello".into(),
+            call_id: None,
         };
         let cache = MessageCache::from_message(&msg, 80);
         assert!(cache.matches(&msg, 80));
@@ -381,6 +417,7 @@ mod tests {
             version: 0,
             line_type: LineType::User,
             content: "hello".into(),
+            call_id: None,
         };
         assert!(!cache.matches(&msg3, 80));
     }
@@ -392,6 +429,7 @@ mod tests {
             version: 0,
             line_type: LineType::User,
             content: "hello".into(),
+            call_id: None,
         };
         let cache = MessageCache::from_message(&msg, 80);
         // User 消息上下各有一行空行，至少 3 行
@@ -405,6 +443,7 @@ mod tests {
             version: 0,
             line_type: LineType::ToolResult,
             content: "line1\nline2\nline3\nline4\nline5\nline6\nline7".into(),
+            call_id: None,
         };
         let cache = MessageCache::from_message(&msg, 80);
         // 截断为 5 行（4+省略）
@@ -422,5 +461,48 @@ mod tests {
         app.clear_messages();
         assert!(app.messages.is_empty());
         assert!(app.message_caches.is_empty());
+    }
+
+    #[test]
+    fn test_add_tool_line_stores_call_id() {
+        let mut app = AppState::new("s".into(), "m".into());
+        app.add_tool_line(LineType::ToolCall, "cmd".into(), "tc_1");
+        assert_eq!(app.messages[0].call_id.as_deref(), Some("tc_1"));
+    }
+
+    #[test]
+    fn test_insert_tool_result_after_matching_call() {
+        let mut app = AppState::new("s".into(), "m".into());
+        app.add_tool_line(LineType::ToolCall, "cmd1".into(), "id1");
+        app.add_tool_line(LineType::ToolCall, "cmd2".into(), "id2");
+        app.insert_tool_result("id1", "result1".into());
+        // 期望顺序: cmd1(id1), result1, cmd2(id2)
+        assert_eq!(app.messages[0].content, "cmd1");
+        assert_eq!(app.messages[1].line_type, LineType::ToolResult);
+        assert_eq!(app.messages[1].content, "result1");
+        assert_eq!(app.messages[2].content, "cmd2");
+    }
+
+    #[test]
+    fn test_insert_tool_result_without_matching_call_appends() {
+        let mut app = AppState::new("s".into(), "m".into());
+        app.add_tool_line(LineType::ToolCall, "cmd".into(), "id1");
+        app.insert_tool_result("nonexistent", "result".into());
+        // 没有匹配的 call_id，追加到末尾
+        assert_eq!(app.messages[1].content, "result");
+    }
+
+    #[test]
+    fn test_multiple_tool_calls_grouped() {
+        let mut app = AppState::new("s".into(), "m".into());
+        app.add_tool_line(LineType::ToolCall, "cmd1".into(), "a");
+        app.add_tool_line(LineType::ToolCall, "cmd2".into(), "b");
+        app.insert_tool_result("b", "result2".into());
+        app.insert_tool_result("a", "result1".into());
+        // cmd1(a), result1, cmd2(b), result2
+        assert_eq!(app.messages[0].content, "cmd1");
+        assert_eq!(app.messages[1].content, "result1");
+        assert_eq!(app.messages[2].content, "cmd2");
+        assert_eq!(app.messages[3].content, "result2");
     }
 }
