@@ -183,7 +183,13 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
 
             if y + total_h > scroll_y && y < scroll_y + visible {
                 let rel_y = area.y + y.saturating_sub(scroll_y);
-                let msg_area = Rect::new(area.x, rel_y, area.width, block_h);
+                let max_h = area.bottom().saturating_sub(rel_y);
+                let actual_h = block_h.min(max_h);
+                if actual_h == 0 {
+                    y += total_h;
+                    continue;
+                }
+                let msg_area = Rect::new(area.x, rel_y, area.width, actual_h);
 
                 // 白边框 Block
                 let block = Block::bordered().border_style(border_style);
@@ -197,16 +203,19 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                 let shadow_x = area.x + area.width.saturating_sub(1);
                 let right = area.right();
                 // Right-edge shadow (only on content rows, skip border rows)
-                for row in (rel_y + 1)..(rel_y + block_h - 1).min(buf.area().bottom()) {
+                let shadow_end = (rel_y + actual_h - 1).min(buf.area().bottom());
+                for row in (rel_y + 1)..shadow_end {
                     if shadow_x < right {
                         buf[(shadow_x, row)].set_bg(shadow_color);
                     }
                 }
                 // Bottom shadow row (below the block, first separator line)
-                let bottom_y = rel_y + block_h;
+                let bottom_y = rel_y + actual_h;
                 if bottom_y < buf.area().bottom() {
                     for x in (area.x + 1)..right {
-                        buf[(x, bottom_y)].set_bg(shadow_color);
+                        if x < buf.area().right() {
+                            buf[(x, bottom_y)].set_bg(shadow_color);
+                        }
                     }
                 }
             }
