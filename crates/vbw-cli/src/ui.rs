@@ -70,7 +70,6 @@ fn build_text_stack(app: &mut AppState, width: u16) -> Text<'static> {
     for (i, msg) in app.messages.iter().enumerate() {
         if i > 0 {
             text_lines.push(sep.clone());
-            text_lines.push(sep.clone());
         }
         if let Some(&idx) = cache_map.get(&msg.id) {
             if !app.message_caches[idx].matches(msg, width) {
@@ -92,7 +91,6 @@ fn build_text_stack(app: &mut AppState, width: u16) -> Text<'static> {
     // 4. 流式文本处理（增量渲染）
     if !app.streaming_text.is_empty() {
         if !app.messages.is_empty() {
-            text_lines.push(sep.clone());
             text_lines.push(sep.clone());
         }
         let style = Style::default()
@@ -140,7 +138,8 @@ fn build_text_stack(app: &mut AppState, width: u16) -> Text<'static> {
 }
 
 fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
-    let mut text = build_text_stack(app, area.width);
+    let content_w = area.width.saturating_sub(1);
+    let mut text = build_text_stack(app, content_w);
     let total = text.lines.len() as u16;
     let visible = area.height;
     let max_scroll = total.saturating_sub(visible);
@@ -158,24 +157,30 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
         text.lines = text.lines[scroll_y_usize..end].to_vec();
     }
 
+    let content_area = Rect::new(area.x, area.y, content_w, area.height);
     let p = Paragraph::new(text).block(Block::default());
-    f.render_widget(p, area);
+    f.render_widget(p, content_area);
 
-    // Draw drop shadow AFTER Paragraph so it's not overwritten by separator lines
+    // Draw drop shadow: right-edge column + 1 bottom row for each message
     let shadow_color = Color::from_u32(0x000D0D17);
     let mut msg_y: u16 = 0;
     for msg in app.messages.iter() {
         if let Some(cache) = app.message_caches.iter().find(|c| c.msg_id == msg.id) {
-            let h = cache.line_count + 2;
+            let h = cache.line_count + 1;
             if msg_y + h > scroll_y && msg_y < scroll_y + visible {
                 let rel_y = area.y + msg_y.saturating_sub(scroll_y);
                 let buf = f.buffer_mut();
-                // Shadow only in the gap below message, not overlapping content
-                let gap_start = rel_y + cache.line_count;
-                let gap_end = rel_y + cache.line_count + 2;
-                for y in gap_start..gap_end.min(buf.area().bottom()) {
-                    for x in (area.x + 1)..(area.x + area.width).min(buf.area().right()) {
-                        buf[(x, y)].set_bg(shadow_color);
+                let shadow_x = area.x + content_w;
+                let right = area.right();
+                // Right-edge shadow column
+                for y in rel_y..(rel_y + cache.line_count).min(buf.area().bottom()) {
+                    buf[(shadow_x, y)].set_bg(shadow_color);
+                }
+                // Bottom shadow row
+                let bottom_y = rel_y + cache.line_count;
+                if bottom_y < buf.area().bottom() {
+                    for x in shadow_x..right {
+                        buf[(x, bottom_y)].set_bg(shadow_color);
                     }
                 }
             }
