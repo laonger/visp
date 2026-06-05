@@ -70,6 +70,7 @@ fn build_text_stack(app: &mut AppState, width: u16) -> Text<'static> {
     for (i, msg) in app.messages.iter().enumerate() {
         if i > 0 {
             text_lines.push(sep.clone());
+            text_lines.push(sep.clone());
         }
         if let Some(&idx) = cache_map.get(&msg.id) {
             if !app.message_caches[idx].matches(msg, width) {
@@ -91,6 +92,7 @@ fn build_text_stack(app: &mut AppState, width: u16) -> Text<'static> {
     // 4. 流式文本处理（增量渲染）
     if !app.streaming_text.is_empty() {
         if !app.messages.is_empty() {
+            text_lines.push(sep.clone());
             text_lines.push(sep.clone());
         }
         let style = Style::default()
@@ -155,7 +157,7 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     let mut msg_y: u16 = 0;
     for msg in &app.messages {
         if let Some(cache) = app.message_caches.iter().find(|c| c.msg_id == msg.id) {
-            let h = cache.line_count + 1; // line_count + 1 for separator
+            let h = cache.line_count + 2; // message + 2 separator lines
             if msg_y + h > scroll_y && msg_y < scroll_y + visible {
                 let rel_y = area.y + msg_y.saturating_sub(scroll_y);
                 let buf = f.buffer_mut();
