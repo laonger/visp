@@ -2,7 +2,7 @@
 
 use ratatui::{
     style::{Color, Style},
-    text::{Line, Span},
+    text::Line,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,9 +50,6 @@ impl MessageCache {
         };
         let style = Style::default().fg(fg).bg(bg);
 
-        let shadow_color = Color::from_u32(0x000D0D17);
-        let shadow_corner = Color::from_u32(0x00080810);
-
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         if msg.line_type == LineType::User {
@@ -74,26 +71,12 @@ impl MessageCache {
             } else {
                 pad_to_width(&dl, width as usize)
             };
-            lines.push(Line::from(vec![
-                Span::styled(content, style),
-                Span::styled(" ", Style::default().bg(shadow_color)),
-            ]));
+            lines.push(Line::styled(content, style));
         }
 
         if msg.line_type == LineType::User {
             lines.push(Line::styled(" ".repeat(width as usize), style));
         }
-
-        let shadow_row_width = width.saturating_sub(1) as usize;
-        let mut shadow_row_spans: Vec<Span<'static>> = vec![
-            Span::styled(
-                " ".repeat(shadow_row_width),
-                Style::default().bg(shadow_color)
-            );
-            1
-        ];
-        shadow_row_spans.push(Span::styled(" ", Style::default().bg(shadow_corner)));
-        lines.push(Line::from(shadow_row_spans));
 
         let line_count = lines.len() as u16;
         Self {
@@ -461,39 +444,8 @@ mod tests {
             call_id: None,
         };
         let cache = MessageCache::from_message(&msg, 80);
-        // 截断为 5 行内容 + 1 行底部阴影 = 6 行
-        assert_eq!(cache.line_count, 6);
-    }
-
-    #[test]
-    fn test_message_shadow_effect() {
-        let msg = ChatLine {
-            id: 0,
-            version: 0,
-            line_type: LineType::Assistant,
-            content: "hello".into(),
-            call_id: None,
-        };
-        let cache = MessageCache::from_message(&msg, 80);
-        // 至少 1 行内容 + 1 行底部阴影
-        assert!(cache.line_count >= 2);
-
-        let shadow_color = Color::from_u32(0x000D0D17);
-
-        // 最后一行是阴影行，第一个 span 使用阴影色
-        let shadow_row = &cache.lines[cache.lines.len() - 1];
-        assert_eq!(shadow_row.spans[0].style.bg.unwrap(), shadow_color);
-        // 右下角更深色（对角渐变效果）
-        let corner_color = Color::from_u32(0x00080810);
-        assert_eq!(
-            shadow_row.spans.last().unwrap().style.bg.unwrap(),
-            corner_color
-        );
-
-        // 内容行的最后一个 span 应是右侧阴影列
-        let content_line = &cache.lines[0];
-        let last_span = content_line.spans.last().unwrap();
-        assert_eq!(last_span.style.bg.unwrap(), shadow_color);
+        // 截断为 5 行内容（4 行 + 1 行 [...]），无底部阴影
+        assert_eq!(cache.line_count, 5);
     }
 
     #[test]
