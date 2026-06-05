@@ -139,8 +139,6 @@ pub struct AppState {
     pub messages: Vec<ChatLine>,
     pub message_caches: Vec<MessageCache>,
     pub streaming_text: String,
-    pub streaming_rendered_len: usize,
-    pub streaming_rendered_lines: Vec<Line<'static>>,
     pub scroll_following: bool,
     pub scroll_state: tui_scrollview::ScrollViewState,
     pub cache_width: u16,
@@ -170,8 +168,6 @@ impl AppState {
             messages: Vec::new(),
             message_caches: Vec::new(),
             streaming_text: String::new(),
-            streaming_rendered_len: 0,
-            streaming_rendered_lines: Vec::new(),
             scroll_following: true,
             scroll_state: tui_scrollview::ScrollViewState::default(),
             cache_width: 0,
@@ -242,8 +238,6 @@ impl AppState {
         if !self.streaming_text.is_empty() {
             let text = std::mem::take(&mut self.streaming_text);
             self.add_message(LineType::Assistant, text);
-            self.streaming_rendered_len = 0;
-            self.streaming_rendered_lines.clear();
         }
     }
 
@@ -281,8 +275,6 @@ impl AppState {
     pub fn clear_messages(&mut self) {
         self.messages.clear();
         self.message_caches.clear();
-        self.streaming_rendered_len = 0;
-        self.streaming_rendered_lines.clear();
     }
 }
 
