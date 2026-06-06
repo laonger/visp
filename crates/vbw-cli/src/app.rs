@@ -40,21 +40,27 @@ pub struct MessageCache {
 
 impl MessageCache {
     pub fn from_message(msg: &ChatLine, width: u16) -> Self {
-        let (fg, bg) = match msg.line_type {
-            LineType::User => (Color::Cyan, Color::from_u32(0x001A3A5E)),
-            LineType::Assistant => (Color::White, Color::from_u32(0x00222A3E)),
-            LineType::ToolCall => (Color::Yellow, Color::from_u32(0x001A1A2E)),
-            LineType::ToolResult => (Color::DarkGray, Color::from_u32(0x00222222)),
-            LineType::Error => (Color::Red, Color::from_u32(0x001A1A2E)),
-            LineType::Status => (Color::Gray, Color::from_u32(0x001A1A2E)),
+        let fg = match msg.line_type {
+            LineType::User => Color::Cyan,
+            LineType::Assistant => Color::White,
+            LineType::ToolCall => Color::Yellow,
+            LineType::ToolResult => Color::DarkGray,
+            LineType::Error => Color::Red,
+            LineType::Status => Color::Gray,
         };
-        let style = Style::default().fg(fg).bg(bg);
+        // 背景色由 ui.rs 的 BlockStyle::bg_fill 统一处理（User/Assistant），
+        // 或行内指定（ToolCall 等不带 bg_fill 的类型）。这里行级只设前景色。
+        let mut style = Style::default().fg(fg);
+        // ToolCall/ToolResult 等无 bg_fill 的类型仍需行级背景色
+        if let Some(bg) = match msg.line_type {
+            LineType::ToolCall | LineType::Error | LineType::Status => Some(Color::from_u32(0x001A1A2E)),
+            LineType::ToolResult => Some(Color::from_u32(0x00222222)),
+            _ => None,
+        } {
+            style = style.bg(bg);
+        }
 
         let mut lines: Vec<Line<'static>> = Vec::new();
-
-        if msg.line_type == LineType::User {
-            lines.push(Line::styled(" ".repeat(width as usize), style));
-        }
 
         let wrapped = wrap_text(&msg.content, width);
         let display_lines = if msg.line_type == LineType::ToolResult && wrapped.len() > 5 {
@@ -72,10 +78,6 @@ impl MessageCache {
                 pad_to_width(&dl, width as usize)
             };
             lines.push(Line::styled(content, style));
-        }
-
-        if msg.line_type == LineType::User {
-            lines.push(Line::styled(" ".repeat(width as usize), style));
         }
 
         let line_count = lines.len() as u16;
@@ -422,8 +424,8 @@ mod tests {
             call_id: None,
         };
         let cache = MessageCache::from_message(&msg, 80);
-        // User 消息上下各有一行空行，至少 3 行
-        assert!(cache.line_count >= 3);
+        // User 消息背景由 bg_fill 处理，行级不带 padding
+        assert!(cache.line_count >= 1);
     }
 
     #[test]

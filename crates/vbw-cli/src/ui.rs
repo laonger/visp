@@ -25,6 +25,8 @@ const COLOR_CONFIRM_BLOCK_BG:Color = Color::DarkGray;
 
 // #FFFFFF
 const COLOR_ASSISTANT_FG:Color = Color::White;
+// #1A3A5E
+const COLOR_USER_BG:Color = Color::from_u32(0x001A3A5E);
 // #222A3E
 const COLOR_ASSISTANT_BG:Color = Color::from_u32(0x00222A3E);
 
@@ -108,25 +110,25 @@ impl BlockStyle {
 
 // 四种消息类型的样式常量
 const USER_STYLE: BlockStyle = BlockStyle {
-    margin_vertical: 2,
-    margin_horizontal: 2,
-    bg_fill: None,
+    margin_vertical: 1,
+    margin_horizontal: 1,
+    bg_fill: Some(COLOR_USER_BG),
     shadow: true,
-    bottom_pad: 2,
+    bottom_pad: 1,
 };
 const ASSISTANT_STYLE: BlockStyle = BlockStyle {
-    margin_vertical: 2,
-    margin_horizontal: 2,
+    margin_vertical: 1,
+    margin_horizontal: 1,
     bg_fill: Some(COLOR_ASSISTANT_BG),
     shadow: true,
-    bottom_pad: 2,
+    bottom_pad: 1,
 };
 const TOOL_STYLE: BlockStyle = BlockStyle {
-    margin_vertical: 2,
-    margin_horizontal: 2,
+    margin_vertical: 1,
+    margin_horizontal: 1,
     bg_fill: None,
     shadow: true,
-    bottom_pad: 2,
+    bottom_pad: 1,
 };
 // 流式文本使用 ASSISTANT_STYLE
 
@@ -223,11 +225,12 @@ fn render_block(
     //    f.render_widget(p, Rect::new(area.x, sep_y, content_w, 1));
     //}
 
+    let mut shadow_y = rel_y;
     // 2) 底色填充（覆盖顶部留白 + 内容区域+底部留白）
     if let Some(bg) = style.bg_fill {
         let buf = f.buffer_mut();
         let end_x = (
-            area.x + content_w + style.margin_horizontal
+            area.x + content_w
         ).min(buf.area().right());
         //let fill_end = (rel_y + 1 + style.margin_vertical + line_count).min(buf.area().bottom());
         // TODO buf.area().bottom() 可能不对，要考虑输入框的padding
@@ -242,6 +245,7 @@ fn render_block(
                 buf[(x, row)].set_bg(bg);
             }
         }
+        shadow_y = fill_end;
     }
 
     // 3) 内容 Paragraph（按 margin 缩进，裁剪到 buffer 边界）
@@ -259,21 +263,21 @@ fn render_block(
     }
 
     // 4) drop shadow：右侧一列 + 底部一行（用背景色，空格也可见）
-    if style.shadow && actual_lines > 0 {
+    if style.shadow && actual_lines > 0 && style.bg_fill.is_some() {
         let buf = f.buffer_mut();
-        let shadow_x = area.x + content_w; // 最右列（chat 区边界），content_w 已 -1 预留
+        let shadow_right_x = area.x + content_w; // 最右列（chat 区边界），content_w 已 -1 预留
         let right = area.right();
         // 右侧阴影（在内容行上）
-        for row in content_y..(content_y + actual_lines).min(buf.area().bottom()) {
-            if shadow_x < right {
-                buf[(shadow_x, row)].set_bg(COLOR_SHADOW);
+        for row in content_y..(shadow_y).min(buf.area().bottom()) {
+            if shadow_right_x < right {
+                buf[(shadow_right_x, row)].set_bg(COLOR_SHADOW);
             }
         }
         // 底部阴影（在内容下方第一行）
-        let bottom_y = content_y + actual_lines;
+        let bottom_y = shadow_y;
         if bottom_y < buf.area().bottom() {
-            for x in (area.x + 1)..right {
-                if x < buf.area().right() {
+            for x in (area.x + 1)..=shadow_right_x {
+                if x < right {
                     buf[(x, bottom_y)].set_bg(COLOR_SHADOW);
                 }
             }
@@ -392,8 +396,8 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
             let content_w_adj = content_w.saturating_sub(style.margin_horizontal * 2);
             let mut text_lines: Vec<Line> = Vec::new();
             let text_style = Style::default()
-                .fg(COLOR_ASSISTANT_FG)
-                .bg(COLOR_ASSISTANT_BG);
+                .fg(COLOR_ASSISTANT_FG);
+                //.bg(COLOR_ASSISTANT_BG);
             for line in &lines {
                 text_lines.push(Line::styled(
                     pad_to_width(line, content_w_adj as usize),
