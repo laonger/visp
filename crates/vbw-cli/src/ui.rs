@@ -259,6 +259,9 @@ fn render_block(
     }
 
     // 4) drop shadow：手动绘制右侧列 + 底部行
+    //
+    // 阴影基于 (area.x, rel_y, content_w_adj, actual_lines) 的偏移 (1,1)，
+    // 等同原 Block::shadow 的效果。
     if style.shadow && actual_lines > 0 {
         let buf = f.buffer_mut();
         let s = Style::default().fg(COLOR_SHADOW);
