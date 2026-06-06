@@ -143,6 +143,8 @@ pub struct AppState {
 
     // 状态
     pub generating: bool,
+    /// 当前正在处理的请求 ID（用于 Done 后发 Ack）
+    pub current_request_id: Option<&'static str>,
     pub needs_render: bool,
     pub last_scroll_time: Option<std::time::Instant>,
     pub last_stream_render: Option<std::time::Instant>,
@@ -168,6 +170,7 @@ impl AppState {
             input_history: Vec::new(),
             history_index: None,
             generating: false,
+            current_request_id: None,
             needs_render: true,
             last_scroll_time: None,
             last_stream_render: None,

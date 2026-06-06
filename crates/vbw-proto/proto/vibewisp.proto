@@ -46,12 +46,18 @@ message ClientMessage {
         ConfigUpdate config_update = 2;
         UserResponse user_response = 3;
         Cancel cancel = 4;
+        Ack ack = 5;
     }
 }
 
 message UserInput {
     string text = 1;
     string session_id = 2;
+    string request_id = 3;
+}
+
+message Ack {
+    string request_id = 1;
 }
 
 message ConfigUpdate {

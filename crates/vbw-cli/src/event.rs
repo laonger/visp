@@ -33,7 +33,7 @@ pub async fn run(session_id: String, mut chat_handle: ChatHandle, model: String)
         tokio::select! {
             event = key_rx.recv() => {
                 match event {
-                    Some(e) => { if handle_key_event(e, &mut app, &chat_handle) { break; } }
+                    Some(e) => { if handle_key_event(e, &mut app, &mut chat_handle) { break; } }
                     None => break,
                 }
             }
@@ -63,7 +63,7 @@ pub async fn run(session_id: String, mut chat_handle: ChatHandle, model: String)
     Ok(())
 }
 
-fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &ChatHandle) -> bool {
+fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHandle) -> bool {
     app.needs_render = true;
     match event {
         Event::Key(key) => {
@@ -103,7 +103,8 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &ChatHandle) 
                     app.history_index = None;
                     app.generating = true;
                     app.scroll_following = true;
-                    chat_handle.send_input(&text);
+                    let rid = chat_handle.send_input(&text);
+                    app.current_request_id = Some(rid);
                 }
                 return false;
             }
@@ -180,7 +181,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &ChatHandle) 
 fn handle_grpc_message(
     msg: vbw_proto::vibewisp::ServerMessage,
     app: &mut AppState,
-    _chat_handle: &ChatHandle,
+    chat_handle: &ChatHandle,
 ) {
     app.needs_render = true;
     match msg.payload {
@@ -210,10 +211,15 @@ fn handle_grpc_message(
         Some(server_message::Payload::Error(err)) => {
             app.add_message(LineType::Error, format!("{}: {}", err.code, err.message));
             app.generating = false;
+            app.current_request_id = None;
         }
         Some(server_message::Payload::Done(_)) => {
             app.flush_streaming();
             app.generating = false;
+            // 收到 Done 后发送 ack，通知服务端该请求已完成
+            if let Some(rid) = app.current_request_id.take() {
+                chat_handle.send_ack(rid);
+            }
         }
         None => {}
     }

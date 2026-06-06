@@ -7,8 +7,8 @@ use tokio::sync::mpsc;
 use tonic::transport::Channel;
 
 use vbw_proto::vibewisp::{
-    Cancel, ClientMessage, ConfigUpdate, CreateSessionRequest, LlmConfig, ServerMessage, Session,
-    UserInput, UserResponse, client_message, coder_daemon_client::CoderDaemonClient,
+    Ack, Cancel, ClientMessage, ConfigUpdate, CreateSessionRequest, LlmConfig, ServerMessage,
+    Session, UserInput, UserResponse, client_message, coder_daemon_client::CoderDaemonClient,
 };
 
 pub struct VbwClient {
@@ -20,6 +20,7 @@ pub struct ChatHandle {
     pub response_stream:
         Pin<Box<dyn futures::Stream<Item = Result<ServerMessage, tonic::Status>> + Send>>,
     pub(crate) session_id: String,
+    next_request_id: u64,
 }
 
 impl VbwClient {
@@ -69,16 +70,20 @@ impl VbwClient {
             request_tx: tx,
             response_stream: Box::pin(response_stream),
             session_id: session_id.to_string(),
+            next_request_id: 1,
         })
     }
 }
 
 impl ChatHandle {
-    pub fn send_input(&self, text: &str) {
+    pub fn send_input(&mut self, text: &str) -> &'static str {
+        let rid = self.next_request_id.to_string();
+        self.next_request_id += 1;
         let msg = ClientMessage {
             payload: Some(client_message::Payload::UserInput(UserInput {
                 text: text.to_string(),
                 session_id: self.session_id.clone(),
+                request_id: rid.clone(),
             })),
         };
         let tx = self.request_tx.clone();
@@ -87,6 +92,20 @@ impl ChatHandle {
                 Ok(_) => eprintln!("[CLI] send_input: OK"),
                 Err(e) => eprintln!("[CLI] send_input: FAILED (receiver dropped): {:?}", e),
             }
+        });
+        // Return a leaked string — the caller uses it immediately for the ack cycle
+        Box::leak(rid.into_boxed_str())
+    }
+
+    pub fn send_ack(&self, request_id: &str) {
+        let msg = ClientMessage {
+            payload: Some(client_message::Payload::Ack(Ack {
+                request_id: request_id.to_owned(),
+            })),
+        };
+        let tx = self.request_tx.clone();
+        tokio::spawn(async move {
+            let _ = tx.send(msg).await;
         });
     }
 

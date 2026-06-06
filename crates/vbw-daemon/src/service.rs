@@ -143,6 +143,7 @@ impl CoderDaemon for CoderDaemonService {
         tokio::spawn(async move {
             let pending_queries: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>> =
                 Arc::new(Mutex::new(HashMap::new()));
+            let mut running_sessions: Vec<String> = Vec::new();
 
             while let Some(msg_result) = in_stream.next().await {
                 let msg = match msg_result {
@@ -225,6 +226,8 @@ impl CoderDaemon for CoderDaemonService {
                         let tx_events = tx.clone();
                         let sid = session_id.clone();
                         let pq = pending_queries.clone();
+
+                            running_sessions.push(session_id.clone());
 
                         let sid2 = sid.clone();
                         tokio::spawn(async move {
@@ -337,8 +340,20 @@ impl CoderDaemon for CoderDaemonService {
                             }
                         }
                     }
+                    Some(proto::client_message::Payload::Ack(ack)) => {
+                        tracing::info!(request_id = %ack.request_id, "[DAEMON] received client Ack");
+                        // 后续可据此清理 request 级状态
+                    }
                     None => {}
                 }
+            }
+
+            // 客户端断开 → 取消此连接上所有运行中的 agent loop
+            for sid in &running_sessions {
+                session_mgr.cancel_agent(sid);
+            }
+            if !running_sessions.is_empty() {
+                tracing::info!("[DAEMON] client disconnected, cancelled {} sessions", running_sessions.len());
             }
         });
 
