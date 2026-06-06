@@ -258,24 +258,25 @@ fn render_block(
         );
     }
 
-    // 4) drop shadow：手动绘制右侧列 + 底部行
-    //
-    // 阴影基于 (area.x, rel_y, content_w_adj, actual_lines) 的偏移 (1,1)，
-    // 等同原 Block::shadow 的效果。
+    // 4) drop shadow：右侧一列 + 底部一行（用背景色，空格也可见）
     if style.shadow && actual_lines > 0 {
         let buf = f.buffer_mut();
-        let s = Style::default().fg(COLOR_SHADOW);
-        let base_right = area.x + content_w_adj;
-        let base_bottom = rel_y + actual_lines;
-
-        // 右侧列（跳过顶部第 1 行，底部避开角落行）
-        for y in (rel_y + 1)..base_bottom {
-            buf[(base_right, y)].set_style(s);
+        let shadow_x = area.x + content_w; // 最右列（chat 区边界），content_w 已 -1 预留
+        let right = area.right();
+        // 右侧阴影（在内容行上）
+        for row in content_y..(content_y + actual_lines).min(buf.area().bottom()) {
+            if shadow_x < right {
+                buf[(shadow_x, row)].set_bg(COLOR_SHADOW);
+            }
         }
-
-        // 底部行（跳过左侧第 1 列，含角落）
-        for x in (area.x + 1)..=base_right {
-            buf[(x, base_bottom)].set_style(s);
+        // 底部阴影（在内容下方第一行）
+        let bottom_y = content_y + actual_lines;
+        if bottom_y < buf.area().bottom() {
+            for x in (area.x + 1)..right {
+                if x < buf.area().right() {
+                    buf[(x, bottom_y)].set_bg(COLOR_SHADOW);
+                }
+            }
         }
     }
 }
