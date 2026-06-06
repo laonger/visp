@@ -21,6 +21,7 @@ const COLOR_INPUT_NOTICE_FG:Color = Color::DarkGray;
 const COLOR_CONFIRM_FG:Color = Color::Yellow;
 // #222222
 const COLOR_CONFIRM_FONT_BG:Color = Color::from_u32(0x00222222);
+const COLOR_TOOL_RESULT_BG:Color = Color::from_u32(0x00222222);
 const COLOR_CONFIRM_BLOCK_BG:Color = Color::DarkGray;
 
 // #FFFFFF
@@ -127,6 +128,13 @@ const TOOL_STYLE: BlockStyle = BlockStyle {
     margin_vertical: 1,
     margin_horizontal: 1,
     bg_fill: None,
+    shadow: true,
+    bottom_pad: 1,
+};
+const TOOL_RESULT_STYLE: BlockStyle = BlockStyle {
+    margin_vertical: 1,
+    margin_horizontal: 1,
+    bg_fill: Some(COLOR_TOOL_RESULT_BG),
     shadow: true,
     bottom_pad: 1,
 };
@@ -333,6 +341,7 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
             let style = match m.line_type {
                 LineType::User => USER_STYLE,
                 LineType::Assistant => ASSISTANT_STYLE,
+                LineType::ToolResult => TOOL_RESULT_STYLE,
                 _ => TOOL_STYLE,
             };
             app.message_caches
@@ -374,6 +383,7 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
         let style = match msg.line_type {
             LineType::User => USER_STYLE,
             LineType::Assistant => ASSISTANT_STYLE,
+            LineType::ToolResult => TOOL_RESULT_STYLE,
             _ => TOOL_STYLE,
         };
         if let Some(cache) = app.message_caches.iter().find(|c| c.msg_id == msg.id) {

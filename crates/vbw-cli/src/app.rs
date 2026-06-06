@@ -48,17 +48,8 @@ impl MessageCache {
             LineType::Error => Color::Red,
             LineType::Status => Color::Gray,
         };
-        // 背景色由 ui.rs 的 BlockStyle::bg_fill 统一处理（User/Assistant），
-        // 或行内指定（ToolCall 等不带 bg_fill 的类型）。这里行级只设前景色。
-        let mut style = Style::default().fg(fg);
-        // ToolCall/ToolResult 等无 bg_fill 的类型仍需行级背景色
-        if let Some(bg) = match msg.line_type {
-            LineType::ToolCall | LineType::Error | LineType::Status => Some(Color::from_u32(0x001A1A2E)),
-            LineType::ToolResult => Some(Color::from_u32(0x00222222)),
-            _ => None,
-        } {
-            style = style.bg(bg);
-        }
+        // 背景色由 ui.rs 的 BlockStyle::bg_fill 统一处理
+        let style = Style::default().fg(fg);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
 
