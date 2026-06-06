@@ -144,7 +144,7 @@ pub struct AppState {
     pub cache_width: u16,
 
     // 输入
-    pub textarea: tui_textarea::TextArea<'static>,
+    pub textarea: ratatui_textarea::TextArea<'static>,
     pub input_history: Vec<String>,
     pub history_index: Option<usize>,
 
@@ -162,7 +162,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(session_id: String, model: String) -> Self {
-        let mut textarea = tui_textarea::TextArea::default();
+        let mut textarea = ratatui_textarea::TextArea::default();
         textarea.set_placeholder_text("Type your message...");
         Self {
             messages: Vec::new(),

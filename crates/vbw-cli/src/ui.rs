@@ -13,35 +13,43 @@ use crate::app::{AppState, LineType, MessageCache, pad_to_width};
 /// 顶层渲染入口：将当前 AppState 绘制到终端
 pub fn render(app: &mut AppState, f: &mut Frame) {
     // 四周1列留白（上/下不留），绘制背景色
-    let area = f.area().inner(ratatui::layout::Margin::new(1, 0));
+    let area = f.area().inner(ratatui::layout::Margin::new(2, 1));
+
     let bg = Block::default().style(Style::default().bg(Color::from_u32(0x001A1A2E)));
     f.render_widget(Paragraph::new("").block(bg), f.area());
+
+    let input_area_height = 4;
+    let bottom_chunks_height = input_area_height + (if app.confirm.is_some() { 2 } else { 1 });
 
     // 纵向分割：对话区 | 分隔线 | 底部区域
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),    // 对话区（占满剩余）
-            Constraint::Length(1), // 分隔线
-            Constraint::Length(if app.confirm.is_some() { 6 } else { 5 }), // 底部：确认栏/输入区/状态栏
+            Constraint::Min(1),                       // 对话区（占满剩余）
+            Constraint::Length(1),                    // 分隔线
+            Constraint::Length(bottom_chunks_height), // 底部：确认栏/输入区/状态栏
         ])
         .split(area);
 
     render_chat_area(app, f, main_chunks[0]);
 
     // 底部区域内部再分割：确认栏(可选) → 输入区 → 状态栏
+    let bottom_area = main_chunks[2].inner(ratatui::layout::Margin::new(0, 2));
     let bottom_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if app.confirm.is_some() {
             vec![
                 Constraint::Length(1),
-                Constraint::Length(4),
-                Constraint::Length(1),
+                Constraint::Length(input_area_height), // input area
+                Constraint::Length(1),                 // status area
             ]
         } else {
-            vec![Constraint::Length(4), Constraint::Length(1)]
+            vec![
+                Constraint::Length(input_area_height), // input area
+                Constraint::Length(1),                 // status area
+            ]
         })
-        .split(main_chunks[2]);
+        .split(bottom_area);
 
     if app.confirm.is_some() {
         render_confirm_bar(app, f, bottom_chunks[0]);
@@ -243,31 +251,33 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     let content_w = area.width.saturating_sub(1); // -1 给右侧阴影列
     ensure_all_caches(app, content_w);
 
-    const CHAT_PAD: u16 = 2; // 对话区顶部留白行数
+    const CHAT_PAD: u16 = 1; // 对话区顶部留白行数
 
     // ── 计算总高度 + 滚动 ────────────────────────────────
-    let total: u16 = CHAT_PAD
-        + app
-            .messages
-            .iter()
-            .map(|m| {
-                let style = match m.line_type {
-                    LineType::User => USER_STYLE,
-                    LineType::Assistant => ASSISTANT_STYLE,
-                    _ => TOOL_STYLE,
-                };
-                app.message_caches
-                    .iter()
-                    .find(|c| c.msg_id == m.id)
-                    .map_or(0, |c| style.total_height(c.line_count))
-            })
-            .sum::<u16>();
+    let total: u16 = app
+        .messages
+        .iter()
+        .map(|m| {
+            let style = match m.line_type {
+                LineType::User => USER_STYLE,
+                LineType::Assistant => ASSISTANT_STYLE,
+                _ => TOOL_STYLE,
+            };
+            app.message_caches
+                .iter()
+                .find(|c| c.msg_id == m.id)
+                .map_or(0, |c| style.total_height(c.line_count))
+        })
+        .sum::<u16>();
+
     let stream_lines = if app.streaming_text.is_empty() {
         0
     } else {
         ASSISTANT_STYLE.total_height(app.streaming_text.lines().count() as u16)
     };
+
     let total_lines = total + stream_lines;
+
     let visible = area.height;
     let max_scroll = total_lines.saturating_sub(visible);
 
@@ -280,12 +290,11 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     // ── 统一渲染循环 ──────────────────────────────────────
     // 先画顶部留白行
     let sep_style = Style::default().bg(Color::from_u32(0x001A1A2E));
-    for row in 0..CHAT_PAD {
-        f.render_widget(
-            Paragraph::new(Line::styled(" ".repeat(content_w as usize), sep_style)),
-            Rect::new(area.x, area.y + row, content_w, 1),
-        );
-    }
+    f.render_widget(
+        Block::default().style(sep_style),
+        Rect::new(area.x, area.y, content_w, CHAT_PAD),
+    );
+
     let mut y: u16 = CHAT_PAD; // 内容从此偏移开始
 
     // 遍历每条消息，按类型取对应 style，走统一 render_block

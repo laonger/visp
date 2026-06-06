@@ -3,7 +3,7 @@
 use crate::app::{AppState, ConfirmState, LineType};
 use crate::client::ChatHandle;
 use crate::ui::render;
-use crossterm::event::{Event, KeyCode, KeyModifiers, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use std::io;
 use vbw_proto::vibewisp::{LlmConfig, server_message};
 
@@ -90,7 +90,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &ChatHandle) 
             }
             if key.code == KeyCode::Enter {
                 let text: String = app.textarea.lines().join("\n");
-                app.textarea = tui_textarea::TextArea::default();
+                app.textarea = ratatui_textarea::TextArea::default();
                 app.textarea.set_placeholder_text("Type your message...");
                 if text.trim().is_empty() {
                     return false;
@@ -116,7 +116,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &ChatHandle) 
                                 i.saturating_sub(1)
                             });
                         app.history_index = Some(idx);
-                        app.textarea = tui_textarea::TextArea::default();
+                        app.textarea = ratatui_textarea::TextArea::default();
                         app.textarea.insert_str(&app.input_history[idx]);
                     }
                 }
@@ -125,11 +125,11 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &ChatHandle) 
                         let ni = idx + 1;
                         if ni >= app.input_history.len() {
                             app.history_index = None;
-                            app.textarea = tui_textarea::TextArea::default();
+                            app.textarea = ratatui_textarea::TextArea::default();
                             app.textarea.set_placeholder_text("Type your message...");
                         } else {
                             app.history_index = Some(ni);
-                            app.textarea = tui_textarea::TextArea::default();
+                            app.textarea = ratatui_textarea::TextArea::default();
                             app.textarea.insert_str(&app.input_history[ni]);
                         }
                     }
@@ -146,9 +146,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &ChatHandle) 
                         .set_offset(ratatui::layout::Position::new(0, y.saturating_add(10)));
                 }
                 _ => {
-                    if let Event::Key(k) = event {
-                        app.textarea.input(Event::Key(k));
-                    }
+                    app.textarea.input(build_input_from_key(key));
                 }
             }
         }
@@ -252,5 +250,28 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &ChatHandle) {
             app.add_message(LineType::Status, format!("Model set to {}", parts[1]));
         }
         _ => {}
+    }
+}
+
+fn build_input_from_key(key: KeyEvent) -> ratatui_textarea::Input {
+    ratatui_textarea::Input {
+        key: match key.code {
+            KeyCode::Char(c) => ratatui_textarea::Key::Char(c),
+            KeyCode::Enter => ratatui_textarea::Key::Enter,
+            KeyCode::Backspace => ratatui_textarea::Key::Backspace,
+            KeyCode::Delete => ratatui_textarea::Key::Delete,
+            KeyCode::Left => ratatui_textarea::Key::Left,
+            KeyCode::Right => ratatui_textarea::Key::Right,
+            KeyCode::Up => ratatui_textarea::Key::Up,
+            KeyCode::Down => ratatui_textarea::Key::Down,
+            KeyCode::Tab => ratatui_textarea::Key::Tab,
+            KeyCode::Esc => ratatui_textarea::Key::Esc,
+            KeyCode::Home => ratatui_textarea::Key::Home,
+            KeyCode::End => ratatui_textarea::Key::End,
+            _ => ratatui_textarea::Key::Char(' '),
+        },
+        ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
+        alt: key.modifiers.contains(KeyModifiers::ALT),
+        shift: key.modifiers.contains(KeyModifiers::SHIFT),
     }
 }
