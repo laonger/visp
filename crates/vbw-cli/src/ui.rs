@@ -45,8 +45,8 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
     let bg = Block::default().style(Style::default().bg(COLOR_BG));
     f.render_widget(Paragraph::new("").block(bg), f.area());
 
-    let input_area_height = 8;
-    let bottom_chunks_height = input_area_height + (if app.confirm.is_some() { 2 } else { 1 });
+    let input_area_height = 6;
+    let bottom_chunks_height = input_area_height + (if app.confirm.is_some() { 3 } else { 2 });
 
     // 纵向分割：对话区 | 分隔线 | 底部区域
     let main_chunks = Layout::default()
@@ -61,18 +61,21 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
     render_chat_area(app, f, main_chunks[0]);
 
     // 底部区域内部再分割：确认栏(可选) → 输入区 → 状态栏
-    let bottom_area = main_chunks[2].inner(ratatui::layout::Margin::new(0, 2));
+    //let bottom_area = main_chunks[2].inner(ratatui::layout::Margin::new(0, 2));
+    let bottom_area = main_chunks[2];
     let bottom_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if app.confirm.is_some() {
             vec![
                 Constraint::Length(1),
-                Constraint::Length(input_area_height), // input area
+                Constraint::Min(2), // input area
+                Constraint::Length(1),                 // status area
                 Constraint::Length(1),                 // status area
             ]
         } else {
             vec![
-                Constraint::Length(input_area_height), // input area
+                Constraint::Min(2), // input area
+                Constraint::Length(1),                 // status area
                 Constraint::Length(1),                 // status area
             ]
         })
@@ -81,10 +84,10 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
     if app.confirm.is_some() {
         render_confirm_bar(app, f, bottom_chunks[0]);
         render_input_area(app, f, bottom_chunks[1]);
-        render_status_bar(app, f, bottom_chunks[2]);
+        render_status_bar(app, f, bottom_chunks[3]);
     } else {
         render_input_area(app, f, bottom_chunks[0]);
-        render_status_bar(app, f, bottom_chunks[1]);
+        render_status_bar(app, f, bottom_chunks[2]);
     }
 }
 
@@ -115,14 +118,14 @@ const USER_STYLE: BlockStyle = BlockStyle {
     margin_horizontal: 1,
     bg_fill: Some(COLOR_USER_BG),
     shadow: true,
-    bottom_pad: 1,
+    bottom_pad: 2,
 };
 const ASSISTANT_STYLE: BlockStyle = BlockStyle {
     margin_vertical: 1,
     margin_horizontal: 1,
     bg_fill: Some(COLOR_ASSISTANT_BG),
     shadow: true,
-    bottom_pad: 1,
+    bottom_pad: 2,
 };
 const TOOL_STYLE: BlockStyle = BlockStyle {
     margin_vertical: 1,
@@ -136,7 +139,7 @@ const TOOL_RESULT_STYLE: BlockStyle = BlockStyle {
     margin_horizontal: 1,
     bg_fill: Some(COLOR_TOOL_RESULT_BG),
     shadow: true,
-    bottom_pad: 1,
+    bottom_pad: 2,
 };
 // 流式文本使用 ASSISTANT_STYLE
 
