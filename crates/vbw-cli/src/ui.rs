@@ -147,7 +147,6 @@ fn render_block(
     rel_y: u16, // 在视窗中的 y 偏移
 ) {
     let content_w = area.width.saturating_sub(1); // -1 给右侧阴影列
-    let shadow_color = Color::from_u32(0x000D0D17);
     let sep_bg = Color::from_u32(0x001A1A2E); // 分隔线 = 聊天背景色
 
     // 1) 底部留白/分隔（bottom_pad 行）：有底色则填底色，否则填聊天背景色
@@ -190,26 +189,18 @@ fn render_block(
         );
     }
 
-    // 4) drop shadow：右侧一列 + 底部一行
-    if style.shadow {
-        let buf = f.buffer_mut();
-        let shadow_x = area.x + area.width.saturating_sub(1); // 最右列
-        let right = area.right();
-        // 右侧阴影（在内容行上）
-        for row in content_y..(content_y + line_count).min(buf.area().bottom()) {
-            if shadow_x < right {
-                buf[(shadow_x, row)].set_bg(shadow_color);
-            }
-        }
-        // 底部阴影（在 bottom_pad 第一行上）
-        let bottom_y = rel_y + 1 + style.inset + line_count;
-        if bottom_y < buf.area().bottom() {
-            for x in (area.x + 1)..right {
-                if x < buf.area().right() {
-                    buf[(x, bottom_y)].set_bg(shadow_color);
-                }
-            }
-        }
+    // 4) drop shadow：使用 ratatui 内置 Block::shadow
+    if style.shadow && actual_lines > 0 {
+        use ratatui::layout::Offset;
+        let block = Block::default().shadow(
+            ratatui::widgets::Shadow::dark_shade()
+                .style(Style::default().fg(Color::from_u32(0x000D0D17)))
+                .offset(Offset::new(1, 1)),
+        );
+        f.render_widget(
+            block,
+            Rect::new(content_x, content_y, content_w_adj, actual_lines),
+        );
     }
 }
 
