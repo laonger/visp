@@ -297,7 +297,7 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
             app.add_message(LineType::User, text.to_string());
             app.generating = true;
             app.scroll_following = true;
-            chat_handle.send_input(&text);
+            chat_handle.send_input(text);
         }
         "/temp" if parts.len() >= 2 => {
             if let Ok(temp) = parts[1].parse::<f64>() {

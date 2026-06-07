@@ -217,6 +217,40 @@ impl CoderDaemon for CoderDaemonService {
                         }
 
                         // Start agent loop
+                        let text = if text.trim().starts_with("/init") {
+                            match crate::command::init::prepare(&session.project_path, &text).await
+                            {
+                                Ok((init_msg, statuses)) => {
+                                    for s in &statuses {
+                                        let _ = tx
+                                            .send(Ok(proto::ServerMessage {
+                                                payload: Some(
+                                                    proto::server_message::Payload::StatusUpdate(
+                                                        proto::StatusUpdate {
+                                                            message: s.clone(),
+                                                            session_id: session_id.clone(),
+                                                        },
+                                                    ),
+                                                ),
+                                            }))
+                                            .await;
+                                    }
+                                    init_msg.content
+                                }
+                                Err(e) => {
+                                    let _ = tx
+                                        .send(Ok(session_error_msg(
+                                            "InitError",
+                                            &e,
+                                            &session_id,
+                                        )))
+                                        .await;
+                                    continue;
+                                }
+                            }
+                        } else {
+                            text
+                        };
                         let ctx = match session_mgr.start_loop(&session_id) {
                             Ok(c) => c,
                             Err(e) => {
