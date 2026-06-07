@@ -166,4 +166,31 @@ mod tests {
             "Database file should persist after shutdown"
         );
     }
+
+    #[tokio::test]
+    async fn test_multi_language_indexing() {
+        let (_tmp, project) = setup_project();
+        let cg = CodeGraph::open(&project).unwrap();
+
+        for (path, content) in [
+            ("src/lib.rs", "pub fn add(a: i32) -> i32 { a }\n"),
+            ("script.py", "def hello(): pass\n"),
+            ("main.ts", "export function greet(): void {}\n"),
+        ] {
+            let full = project.join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, content).unwrap();
+        }
+
+        cg.build_full(&project, &CodeGraphConfig::default())
+            .await
+            .unwrap();
+        let results = cg.search("", 100).unwrap();
+        assert_eq!(
+            results.len(),
+            3,
+            "expected 3 symbols, got {}",
+            results.len()
+        );
+    }
 }
