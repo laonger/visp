@@ -63,7 +63,10 @@ mod tests {
     fn test_skip_context_messages_filtered() {
         let history = vec![
             Message::user("Hello"),
-            Message { skip_context: true, ..Message::user("skip me") },
+            Message {
+                skip_context: true,
+                ..Message::user("skip me")
+            },
             Message::assistant("Hi!"),
         ];
         let messages = PromptBuilder::build("system", "", &history);

@@ -323,7 +323,7 @@ pub async fn run_agent_loop(
             tool_call_id: None,
             tool_calls: Some(tool_calls.clone()),
             skip_context: false,
-                extra_blocks: if thinking_blocks.is_empty() {
+            extra_blocks: if thinking_blocks.is_empty() {
                 None
             } else {
                 Some(thinking_blocks.clone())

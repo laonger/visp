@@ -239,11 +239,7 @@ impl CoderDaemon for CoderDaemonService {
                                 }
                                 Err(e) => {
                                     let _ = tx
-                                        .send(Ok(session_error_msg(
-                                            "InitError",
-                                            &e,
-                                            &session_id,
-                                        )))
+                                        .send(Ok(session_error_msg("InitError", &e, &session_id)))
                                         .await;
                                     continue;
                                 }
