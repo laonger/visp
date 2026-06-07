@@ -267,7 +267,7 @@ fn handle_grpc_message(
             if let Some((it, ot, tc)) = app.pending_usage.take() {
                 let time = chrono::Local::now().format("%H:%M:%S");
                 let usage = format!(
-                    "\n[{} | Tokens: {} in / {} out | Tools: {}]",
+                    "\n\n[{} | Tokens: {} in / {} out | Tools: {}]",
                     time, it, ot, tc
                 );
                 app.streaming_text.push_str(&usage);

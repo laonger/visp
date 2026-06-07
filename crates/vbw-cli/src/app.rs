@@ -2,8 +2,93 @@
 
 use ratatui::{
     style::{Color, Style},
-    text::Line,
+    text::{Line, Span},
 };
+
+/// 将一个带样式的 Line 按屏幕宽度拆分为多行，保留样式，每行末尾补空格到指定宽度
+fn wrap_styled_line(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
+    use std::collections::VecDeque;
+
+    struct StyledChar {
+        ch: char,
+        style: Style,
+        cw: usize,
+    }
+
+    // 展平 spans 为字符序列
+    let mut chars: VecDeque<StyledChar> = VecDeque::new();
+    for span in &line.spans {
+        for ch in span.content.chars() {
+            let cw = if ch > '\u{2000}' { 2 } else { 1 };
+            chars.push_back(StyledChar {
+                ch,
+                style: span.style,
+                cw,
+            });
+        }
+    }
+
+    if chars.is_empty() {
+        return vec![Line::from(" ")];
+    }
+
+    let mut result: Vec<Line<'static>> = Vec::new();
+    let mut line_spans: Vec<(String, Style)> = Vec::new();
+    let mut col: usize = 0;
+
+    while let Some(sc) = chars.pop_front() {
+        if sc.ch == '\n' {
+            // 显式换行
+            flush_line(&mut line_spans, width, &mut result, col);
+            col = 0;
+            continue;
+        }
+        if col + sc.cw > width && col > 0 {
+            flush_line(&mut line_spans, width, &mut result, col);
+            col = 0;
+        }
+        // 与最后一个 span 样式相同则合并，否则新建
+        if let Some((text, last_style)) = line_spans.last_mut()
+            && *last_style == sc.style
+        {
+            text.push(sc.ch);
+        } else {
+            line_spans.push((sc.ch.to_string(), sc.style));
+        }
+        col += sc.cw;
+    }
+
+    // 最后一行
+    if !line_spans.is_empty() {
+        let mut spans: Vec<Span<'static>> = line_spans
+            .into_iter()
+            .map(|(t, s)| Span::styled(t, s))
+            .collect();
+        // 补空格到宽度
+        if col < width {
+            spans.push(Span::styled(" ".repeat(width - col), Style::default()));
+        }
+        result.push(Line::from(spans));
+    }
+
+    result
+}
+
+fn flush_line(
+    line_spans: &mut Vec<(String, Style)>,
+    width: usize,
+    result: &mut Vec<Line<'static>>,
+    col: usize,
+) {
+    let mut spans: Vec<Span<'static>> = line_spans
+        .drain(..)
+        .map(|(t, s)| Span::styled(t, s))
+        .collect();
+    if col < width {
+        spans.push(Span::styled(" ".repeat(width - col), Style::default()));
+    }
+    result.push(Line::from(spans));
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LineType {
@@ -53,36 +138,50 @@ impl MessageCache {
             LineType::Usage => Color::DarkGray,
         };
         // 背景色由 ui.rs 的 BlockStyle::bg_fill 统一处理
-        let style = Style::default().fg(fg);
+        let base_style = Style::default().fg(fg);
+        let lines: Vec<Line<'static>> = match msg.line_type {
+            LineType::Assistant => {
+                use ratatui_markdown::markdown::MarkdownRenderer;
+                let renderer = MarkdownRenderer::new(width as usize);
+                let blocks = renderer.parse(&msg.content);
+                let md_lines =
+                    renderer.render(&blocks, &ratatui_markdown::theme::ThemeConfig::default());
+                md_lines
+                    .into_iter()
+                    .map(|l| {
+                        let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                        Line::styled(text, Style::default().fg(Color::White))
+                    })
+                    .collect()
+            }
+            _ => {
+                let mut lines = Vec::new();
+                let wrapped = wrap_text(&msg.content, width);
+                let display_lines = if msg.line_type == LineType::ToolCall && wrapped.len() > 5 {
+                    let mut truncated: Vec<String> = wrapped.into_iter().take(5).collect();
+                    truncated.push(format!("... [truncated, {}B]", msg.content.len()));
+                    truncated
+                } else {
+                    wrapped
+                };
 
-        let mut lines: Vec<Line<'static>> = Vec::new();
-
-        let wrapped = wrap_text(&msg.content, width);
-        let display_lines = if msg.line_type == LineType::ToolCall && wrapped.len() > 5 {
-            let mut truncated: Vec<String> = wrapped.into_iter().take(5).collect();
-            truncated.push(format!("... [truncated, {}B]", msg.content.len()));
-            truncated
-        } else {
-            wrapped
+                for (i, dl) in display_lines.iter().enumerate() {
+                    let content = if dl.is_empty() {
+                        " ".repeat(width as usize)
+                    } else {
+                        pad_to_width(dl, width as usize)
+                    };
+                    // tool call 中首行（call）用黄色，后续行（result）用灰色
+                    let line_style = if msg.line_type == LineType::ToolCall && i > 0 {
+                        Style::default().fg(Color::DarkGray)
+                    } else {
+                        base_style
+                    };
+                    lines.push(Line::styled(content, line_style));
+                }
+                lines
+            }
         };
-
-        for (i, dl) in display_lines.iter().enumerate() {
-            let content = if dl.is_empty() {
-                " ".repeat(width as usize)
-            } else {
-                pad_to_width(dl, width as usize)
-            };
-            // assistant 中以 [ 开头的行（时间戳+用量）用灰色
-            // tool call 中首行（call）用黄色，后续行（result）用灰色
-            let line_style = if (msg.line_type == LineType::Assistant && dl.starts_with('['))
-                || (msg.line_type == LineType::ToolCall && i > 0)
-            {
-                Style::default().fg(Color::DarkGray)
-            } else {
-                style
-            };
-            lines.push(Line::styled(content, line_style));
-        }
 
         let line_count = lines.len() as u16;
         Self {
