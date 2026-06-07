@@ -1,9 +1,11 @@
 #![allow(dead_code)]
 
 use ratatui::{
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
 };
+
+use crate::theme;
 
 /// 用 syntect 高亮代码块，返回 ratatui 行
 fn highlight_code_block(lang: &str, code: &str) -> Vec<Line<'static>> {
@@ -217,18 +219,8 @@ pub struct MessageCache {
 
 impl MessageCache {
     pub fn from_message(msg: &ChatLine, width: u16) -> Self {
-        let fg = match msg.line_type {
-            LineType::User => Color::Cyan,
-            LineType::Assistant => Color::White,
-            LineType::Thinking => Color::Green,
-            LineType::ToolCall => Color::Yellow,
-            LineType::ToolResult => Color::DarkGray,
-            LineType::Error => Color::Red,
-            LineType::Status => Color::Gray,
-            LineType::Usage => Color::DarkGray,
-        };
         // 背景色由 ui.rs 的 BlockStyle::bg_fill 统一处理
-        let base_style = Style::default().fg(fg);
+        let base_style = Style::default().fg(theme::fg_for(msg.line_type.clone()));
         let lines: Vec<Line<'static>> = match msg.line_type {
             LineType::Assistant => {
                 // 第一步：用 syntect 高亮代码块，替换为标记
@@ -253,7 +245,7 @@ impl MessageCache {
                             return highlighted_blocks[idx].clone();
                         }
                         // 非代码行：白色
-                        vec![Line::styled(text, Style::default().fg(Color::White))]
+                        vec![Line::styled(text, Style::default().fg(theme::ASSISTANT_FG))]
                     })
                     .collect()
             }
@@ -276,7 +268,7 @@ impl MessageCache {
                     };
                     // tool call 中首行（call）用黄色，后续行（result）用灰色
                     let line_style = if msg.line_type == LineType::ToolCall && i > 0 {
-                        Style::default().fg(Color::DarkGray)
+                        Style::default().fg(theme::TOOL_RESULT_FG)
                     } else {
                         base_style
                     };
