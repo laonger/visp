@@ -283,15 +283,21 @@ fn handle_grpc_message(
     }
 }
 
-fn handle_command(text: &str, app: &mut AppState, chat_handle: &ChatHandle) {
+fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) {
     let parts: Vec<&str> = text.splitn(2, ' ').collect();
     match parts[0] {
         "/clear" => app.clear_messages(),
         "/help" => {
             app.add_message(
                 LineType::Status,
-                "/clear /temp <val> /model <name> /help".into(),
+                "/clear /temp <val> /model <name> /init /help".into(),
             );
+        }
+        "/init" => {
+            app.add_message(LineType::User, text.to_string());
+            app.generating = true;
+            app.scroll_following = true;
+            chat_handle.send_input(&text);
         }
         "/temp" if parts.len() >= 2 => {
             if let Ok(temp) = parts[1].parse::<f64>() {

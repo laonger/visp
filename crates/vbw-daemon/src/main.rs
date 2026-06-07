@@ -1,3 +1,5 @@
+#[allow(dead_code)]
+mod command;
 mod config;
 mod server;
 mod service;
