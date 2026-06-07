@@ -1,162 +1,198 @@
-# vibewisp init 命令 — 项目初始化设计
+# /init 斜杠命令设计
 
 ## 1. 目标
 
-`vbw init` 一键完成项目初始化：创建目录结构、初始化 CodeGraph AST 索引、生成 AI 行为指南和项目规则。
+`/init` 是 TUI 聊天中的斜杠命令，一键完成项目初始化：创建目录结构、初始化 CodeGraph、生成 AGENTS.md。
+
+对标 opencode 的 `/init` 命令。
 
 ## 2. 执行流程
 
 ```
-用户执行: vbw init [--force] [--no-ai]
+用户输入: /init [--force]
 
-CLI 端:
-  ├─ 解析参数
-  ├─ 构造 InitProjectRequest (project_path, force, skip_ai)
-  ├─ 调用 gRPC VbwClient::init_project(request)
-  └─ 接收 InitProjectResponse，打印 created 列表到终端
+CLI (event.rs):
+  └─ handle_command(text)
+       └─ chat_handle.send_input(text)  ← 像普通消息一样发送
 
-Server 端 (Daemon):
-  ├─ 1. 创建目录结构
-  │     .vibewisp/rules/
-  │     .vibewisp/skills/
-  │     .vibewisp/plans/
+Daemon (service.rs, chat handler):
+  ├─ 收到 UserInput text="/init [--force]"
+  ├─ 识别为 init 命令
+  ├─ 状态检查: session 必须是 Idle
   │
-  ├─ 2. 写入样例文件
-  │     .vibewisp/rules/always.md      ← 始终生效的默认规则
+  ├─ 调用 command::init::prepare(project_path, text)
+  │     │
+  │     ├─ 解析 --force 参数（text.contains("--force")）
+  │     │
+  │     ├─ 创建目录
+  │     │      .vibewisp/rules/
+  │     │      .vibewisp/skills/
+  │     │      .vibewisp/plans/
+  │     │   → 发送 StatusUpdate: "Creating .vibewisp/..."
+  │     │
+  │     ├─ 初始化 CodeGraph
+  │     │      CodeGraph::open(project_path)
+  │     │      → 创建 .vibewisp/codegraph.db
+  │     │      → 后台 tokio::spawn(build_full)
+  │     │   → 发送 StatusUpdate: "Initializing CodeGraph..."
+  │     │   → open 失败记 warning 日志，不中断流程
+  │     │
+  │     └─ 构造 prompt（硬编码模板 + project_path 注入，--force 时修改指令）
+  │         → 返回 Message::user(prompt)
   │
-  ├─ 3. CodeGraph 初始化
-  │     CodeGraph::open(project_path)
-  │       → 创建 .vibewisp/codegraph.db（WAL + FTS5）
-  │       → 初始化 SQLite schema（symbols, edges, files 表）
-  │       → 启动后台 build_full（增量索引项目源码）
+  ├─ 追加 user_msg 到 session
+  ├─ 启动 agent loop
+  │      → AI 读取 README.md、Cargo.toml 等
+  │      → AI 调用 glob 浏览项目结构
+  │      → AI 调用 codegraph_search 了解符号
+  │      → AI 读取已有 AGENTS.md（如存在且非 --force）
+  │      → AI 调用 write_file(AGENTS.md)
   │
-   ├─ 4. AI 规则生成（除非 --no-ai）
-   │     ├─ 创建临时 session
-   │     ├─ 构建 init 专用 prompt（分析项目 → AGENTS.md + rules）
-   │     ├─ 启动 agent loop（使用默认 provider + tools）
-   │     │     工具：read_file, glob, codegraph_search, write_file
-   │     ├─ Agent 执行：
-   │     │   ├─ 读取现有的 AGENTS.md（如果存在）
-   │     │   ├─ 读取 README.md、Cargo.toml 等
-   │     │   ├─ 分析项目结构
-   │     │   ├─ **更新** 现有的 AGENTS.md（追加或修改 vibewisp 相关信息）
-   │     │   │   └─ 不存在则新建
-   │     │   ├─ 写入 .vibewisp/rules/project.md
-   │     │   └─ 更新 .vibewisp/rules/always.md
-   │     └─ Agent 完成后销毁临时 session
-  │
-  └─ 5. 返回 created 列表
+  └─ Agent 正常完成，Done 事件发送给 CLI
 ```
 
-## 3. gRPC 接口
+## 3. 关键接口
 
-### Proto 定义
-
-在 `vibewisp.proto` 中新增 RPC：
+### command::init::prepare
 
 ```
-rpc InitProject(InitProjectRequest) returns (InitProjectResponse)
+入参:
+  - project_path: PathBuf  (项目根目录)
+  - text: &str             (原始消息文本，如 "/init --force")
+
+返回值:
+  - Message                (构造好的 user message，包含 init prompt)
 ```
 
-### 请求消息
+副作用（函数内部执行）:
+- 文件系统: 创建 .vibewisp/ 子目录
+- CodeGraph: 打开数据库 + 后台索引
+- gRPC 流: 发送 StatusUpdate 到 CLI
 
-`InitProjectRequest`：
-- `project_path` — 项目根目录绝对路径
-- `force` — 是否覆盖已有文件（默认 false）
-- `skip_ai` — 是否跳过 AI 规则生成（默认 false）
+## 4. Prompt 模板
 
-### 响应消息
+### 默认模式 (无 --force)
 
-`InitProjectResponse`：
-- `created` — 已创建的文件路径列表（相对或绝对）
+```
+你是一个项目初始化助手。你的任务是分析当前项目，生成或更新 AGENTS.md 文件。
 
-## 4. 模块职责
+当前项目路径: ${project_path}
 
-| 模块 | 职责 |
+执行步骤:
+1. 使用 read_file 读取以下文件（如果存在）:
+   - README.md
+   - Cargo.toml (Rust 项目) / package.json (JS 项目) / 其他构建配置
+2. 使用 glob 浏览项目的顶层文件结构
+3. 使用 codegraph_search 搜索项目中的关键符号（如 main 函数、核心类型定义）
+4. 如果项目已有 AGENTS.md，使用 read_file 读取它，然后在现有内容基础上追加补充 vibewisp 相关信息
+5. 如果项目没有 AGENTS.md，创建新的
+6. 使用 write_file 写入 AGENTS.md
+
+AGENTS.md 格式要求:
+- 使用 Markdown 格式
+- 使用 XML 标签组织内容（如 <Role>、<Workflow>、<CodingStyle>），参考 vibewisp 项目的 AGENTS.md 风格
+- 内容应包括:
+  * 项目概述: 一句话描述 + 技术栈
+  * 构建/测试/检查命令
+  * 项目架构简要说明
+  * 编码规范和注意事项
+  * 各阶段的工具引用（如 read_file、bash、codegraph_search）
+- 保持简洁，只写 AI 代理在做任务时需要知道的信息
+- 不要写用户不需要看的内容
+```
+
+### --force 模式
+
+```
+你是一个项目初始化助手。你的任务是分析当前项目，重写 AGENTS.md 文件。
+
+当前项目路径: ${project_path}
+
+执行步骤:
+1. 使用 read_file 读取以下文件（如果存在）:
+   - README.md
+   - Cargo.toml (Rust 项目) / package.json (JS 项目) / 其他构建配置
+2. 使用 glob 浏览项目的顶层文件结构
+3. 使用 codegraph_search 搜索项目中的关键符号（如 main 函数、核心类型定义）
+4. 忽略已有的 AGENTS.md 内容，从头重写一个完整的 AGENTS.md
+5. 使用 write_file 写入 AGENTS.md
+
+AGENTS.md 格式要求:
+- 使用 Markdown 格式
+- 使用 XML 标签组织内容（如 <Role>、<Workflow>、<CodingStyle>），参考 vibewisp 项目的 AGENTS.md 风格
+- 内容应包括:
+  * 项目概述: 一句话描述 + 技术栈
+  * 构建/测试/检查命令
+  * 项目架构简要说明
+  * 编码规范和注意事项
+  * 各阶段的工具引用（如 read_file、bash、codegraph_search）
+- 保持简洁，只写 AI 代理在做任务时需要知道的信息
+- 不要写用户不需要看的内容
+```
+
+### 区别
+
+| 模式 | 第 4 步 |
+|------|--------|
+| 默认 | 读取已有 AGENTS.md，在现有内容基础上追加补充 |
+| --force | 忽略已有 AGENTS.md，从头重写 |
+
+## 5. 文件变动
+
+| 文件 | 改动 |
 |------|------|
-| `cli/main.rs` | 新增 `Init` 子命令（clap），解析 `--force` / `--no-ai` 参数 |
-| `cli/client.rs` | 新增 `VbwClient::init_project()` 方法，调用 gRPC |
-| `proto/vibewisp.proto` | 新增 `InitProject` RPC + 消息定义 |
-| `daemon/init.rs` | **新增**，init 全逻辑：目录创建、样例文件、CodeGraph 初始化、AI 规则生成 |
-| `daemon/service.rs` | 新增 `init_project` endpoint handler，委托给 `init.rs` |
+| `cli/event.rs` | `handle_command` 新增 `/init` 分支 |
+| `daemon/src/command/init.rs` | **新增**：目录创建、CodeGraph 初始化、prompt 构造 |
+| `daemon/src/command/mod.rs` | **新增**：模块声明 |
+| `daemon/src/service.rs` | chat handler 调用 `command::init::prepare()` |
+| 其他 | 无 proto 改动，无新增 RPC |
 
-## 5. 目录结构
+## 6. 关键设计决策
 
-init 创建的目录结构：
+| 决策 | 方案 |
+|------|------|
+| init 逻辑位置 | `daemon/src/command/init.rs`，chat handler 只调用入口函数 |
+| 返回值 | `prepare()` 返回 `Message`，CodeGraph 结果通过 tracing 记录 |
+| `--force` 参数 | daemon 端字符串解析（`text.contains("--force")`） |
+| CodeGraph::open 失败 | 记 warning 日志，不阻止 agent loop |
+| CLI 显示 | `/init` 作为普通 User 消息显示 |
+| Prompt 模板 | 硬编码为 const 字符串在 `init.rs` 中 |
+| CLI 进度反馈 | daemon 发送 StatusUpdate："Creating .vibewisp/..."、"Initializing CodeGraph..." |
+| AGENTS.md 处理 | 默认：读取后追加补充；--force：重写 |
+
+## 7. 产出物
 
 ```
 <project_root>/
-└── .vibewisp/
-    ├── codegraph.db         ← CodeGraph SQLite 索引
-    ├── rules/
-    │   ├── always.md        ← 始终生效（alwaysApply: true）
-    │   └── project.md       ← 项目专属（AI 生成时创建）
-    ├── skills/              ← 预留，未来 Skills 功能
-    └── plans/               ← 预留，未来工作计划
+├── .vibewisp/
+│   ├── codegraph.db        ← CodeGraph SQLite 索引
+│   ├── rules/              ← 规则目录（空，用户自行添加）
+│   ├── skills/             ← 预留
+│   └── plans/              ← 预留
+│
+└── AGENTS.md               ← AI 生成的 AI 编程指南
 ```
 
-## 6. 样例文件内容
-
-### .vibewisp/rules/always.md（默认模板）
-
-YAML frontmatter 声明 `alwaysApply: true`，内容包含项目关键约束：
-- 构建/测试命令
-- 编码规范
-- 注意事项
-
-### AGENTS.md（AI 生成或默认模板）
-
-为 AI 编程助手提供项目上下文：
-- 构建/测试/检查命令
-- 项目架构简要说明
-- 编码规范和注意事项
-- Monorepo 边界说明（如适用）
-
-## 7. AI 规则生成的 Prompt
-
-当 `--no-ai` 未指定时，init 构建以下 prompt 发送给 agent：
-
-系统提示应该引导 agent：
-- 检查项目中是否已有 `AGENTS.md`，如存在先读取其内容
-- 阅读 README.md、Cargo.toml、已有配置文件
-- 浏览项目文件结构
-- 查询 CodeGraph 符号了解 API
-- **更新** 已有的 `AGENTS.md`：
-  - 如已有 AGENTS.md，追加 vibewisp 相关信息或补充缺失内容
-  - 如不存在，新建 AGENTS.md
-- 写入 .vibewisp/rules/project.md（项目专属规则）
-- 更新 .vibewisp/rules/always.md（始终生效的约束）
-- 保持文件简洁、可执行
-
-## 8. 边界情况处理
+## 8. 边界情况
 
 | 场景 | 处理 |
 |------|------|
-| `.vibewisp/` 已存在 | 如 `--force`，覆盖；否则跳过已存在文件，创建缺失的 |
-| `codegraph.db` 已存在 | `CodeGraph::open()` 幂等，不会损坏已有数据 |
-| CodeGraph build_full 失败 | 后台执行，不影响 init 返回；warning 级别日志 |
-| daemon 未启动 | CLI 提示 "Daemon not available" 并退出 |
-| AI 规则生成失败 | 不阻塞 init 其他步骤；error 日志 + 使用默认模板 |
-| 项目路径不存在 | 返回错误，不创建目录 |
-| 已有 AGENTS.md | AI 读取并追加/更新，不覆盖 |
-| 已有 AGENTS.md 但 --no-ai | 不修改已有 AGENTS.md |
+| `.vibewisp/` 已存在 | 跳过目录创建，CodeGraph::open 幂等 |
+| AGENTS.md 已存在，无 --force | AI 读取后追加补充 |
+| AGENTS.md 已存在，--force | AI 忽略已有内容，重写 |
+| daemon 未连接 | CLI 提示 "Daemon not available" |
+| CodeGraph build_full 失败 | 后台执行，不影响 agent loop |
+| AI 生成 AGENTS.md 失败 | 错误信息正常返回给用户 |
+| session 非 Idle | 返回 "Session is busy" 错误 |
+| 目录创建失败 | 返回错误，不继续后续步骤 |
 
-## 9. 不做什么
+## 9. 验收标准
 
-- ❌ 不覆盖已有的 AGENTS.md（除非 --force）
-- ❌ 不修改已有的 AGENTS.md（当 `--no-ai` 时）
-- ❌ 不自动安装依赖或运行构建
-- ❌ 不创建 daemon.toml（那是全局配置，不是项目配置）
-- ❌ 不修改 .gitignore（用户自行管理）
-
-## 10. 验收标准
-
-- `vbw init` 创建 `.vibewisp/` 及其子目录
-- CodeGraph 数据库已初始化，后台索引已启动
-- 样例 `always.md` 已写入
-- `--no-ai` 时 AGENTS.md 不修改
-- `--force` 时覆盖已有文件
-- 已有 AGENTS.md 时，AI 读取后追加/更新，不从头覆盖
-- AI 模式生成的 AGENTS.md 包含所在任务的说明
-- 没有 AI 生成的文件时，打印创建的目录列表
-- CodeGraph 索引完成后，`codegraph_search` 可用
+- 用户输入 `/init` 后，daemon 创建 .vibewisp/ 目录
+- CLI 显示 "Creating .vibewisp/..." 和 "Initializing CodeGraph..." 状态
+- CodeGraph 数据库已初始化
+- AI 分析项目并生成/更新 AGENTS.md
+- AGENTS.md 包含项目关键信息
+- 已有 AGENTS.md 时（无 --force）AI 读取后更新，不覆盖
+- --force 时 AI 重写 AGENTS.md
+- 操作结果在对话区可见
