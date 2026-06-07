@@ -13,13 +13,9 @@ Follow these steps to create an appropriate AGENTS.md:
 2. Browse the project structure using `glob` to understand file organization
 3. Search symbols using `codegraph_search` to understand the codebase
 4. {STEP4}
-5. Write a comprehensive AGENTS.md file that covers:
-   - Project overview and architecture
-   - Key modules and their responsibilities
-   - Build and test commands
-   - Coding conventions and design patterns
-   - Important configuration and environment setup
-";
+5. Write AGENTS.md using write_file with the complete content in ONE call.
+   IMPORTANT: Write the file exactly once. Do NOT rewrite it after writing.
+   Finish with no further tool calls after writing.";
 
 const STEP4_UPDATE: &str =
     "Read the existing AGENTS.md if present — update it rather than rewrite from scratch.";

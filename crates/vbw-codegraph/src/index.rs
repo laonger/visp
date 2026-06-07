@@ -40,6 +40,26 @@ impl Default for CodeGraphConfig {
     }
 }
 
+/// Map a file extension to a human-readable language name.
+fn language_name(rel_path: &str) -> &'static str {
+    if rel_path.ends_with(".rs") {
+        "rust"
+    } else if rel_path.ends_with(".py") {
+        "python"
+    } else if rel_path.ends_with(".ts") || rel_path.ends_with(".tsx") {
+        "typescript"
+    } else if rel_path.ends_with(".c") || rel_path.ends_with(".h") {
+        "c"
+    } else if rel_path.ends_with(".cpp") || rel_path.ends_with(".hpp") || rel_path.ends_with(".cc")
+    {
+        "cpp"
+    } else if rel_path.ends_with(".go") {
+        "go"
+    } else {
+        "unknown"
+    }
+}
+
 /// Types of file system events for incremental indexing
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileEvent {
@@ -129,8 +149,12 @@ impl Indexer {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            self.store
-                .upsert_file(&rel_path, "typescript", symbols.len() as u32, ts)?;
+            self.store.upsert_file(
+                &rel_path,
+                language_name(&rel_path),
+                symbols.len() as u32,
+                ts,
+            )?;
         }
 
         // Cross-file resolution
@@ -200,8 +224,12 @@ impl Indexer {
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-                self.store
-                    .upsert_file(&rel_path, "typescript", symbols.len() as u32, ts)?;
+                self.store.upsert_file(
+                    &rel_path,
+                    language_name(&rel_path),
+                    symbols.len() as u32,
+                    ts,
+                )?;
 
                 // Re-resolve cross-file edges
                 resolve_cross_file_edges(&self.store)?;
