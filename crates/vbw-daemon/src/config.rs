@@ -33,6 +33,9 @@ pub struct LlmSection {
     pub api_key: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
+    /// Claude thinking 模式预算 token 数（如 2048）
+    #[serde(default)]
+    pub thinking_budget_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -131,6 +134,7 @@ fn default_config() -> DaemonConfig {
             max_tokens: default_max_tokens(),
             api_key: None,
             base_url: None,
+            thinking_budget_tokens: None,
         },
         tools: ToolsSection {
             bash_timeout_secs: default_bash_timeout(),

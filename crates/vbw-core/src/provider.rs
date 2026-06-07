@@ -63,6 +63,12 @@ pub enum ChatEvent {
     },
     /// 思考块（如 DeepSeek thinking mode），原样 JSON
     ThinkingBlock(serde_json::Value),
+    /// token 用量及工具调用次数
+    UsageInfo {
+        input_tokens: u32,
+        output_tokens: u32,
+        tool_calls: u32,
+    },
     /// 流结束
     Done,
 }

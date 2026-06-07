@@ -7,25 +7,56 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use std::io;
 use vbw_proto::vibewisp::{LlmConfig, server_message};
 
+/// Drop guard: 离开作用域时保证恢复终端状态
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture);
+    }
+}
+
 pub async fn run(session_id: String, mut chat_handle: ChatHandle, model: String) -> io::Result<()> {
     crossterm::terminal::enable_raw_mode()?;
     crossterm::execute!(io::stdout(), crossterm::event::EnableMouseCapture)?;
+    let _guard = TerminalGuard;
     let mut terminal = ratatui::init();
     let mut app = AppState::new(session_id.clone(), model);
 
-    // 独立长驻键盘任务，不随 select! 取消（解决 spawn_blocking 僵尸问题）
+    // exit 信号：键盘线程检测到 Ctrl+D 时通知主循环无条件退出
+    let (exit_tx, mut exit_rx) = tokio::sync::watch::channel(false);
+    let thread_exit_tx = exit_tx.clone();
+
+    // 键盘事件采集线程，同时负责 Ctrl+D 退出检测
     let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
     std::thread::spawn(move || {
-        while let Ok(event) = crossterm::event::read() {
-            // MouseMoved 在源头过滤，不进入 channel
-            if matches!(event, Event::Mouse(ref m) if m.kind == MouseEventKind::Moved) {
-                continue;
-            }
-            if key_tx.send(event).is_err() {
+        loop {
+            if key_tx.is_closed() {
                 break;
+            }
+            if crossterm::event::poll(std::time::Duration::from_millis(100)).unwrap_or(false)
+                && let Ok(event) = crossterm::event::read()
+            {
+                // 独立检测 Ctrl+D：无论任何状态，无条件触发退出
+                if matches!(event, Event::Key(KeyEvent { code: KeyCode::Char('d'), modifiers, .. })
+                    if modifiers.contains(KeyModifiers::CONTROL))
+                {
+                    let _ = thread_exit_tx.send(true);
+                    break;
+                }
+                // MouseMoved 在源头过滤
+                if matches!(event, Event::Mouse(ref m) if m.kind == MouseEventKind::Moved) {
+                    continue;
+                }
+                if key_tx.send(event).is_err() {
+                    break;
+                }
             }
         }
     });
+    // 主线程的 exit_tx 后续不再使用，drop 后 thread_exit_tx 是唯一 sender
+    drop(exit_tx);
 
     let _ = terminal.draw(|f| render(&mut app, f));
 
@@ -43,6 +74,11 @@ pub async fn run(session_id: String, mut chat_handle: ChatHandle, model: String)
                     None => { app.should_quit = true; }
                 }
             }
+            _ = exit_rx.changed() => {
+                // Ctrl+D: 先发 Cancel 让 daemon 优雅停止，再断开连接
+                chat_handle.send_cancel();
+                break;
+            }
         }
         if app.should_quit {
             break;
@@ -59,7 +95,6 @@ pub async fn run(session_id: String, mut chat_handle: ChatHandle, model: String)
     }
 
     ratatui::restore();
-    let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture);
     Ok(())
 }
 
@@ -73,17 +108,12 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 chat_handle.send_response(&q.query_id, approved);
                 return false;
             }
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                match key.code {
-                    KeyCode::Char('c') => {
-                        if app.generating {
-                            chat_handle.send_cancel();
-                        }
-                        return false;
-                    }
-                    KeyCode::Char('d') => return true,
-                    _ => {}
+            // Ctrl+C: 取消正在生成的请求
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                if app.generating {
+                    chat_handle.send_cancel();
                 }
+                return false;
             }
             if app.generating {
                 return false;
@@ -188,7 +218,20 @@ fn handle_grpc_message(
         Some(server_message::Payload::TextDelta(delta)) => app.append_streaming(&delta.delta),
         Some(server_message::Payload::ToolCall(tc)) => app.add_tool_line(
             LineType::ToolCall,
-            format!("{} {}", tc.tool_name, tc.arguments),
+            match serde_json::from_str::<serde_json::Value>(&tc.arguments) {
+                Ok(serde_json::Value::Object(obj)) => {
+                    let vals: Vec<String> = obj
+                        .values()
+                        .filter_map(|v| v.as_str().map(|s| format!("\"{}\"", s)))
+                        .collect();
+                    if vals.is_empty() {
+                        format!("{} {}", tc.tool_name, tc.arguments)
+                    } else {
+                        format!("{}: {}", tc.tool_name, vals.join(" "))
+                    }
+                }
+                _ => format!("{}: {}", tc.tool_name, tc.arguments),
+            },
             &tc.call_id,
         ),
         Some(server_message::Payload::ToolResult(tr)) => app.insert_tool_result(
@@ -199,6 +242,13 @@ fn handle_grpc_message(
                 tr.content
             ),
         ),
+        Some(server_message::Payload::ThinkingBlock(tb)) => {
+            let text = format!("[Thinking] {}", tb.thinking);
+            app.add_message(LineType::Thinking, text)
+        }
+        Some(server_message::Payload::UsageInfo(ui)) => {
+            app.pending_usage = Some((ui.input_tokens, ui.output_tokens, ui.tool_calls));
+        }
         Some(server_message::Payload::StatusUpdate(su)) => {
             app.add_message(LineType::Status, su.message)
         }
@@ -214,6 +264,14 @@ fn handle_grpc_message(
             app.current_request_id = None;
         }
         Some(server_message::Payload::Done(_)) => {
+            if let Some((it, ot, tc)) = app.pending_usage.take() {
+                let time = chrono::Local::now().format("%H:%M:%S");
+                let usage = format!(
+                    "\n[{} | Tokens: {} in / {} out | Tools: {}]",
+                    time, it, ot, tc
+                );
+                app.streaming_text.push_str(&usage);
+            }
             app.flush_streaming();
             app.generating = false;
             // 收到 Done 后发送 ack，通知服务端该请求已完成

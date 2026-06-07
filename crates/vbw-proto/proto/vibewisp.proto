@@ -76,6 +76,12 @@ message UserQuery {
     string session_id = 3;
 }
 
+message ThinkingBlock {
+    string thinking = 1;
+    string signature = 2;
+    string session_id = 3;
+}
+
 message ServerMessage {
     oneof payload {
         TextDelta text_delta = 1;
@@ -85,6 +91,8 @@ message ServerMessage {
         Error error = 5;
         Done done = 6;
         UserQuery user_query = 7;
+        ThinkingBlock thinking_block = 8;
+        UsageInfo usage_info = 9;
     }
 }
 
@@ -116,6 +124,13 @@ message Error {
     string code = 1;
     string message = 2;
     string session_id = 3;
+}
+
+message UsageInfo {
+    uint32 input_tokens = 1;
+    uint32 output_tokens = 2;
+    uint32 tool_calls = 3;
+    string session_id = 4;
 }
 
 message Done {

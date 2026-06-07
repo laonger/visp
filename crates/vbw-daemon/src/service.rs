@@ -20,6 +20,8 @@ use vbw_core::{
 };
 use vbw_proto::vibewisp::{self as proto, coder_daemon_server::CoderDaemon};
 
+use crate::config::LlmSection;
+
 type ResponseStream =
     Pin<Box<dyn futures::Stream<Item = Result<proto::ServerMessage, tonic::Status>> + Send>>;
 type CodeGraphMap = Arc<RwLock<HashMap<String, Arc<CodeGraph>>>>;
@@ -33,6 +35,8 @@ pub struct CoderDaemonService {
     start_time: Instant,
     /// Phase 5: lazy-loaded CodeGraph instances per project path
     codegraphs: CodeGraphMap,
+    /// 默认 LLM 配置（来自 daemon.toml），create_session 时与客户端配置合并
+    default_llm_config: LlmConfig,
 }
 
 impl CoderDaemonService {
@@ -43,7 +47,18 @@ impl CoderDaemonService {
         rule_engine: Arc<RuleEngine>,
         session_mgr: Arc<SessionManager>,
         agent_config: AgentConfig,
+        llm_section: LlmSection,
     ) -> Self {
+        let mut extra = std::collections::HashMap::new();
+        if let Some(budget) = llm_section.thinking_budget_tokens {
+            extra.insert("thinking_budget_tokens".into(), budget.to_string());
+        }
+        let default_llm_config = LlmConfig {
+            model: llm_section.model,
+            temperature: llm_section.temperature,
+            max_tokens: llm_section.max_tokens,
+            extra,
+        };
         Self {
             provider,
             tool_registry,
@@ -52,6 +67,7 @@ impl CoderDaemonService {
             agent_config,
             start_time: Instant::now(),
             codegraphs: Arc::new(RwLock::new(HashMap::new())),
+            default_llm_config,
         }
     }
 
@@ -95,7 +111,21 @@ impl CoderDaemon for CoderDaemonService {
         request: Request<proto::CreateSessionRequest>,
     ) -> Result<Response<proto::Session>, Status> {
         let req = request.into_inner();
-        let config = req.config.as_ref().map(map_llm_config).unwrap_or_default();
+        // 从客户端配置开始，然后用 daemon 默认值覆盖未设置的字段
+        let mut config = req.config.as_ref().map(map_llm_config).unwrap_or_default();
+        if config.extra.is_empty() {
+            config.extra = self.default_llm_config.extra.clone();
+        }
+        // 客户端未传的字段用 daemon 默认值
+        if config.model == LlmConfig::default().model {
+            config.model = self.default_llm_config.model.clone();
+        }
+        if (config.temperature - LlmConfig::default().temperature).abs() < f64::EPSILON {
+            config.temperature = self.default_llm_config.temperature;
+        }
+        if config.max_tokens == LlmConfig::default().max_tokens {
+            config.max_tokens = self.default_llm_config.max_tokens;
+        }
         let session = self
             .session_mgr
             .create(Path::new(&req.project_path), config)
@@ -227,7 +257,7 @@ impl CoderDaemon for CoderDaemonService {
                         let sid = session_id.clone();
                         let pq = pending_queries.clone();
 
-                            running_sessions.push(session_id.clone());
+                        running_sessions.push(session_id.clone());
 
                         let sid2 = sid.clone();
                         tokio::spawn(async move {
@@ -334,6 +364,7 @@ impl CoderDaemon for CoderDaemonService {
                         match session_mgr.get(sid) {
                             Ok(s) if s.status == SessionStatus::Running => {
                                 session_mgr.cancel_agent(sid);
+                                running_sessions.retain(|id| id != sid);
                             }
                             _ => {
                                 // 不存在或非 Running 状态 → 静默忽略
@@ -353,7 +384,10 @@ impl CoderDaemon for CoderDaemonService {
                 session_mgr.cancel_agent(sid);
             }
             if !running_sessions.is_empty() {
-                tracing::info!("[DAEMON] client disconnected, cancelled {} sessions", running_sessions.len());
+                tracing::info!(
+                    "[DAEMON] client disconnected, cancelled {} sessions",
+                    running_sessions.len()
+                );
             }
         });
 
@@ -569,6 +603,36 @@ fn agent_event_to_server_message(event: AgentEvent, session_id: &str) -> proto::
                 },
             )),
         },
+        AgentEvent::UsageInfo {
+            input_tokens,
+            output_tokens,
+            tool_calls,
+        } => proto::ServerMessage {
+            payload: Some(proto::server_message::Payload::UsageInfo(
+                proto::UsageInfo {
+                    input_tokens,
+                    output_tokens,
+                    tool_calls,
+                    session_id: sid,
+                },
+            )),
+        },
+        AgentEvent::ThinkingBlock(block) => {
+            let thinking = block.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
+            let signature = block
+                .get("signature")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            proto::ServerMessage {
+                payload: Some(proto::server_message::Payload::ThinkingBlock(
+                    proto::ThinkingBlock {
+                        thinking: thinking.to_string(),
+                        signature: signature.to_string(),
+                        session_id: sid,
+                    },
+                )),
+            }
+        }
         AgentEvent::StatusUpdate(message) => proto::ServerMessage {
             payload: Some(proto::server_message::Payload::StatusUpdate(
                 proto::StatusUpdate {

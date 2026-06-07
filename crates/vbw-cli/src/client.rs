@@ -88,10 +88,7 @@ impl ChatHandle {
         };
         let tx = self.request_tx.clone();
         tokio::spawn(async move {
-            match tx.send(msg).await {
-                Ok(_) => eprintln!("[CLI] send_input: OK"),
-                Err(e) => eprintln!("[CLI] send_input: FAILED (receiver dropped): {:?}", e),
-            }
+            let _ = tx.send(msg).await;
         });
         // Return a leaked string — the caller uses it immediately for the ack cycle
         Box::leak(rid.into_boxed_str())

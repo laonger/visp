@@ -11,25 +11,25 @@ use ratatui::{
 use crate::app::{AppState, LineType, MessageCache, pad_to_width};
 
 // #1A12E
-const COLOR_BG:Color = Color::from_u32(0x001A1A2E);
+const COLOR_BG: Color = Color::from_u32(0x001A1A2E);
 
 // #111111
-const COLOR_INPUT_BG:Color = Color::from_u32(0x00111111);
-const COLOR_INPUT_BLOCK_BORDER_FG:Color = Color::DarkGray;
-const COLOR_INPUT_NOTICE_FG:Color = Color::DarkGray;
+const COLOR_INPUT_BG: Color = Color::from_u32(0x00111111);
+const COLOR_INPUT_BLOCK_BORDER_FG: Color = Color::DarkGray;
+const COLOR_INPUT_NOTICE_FG: Color = Color::DarkGray;
 
-const COLOR_CONFIRM_FG:Color = Color::Yellow;
+const COLOR_CONFIRM_FG: Color = Color::Yellow;
 // #222222
-const COLOR_CONFIRM_FONT_BG:Color = Color::from_u32(0x00222222);
-const COLOR_TOOL_RESULT_BG:Color = Color::from_u32(0x00222222);
-const COLOR_CONFIRM_BLOCK_BG:Color = Color::DarkGray;
+const COLOR_CONFIRM_FONT_BG: Color = Color::from_u32(0x00222222);
+const COLOR_TOOL_RESULT_BG: Color = Color::from_u32(0x00222222);
+const COLOR_CONFIRM_BLOCK_BG: Color = Color::DarkGray;
 
 // #FFFFFF
-const COLOR_ASSISTANT_FG:Color = Color::White;
+const COLOR_ASSISTANT_FG: Color = Color::White;
 // #1A3A5E
-const COLOR_USER_BG:Color = Color::from_u32(0x001A3A5E);
+const COLOR_USER_BG: Color = Color::from_u32(0x001A3A5E);
 // #222A3E
-const COLOR_ASSISTANT_BG:Color = Color::from_u32(0x00222A3E);
+const COLOR_ASSISTANT_BG: Color = Color::from_u32(0x00222A3E);
 
 // #0D0D17
 const COLOR_SHADOW: Color = Color::from_u32(0x000D0D17);
@@ -68,15 +68,15 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
         .constraints(if app.confirm.is_some() {
             vec![
                 Constraint::Length(1),
-                Constraint::Min(2), // input area
-                Constraint::Length(1),                 // status area
-                Constraint::Length(1),                 // status area
+                Constraint::Min(2),    // input area
+                Constraint::Length(1), // status area
+                Constraint::Length(1), // status area
             ]
         } else {
             vec![
-                Constraint::Min(2), // input area
-                Constraint::Length(1),                 // status area
-                Constraint::Length(1),                 // status area
+                Constraint::Min(2),    // input area
+                Constraint::Length(1), // status area
+                Constraint::Length(1), // status area
             ]
         })
         .split(bottom_area);
@@ -98,8 +98,8 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
 /// 消息块的统一布局参数。所有消息类型共用同一套渲染流程，差异由此数据驱动。
 #[derive(Copy, Clone)]
 struct BlockStyle {
-    margin_vertical: u16,    // 垂直两端留白（字符数）
-    margin_horizontal: u16,  // 水平两端留白（字符数）
+    margin_vertical: u16,   // 垂直两端留白（字符数）
+    margin_horizontal: u16, // 水平两端留白（字符数）
     bg_fill: Option<Color>, // 底色；None → bottom_pad 画分隔线，Some → 画底色
     shadow: bool,           // 是否绘制右侧+底部 drop shadow
     bottom_pad: u16,        // 内容下方行数（底色或分隔线）
@@ -112,6 +112,20 @@ impl BlockStyle {
     }
 }
 
+const THINKING_STYLE: BlockStyle = BlockStyle {
+    margin_vertical: 1,
+    margin_horizontal: 1,
+    bg_fill: None,
+    shadow: false,
+    bottom_pad: 1,
+};
+const USAGE_STYLE: BlockStyle = BlockStyle {
+    margin_vertical: 0,
+    margin_horizontal: 1,
+    bg_fill: Some(COLOR_TOOL_RESULT_BG),
+    shadow: false,
+    bottom_pad: 1,
+};
 // 四种消息类型的样式常量
 const USER_STYLE: BlockStyle = BlockStyle {
     margin_vertical: 1,
@@ -130,16 +144,16 @@ const ASSISTANT_STYLE: BlockStyle = BlockStyle {
 const TOOL_STYLE: BlockStyle = BlockStyle {
     margin_vertical: 1,
     margin_horizontal: 1,
-    bg_fill: None,
+    bg_fill: Some(COLOR_TOOL_RESULT_BG),
     shadow: true,
-    bottom_pad: 1,
+    bottom_pad: 0,
 };
 const TOOL_RESULT_STYLE: BlockStyle = BlockStyle {
     margin_vertical: 1,
     margin_horizontal: 1,
     bg_fill: Some(COLOR_TOOL_RESULT_BG),
     shadow: true,
-    bottom_pad: 2,
+    bottom_pad: 0,
 };
 // 流式文本使用 ASSISTANT_STYLE
 
@@ -240,18 +254,12 @@ fn render_block(
     // 2) 底色填充（覆盖顶部留白 + 内容区域+底部留白）
     if let Some(bg) = style.bg_fill {
         let buf = f.buffer_mut();
-        let end_x = (
-            area.x + content_w
-        ).min(buf.area().right());
+        let end_x = (area.x + content_w).min(buf.area().right());
         //let fill_end = (rel_y + 1 + style.margin_vertical + line_count).min(buf.area().bottom());
         // TODO buf.area().bottom() 可能不对，要考虑输入框的padding
-        let fill_end = (
-            rel_y
-            + style.margin_vertical
-            + line_count
-            + style.margin_vertical
-        ).min(buf.area().bottom());
-        for row in (rel_y )..fill_end {
+        let fill_end = (rel_y + style.margin_vertical + line_count + style.margin_vertical)
+            .min(buf.area().bottom());
+        for row in (rel_y)..fill_end {
             for x in area.x..end_x {
                 buf[(x, row)].set_bg(bg);
             }
@@ -344,7 +352,9 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
             let style = match m.line_type {
                 LineType::User => USER_STYLE,
                 LineType::Assistant => ASSISTANT_STYLE,
+                LineType::Thinking => THINKING_STYLE,
                 LineType::ToolResult => TOOL_RESULT_STYLE,
+                LineType::Usage => USAGE_STYLE,
                 _ => TOOL_STYLE,
             };
             app.message_caches
@@ -386,7 +396,9 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
         let style = match msg.line_type {
             LineType::User => USER_STYLE,
             LineType::Assistant => ASSISTANT_STYLE,
+            LineType::Thinking => THINKING_STYLE,
             LineType::ToolResult => TOOL_RESULT_STYLE,
+            LineType::Usage => USAGE_STYLE,
             _ => TOOL_STYLE,
         };
         if let Some(cache) = app.message_caches.iter().find(|c| c.msg_id == msg.id) {
@@ -408,9 +420,8 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
             let style = ASSISTANT_STYLE;
             let content_w_adj = content_w.saturating_sub(style.margin_horizontal * 2);
             let mut text_lines: Vec<Line> = Vec::new();
-            let text_style = Style::default()
-                .fg(COLOR_ASSISTANT_FG);
-                //.bg(COLOR_ASSISTANT_BG);
+            let text_style = Style::default().fg(COLOR_ASSISTANT_FG);
+            //.bg(COLOR_ASSISTANT_BG);
             for line in &lines {
                 text_lines.push(Line::styled(
                     pad_to_width(line, content_w_adj as usize),

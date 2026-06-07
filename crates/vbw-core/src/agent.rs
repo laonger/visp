@@ -27,6 +27,14 @@ use tokio_util::sync::CancellationToken;
 pub enum AgentEvent {
     /// 文本增量
     TextDelta(String),
+    /// 思考块（如 DeepSeek thinking mode）
+    ThinkingBlock(serde_json::Value),
+    /// token 用量及工具调用统计
+    UsageInfo {
+        input_tokens: u32,
+        output_tokens: u32,
+        tool_calls: u32,
+    },
     /// 工具调用请求
     ToolCallRequest {
         call_id: String,
@@ -167,6 +175,7 @@ pub async fn run_agent_loop(
     }
     ctx.history.push(user_message);
 
+    let mut total_tool_calls: u32 = 0;
     for _ in 0..agent_config.max_iterations {
         // a. Cancellation check
         if ctx.cancel_token.is_cancelled() {
@@ -230,6 +239,8 @@ pub async fn run_agent_loop(
         let mut text_buffer = String::new();
         let mut tool_calls: Vec<ToolCallRequest> = Vec::new();
         let mut thinking_blocks: Vec<serde_json::Value> = Vec::new();
+        let mut input_tokens: u32 = 0;
+        let mut output_tokens: u32 = 0;
 
         let mut pin_stream = Box::pin(stream);
         while let Some(event) = pin_stream.next().await {
@@ -239,7 +250,16 @@ pub async fn run_agent_loop(
                     try_send!(AgentEvent::TextDelta(delta));
                 }
                 Ok(ChatEvent::ThinkingBlock(block)) => {
-                    thinking_blocks.push(block);
+                    thinking_blocks.push(block.clone());
+                    try_send!(AgentEvent::ThinkingBlock(block));
+                }
+                Ok(ChatEvent::UsageInfo {
+                    input_tokens: it,
+                    output_tokens: ot,
+                    ..
+                }) => {
+                    input_tokens = it;
+                    output_tokens = ot;
                 }
                 Ok(ChatEvent::ToolCall {
                     id,
@@ -269,7 +289,11 @@ pub async fn run_agent_loop(
                 content: text_buffer,
                 tool_call_id: None,
                 tool_calls: None,
-                extra_blocks: None,
+                extra_blocks: if thinking_blocks.is_empty() {
+                    None
+                } else {
+                    Some(thinking_blocks.clone())
+                },
             };
             ctx.history.push(assistant_msg.clone());
             if let Err(e) = session_mgr.append_message(&ctx.session_id, assistant_msg) {
@@ -280,12 +304,19 @@ pub async fn run_agent_loop(
                 let _ = session_mgr.finish_loop(&ctx.session_id, SessionStatus::Error);
                 return;
             }
+            // 发送用量统计后再发送 Done
+            try_send!(AgentEvent::UsageInfo {
+                input_tokens,
+                output_tokens,
+                tool_calls: total_tool_calls,
+            });
             try_send!(AgentEvent::Done);
             let _ = session_mgr.finish_loop(&ctx.session_id, SessionStatus::Completed);
             return;
         }
 
         // Has tool calls: append assistant message with tool_calls
+        total_tool_calls += tool_calls.len() as u32;
         let assistant_msg = Message {
             role: Role::Assistant,
             content: text_buffer,

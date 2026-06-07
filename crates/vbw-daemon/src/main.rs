@@ -97,6 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rule_engine,
         session_mgr,
         agent_config,
+        config.llm,
     );
 
     // 9. Start gRPC server

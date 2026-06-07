@@ -51,6 +51,16 @@ pub fn build_anthropic_request(
         request["tools"] = serde_json::Value::Array(anthropic_tools);
     }
 
+    // 从 extra 配置读取 thinking_budget_tokens 启用 thinking 模式
+    if let Some(budget_str) = config.extra.get("thinking_budget_tokens")
+        && let Ok(budget) = budget_str.parse::<u32>()
+    {
+        request["thinking"] = serde_json::json!({
+            "type": "enabled",
+            "budget_tokens": budget,
+        });
+    }
+
     // Anthropic API 流式请求
     request["stream"] = serde_json::Value::Bool(true);
 
@@ -91,7 +101,7 @@ fn build_anthropic_messages(messages: &[&Message]) -> Vec<serde_json::Value> {
                 && last["role"] == "user"
                 && last["content"]
                     .as_array()
-                    .map_or(false, |a| a.iter().all(|b| b["type"] == "tool_result"))
+                    .is_some_and(|a| a.iter().all(|b| b["type"] == "tool_result"))
             {
                 last["content"].as_array_mut().unwrap().push(tool_result);
             } else {
@@ -183,6 +193,7 @@ fn build_anthropic_messages(messages: &[&Message]) -> Vec<serde_json::Value> {
 pub(crate) enum ParsedEvent {
     Emit(ChatEvent),
     /// 工具输入增量: (index, tool_id, tool_name, partial_input_json)
+    #[allow(dead_code)]
     ToolInputDelta {
         index: u64,
         id: String,
@@ -199,6 +210,11 @@ pub(crate) enum ParsedEvent {
         partial: String,
         signature: String,
     },
+    /// token 用量信息
+    Usage {
+        input_tokens: u32,
+        output_tokens: u32,
+    },
     Skip,
 }
 
@@ -211,8 +227,27 @@ pub(crate) enum ParsedEvent {
 /// - `content_block_stop` → `ToolBlockStop { index }`
 /// - `message_stop` → `Emit(ChatEvent::Done)`
 /// - 其他事件 → `Skip`
-pub fn parse_anthropic_event(event_name: &str, data: &str) -> Result<ParsedEvent, LlmError> {
+pub(crate) fn parse_anthropic_event(event_name: &str, data: &str) -> Result<ParsedEvent, LlmError> {
     match event_name {
+        "message_start" => {
+            let v: serde_json::Value = serde_json::from_str(data)
+                .map_err(|e| LlmError::Stream(format!("parse message_start: {e}")))?;
+            let input_tokens = v["message"]["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32;
+            let output_tokens = v["message"]["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
+            Ok(ParsedEvent::Usage {
+                input_tokens,
+                output_tokens,
+            })
+        }
+        "message_delta" => {
+            let v: serde_json::Value = serde_json::from_str(data)
+                .map_err(|e| LlmError::Stream(format!("parse message_delta: {e}")))?;
+            let output_tokens = v["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
+            Ok(ParsedEvent::Usage {
+                input_tokens: 0,
+                output_tokens,
+            })
+        }
         "message_stop" => Ok(ParsedEvent::Emit(ChatEvent::Done)),
         "content_block_delta" => {
             let v: serde_json::Value = serde_json::from_str(data)
@@ -234,6 +269,14 @@ pub fn parse_anthropic_event(event_name: &str, data: &str) -> Result<ParsedEvent
                         id: String::new(),
                         name: String::new(),
                         partial,
+                    })
+                }
+                "thinking_delta" => {
+                    let partial = v["delta"]["thinking"].as_str().unwrap_or("").to_string();
+                    Ok(ParsedEvent::ThinkingDelta {
+                        index,
+                        partial,
+                        signature: String::new(),
                     })
                 }
                 _ => Ok(ParsedEvent::Skip),
@@ -273,39 +316,6 @@ pub fn parse_anthropic_event(event_name: &str, data: &str) -> Result<ParsedEvent
                         index,
                         partial: thinking,
                         signature,
-                    })
-                }
-                _ => Ok(ParsedEvent::Skip),
-            }
-        }
-        "content_block_delta" => {
-            let v: serde_json::Value = serde_json::from_str(data)
-                .map_err(|e| LlmError::Stream(format!("parse content_block_delta: {e}")))?;
-            let delta_type = v["delta"]["type"].as_str().unwrap_or("");
-            let index = v["index"].as_u64().unwrap_or(0);
-            match delta_type {
-                "text_delta" => {
-                    let text = v["delta"]["text"].as_str().unwrap_or("").to_string();
-                    Ok(ParsedEvent::Emit(ChatEvent::TextDelta(text)))
-                }
-                "input_json_delta" => {
-                    let partial = v["delta"]["partial_json"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string();
-                    Ok(ParsedEvent::ToolInputDelta {
-                        index,
-                        id: String::new(),
-                        name: String::new(),
-                        partial,
-                    })
-                }
-                "thinking_delta" => {
-                    let partial = v["delta"]["thinking"].as_str().unwrap_or("").to_string();
-                    Ok(ParsedEvent::ThinkingDelta {
-                        index,
-                        partial,
-                        signature: String::new(),
                     })
                 }
                 _ => Ok(ParsedEvent::Skip),
@@ -410,137 +420,206 @@ fn byte_stream_to_chat_events(
         name: String,
         input: String,
     }
-    let tools: HashMap<String, ToolAcc> = HashMap::new();
-    let stream = Box::pin(byte_stream);
-    let buf = String::new();
 
-    let event_stream = stream::unfold(
-        (stream, buf, tools),
-        |(mut stream, mut buf, mut tools)| async move {
-            loop {
-                if let Some(pos) = buf.find("\n\n") {
-                    let chunk = buf[..pos].to_string();
-                    buf = buf[pos + 2..].to_string();
+    struct StreamState {
+        stream: Pin<Box<dyn Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send>>,
+        buf: String,
+        tools: HashMap<String, ToolAcc>,
+        input_tokens: u32,
+        output_tokens: u32,
+        /// 设为 true 后，下次 unfold 迭代发射 UsageInfo，再下次发射 Done
+        done_pending: bool,
+        /// UsageInfo 已发射，下次返回 Done
+        usage_emitted: bool,
+    }
 
-                    let sse_events = crate::streaming::parse_sse_events(&chunk);
-                    for sse in sse_events {
-                        let event_name = sse.event.as_deref().unwrap_or("");
-                        let data = sse.data.as_deref().unwrap_or("");
-                        match parse_anthropic_event(event_name, data) {
-                            Ok(ParsedEvent::Emit(chat_event)) => {
-                                return Some((Ok(chat_event), (stream, buf, tools)));
+    let state = StreamState {
+        stream: Box::pin(byte_stream),
+        buf: String::new(),
+        tools: HashMap::new(),
+        input_tokens: 0,
+        output_tokens: 0,
+        done_pending: false,
+        usage_emitted: false,
+    };
+
+    let event_stream = stream::unfold(state, |mut state| async move {
+        // 如果已经处理完 SSE 但还没发射 UsageInfo/Done
+        if state.done_pending && !state.usage_emitted {
+            state.usage_emitted = true;
+            return Some((
+                Ok(ChatEvent::UsageInfo {
+                    input_tokens: state.input_tokens,
+                    output_tokens: state.output_tokens,
+                    tool_calls: 0,
+                }),
+                state,
+            ));
+        }
+        if state.usage_emitted {
+            state.done_pending = false;
+            state.usage_emitted = false;
+            return Some((Ok(ChatEvent::Done), state));
+        }
+
+        loop {
+            if let Some(pos) = state.buf.find("\n\n") {
+                let chunk = state.buf[..pos].to_string();
+                state.buf = state.buf[pos + 2..].to_string();
+
+                let sse_events = crate::streaming::parse_sse_events(&chunk);
+                for sse in sse_events {
+                    let event_name = sse.event.as_deref().unwrap_or("");
+                    let data = sse.data.as_deref().unwrap_or("");
+                    match parse_anthropic_event(event_name, data) {
+                        Ok(ParsedEvent::Emit(chat_event)) => {
+                            // message_stop → 先标记 pending，返回后发 UsageInfo
+                            if matches!(chat_event, ChatEvent::Done) {
+                                state.done_pending = true;
+                                state.usage_emitted = true;
+                                return Some((
+                                    Ok(ChatEvent::UsageInfo {
+                                        input_tokens: state.input_tokens,
+                                        output_tokens: state.output_tokens,
+                                        tool_calls: 0,
+                                    }),
+                                    state,
+                                ));
                             }
-                            Ok(ParsedEvent::ThinkingDelta {
-                                index,
-                                partial,
-                                signature,
-                            }) => {
-                                let key = format!("thinking_{}", index);
-                                let entry = tools.entry(key).or_insert_with(|| ToolAcc {
-                                    name: String::new(),
-                                    input: String::new(),
+                            return Some((Ok(chat_event), state));
+                        }
+                        Ok(ParsedEvent::Usage {
+                            input_tokens,
+                            output_tokens,
+                        }) => {
+                            // ×tracing not available in this crate
+                            if input_tokens > 0 {
+                                state.input_tokens = input_tokens;
+                            }
+                            if output_tokens > 0 {
+                                state.output_tokens = output_tokens;
+                            }
+                        }
+                        Ok(ParsedEvent::ThinkingDelta {
+                            index,
+                            partial,
+                            signature,
+                        }) => {
+                            let key = format!("thinking_{}", index);
+                            let entry = state.tools.entry(key).or_insert_with(|| ToolAcc {
+                                name: String::new(),
+                                input: String::new(),
+                            });
+                            if !signature.is_empty() {
+                                entry.name = signature;
+                            }
+                            entry.input.push_str(&partial);
+                        }
+                        Ok(ParsedEvent::ToolInputDelta {
+                            index,
+                            id: _,
+                            name,
+                            partial,
+                        }) => {
+                            let key = index.to_string();
+                            if !name.is_empty() {
+                                state.tools.insert(
+                                    key,
+                                    ToolAcc {
+                                        name,
+                                        input: partial,
+                                    },
+                                );
+                            } else if let Some(acc) = state.tools.get_mut(&key) {
+                                acc.input.push_str(&partial);
+                            }
+                        }
+                        Ok(ParsedEvent::BlockStop { index }) => {
+                            let tkey = format!("thinking_{}", index);
+                            if let Some(acc) = state.tools.remove(&tkey) {
+                                let block = serde_json::json!({
+                                    "type": "thinking",
+                                    "thinking": acc.input,
+                                    "signature": acc.name,
                                 });
-                                if !signature.is_empty() {
-                                    entry.name = signature;
-                                }
-                                entry.input.push_str(&partial);
+                                return Some((Ok(ChatEvent::ThinkingBlock(block)), state));
                             }
-                            Ok(ParsedEvent::Emit(chat_event)) => {
-                                return Some((Ok(chat_event), (stream, buf, tools)));
-                            }
-                            Ok(ParsedEvent::ToolInputDelta {
-                                index,
-                                id,
-                                name,
-                                partial,
-                            }) => {
-                                let key = index.to_string();
-                                if !name.is_empty() {
-                                    // content_block_start: new tool
-                                    tools.insert(
-                                        key,
-                                        ToolAcc {
-                                            name,
-                                            input: partial,
-                                        },
-                                    );
-                                } else if let Some(acc) = tools.get_mut(&key) {
-                                    // input_json_delta: append
-                                    acc.input.push_str(&partial);
-                                }
-                            }
-                            Ok(ParsedEvent::BlockStop { index }) => {
-                                // flush thinking block
-                                let tkey = format!("thinking_{}", index);
-                                if let Some(acc) = tools.remove(&tkey) {
-                                    let block = serde_json::json!({
-                                        "type": "thinking",
-                                        "thinking": acc.input,
-                                        "signature": acc.name,
-                                    });
-                                    return Some((
-                                        Ok(ChatEvent::ThinkingBlock(block)),
-                                        (stream, buf, tools),
-                                    ));
-                                }
-                                // flush tool block
-                                let key = index.to_string();
-                                if let Some(acc) = tools.remove(&key) {
-                                    let evt = ChatEvent::ToolCall {
-                                        id: format!("tool_call_{}", index),
-                                        name: acc.name,
-                                        arguments: acc.input,
-                                    };
-                                    return Some((Ok(evt), (stream, buf, tools)));
-                                }
-                            }
-                            Ok(ParsedEvent::Skip) => continue,
-                            Err(e) => {
-                                return Some((Err(e), (stream, buf, tools)));
+                            let key = index.to_string();
+                            if let Some(acc) = state.tools.remove(&key) {
+                                let evt = ChatEvent::ToolCall {
+                                    id: format!("tool_call_{}", index),
+                                    name: acc.name,
+                                    arguments: acc.input,
+                                };
+                                return Some((Ok(evt), state));
                             }
                         }
+                        Ok(ParsedEvent::Skip) => continue,
+                        Err(e) => {
+                            return Some((Err(e), state));
+                        }
                     }
-                    continue;
                 }
+                continue;
+            }
 
-                match stream.next().await {
-                    Some(Ok(bytes)) => {
-                        if let Ok(s) = std::str::from_utf8(&bytes) {
-                            buf.push_str(s);
-                        } else {
-                            return Some((
-                                Err(LlmError::Stream("Invalid UTF-8".into())),
-                                (stream, buf, tools),
-                            ));
-                        }
+            match state.stream.next().await {
+                Some(Ok(bytes)) => {
+                    if let Ok(s) = std::str::from_utf8(&bytes) {
+                        state.buf.push_str(s);
+                    } else {
+                        return Some((Err(LlmError::Stream("Invalid UTF-8".into())), state));
                     }
-                    Some(Err(e)) => {
-                        return Some((Err(LlmError::Stream(e.to_string())), (stream, buf, tools)));
-                    }
-                    None => {
-                        // 流结束，处理剩余 buffer
-                        if !buf.is_empty() {
-                            let sse_events = crate::streaming::parse_sse_events(&buf);
-                            for sse in sse_events {
-                                let event_name = sse.event.as_deref().unwrap_or("");
-                                let data = sse.data.as_deref().unwrap_or("");
-                                match parse_anthropic_event(event_name, data) {
-                                    Ok(ParsedEvent::Emit(chat_event)) => {
-                                        return Some((Ok(chat_event), (stream, buf, tools)));
+                }
+                Some(Err(e)) => {
+                    return Some((Err(LlmError::Stream(e.to_string())), state));
+                }
+                None => {
+                    if !state.buf.is_empty() {
+                        let sse_events = crate::streaming::parse_sse_events(&state.buf);
+                        for sse in sse_events {
+                            let event_name = sse.event.as_deref().unwrap_or("");
+                            let data = sse.data.as_deref().unwrap_or("");
+                            match parse_anthropic_event(event_name, data) {
+                                Ok(ParsedEvent::Emit(chat_event)) => {
+                                    if matches!(chat_event, ChatEvent::Done) {
+                                        state.done_pending = true;
+                                        state.usage_emitted = true;
+                                        return Some((
+                                            Ok(ChatEvent::UsageInfo {
+                                                input_tokens: state.input_tokens,
+                                                output_tokens: state.output_tokens,
+                                                tool_calls: 0,
+                                            }),
+                                            state,
+                                        ));
                                     }
-                                    Ok(_) => continue,
-                                    Err(e) => {
-                                        return Some((Err(e), (stream, buf, tools)));
+                                    return Some((Ok(chat_event), state));
+                                }
+                                Ok(ParsedEvent::Usage {
+                                    input_tokens,
+                                    output_tokens,
+                                }) => {
+                                    if input_tokens > 0 {
+                                        state.input_tokens = input_tokens;
                                     }
+                                    if output_tokens > 0 {
+                                        state.output_tokens = output_tokens;
+                                    }
+                                    continue;
+                                }
+                                Ok(_) => continue,
+                                Err(e) => {
+                                    return Some((Err(e), state));
                                 }
                             }
                         }
-                        return None;
                     }
+                    return None;
                 }
             }
-        },
-    );
+        }
+    });
 
     Box::pin(event_stream)
 }
@@ -605,6 +684,38 @@ mod tests {
         match result {
             ParsedEvent::Emit(ChatEvent::Done) => {}
             _ => panic!("expected Done, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_parse_message_start_returns_usage() {
+        let data = r#"{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":105,"output_tokens":0}}}"#;
+        let result = parse_anthropic_event("message_start", data).unwrap();
+        match result {
+            ParsedEvent::Usage {
+                input_tokens,
+                output_tokens,
+            } => {
+                assert_eq!(input_tokens, 105);
+                assert_eq!(output_tokens, 0);
+            }
+            _ => panic!("expected Usage, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_parse_message_delta_returns_usage() {
+        let data = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":125}}"#;
+        let result = parse_anthropic_event("message_delta", data).unwrap();
+        match result {
+            ParsedEvent::Usage {
+                input_tokens,
+                output_tokens,
+            } => {
+                assert_eq!(input_tokens, 0);
+                assert_eq!(output_tokens, 125);
+            }
+            _ => panic!("expected Usage, got {:?}", result),
         }
     }
 

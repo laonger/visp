@@ -9,10 +9,12 @@ use ratatui::{
 pub enum LineType {
     User,
     Assistant,
+    Thinking,
     ToolCall,
     ToolResult,
     Error,
     Status,
+    Usage,
 }
 
 #[derive(Debug, Clone)]
@@ -43,10 +45,12 @@ impl MessageCache {
         let fg = match msg.line_type {
             LineType::User => Color::Cyan,
             LineType::Assistant => Color::White,
+            LineType::Thinking => Color::Green,
             LineType::ToolCall => Color::Yellow,
             LineType::ToolResult => Color::DarkGray,
             LineType::Error => Color::Red,
             LineType::Status => Color::Gray,
+            LineType::Usage => Color::DarkGray,
         };
         // 背景色由 ui.rs 的 BlockStyle::bg_fill 统一处理
         let style = Style::default().fg(fg);
@@ -54,21 +58,30 @@ impl MessageCache {
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         let wrapped = wrap_text(&msg.content, width);
-        let display_lines = if msg.line_type == LineType::ToolResult && wrapped.len() > 5 {
-            let mut truncated: Vec<String> = wrapped.into_iter().take(4).collect();
+        let display_lines = if msg.line_type == LineType::ToolCall && wrapped.len() > 5 {
+            let mut truncated: Vec<String> = wrapped.into_iter().take(5).collect();
             truncated.push(format!("... [truncated, {}B]", msg.content.len()));
             truncated
         } else {
             wrapped
         };
 
-        for dl in display_lines {
+        for (i, dl) in display_lines.iter().enumerate() {
             let content = if dl.is_empty() {
                 " ".repeat(width as usize)
             } else {
-                pad_to_width(&dl, width as usize)
+                pad_to_width(dl, width as usize)
             };
-            lines.push(Line::styled(content, style));
+            // assistant 中以 [ 开头的行（时间戳+用量）用灰色
+            // tool call 中首行（call）用黄色，后续行（result）用灰色
+            let line_style = if (msg.line_type == LineType::Assistant && dl.starts_with('['))
+                || (msg.line_type == LineType::ToolCall && i > 0)
+            {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                style
+            };
+            lines.push(Line::styled(content, line_style));
         }
 
         let line_count = lines.len() as u16;
@@ -153,6 +166,7 @@ pub struct AppState {
     pub model: String,
     pub session_id: String,
     pub should_quit: bool,
+    pub pending_usage: Option<(u32, u32, u32)>,
 }
 
 impl AppState {
@@ -179,6 +193,7 @@ impl AppState {
             model,
             session_id,
             should_quit: false,
+            pending_usage: None,
         }
     }
 
@@ -207,22 +222,24 @@ impl AppState {
     }
 
     pub fn insert_tool_result(&mut self, call_id: &str, content: String) {
-        let insert_pos = self.messages.iter().rposition(|m| {
-            m.line_type == LineType::ToolCall && m.call_id.as_deref() == Some(call_id)
-        });
-        let id = self.next_message_id;
-        self.next_message_id += 1;
-        let msg = ChatLine {
-            id,
-            version: 0,
-            line_type: LineType::ToolResult,
-            content,
-            call_id: Some(call_id.to_string()),
-        };
-        if let Some(pos) = insert_pos {
-            self.messages.insert(pos + 1, msg);
+        if let Some(msg) = self
+            .messages
+            .iter_mut()
+            .find(|m| m.line_type == LineType::ToolCall && m.call_id.as_deref() == Some(call_id))
+        {
+            msg.content.push('\n');
+            msg.content.push_str(&content);
+            msg.version += 1;
         } else {
-            self.messages.push(msg);
+            let id = self.next_message_id;
+            self.next_message_id += 1;
+            self.messages.push(ChatLine {
+                id,
+                version: 0,
+                line_type: LineType::ToolCall,
+                content,
+                call_id: Some(call_id.to_string()),
+            });
         }
     }
 
@@ -423,17 +440,17 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_tool_result_truncation() {
+    fn test_cache_tool_call_truncation() {
         let msg = ChatLine {
             id: 0,
             version: 0,
-            line_type: LineType::ToolResult,
+            line_type: LineType::ToolCall,
             content: "line1\nline2\nline3\nline4\nline5\nline6\nline7".into(),
             call_id: None,
         };
         let cache = MessageCache::from_message(&msg, 80);
-        // 截断为 5 行内容（4 行 + 1 行 [...]），无底部阴影
-        assert_eq!(cache.line_count, 5);
+        // 截断为 6 行内容（5 行 + 1 行 [...]）
+        assert_eq!(cache.line_count, 6);
     }
 
     #[test]
@@ -457,16 +474,15 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_tool_result_after_matching_call() {
+    fn test_insert_tool_result_appends_to_matching_call() {
         let mut app = AppState::new("s".into(), "m".into());
         app.add_tool_line(LineType::ToolCall, "cmd1".into(), "id1");
         app.add_tool_line(LineType::ToolCall, "cmd2".into(), "id2");
         app.insert_tool_result("id1", "result1".into());
-        // 期望顺序: cmd1(id1), result1, cmd2(id2)
-        assert_eq!(app.messages[0].content, "cmd1");
-        assert_eq!(app.messages[1].line_type, LineType::ToolResult);
-        assert_eq!(app.messages[1].content, "result1");
-        assert_eq!(app.messages[2].content, "cmd2");
+        // result 追加到匹配的 cmd1 后面
+        assert_eq!(app.messages[0].content, "cmd1\nresult1");
+        assert_eq!(app.messages[1].content, "cmd2");
+        assert_eq!(app.messages[1].line_type, LineType::ToolCall);
     }
 
     #[test]
@@ -474,7 +490,8 @@ mod tests {
         let mut app = AppState::new("s".into(), "m".into());
         app.add_tool_line(LineType::ToolCall, "cmd".into(), "id1");
         app.insert_tool_result("nonexistent", "result".into());
-        // 没有匹配的 call_id，追加到末尾
+        // 没有匹配的 call_id，作为新的 ToolCall 追加到末尾
+        assert_eq!(app.messages.len(), 2);
         assert_eq!(app.messages[1].content, "result");
     }
 
@@ -485,10 +502,8 @@ mod tests {
         app.add_tool_line(LineType::ToolCall, "cmd2".into(), "b");
         app.insert_tool_result("b", "result2".into());
         app.insert_tool_result("a", "result1".into());
-        // cmd1(a), result1, cmd2(b), result2
-        assert_eq!(app.messages[0].content, "cmd1");
-        assert_eq!(app.messages[1].content, "result1");
-        assert_eq!(app.messages[2].content, "cmd2");
-        assert_eq!(app.messages[3].content, "result2");
+        // result 追加到各自的 call 后面
+        assert_eq!(app.messages[0].content, "cmd1\nresult1");
+        assert_eq!(app.messages[1].content, "cmd2\nresult2");
     }
 }

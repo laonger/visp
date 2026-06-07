@@ -21,6 +21,9 @@ struct Cli {
 
     #[arg(long)]
     temperature: Option<f64>,
+
+    #[arg(long)]
+    thinking_budget: Option<u32>,
 }
 
 #[tokio::main]
@@ -44,12 +47,16 @@ async fn main() {
         }
     }
 
-    let config = if cli.model.is_some() || cli.temperature.is_some() {
+    let mut extra = std::collections::HashMap::new();
+    if let Some(budget) = cli.thinking_budget {
+        extra.insert("thinking_budget_tokens".into(), budget.to_string());
+    }
+    let config = if cli.model.is_some() || cli.temperature.is_some() || !extra.is_empty() {
         Some(ProtoLlmConfig {
             model: cli.model.clone(),
             temperature: cli.temperature,
             max_tokens: None,
-            extra: Default::default(),
+            extra,
         })
     } else {
         None
