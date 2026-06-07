@@ -403,8 +403,25 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
         };
         if let Some(cache) = app.message_caches.iter().find(|c| c.msg_id == msg.id) {
             let h = style.total_height(cache.line_count);
-            if let Some((rel_y, _)) = viewport_intersect(y, h, scroll_y, visible, area.bottom()) {
-                render_block(f, area, style, &cache.lines, cache.line_count, rel_y);
+            if let Some((rel_y, visible_h)) =
+                viewport_intersect(y, h, scroll_y, visible, area.bottom())
+            {
+                // 计算被滚出屏幕上方的行数
+                let hidden_top = scroll_y.saturating_sub(y);
+                let remain = cache.line_count.saturating_sub(hidden_top);
+                let visible_lines = remain.min(visible_h);
+                if visible_lines > 0 {
+                    let start = hidden_top as usize;
+                    let end = (start + visible_lines as usize).min(cache.lines.len());
+                    render_block(
+                        f,
+                        area,
+                        style,
+                        &cache.lines[start..end],
+                        visible_lines,
+                        rel_y,
+                    );
+                }
             }
             y += h;
         }
@@ -415,20 +432,27 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
         let lines: Vec<String> = app.streaming_text.lines().map(|s| s.to_string()).collect();
         let line_count = lines.len() as u16;
         let h = ASSISTANT_STYLE.total_height(line_count);
-        // 是否在可是区域
-        if let Some((rel_y, _)) = viewport_intersect(y, h, scroll_y, visible, area.bottom()) {
-            let style = ASSISTANT_STYLE;
-            let content_w_adj = content_w.saturating_sub(style.margin_horizontal * 2);
-            let mut text_lines: Vec<Line> = Vec::new();
-            let text_style = Style::default().fg(COLOR_ASSISTANT_FG);
-            //.bg(COLOR_ASSISTANT_BG);
-            for line in &lines {
-                text_lines.push(Line::styled(
-                    pad_to_width(line, content_w_adj as usize),
-                    text_style,
-                ));
+        if let Some((rel_y, visible_h)) = viewport_intersect(y, h, scroll_y, visible, area.bottom())
+        {
+            let hidden_top = scroll_y.saturating_sub(y);
+            let remain = line_count.saturating_sub(hidden_top);
+            let visible_lines = remain.min(visible_h);
+            if visible_lines > 0 {
+                let style = ASSISTANT_STYLE;
+                let content_w_adj = content_w.saturating_sub(style.margin_horizontal * 2);
+                let mut text_lines: Vec<Line> = Vec::new();
+                let text_style = Style::default().fg(COLOR_ASSISTANT_FG);
+                for line in &lines[hidden_top as usize..] {
+                    if text_lines.len() >= visible_lines as usize {
+                        break;
+                    }
+                    text_lines.push(Line::styled(
+                        pad_to_width(line, content_w_adj as usize),
+                        text_style,
+                    ));
+                }
+                render_block(f, area, style, &text_lines, visible_lines, rel_y);
             }
-            render_block(f, area, style, &text_lines, line_count, rel_y);
         }
     }
 }
