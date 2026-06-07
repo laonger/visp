@@ -1,12 +1,26 @@
 use std::collections::HashSet;
 use std::error::Error;
+use std::path::Path;
 
-use tree_sitter::{Node, Parser as TsParser};
+use tree_sitter::{Language, Node, Parser as TsParser};
 
 use crate::graph::{Edge, EdgeKind, Symbol, SymbolKind};
 
+fn language_for_ext(ext: &str) -> Option<Language> {
+    match ext {
+        ".ts" | ".tsx" => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        ".rs" => Some(tree_sitter_rust::LANGUAGE.into()),
+        ".py" => Some(tree_sitter_python::LANGUAGE.into()),
+        ".c" | ".h" => Some(tree_sitter_c::LANGUAGE.into()),
+        ".cpp" | ".hpp" | ".cc" => Some(tree_sitter_cpp::LANGUAGE.into()),
+        ".go" => Some(tree_sitter_go::LANGUAGE.into()),
+        _ => None,
+    }
+}
+
 pub struct Parser {
     parser: TsParser,
+    current_lang: Option<Language>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -19,10 +33,10 @@ pub struct ParseResult {
 
 impl Parser {
     pub fn new() -> Result<Self, Box<dyn Error>> {
-        let mut parser = TsParser::new();
-        let lang = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
-        parser.set_language(&lang)?;
-        Ok(Self { parser })
+        Ok(Self {
+            parser: TsParser::new(),
+            current_lang: None,
+        })
     }
 
     pub fn parse_file(
@@ -30,6 +44,18 @@ impl Parser {
         file_path: &str,
         content: &str,
     ) -> Result<ParseResult, Box<dyn Error>> {
+        let ext = Path::new(file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!(".{e}"))
+            .unwrap_or_default();
+        let lang =
+            language_for_ext(&ext).ok_or_else(|| format!("unsupported file extension: {ext}"))?;
+        if self.current_lang.as_ref() != Some(&lang) {
+            self.parser.set_language(&lang)?;
+            self.current_lang = Some(lang);
+        }
+
         let tree = self
             .parser
             .parse(content, None)

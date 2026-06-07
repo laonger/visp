@@ -24,7 +24,18 @@ impl Default for CodeGraphConfig {
                 "dist".into(),
                 "build".into(),
             ],
-            supported_extensions: vec![".ts".into(), ".tsx".into()],
+            supported_extensions: vec![
+                ".ts".into(),
+                ".tsx".into(),
+                ".rs".into(),
+                ".py".into(),
+                ".c".into(),
+                ".h".into(),
+                ".cpp".into(),
+                ".hpp".into(),
+                ".cc".into(),
+                ".go".into(),
+            ],
         }
     }
 }
