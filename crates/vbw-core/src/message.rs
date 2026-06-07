@@ -33,6 +33,9 @@ pub struct Message {
     /// 额外的原始内容块（如 thinking），以 JSON Value 存储
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_blocks: Option<Vec<serde_json::Value>>,
+    /// 标记此消息不注入后续对话的 context window（用于 /init 等系统命令）
+    #[serde(default)]
+    pub skip_context: bool,
 }
 
 impl Message {
@@ -43,6 +46,7 @@ impl Message {
             tool_call_id: None,
             tool_calls: None,
             extra_blocks: None,
+            skip_context: false,
         }
     }
 
@@ -53,6 +57,7 @@ impl Message {
             tool_call_id: None,
             tool_calls: None,
             extra_blocks: None,
+            skip_context: false,
         }
     }
 
@@ -63,6 +68,7 @@ impl Message {
             tool_call_id: None,
             tool_calls: None,
             extra_blocks: None,
+            skip_context: false,
         }
     }
 
@@ -73,6 +79,7 @@ impl Message {
             tool_call_id: Some(call_id.into()),
             tool_calls: None,
             extra_blocks: None,
+            skip_context: false,
         }
     }
 }

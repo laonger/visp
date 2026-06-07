@@ -14,8 +14,7 @@ use crate::provider::LlmProvider;
 use crate::rules::RuleEngine;
 use crate::session::SessionManager;
 use crate::session::SessionStatus;
-use crate::tool::ToolContext;
-use crate::tool::ToolResult;
+use crate::tool::{ToolContext, ToolResult};
 use crate::tool_registry::ToolRegistry;
 
 use futures::StreamExt;
@@ -289,6 +288,7 @@ pub async fn run_agent_loop(
                 content: text_buffer,
                 tool_call_id: None,
                 tool_calls: None,
+                skip_context: false,
                 extra_blocks: if thinking_blocks.is_empty() {
                     None
                 } else {
@@ -322,7 +322,8 @@ pub async fn run_agent_loop(
             content: text_buffer,
             tool_call_id: None,
             tool_calls: Some(tool_calls.clone()),
-            extra_blocks: if thinking_blocks.is_empty() {
+            skip_context: false,
+                extra_blocks: if thinking_blocks.is_empty() {
                 None
             } else {
                 Some(thinking_blocks.clone())

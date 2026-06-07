@@ -398,6 +398,7 @@ mod tests {
             tool_call_id: None,
             tool_calls: None,
             extra_blocks: None,
+            skip_context: false,
         };
         manager.append_message(&session.id, msg.clone()).unwrap();
 
