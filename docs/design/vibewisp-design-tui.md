@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-用 ratatui 框架替换当前 `print!`/`readline` 的简单终端交互，提供分区化的、流式更新的 TUI 体验。
+用 ratatui 框架提供分区化的、流式更新的 TUI 体验，支持 markdown 渲染、代码语法高亮、工具调用可视化、token 用量统计。
 
 ## 2. 布局
 
@@ -12,179 +12,253 @@
 │                                                  │
 │  User: 请帮我看下项目                             │
 │  Assistant: 好的，让我先看看...                    │
-│  🔧 bash(ls)                                     │
-│  📄 [output]                                     │
+│  ┌─ [Tool] ────────────────────────────┐          │
+│  │  bash: "ls -a"                       │ ← 黄色  │
+│  │  Output: file1 file2                  │ ← 灰色  │
+│  └──────────────────────────────────────┘          │
 │  Assistant: 项目包含以下文件...                    │
+│  代码块：                                        │
+│  ┌─────────────────────────────────────────┐      │
+│  │ fn hello() { ← 语法高亮（syntect）       │      │
+│  │     println!("hi");                     │      │
+│  │ }                                        │      │
+│  └─────────────────────────────────────────┘      │
+│  [14:32:05 | Tokens: 105 in / 125 out | Tools: 2]│ ← 灰色
 │                                                  │
+├─────────────────────────────────────────────────┤ ← 分隔线 ─
+│  ❓ 是否允许执行: rm -rf? [y/N] _                 │ ← 确认区
 ├─────────────────────────────────────────────────┤
-│  ❓ 是否允许执行: rm -rf? [y/N] _                 │  ← 确认区（UserQuery 时显示）
+│  > 输入消息...                                   │ ← 输入区
 ├─────────────────────────────────────────────────┤
-│  > 输入消息...                                   │  ← 输入区
-├─────────────────────────────────────────────────┤
-│  Session: abc123  |  Model: deepseek-v4-flash    │  ← 状态栏
+│  Session: abc123  |  Model: deepseek-v4-flash    │ ← 状态栏
 └─────────────────────────────────────────────────┘
 ```
 
-三区 + 条件确认区：
-- **对话区**（上半屏，可滚动）：显示用户消息、助手回复、工具调用/结果/错误。使用 `List` widget 逐行渲染，每行可独立染色。
-- **确认区**（UserQuery 时显示）：提示文本 + 直接按键 y/n（不需要 Enter）
-- **输入区**（底部固定一行）：`tui-textarea` 组件，Enter 发送，↑↓ 浏览历史
-- **状态栏**（底部固定一行）：session id、模型名、运行状态（Idle/Generating）
+三区 + 条件确认区 + 分隔线：
+- **对话区**（上半屏，可滚动）：显示用户消息、助手回复、工具调用/结果/错误、token 用量
+- **分隔线**：对话区与底部区域之间的 `─` 线条
+- **确认区**（UserQuery 时显示）：提示文本 + 直接按键 y/n
+- **输入区**（底部）：`tui-textarea` 组件，Enter 发送，↑↓ 浏览历史
+- **状态栏**（底部一行）：session id、模型名、运行状态（Idle/Generating）
 
-## 3. 模块变更
+## 3. BlockStyle 统一渲染系统
 
-| 模块 | 变更 |
-|---|---|
-| `display.rs` | **删除** |
-| `repl.rs` | **删除** |
-| `event.rs` | **新增**，事件循环（tokio::select!）和事件分发 |
-| `app.rs` | **新增**，应用状态管理 |
-| `ui.rs` | **新增**，ratatui 渲染函数（ChatArea/InputArea/ConfirmBar/StatusBar） |
-| `main.rs` | 微小改动 |
-| `client.rs` | **不变** |
+所有消息块使用 `BlockStyle` 结构和统一的 `render_block()` 函数渲染。
 
-新增依赖：
-- `ratatui`：TUI 框架
-- `crossterm`：终端后端
-- `tui-textarea`：输入区组件
-
-## 4. 核心数据流
-
-```
-crossterm EventStream (keyboard, resize)
-    │
-    ▼
-ratatui App 事件循环 (tokio::select!):
-    ├─ crossterm event → handle_key(key) / handle_resize(size)
-    │   输入区文字编辑 / Enter发送 / 特殊命令
-    │   Resize 事件 → 重新计算三区布局
-
-    ├─ gRPC message → chat_handle.recv()
-    │   追加到对话历史 / 触发 UI 刷新
-    │   · Some(msg) → 更新 AppState → draw
-    │   · None → 状态栏显示 "Daemon disconnected" → should_quit = true → break
-    │   每个 TextDelta token 到达时立即 draw，帧率由 LLM 输出速度决定
-    │   ratatui 仅重绘变化区域，高频 token 场景性能可接受
-
-    └─ Ctrl+C / Ctrl+D → 键盘事件中处理（crossterm raw mode）
-```
-
-- 启动时启用 crossterm `raw mode`，Ctrl+C/Ctrl+D 统一在键盘事件中处理
-- Ctrl+C：若 Agent 运行中 → `send_cancel()`；空闲 → 忽略
-- Ctrl+D：任意状态 → 设置 `should_quit = true`，事件循环 break
-- 退出时调用 `disable_raw_mode()` + `terminal.clear()` 清理终端
-
-## 5. 组件设计
-
-### 5.1 对话区 (ChatArea)
-
-- 使用 `List` widget，逐行渲染，支持不同颜色
-- 数据结构：`Vec<ChatLine>`
+### 3.1 BlockStyle 定义
 
 ```rust
-enum LineType { User, Assistant, ToolCall, ToolResult, Error, Status }
-struct ChatLine { line_type: LineType, content: String }
+struct BlockStyle {
+    margin_vertical: u16,   // 垂直两端留白（字符数）
+    margin_horizontal: u16,  // 水平两端留白（字符数）
+    bg_fill: Option<Color>, // 底色；None → 无底色，Some → 填底色
+    shadow: bool,           // 是否绘制右侧+底部 drop shadow
+    bottom_pad: u16,        // 内容下方行数（底色或分隔线）
+}
 ```
 
-**每行颜色方案**：
+### 3.2 各消息类型样式
+
+| 类型 | margin_vertical | margin_horizontal | bg_fill | shadow | bottom_pad | 前景色 |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|
+| **User** | 1 | 1 | `#1A3A5E` | ✓ | 2 | Cyan |
+| **Assistant** | 1 | 1 | `#222A3E` | ✓ | 2 | White |
+| **Thinking** | 1 | 1 | None | ✗ | 1 | Green |
+| **ToolCall / ToolResult** | 1 | 1 | `#222222` | ✓ | 0 | Yellow / DarkGray |
+| **Usage (token 统计)** | 0 | 1 | `#222222` | ✗ | 1 | DarkGray |
+
+### 3.3 render_block 渲染流程
+
+```
+渲染顺序：
+  1. 底色填充（如有 bg_fill）
+  2. 内容 Paragraph（按 margin 缩进）
+  3. drop shadow（右侧列 + 底部行）
+```
+
+内容区域宽度：`content_w_adj = area_width - 1(阴影列) - margin_horizontal * 2`
+
+### 3.4 滚动与视窗裁剪
+
+使用 `viewport_intersect()` 判断 block 可见性。
+
+计算 `hidden_top = scroll_y - y`（被滚出屏幕上方的行数），从 `hidden_top` 位置开始取 lines slice，只渲染可见部分。解决滚动时 block 前后重叠的问题。
+
+## 4. 消息类型
+
+### 4.1 LineType 枚举
+
+```rust
+enum LineType {
+    User,        // 用户消息
+    Assistant,   // AI 回复（支持 markdown）
+    Thinking,    // 思考块（如 Anthropic 的 extended thinking）
+    ToolCall,    // 工具调用 + 结果（合并为同一 block）
+    Error,       // 错误消息
+    Status,      // 状态消息
+    Usage,       // token 用量统计（已废弃，并入 Assistant 末尾）
+}
+```
+
+### 4.2 工具调用显示
+
+调用行和结果行合并为同一个 `ToolCall` 消息块：
+- **首行**（调用行）：`tool_name: "args"`，**黄色**
+- **后续行**（结果行）：`Output: ...` 或 `Error: ...`，**灰色**
+- 超过 5 行时截断，显示 `[truncated, N bytes]`
+- 使用 `TOOL_RESULT_STYLE`（深色底色 `#222222`）
+
+### 4.3 Token 用量统计
+
+AI 回复完成后，在助理消息末尾追加一行统计：
+
+```
+[14:32:05 | Tokens: 105 in / 125 out | Tools: 2]
+```
+
+- 时间使用 `chrono::Local`（系统时区）
+- 文字灰色（`Color::DarkGray`）
+- 数据来源：Anthropic API `message_start.input_tokens` + `message_delta.output_tokens`
+- Agent 循环累加 `total_tool_calls`
+
+## 5. Markdown 渲染
+
+### 5.1 架构
+
+助理消息（`LineType::Assistant`）经过两阶段渲染：
+
+```
+原始 Markdown
+  ↓
+阶段 1: regex 提取代码块 → syntect 语法高亮 → 替换为 \x00CODEBLOCK_N\x00 标记
+  ↓
+阶段 2: ratatui-markdown 渲染（标题、列表、表格、粗体/斜体等）
+  ↓
+阶段 3: 标记替换 → syntect 高亮行嵌入最终输出
+```
+
+### 5.2 所用库
+
+| 库 | 用途 |
+|---|---|
+| `ratatui-markdown` | 通用 markdown 渲染（标题、列表、表格、粗体/斜体等） |
+| `syntect` | 代码语法高亮（`base16-ocean.dark` 主题），纯 Rust 实现 |
+| `regex` | 提取 fenced code block（````lang\n...`````） |
+
+### 5.3 代码块高亮
+
+- 使用 `syntect::easy::HighlightLines` 逐行高亮
+- 每个 token 转换为独立的 `ratatui::Span`，带 RGB 颜色
+- 语言识别：`find_syntax_by_token()` + `find_syntax_by_name()`，回退到纯文本
+- 支持 30+ 语言（通过 syntect 的 Sublime Syntax 定义）
+
+## 6. 流式文本
+
+- AppState 维护 `streaming_text: String`，累积 TextDelta
+- Done 到达时 `flush_streaming()` 创建最终 `LineType::Assistant` 消息
+- Usage 统计在 `flush_streaming` 前追加到 `streaming_text`
+- 流式渲染使用 `Paragraph` widget，白色前景
+
+## 7. 键盘事件与退出
+
+### 7.1 键盘线程
+
+独立线程使用 `crossterm::event::poll(100ms)` 轮询，而非阻塞 `read()`：
+```rust
+loop {
+    if key_tx.is_closed() { break; }
+    if crossterm::event::poll(100ms) {
+        if let Ok(event) = crossterm::event::read() {
+            if Ctrl+D -> 通过 watch channel 通知主循环退出
+            else -> 发送到 key_tx channel
+        }
+    }
+}
+```
+
+### 7.2 Ctrl+D 退出
+
+- 键盘线程检测到 Ctrl+D → 通过 `watch::Sender` 发送退出信号
+- 主循环 `select!` 中 `exit_rx.changed()` 分支触发退出
+- 退出前先发送 Cancel 给 daemon（优雅停止 agent loop）
+- 再 `drop(key_tx)` 让键盘线程退出
+- `TerminalGuard` Drop guard 保证终端恢复（raw mode + mouse capture）
+
+### 7.3 Ctrl+C
+
+仅在 `generating` 状态时发送 cancel，否则忽略
+
+## 8. 输入区
+
+- `tui-textarea` crate
+- Enter 发送 / 命令执行
+- ↑↓ 浏览输入历史（App 自行维护 `input_history`）
+- `/clear`、`/temp`、`/model`、`/help` 等命令
+- 生成中文字变灰，输入被锁定
+
+## 9. 颜色系统
+
+### 9.1 背景色
+
+```rust
+const COLOR_BG: Color = #1A1A2E;           // 全局背景
+const COLOR_INPUT_BG: Color = #111111;       // 输入区背景
+const COLOR_USER_BG: Color = #1A3A5E;       // 用户消息底色
+const COLOR_ASSISTANT_BG: Color = #222A3E;   // 助理消息底色
+const COLOR_TOOL_RESULT_BG: Color = #222222; // 工具调用/结果底色
+const COLOR_SHADOW: Color = #0D0D17;        // block 阴影色
+```
+
+### 9.2 前景色
 
 | 类型 | 颜色 |
 |---|---|
 | User | Cyan |
 | Assistant | White |
-| ToolCall | Yellow |
-| ToolResult | DarkGray |
+| Thinking | Green |
+| ToolCall 首行 | Yellow |
+| ToolCall 后续行 | DarkGray |
 | Error | Red |
 | Status | Gray |
+| Usage / 时间戳 | DarkGray |
+| 分隔线 | DarkGray |
 
-**流式文本缓冲**：App 维护 `streaming_text: String`（当前 assistant 的未完成文本）
-- TextDelta → `streaming_text += delta`，渲染时临时拼到 List 末尾
-- Done → `ChatLine(Assistant, streaming_text)` 追加到 messages → `streaming_text` 清空
+## 10. 配置
 
-**滚动**：
-- 自动滚动：新行追加时若用户在底部（`scroll_following: true`）则滚到底部
-- 手动滚动：PageUp/PageDown 浏览历史，向上滚动后 `scroll_following = false`
-- 恢复跟随：用户手动滚回底部或发送新消息时 `scroll_following = true`
+### 10.1 daemon.toml
 
-### 5.2 输入区 (InputArea)
-
-- 使用 `tui-textarea` crate
-
-**按键消费分工**：
-- **App 优先**：Enter（发送/命令）、Ctrl+C/D、y/n（确认）、PageUp/PageDown（滚动）
-- **Textarea 消费**：字母、退格、Delete、光标移动、↑↓（历史）等其余所有键
-- 使用 `textarea.input(event)` 判断是否消费
-
-- Enter → 发送 UserInput → 清空输入区
-- 特殊命令（`/temp`、`/model`、`/clear`、`/help` 等）
-- `/clear` → `messages.clear()`（不是 ANSI escape）
-- Ctrl+D 直接退出，无需 `/quit` 命令
-
-**↑↓ 历史浏览**（App 自行实现，非 textarea 内置）：
-- 维护 `input_history: Vec<String>`（最近 100 条）
-- Enter 发送时将当前输入 push 到 history
-- ↑：从 history 取上一条 → 写入 textarea
-- ↓：从 history 取下一条 → 写入 textarea，到底则清空
-- 维护 `history_index: Option<usize>` 跟踪位置
-
-### 5.3 确认区 (ConfirmBar)
-
-- UserQuery 到达时显示，平时隐藏
-- **直接按键 y/n，不需要 Enter**
-- App 维护 `confirm_state: Option<ConfirmState>`，handle_key 优先消费
-- y → 发送 approved=true，n / 其他 → 发送 approved=false
-- 确认完成后清空 confirm_state
-
-**Agent 运行中锁定输入**：
-- App 维护 `generating: bool` 状态
-- `generating = true` 时，handle_key 忽略所有输入键（仅 Ctrl+C / Ctrl+D 仍可用）
-- textarea 文字变灰（`Style::fg(Color::DarkGray)`），状态栏显示 `[Generating]`
-- Done / Error 到达后设回 false，恢复 textarea 颜色和状态栏
-
-### 5.4 状态栏 (StatusBar)
-
-- 左侧：session id（前 8 位）
-- 右侧：模型名、运行状态（Idle/Generating）
-
-### 5.5 AppState 汇总
-
-```rust
-struct AppState {
-    // 对话
-    messages: Vec<ChatLine>,
-    streaming_text: String,            // Done 前累积，渲染时临时拼到 List 末尾
-    scroll_offset: usize,
-    scroll_following: bool,
-
-    // 输入
-    textarea: tui_textarea::TextArea<'static>,
-    input_history: Vec<String>,
-    history_index: Option<usize>,      // ↑↓ 历史浏览位置
-
-    // 状态
-    generating: bool,
-    confirm: Option<ConfirmState>,
-    model: String,
-    session_id: String,
-    should_quit: bool,
-}
+```toml
+[llm]
+model = "claude-sonnet-4-6"
+temperature = 0.5
+thinking_budget_tokens = 2048  # Claude thinking 模式预算
 ```
 
-## 6. 不做什么
+### 10.2 CLI 参数
+
+```bash
+vbw-cli --model claude-sonnet-4-6 --thinking-budget 2048
+```
+
+`thinking_budget_tokens` 通过 `LlmConfig.extra` 传到 Anthropic API 请求体。
+
+## 11. 不做什么
 
 - ❌ 多标签会话
-- ❌ 语法高亮
 - ❌ 文件树/侧边栏
 - ❌ 复杂快捷键（仅 Enter/Ctrl+C/Ctrl+D/PageUp/PageDown/↑↓）
+- ❌ 图片渲染（Mermaid 图等）
 
-## 7. 验收标准
+## 12. 验收标准
 
-- TUI 启动正常，三个区域可见
-- 输入文本后流式显示在对话区
-- 工具调用/结果显示在对话区
-- UserQuery 弹出确认区，直接按键 y/n
-- Ctrl+C 发送取消（Agent 运行中）；空闲时忽略
-- Ctrl+D 任意状态退出
-- 对话区可滚动查看历史（PageUp/PageDown）
+- TUI 启动正常，三个区域 + 分隔线可见
+- Markdown 渲染：标题、列表、表格、粗体/斜体
+- 代码块语法高亮（syntect base16-ocean.dark 主题）
+- 工具调用和结果显示在同一 block，颜色区分
+- AI 回复末尾显示 token 用量 + 时间戳
+- 流式文本实时更新
+- 对话区可滚动，无重叠
+- Ctrl+D 优雅退出（daemon 不受影响，终端正常恢复）
+- Ctrl+C 取消生成
 - ↑↓ 浏览输入历史
-- 退出时终端正常恢复
+- Tab 补齐 / 文本选择等高级输入功能
