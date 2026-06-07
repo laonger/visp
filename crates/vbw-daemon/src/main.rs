@@ -13,6 +13,7 @@ use vbw_core::{
 use vbw_llm::anthropic::AnthropicProvider;
 use vbw_tools::{
     bash::Bash,
+    codegraph::{CodeGraphGetDetails, CodeGraphSearch},
     file::{EditFile, ReadFile, WriteFile},
     search::{Glob, Grep},
 };
@@ -72,6 +73,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tool_registry
         .register(Box::new(Glob))
         .map_err(|e| format!("register glob: {e}"))?;
+    tool_registry
+        .register(Box::new(CodeGraphSearch))
+        .map_err(|e| format!("register codegraph_search: {e}"))?;
+    tool_registry
+        .register(Box::new(CodeGraphGetDetails))
+        .map_err(|e| format!("register codegraph_get_details: {e}"))?;
     let tool_registry = Arc::new(tool_registry);
 
     // 5. Create rule engine
