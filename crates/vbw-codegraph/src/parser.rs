@@ -147,7 +147,7 @@ fn walk_node(
 ) {
     match node.kind() {
         // --- Symbol declarations ---
-        "function_declaration" => {
+        "function_declaration" | "function_item" | "function_definition" => {
             let new_id = node.child_by_field_name("name").and_then(|n| {
                 n.utf8_text(source).ok().map(|name| {
                     add_symbol(
@@ -167,7 +167,8 @@ fn walk_node(
             );
         }
 
-        "class_declaration" => {
+        "class_declaration" | "struct_item" | "class_definition" | "struct_specifier"
+        | "class_specifier" => {
             let new_id = node.child_by_field_name("name").and_then(|n| {
                 n.utf8_text(source).ok().map(|name| {
                     add_symbol(
@@ -182,9 +183,17 @@ fn walk_node(
                 })
             });
             let sym_id = new_id.or(current_sym_id);
-            walk_class_body(
-                node, source, file_path, symbols, edges, imports, exports, dedup, next_id, sym_id,
-            );
+            if node.kind() == "class_declaration" {
+                walk_class_body(
+                    node, source, file_path, symbols, edges, imports, exports, dedup, next_id,
+                    sym_id,
+                );
+            } else {
+                walk_children(
+                    node, source, file_path, symbols, edges, imports, exports, dedup, next_id,
+                    sym_id,
+                );
+            }
         }
 
         "method_definition" => {
@@ -207,7 +216,7 @@ fn walk_node(
             );
         }
 
-        "interface_declaration" => {
+        "interface_declaration" | "trait_item" | "interface_type" => {
             node.child_by_field_name("name").and_then(|n| {
                 n.utf8_text(source).ok().map(|name| {
                     add_symbol(
@@ -235,7 +244,7 @@ fn walk_node(
             );
         }
 
-        "type_alias_declaration" => {
+        "type_alias_declaration" | "type_item" | "type_alias_statement" | "type_declaration" => {
             node.child_by_field_name("name").and_then(|n| {
                 n.utf8_text(source).ok().map(|name| {
                     add_symbol(
@@ -263,7 +272,7 @@ fn walk_node(
             );
         }
 
-        "enum_declaration" => {
+        "enum_declaration" | "enum_item" | "enum_specifier" => {
             node.child_by_field_name("name").and_then(|n| {
                 n.utf8_text(source).ok().map(|name| {
                     add_symbol(
@@ -292,7 +301,7 @@ fn walk_node(
         }
 
         // Variable / lexical declarations – check for arrow_function values
-        "lexical_declaration" | "variable_declaration" => {
+        "lexical_declaration" | "variable_declaration" | "let_declaration" => {
             handle_variable_declaration(
                 node,
                 source,
@@ -388,7 +397,7 @@ fn walk_node(
         }
 
         // --- Imports ---
-        "import_statement" => {
+        "import_statement" | "use_declaration" | "import_declaration" => {
             handle_import(node, source, imports);
             walk_children(
                 node,
@@ -920,5 +929,31 @@ mod tests {
         assert_eq!(res.edges.len(), 0);
         assert_eq!(res.imports.len(), 0);
         assert_eq!(res.exports.len(), 0);
+    }
+
+    #[test]
+    fn test_rust_function() {
+        let mut p = setup();
+        let res = p
+            .parse_file("test.rs", "fn hello() -> i32 { 42 }\n")
+            .unwrap();
+        assert_eq!(
+            res.symbols.len(),
+            1,
+            "expected 1 symbol, got {:?}",
+            res.symbols
+        );
+        assert_eq!(res.symbols[0].name, "hello");
+        assert_eq!(res.symbols[0].kind, SymbolKind::Function);
+    }
+
+    #[test]
+    fn test_python_function() {
+        let mut p = setup();
+        let res = p
+            .parse_file("test.py", "def hello():\n    return 42\n")
+            .unwrap();
+        assert_eq!(res.symbols.len(), 1);
+        assert_eq!(res.symbols[0].kind, SymbolKind::Function);
     }
 }
