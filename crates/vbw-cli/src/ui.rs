@@ -45,7 +45,7 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
     let bg = Block::default().style(Style::default().bg(COLOR_BG));
     f.render_widget(Paragraph::new("").block(bg), f.area());
 
-    let input_area_height = 6;
+    let input_area_height = 4;
     let bottom_chunks_height = input_area_height + (if app.confirm.is_some() { 3 } else { 2 });
 
     // 纵向分割：对话区 | 分隔线 | 底部区域
@@ -60,6 +60,13 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
 
     render_chat_area(app, f, main_chunks[0]);
 
+    // 分隔线
+    let sep_line = "─".repeat(main_chunks[1].width as usize);
+    f.render_widget(
+        Paragraph::new(sep_line).style(Style::default().fg(Color::DarkGray)),
+        main_chunks[1],
+    );
+
     // 底部区域内部再分割：确认栏(可选) → 输入区 → 状态栏
     //let bottom_area = main_chunks[2].inner(ratatui::layout::Margin::new(0, 2));
     let bottom_area = main_chunks[2];
@@ -67,15 +74,15 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
         .direction(Direction::Vertical)
         .constraints(if app.confirm.is_some() {
             vec![
-                Constraint::Length(1),
+                Constraint::Length(1), // 确认栏
                 Constraint::Min(2),    // input area
-                Constraint::Length(1), // status area
+                Constraint::Length(1), // 分隔线
                 Constraint::Length(1), // status area
             ]
         } else {
             vec![
                 Constraint::Min(2),    // input area
-                Constraint::Length(1), // status area
+                Constraint::Length(1), // 分隔线
                 Constraint::Length(1), // status area
             ]
         })
@@ -146,7 +153,7 @@ const TOOL_STYLE: BlockStyle = BlockStyle {
     margin_horizontal: 1,
     bg_fill: Some(COLOR_TOOL_RESULT_BG),
     shadow: true,
-    bottom_pad: 0,
+    bottom_pad: 1,
 };
 const TOOL_RESULT_STYLE: BlockStyle = BlockStyle {
     margin_vertical: 1,
@@ -353,7 +360,7 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                 LineType::User => USER_STYLE,
                 LineType::Assistant => ASSISTANT_STYLE,
                 LineType::Thinking => THINKING_STYLE,
-                LineType::ToolResult => TOOL_RESULT_STYLE,
+                LineType::ToolCall | LineType::ToolResult => TOOL_RESULT_STYLE,
                 LineType::Usage => USAGE_STYLE,
                 _ => TOOL_STYLE,
             };
@@ -397,7 +404,7 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
             LineType::User => USER_STYLE,
             LineType::Assistant => ASSISTANT_STYLE,
             LineType::Thinking => THINKING_STYLE,
-            LineType::ToolResult => TOOL_RESULT_STYLE,
+            LineType::ToolCall | LineType::ToolResult => TOOL_RESULT_STYLE,
             LineType::Usage => USAGE_STYLE,
             _ => TOOL_STYLE,
         };
@@ -496,9 +503,10 @@ fn render_input_area(app: &AppState, f: &mut Frame, area: Rect) {
     // 内部 2 行顶部留白（不改变 layout 区域）
     let input_area = Rect::new(
         area.x,
-        area.y + 2,
+        area.y,
         area.width,
-        area.height.saturating_sub(2),
+        //area.height.saturating_sub(2),
+        area.height,
     );
     f.render_widget(&textarea, input_area);
 }
