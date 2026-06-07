@@ -35,7 +35,7 @@ Daemon (service.rs, chat handler):
    │     │      → cg.build_full(...).await ← 等待完成后才继续
    │     │
    │     └─ 构造 prompt
-   │         → 返回 (Message::user(prompt, skip_context=true), status_messages)
+   │         → 返回 (Message { content: prompt, skip_context: true, ..Message::user("") }, status_messages)
    │
    ├─ 逐个发送 status_messages 作为 StatusUpdate 到 CLI
    ├─ 追加 user_msg 到 session
@@ -63,7 +63,7 @@ Daemon (service.rs, chat handler):
 
 副作用（函数内部执行）:
 - 文件系统: 创建 .vibewisp/ 子目录
-- CodeGraph: 打开数据库 + 后台索引
+- CodeGraph: 打开数据库 + 同步等待 build_full 完成
 
 状态消息由 chat handler 在 prepare 返回后逐个发送 StatusUpdate 给 CLI。
 
@@ -147,6 +147,8 @@ AGENTS.md 格式要求:
 
 | 文件 | 改动 |
 |------|------|
+| `vbw-core/src/message.rs` | `Message` 新增 `skip_context: bool` 字段 |
+| `vbw-core/src/prompt.rs` | 构建历史时过滤 `skip_context == true` 的消息 |
 | `cli/event.rs` | `handle_command` 新增 `/init` 分支 |
 | `daemon/src/command/init.rs` | **新增**：目录创建、CodeGraph 初始化、prompt 构造 |
 | `daemon/src/command/mod.rs` | **新增**：模块声明 |
