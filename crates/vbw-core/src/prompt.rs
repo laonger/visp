@@ -12,7 +12,7 @@ impl PromptBuilder {
         };
 
         let mut messages = vec![Message::system(system_content)];
-        messages.extend_from_slice(history);
+        messages.extend(history.iter().filter(|m| !m.skip_context).cloned());
         messages
     }
 }
@@ -57,5 +57,18 @@ mod tests {
         let messages = PromptBuilder::build("", "Be concise", &[]);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content, "Be concise");
+    }
+
+    #[test]
+    fn test_skip_context_messages_filtered() {
+        let history = vec![
+            Message::user("Hello"),
+            Message { skip_context: true, ..Message::user("skip me") },
+            Message::assistant("Hi!"),
+        ];
+        let messages = PromptBuilder::build("system", "", &history);
+        assert_eq!(messages.len(), 3); // system + 2 non-skipped
+        assert_eq!(messages[1], Message::user("Hello"));
+        assert_eq!(messages[2], Message::assistant("Hi!"));
     }
 }
