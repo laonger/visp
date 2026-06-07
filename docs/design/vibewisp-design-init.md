@@ -21,34 +21,30 @@ Daemon (service.rs, chat handler):
   ├─ 状态检查: session 必须是 Idle
   │
   ├─ 调用 command::init::prepare(project_path, text)
-  │     │
-  │     ├─ 解析 --force 参数（text.contains("--force")）
-  │     │
-  │     ├─ 创建目录
-  │     │      .vibewisp/rules/
-  │     │      .vibewisp/skills/
-  │     │      .vibewisp/plans/
-  │     │   → 发送 StatusUpdate: "Creating .vibewisp/..."
-  │     │
-  │     ├─ 初始化 CodeGraph
-  │     │      CodeGraph::open(project_path)
-  │     │      → 创建 .vibewisp/codegraph.db
-  │     │      → 后台 tokio::spawn(build_full)
-  │     │   → 发送 StatusUpdate: "Initializing CodeGraph..."
-  │     │   → open 失败记 warning 日志，不中断流程
-  │     │
-  │     └─ 构造 prompt（硬编码模板 + project_path 注入，--force 时修改指令）
-  │         → 返回 Message::user(prompt)
-  │
-  ├─ 追加 user_msg 到 session
-  ├─ 启动 agent loop
-  │      → AI 读取 README.md、Cargo.toml 等
-  │      → AI 调用 glob 浏览项目结构
-  │      → AI 调用 codegraph_search 了解符号
-  │      → AI 读取已有 AGENTS.md（如存在且非 --force）
-  │      → AI 调用 write_file(AGENTS.md)
-  │
-  └─ Agent 正常完成，Done 事件发送给 CLI
+   │     │
+   │     ├─ 解析 --force 参数（text.contains("--force")）
+   │     │
+   │     ├─ 创建目录
+   │     │      .vibewisp/rules/
+   │     │      .vibewisp/skills/
+   │     │      .vibewisp/plans/
+   │     │
+   │     ├─ 初始化 CodeGraph（**同步等待 build_full 完成**）
+   │     │      CodeGraph::open(project_path)
+   │     │      → 创建 .vibewisp/codegraph.db
+   │     │      → cg.build_full(...).await ← 等待完成后才继续
+   │     │
+   │     └─ 构造 prompt
+   │         → 返回 (Message::user(prompt, skip_context=true), status_messages)
+   │
+   ├─ 逐个发送 status_messages 作为 StatusUpdate 到 CLI
+   ├─ 追加 user_msg 到 session
+   ├─ 启动 agent loop（此时 codegraph 已就绪）
+   │      → AI 使用 read_file、glob、codegraph_search 等工具分析项目
+   │      → AI 读取已有 AGENTS.md（如存在且非 --force）
+   │      → AI 调用 write_file(AGENTS.md)
+   │
+   └─ Agent 正常完成，Done 事件发送给 CLI
 ```
 
 ## 3. 关键接口
@@ -62,12 +58,22 @@ Daemon (service.rs, chat handler):
 
 返回值:
   - Message                (构造好的 user message，包含 init prompt)
+  - Vec<String>            (状态消息列表，用于发送 StatusUpdate 到 CLI)
 ```
 
 副作用（函数内部执行）:
 - 文件系统: 创建 .vibewisp/ 子目录
 - CodeGraph: 打开数据库 + 后台索引
-- gRPC 流: 发送 StatusUpdate 到 CLI
+
+状态消息由 chat handler 在 prepare 返回后逐个发送 StatusUpdate 给 CLI。
+
+### Message.skip_context
+
+`vbw-core` 的 `Message` 结构体新增 `skip_context: bool` 字段：
+
+- 默认 `false`（所有普通消息正常行为）
+- `prepare()` 创建的 Message 设为 `true`
+- prompt 构建时跳过 `skip_context == true` 的消息，不注入后续对话的 context window
 
 ## 4. Prompt 模板
 
@@ -152,13 +158,15 @@ AGENTS.md 格式要求:
 | 决策 | 方案 |
 |------|------|
 | init 逻辑位置 | `daemon/src/command/init.rs`，chat handler 只调用入口函数 |
-| 返回值 | `prepare()` 返回 `Message`，CodeGraph 结果通过 tracing 记录 |
+| 返回值 | `prepare()` 返回 `(Message, Vec<String>)`，Message 包含 skip_context=true |
 | `--force` 参数 | daemon 端字符串解析（`text.contains("--force")`） |
+| CodeGraph 初始化 | **同步等待** `build_full` 完成后再启动 agent loop |
 | CodeGraph::open 失败 | 记 warning 日志，不阻止 agent loop |
 | CLI 显示 | `/init` 作为普通 User 消息显示 |
 | Prompt 模板 | 硬编码为 const 字符串在 `init.rs` 中 |
 | CLI 进度反馈 | daemon 发送 StatusUpdate："Creating .vibewisp/..."、"Initializing CodeGraph..." |
 | AGENTS.md 处理 | 默认：读取后追加补充；--force：重写 |
+| init prompt 在历史中 | `Message.skip_context = true`，prompt 构建时跳过，不占用后续对话窗口 |
 
 ## 7. 产出物
 
