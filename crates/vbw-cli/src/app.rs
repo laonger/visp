@@ -5,6 +5,96 @@ use ratatui::{
     text::{Line, Span},
 };
 
+/// 用 syntect 高亮代码块，返回 ratatui 行
+fn highlight_code_block(lang: &str, code: &str) -> Vec<Line<'static>> {
+    use syntect::easy::HighlightLines;
+    use syntect::highlighting::ThemeSet;
+    use syntect::parsing::SyntaxSet;
+    use syntect::util::LinesWithEndings;
+
+    let ss = SyntaxSet::load_defaults_newlines();
+    let ts = ThemeSet::load_defaults();
+    let theme = &ts.themes["base16-ocean.dark"];
+
+    let syntax = if lang.is_empty() {
+        ss.find_syntax_plain_text()
+    } else {
+        ss.find_syntax_by_token(lang)
+            .or_else(|| ss.find_syntax_by_name(lang))
+            .unwrap_or_else(|| ss.find_syntax_plain_text())
+    };
+
+    let mut h = HighlightLines::new(syntax, theme);
+    let mut result = Vec::new();
+
+    for line in LinesWithEndings::from(code) {
+        if let Ok(ranges) = h.highlight_line(line, &ss) {
+            let spans: Vec<Span<'static>> = ranges
+                .iter()
+                .map(|(syn_style, text)| {
+                    let fg = ratatui::style::Color::Rgb(
+                        syn_style.foreground.r,
+                        syn_style.foreground.g,
+                        syn_style.foreground.b,
+                    );
+                    Span::styled(text.to_string(), Style::default().fg(fg))
+                })
+                .collect();
+            // LinesWithEndings preserves trailing \n; remove it
+            let line_text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+            if line_text.ends_with('\n') {
+                // 去掉最后的换行，重新构建不带 \n 的 spans
+                let trimmed: Vec<Span<'static>> = ranges
+                    .iter()
+                    .map(|(syn_style, text)| {
+                        let t = text.trim_end_matches('\n');
+                        let fg = ratatui::style::Color::Rgb(
+                            syn_style.foreground.r,
+                            syn_style.foreground.g,
+                            syn_style.foreground.b,
+                        );
+                        Span::styled(t.to_string(), Style::default().fg(fg))
+                    })
+                    .collect();
+                result.push(Line::from(trimmed));
+            } else {
+                result.push(Line::from(spans));
+            }
+        }
+    }
+    result
+}
+
+/// 在 markdown 中查找代码块并用唯一标记替换，返回 (处理后的文本, 高亮行列表)
+fn process_code_blocks(md: &str) -> (String, Vec<Vec<Line<'static>>>) {
+    use regex::Regex;
+    let re = Regex::new(r"(?ms)```(\w*)\n(.*?)```").unwrap();
+    let mut highlighted: Vec<Vec<Line<'static>>> = Vec::new();
+    let mut result = String::new();
+    let mut last_end = 0;
+
+    for cap in re.captures_iter(md) {
+        let full_match = cap.get(0).unwrap();
+        let lang = cap.get(1).map_or("", |m| m.as_str());
+        let code = cap.get(2).map_or("", |m| m.as_str());
+
+        // 追加匹配前的文本
+        result.push_str(&md[last_end..full_match.start()]);
+
+        // 高亮代码
+        let lines = highlight_code_block(lang, code);
+        let idx = highlighted.len();
+        highlighted.push(lines);
+
+        // 插入标记（使用控制字符确保不被 markdown 解析器干扰）
+        result.push_str(&format!("\x00CODEBLOCK_{}\x00", idx));
+        last_end = full_match.end();
+    }
+    // 追加剩余文本
+    result.push_str(&md[last_end..]);
+    (result, highlighted)
+}
+
 /// 将一个带样式的 Line 按屏幕宽度拆分为多行，保留样式，每行末尾补空格到指定宽度
 fn wrap_styled_line(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
     use std::collections::VecDeque;
@@ -141,16 +231,29 @@ impl MessageCache {
         let base_style = Style::default().fg(fg);
         let lines: Vec<Line<'static>> = match msg.line_type {
             LineType::Assistant => {
+                // 第一步：用 syntect 高亮代码块，替换为标记
+                let (processed, highlighted_blocks) = process_code_blocks(&msg.content);
+                // 第二步：ratatui-markdown 渲染（代码块位置是标记）
                 use ratatui_markdown::markdown::MarkdownRenderer;
                 let renderer = MarkdownRenderer::new(width as usize);
-                let blocks = renderer.parse(&msg.content);
+                let blocks = renderer.parse(&processed);
                 let md_lines =
                     renderer.render(&blocks, &ratatui_markdown::theme::ThemeConfig::default());
+                // 第三步：将标记替换为 syntect 高亮行
                 md_lines
                     .into_iter()
-                    .map(|l| {
+                    .flat_map(|l| {
                         let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
-                        Line::styled(text, Style::default().fg(Color::White))
+                        if let Some(rest) = text.strip_prefix('\x00')
+                            && let Some(id_tag) = rest.strip_prefix("CODEBLOCK_")
+                            && let Some(end) = id_tag.find('\x00')
+                            && let Ok(idx) = id_tag[..end].parse::<usize>()
+                            && idx < highlighted_blocks.len()
+                        {
+                            return highlighted_blocks[idx].clone();
+                        }
+                        // 非代码行：白色
+                        vec![Line::styled(text, Style::default().fg(Color::White))]
                     })
                     .collect()
             }

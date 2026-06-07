@@ -89,7 +89,7 @@ fn walk_children(
     current_sym_id: Option<u64>,
 ) {
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
+        if let Some(child) = node.child(i as u32) {
             walk_node(
                 child,
                 source,
@@ -341,7 +341,7 @@ fn walk_node(
 
         "extends_clause" => {
             for i in 0..node.child_count() {
-                if let Some(child) = node.child(i)
+                if let Some(child) = node.child(i as u32)
                     && child.is_named()
                     && let Ok(name) = child.utf8_text(source)
                 {
@@ -352,7 +352,7 @@ fn walk_node(
 
         "implements_clause" => {
             for i in 0..node.child_count() {
-                if let Some(child) = node.child(i)
+                if let Some(child) = node.child(i as u32)
                     && child.is_named()
                     && let Ok(name) = child.utf8_text(source)
                 {
@@ -475,12 +475,12 @@ fn handle_variable_declaration(
     let mut last_sym_id = current_sym_id;
 
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i)
+        if let Some(child) = node.child(i as u32)
             && child.kind() == "variable_declarator"
         {
             let has_arrow = (0..child.child_count()).any(|j| {
                 child
-                    .child(j)
+                    .child(j as u32)
                     .map(|c| c.kind() == "arrow_function")
                     .unwrap_or(false)
             });
@@ -546,16 +546,18 @@ fn handle_import(node: Node, source: &[u8], imports: &mut Vec<(String, String)>)
         return;
     };
 
-    let clause =
-        (0..node.child_count()).find_map(|i| node.child(i).filter(|c| c.kind() == "import_clause"));
+    let clause = (0..node.child_count())
+        .find_map(|i| node.child(i as u32).filter(|c| c.kind() == "import_clause"));
 
     if let Some(clause) = clause {
         // named_imports: import { foo, bar } from '...'
-        if let Some(named) = (0..clause.child_count())
-            .find_map(|i| clause.child(i).filter(|c| c.kind() == "named_imports"))
-        {
+        if let Some(named) = (0..clause.child_count()).find_map(|i| {
+            clause
+                .child(i as u32)
+                .filter(|c| c.kind() == "named_imports")
+        }) {
             for j in 0..named.child_count() {
-                if let Some(spec) = named.child(j)
+                if let Some(spec) = named.child(j as u32)
                     && spec.kind() == "import_specifier"
                     && let Some(ident) = spec.child_by_field_name("name")
                     && let Ok(name) = ident.utf8_text(source)
@@ -565,16 +567,18 @@ fn handle_import(node: Node, source: &[u8], imports: &mut Vec<(String, String)>)
             }
         }
         // namespace_import: import * as foo from '...'
-        if let Some(ns) = (0..clause.child_count())
-            .find_map(|i| clause.child(i).filter(|c| c.kind() == "namespace_import"))
-            && let Some(ident) = ns.child_by_field_name("name")
+        if let Some(ns) = (0..clause.child_count()).find_map(|i| {
+            clause
+                .child(i as u32)
+                .filter(|c| c.kind() == "namespace_import")
+        }) && let Some(ident) = ns.child_by_field_name("name")
             && let Ok(name) = ident.utf8_text(source)
         {
             imports.push((name.to_string(), source_str.clone()));
         }
         // default import: import foo from '...'
         if let Some(default) = (0..clause.child_count())
-            .find_map(|i| clause.child(i).filter(|c| c.kind() == "identifier"))
+            .find_map(|i| clause.child(i as u32).filter(|c| c.kind() == "identifier"))
             && let Ok(name) = default.utf8_text(source)
         {
             imports.push((name.to_string(), source_str));
@@ -605,11 +609,11 @@ fn handle_export(
     {
         let src = src.trim_matches('\'').trim_matches('"');
         for i in 0..node.child_count() {
-            if let Some(child) = node.child(i)
+            if let Some(child) = node.child(i as u32)
                 && child.kind() == "export_clause"
             {
                 for j in 0..child.child_count() {
-                    if let Some(spec) = child.child(j)
+                    if let Some(spec) = child.child(j as u32)
                         && spec.kind() == "export_specifier"
                         && let Some(ident) = spec.child_by_field_name("name")
                         && let Ok(name) = ident.utf8_text(source)
@@ -624,11 +628,11 @@ fn handle_export(
 
     // Check for export clause without 'from' (named exports of existing symbols)
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i)
+        if let Some(child) = node.child(i as u32)
             && child.kind() == "export_clause"
         {
             for j in 0..child.child_count() {
-                if let Some(spec) = child.child(j)
+                if let Some(spec) = child.child(j as u32)
                     && spec.kind() == "export_specifier"
                     && let Some(ident) = spec.child_by_field_name("name")
                     && let Ok(name) = ident.utf8_text(source)
@@ -679,7 +683,7 @@ fn walk_class_body(
     current_sym_id: Option<u64>,
 ) {
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
+        if let Some(child) = node.child(i as u32) {
             match child.kind() {
                 "class_heritage" => {
                     walk_children(
