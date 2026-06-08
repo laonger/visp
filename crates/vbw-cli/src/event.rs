@@ -120,17 +120,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 }
                 return false;
             }
-            // F2: 切换鼠标捕获（开启时支持滚轮，关闭时支持原生文本选择）
-            if key.code == KeyCode::F(2) {
-                app.mouse_captured = !app.mouse_captured;
-                let _ = if app.mouse_captured {
-                    write!(io::stdout(), "\x1b[?1000h\x1b[?1006h")
-                } else {
-                    write!(io::stdout(), "\x1b[?1000l\x1b[?1006l")
-                };
-                let _ = io::stdout().flush();
-                return false;
-            }
+            // F2 已在键盘线程处理，此处不再需要
             if app.generating {
                 return false;
             }
@@ -306,7 +296,7 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
         "/help" => {
             app.add_message(
                 LineType::Status,
-                "/clear /temp <val> /model <name> /init /help".into(),
+                "/clear /temp <val> /model <name> /mouse /init /help".into(),
             );
         }
         "/init" => {
@@ -314,6 +304,23 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
             app.generating = true;
             app.scroll_following = true;
             chat_handle.send_input(text);
+        }
+        "/mouse" => {
+            app.mouse_captured = !app.mouse_captured;
+            let _ = if app.mouse_captured {
+                use std::io::Write;
+                write!(io::stdout(), "\x1b[?1000h\x1b[?1006h")
+            } else {
+                use std::io::Write;
+                write!(io::stdout(), "\x1b[?1000l\x1b[?1006l")
+            };
+            let _ = io::stdout().flush();
+            let mode = if app.mouse_captured {
+                "Mouse"
+            } else {
+                "Select"
+            };
+            app.add_message(LineType::Status, format!("Mouse mode: {mode}"));
         }
         "/temp" if parts.len() >= 2 => {
             if let Ok(temp) = parts[1].parse::<f64>() {
