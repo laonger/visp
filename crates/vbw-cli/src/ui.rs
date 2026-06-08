@@ -337,7 +337,12 @@ fn render_input_area(app: &AppState, f: &mut Frame, area: Rect) {
 fn render_status_bar(app: &AppState, f: &mut Frame, area: Rect) {
     let sid = app.session_id.chars().take(8).collect::<String>();
     let status = if app.generating { "Generating" } else { "Idle" };
-    let text = format!("Session: {} | Model: {} | {}", sid, app.model, status);
+    let mouse = if app.mouse_captured {
+        "Mouse"
+    } else {
+        "Select"
+    };
+    let text = format!("{sid} | {model} | {status} | [{mouse}]", model = app.model);
     let p = Paragraph::new(text)
         .style(Style::default().fg(theme::STATUS_FG).bg(theme::STATUS_BG))
         .block(Block::default());

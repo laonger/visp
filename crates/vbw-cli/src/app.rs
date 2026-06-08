@@ -361,6 +361,7 @@ pub struct AppState {
     pub session_id: String,
     pub should_quit: bool,
     pub pending_usage: Option<(u32, u32, u32)>,
+    pub mouse_captured: bool,
 }
 
 impl AppState {
@@ -388,6 +389,7 @@ impl AppState {
             session_id,
             should_quit: false,
             pending_usage: None,
+            mouse_captured: true,
         }
     }
 
