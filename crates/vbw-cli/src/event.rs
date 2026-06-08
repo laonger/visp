@@ -125,6 +125,10 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 return false;
             }
             if key.code == KeyCode::Enter {
+                if key.modifiers.contains(KeyModifiers::ALT) {
+                    app.textarea.insert_newline();
+                    return false;
+                }
                 let text: String = app.textarea.lines().join("\n");
                 app.textarea = ratatui_textarea::TextArea::default();
                 app.textarea.set_placeholder_text("Type your message...");
