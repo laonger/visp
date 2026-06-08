@@ -145,6 +145,29 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 return false;
             }
             match key.code {
+                KeyCode::Tab => {
+                    let current = app
+                        .textarea
+                        .lines()
+                        .first()
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
+                    if current.starts_with('/') {
+                        let cmds = ["/clear", "/help", "/temp ", "/model ", "/init", "/mouse"];
+                        let completion = if current.len() > 1 {
+                            cmds.iter()
+                                .find(|c| c.starts_with(&current))
+                                .map(|c| c.to_string())
+                        } else {
+                            None
+                        };
+                        if let Some(cmd) = completion {
+                            app.textarea = ratatui_textarea::TextArea::default();
+                            app.textarea.insert_str(&cmd);
+                        }
+                    }
+                    return false;
+                }
                 KeyCode::Up => {
                     if !app.input_history.is_empty() {
                         let idx = app

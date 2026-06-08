@@ -322,6 +322,35 @@ fn render_input_area(app: &AppState, f: &mut Frame, area: Rect) {
     if app.generating {
         textarea.set_style(Style::default().fg(theme::INPUT_NOTICE_FG));
         textarea.set_placeholder_text("[Generating...]");
+    } else {
+        // 如果输入以 / 开头，在输入区下方显示命令提示
+        let current = app
+            .textarea
+            .lines()
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        if current.starts_with('/') {
+            let all_cmds = ["/clear", "/help", "/temp", "/model", "/init", "/mouse"];
+            let hint: Vec<&str> = if current.len() > 1 {
+                all_cmds
+                    .iter()
+                    .filter(|c| c.starts_with(current))
+                    .copied()
+                    .collect()
+            } else {
+                all_cmds.to_vec()
+            };
+            if !hint.is_empty() {
+                let hint_line = format!("  {}", hint.join("  "));
+                let hint_y = area.y + area.height.saturating_sub(1);
+                if hint_y > area.y {
+                    let p = Paragraph::new(hint_line)
+                        .style(Style::default().fg(theme::INPUT_NOTICE_FG));
+                    f.render_widget(p, Rect::new(area.x, hint_y, area.width, 1));
+                }
+            }
+        }
     }
     textarea.set_block(
         Block::default()
