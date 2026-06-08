@@ -62,6 +62,7 @@ pub const STATUS_FG: Color = Color::DarkGray;
 /// 输入框 border / notice 文字
 pub const INPUT_BORDER_FG: Color = Color::DarkGray;
 pub const INPUT_NOTICE_FG: Color = Color::DarkGray;
+pub const INPUT_FG: Color = Color::White;
 
 /// 确认栏文字
 pub const CONFIRM_FG: Color = Color::Yellow;

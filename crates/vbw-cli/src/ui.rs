@@ -319,6 +319,7 @@ fn render_confirm_bar(app: &AppState, f: &mut Frame, area: Rect) {
 /// 输入区：tui-textarea 封装
 fn render_input_area(app: &AppState, f: &mut Frame, area: Rect) {
     let mut textarea = app.textarea.clone();
+    textarea.set_style(Style::default().fg(theme::INPUT_FG));
     if app.generating {
         textarea.set_style(Style::default().fg(theme::INPUT_NOTICE_FG));
         textarea.set_placeholder_text("[Generating...]");
