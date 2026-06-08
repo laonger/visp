@@ -89,7 +89,8 @@ pub async fn run(session_id: String, mut chat_handle: ChatHandle, model: String)
             break;
         }
         if app.needs_render {
-            if app.generating && !app.try_begin_stream_render() {
+            // 确认状态始终需要渲染，不受流节流影响
+            if app.generating && app.confirm.is_none() && !app.try_begin_stream_render() {
                 app.needs_render = false;
             }
             if app.needs_render {
@@ -108,9 +109,20 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
     match event {
         Event::Key(key) => {
             if app.confirm.is_some() {
-                let q = app.confirm.take().unwrap();
-                let approved = matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'));
-                chat_handle.send_response(&q.query_id, approved);
+                match key.code {
+                    KeyCode::Char('y' | 'Y') => {
+                        let q = app.confirm.take().unwrap();
+                        chat_handle.send_response(&q.query_id, true);
+                    }
+                    KeyCode::Char('n' | 'N') | KeyCode::Enter | KeyCode::Esc => {
+                        let q = app.confirm.take().unwrap();
+                        chat_handle.send_response(&q.query_id, false);
+                    }
+                    _ => {
+                        app.needs_render = false; // 忽略其他按键，不触发渲染
+                        return false;
+                    }
+                }
                 return false;
             }
             // Ctrl+C: 取消正在生成的请求
