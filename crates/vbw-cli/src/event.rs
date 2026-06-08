@@ -4,7 +4,7 @@ use crate::app::{AppState, ConfirmState, LineType};
 use crate::client::ChatHandle;
 use crate::ui::render;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
-use std::io;
+use std::io::{self, Write};
 use vbw_proto::vibewisp::{LlmConfig, server_message};
 
 /// Drop guard: 离开作用域时保证恢复终端状态
@@ -13,13 +13,18 @@ struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = crossterm::terminal::disable_raw_mode();
-        let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture);
+        // 仅关闭 mouse mode 1000 + 1006（和启用时一致）
+        let _ = write!(io::stdout(), "\x1b[?1000l\x1b[?1006l");
+        let _ = io::stdout().flush();
     }
 }
 
 pub async fn run(session_id: String, mut chat_handle: ChatHandle, model: String) -> io::Result<()> {
     crossterm::terminal::enable_raw_mode()?;
-    crossterm::execute!(io::stdout(), crossterm::event::EnableMouseCapture)?;
+    // 只启用 mouse mode 1000（按钮点击事件），保留拖拽给终端做原生选择复制
+    // 不启用 1002/1003，这样 drag 不会拦截终端选择
+    write!(io::stdout(), "\x1b[?1000h\x1b[?1006h")?;
+    io::stdout().flush()?;
     let _guard = TerminalGuard;
     let mut terminal = ratatui::init();
     let mut app = AppState::new(session_id.clone(), model);
