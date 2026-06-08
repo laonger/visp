@@ -377,18 +377,21 @@ pub async fn run_agent_loop(
                     })
                     .await;
 
-                // Check if tool requires approval
+                // Check if tool requires approval (with arguments)
+                let args_value: serde_json::Value =
+                    serde_json::from_str(&tc.arguments).unwrap_or_default();
                 let requires_approval = registry
                     .get(&tc.name)
-                    .map(|t| t.requires_approval())
+                    .map(|t| t.requires_approval_for(&args_value))
                     .unwrap_or(false);
 
                 if requires_approval {
                     let (resp_tx, resp_rx) = oneshot::channel::<bool>();
+                    let args_display = serde_json::to_string(&tc.arguments).unwrap_or_default();
                     let _ = tx
                         .send(AgentEvent::UserQuery {
                             query_id: tc.id.clone(),
-                            message: format!("Allow tool execution: {}?", tc.name),
+                            message: format!("Allow tool: {}({})?", tc.name, args_display),
                             respond: resp_tx,
                         })
                         .await;

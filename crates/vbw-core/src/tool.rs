@@ -72,6 +72,12 @@ pub trait Tool: Send + Sync {
     fn requires_approval(&self) -> bool {
         false
     }
+
+    /// 根据参数判断是否需要用户确认（默认调用 requires_approval()）
+    /// 工具可覆盖此方法以根据执行参数动态决定是否需要审批
+    fn requires_approval_for(&self, _arguments: &serde_json::Value) -> bool {
+        self.requires_approval()
+    }
 }
 
 #[cfg(test)]
@@ -100,5 +106,53 @@ mod tests_tool_approval {
     fn test_tool_default_requires_approval() {
         let tool = NoApprovalTool;
         assert!(!tool.requires_approval());
+    }
+
+    #[test]
+    fn test_requires_approval_for_default_matches_approval() {
+        let tool = NoApprovalTool;
+        let args = serde_json::json!({"url": "https://example.com"});
+        assert_eq!(tool.requires_approval_for(&args), tool.requires_approval());
+    }
+
+    struct ApprovalForTool;
+
+    #[async_trait]
+    impl Tool for ApprovalForTool {
+        fn name(&self) -> &str {
+            "approval_for"
+        }
+        fn description(&self) -> &str {
+            "test tool with dynamic approval"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn execute(&self, _args: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::success("ok")
+        }
+
+        fn requires_approval_for(&self, arguments: &serde_json::Value) -> bool {
+            // 模拟白名单：example.com 不需要确认，其他需要
+            arguments
+                .get("url")
+                .and_then(|v| v.as_str())
+                .map(|url| !url.contains("example.com"))
+                .unwrap_or(true)
+        }
+    }
+
+    #[test]
+    fn test_requires_approval_for_override_allowed() {
+        let tool = ApprovalForTool;
+        let args = serde_json::json!({"url": "https://example.com/page"});
+        assert!(!tool.requires_approval_for(&args));
+    }
+
+    #[test]
+    fn test_requires_approval_for_override_denied() {
+        let tool = ApprovalForTool;
+        let args = serde_json::json!({"url": "https://evil.com"});
+        assert!(tool.requires_approval_for(&args));
     }
 }

@@ -16,6 +16,7 @@ use vbw_llm::anthropic::AnthropicProvider;
 use vbw_tools::{
     bash::Bash,
     codegraph::{CodeGraphGetDetails, CodeGraphSearch},
+    fetch::WebFetch,
     file::{EditFile, ReadFile, WriteFile},
     search::{Glob, Grep},
 };
@@ -81,6 +82,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tool_registry
         .register(Box::new(CodeGraphGetDetails))
         .map_err(|e| format!("register codegraph_get_details: {e}"))?;
+    tool_registry
+        .register(Box::new(WebFetch::from_toml(config.tool.get("webfetch"))))
+        .map_err(|e| format!("register fetch_web: {e}"))?;
     let tool_registry = Arc::new(tool_registry);
 
     // 5. Create rule engine

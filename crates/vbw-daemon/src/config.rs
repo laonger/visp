@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -9,6 +10,8 @@ pub struct DaemonConfig {
     pub llm: LlmSection,
     pub tools: ToolsSection,
     pub agent: AgentSection,
+    #[serde(default)]
+    pub tool: HashMap<String, toml::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -147,6 +150,7 @@ fn default_config() -> DaemonConfig {
             bash_confirm_mode: default_bash_confirm(),
             file_max_size_bytes: default_file_max_size(),
         },
+        tool: HashMap::new(),
     }
 }
 

@@ -1,6 +1,72 @@
 # TODO & 已知限制
 
-## Phase 3 已知限制
+> 最后更新：2026-06-08
+> 测试：201 passed
+
+## Phase 完成状态
+
+| Phase | 内容 | 状态 |
+|-------|------|------|
+| 1 | 项目骨架 + 核心抽象 | ✅ |
+| 2 | LLM Provider + 内置工具 | ✅ |
+| 3 | Agent 核心 + Daemon | ✅ |
+| 4 | CLI 前端 (vbw-cli) | ✅ |
+| 5 | CodeGraph 代码智能 | ✅ |
+
+**测试分布**：vbw-codegraph 18+64 · vbw-core 53 · vbw-daemon 17 · vbw-llm 22 · vbw-tools 27
+
+---
+
+## ~~待合并分支：`mouse`~~ ✅ 已合并
+
+~~所有 CLI UI 改进，尚未合并回 master：~~
+
+| 提交 | 内容 |
+|------|------|
+| `fbe96cb` | feat: input area text color white |
+| `c112cbb` | feat: Alt+Enter inserts newline in input area |
+| `17cc17e` | feat: slash command hints and Tab autocomplete |
+| `776c839` | feat: add /mouse command toggle mouse capture |
+| `039f398` | fix: use KeyCode::F(2) instead of Ctrl+M |
+| `b501806` | feat: add Ctrl+M toggle mouse capture |
+
+---
+
+## Phase 4+ 计划（待实现）
+
+### Session 持久化到 SQLite
+
+当前使用 `InMemorySessionStore`，重启 daemon 后所有会话丢失。
+
+**后续方案**：实现 `SqliteSessionStore: SessionStore`，使用 rusqlite 持久化 session 状态和历史。
+
+### 对话历史 token 计数 + 裁剪
+
+`Session.history` 不设上限，超长对话可能导致 LLM context window 溢出。
+
+**后续方案**：实现 token 计数（tiktoken-rs）和消息裁剪（保留最近 N 轮或最近 N tokens）。
+
+### ConfigUpdate 支持 model 切换
+
+当前 `/model` 命令只更新内存配置，daemon 侧的 LlmProvider 不会重新初始化。
+
+**后续方案**：Chat 流中收到 ConfigUpdate 时重建 LlmProvider。
+
+### gRPC TLS 支持
+
+目前 daemon 监听明文连接，生产环境需加密。
+
+**后续方案**：config 添加 `[daemon.tls]` section + tonic TLS 配置。
+
+### Agent 委派（多 specialist）
+
+当前 Agent 是单循环模式，不支持多 specialist 协作。
+
+**后续方案**：设计 sub-agent 编排机制，支持 specialist 委派。
+
+---
+
+## Phase 3 已知限制（可优化）
 
 ### 1. Agent 循环 panic 时状态无法自动恢复
 
@@ -18,9 +84,7 @@
 
 ### 3. 对话历史无长度限制
 
-Session.history 不设上限，超长对话可能导致 LLM context window 溢出。
-
-**后续方案**：实现 token 计数和消息裁剪（保留最近 N 轮或最近 N tokens）。
+见 Phase 4+ 计划「对话历史 token 计数 + 裁剪」。
 
 ### 4. 规则热重载不打断运行中的 Agent
 
@@ -32,16 +96,7 @@ Session.history 不设上限，超长对话可能导致 LLM context window 溢�
 
 ---
 
-## Phase 4+ 计划
-
-- [ ] Session 持久化到 SQLite
-- [ ] 对话历史 token 计数 + 裁剪
-- [ ] ConfigUpdate 支持 model 切换（需重新初始化 LlmProvider）
-- [ ] gRPC TLS 支持
-- [ ] Agent 委派（多 specialist）
-- [ ] CodeGraph 集成
-
-## Phase 5 已知限制
+## Phase 5 已知限制（可优化）
 
 ### 1. 全量构建无进度反馈
 
