@@ -23,7 +23,7 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
     f.render_widget(Paragraph::new("").block(bg), f.area());
 
     let input_area_height = 4;
-    let bottom_chunks_height = input_area_height + (if app.confirm.is_some() { 3 } else { 2 });
+    let bottom_chunks_height = input_area_height + (if app.confirm.is_some() { 4 } else { 3 });
 
     // 纵向分割：对话区 | 分隔线 | 底部区域
     let main_chunks = Layout::default()
@@ -50,7 +50,7 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
         .direction(Direction::Vertical)
         .constraints(if app.confirm.is_some() {
             vec![
-                Constraint::Length(1), // 确认栏
+                Constraint::Length(2), // 确认栏
                 Constraint::Min(2),    // input area
                 Constraint::Length(1), // 分隔线
                 Constraint::Length(1), // status area
