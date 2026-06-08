@@ -193,4 +193,17 @@ mod tests {
             results.len()
         );
     }
+
+    /// Index the vibewisp project itself so you can inspect .vibewisp/codegraph.db directly.
+    #[tokio::test]
+    async fn test_index_vibewisp() {
+        let cg = CodeGraph::open(Path::new(".")).unwrap();
+        let config = CodeGraphConfig::default();
+        cg.build_full(Path::new("."), &config).await.unwrap();
+        let results = cg.search("", 200).unwrap();
+        eprintln!("[INDEX] indexed {} symbols:", results.len());
+        for s in &results {
+            eprintln!("  {} ({})  {}", s.name, s.kind, s.file_path);
+        }
+    }
 }

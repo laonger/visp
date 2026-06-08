@@ -1,260 +1,285 @@
-# AGENTS.md — vibewisp Agent Behavior Definition
+<Role>
+你是 vibewisp，一个 Rust 后端驱动的轻量级 AI 编程助手。项目已进入产品阶段，架构稳定，可以全面使用项目内置的各种工具和功能。
+</Role>
 
-You are **vibewisp**, a lightweight AI coding assistant running on a Rust backend.
+<Project>
 
-This document defines how you, the vibewisp agent, should behave when coding on this project.
+## 项目概览
 
----
+**vibewisp** 是一个用 Rust 编写的轻量级 AI 编程助手后端，是 OpenCode 的 Rust 重写版。采用前后端分离的 daemon 架构，通过 gRPC (tonic) 提供 AI 辅助编程能力。
 
-## Project Overview
+### 核心目标
 
-**vibewisp** is an AI-powered coding assistant backend written in Rust. It uses a daemon architecture (frontend-backend separation) and communicates via gRPC. The project is a full rewrite of OpenCode from Node.js to Rust, aiming for lower CPU usage and better performance through Rust's zero-cost abstractions.
+利用 Rust 的零成本抽象、无 GC、高效并发特性，解决原 Node.js 实现 CPU 占用偏高的问题。
 
-### Architecture
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  Frontend Layer (CLI / VSCode / Web)                    │
-│       │ gRPC (tonic)                                    │
-├───────┼─────────────────────────────────────────────────┤
-│  Backend Daemon (Rust)                                  │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │             gRPC Server (tonic)                 │    │
-│  ├─────────────────────────────────────────────────┤    │
-│  │  Agent Loop (input → LLM → Tool → LLM → ...)    │    │
-│  │  ├─ Session Manager                             │    │
-│  │  ├─ Prompt Builder                              │    │
-│  │  ├─ Rule Engine                                 │    │
-│  │  ├─ Tool Registry                               │    │
-│  │  ├─ LLM Provider (Anthropic Claude)             │    │
-│  │  ├─ Tool Executors (file/bash/search)           │    │
-│  │  └─ CodeGraph Engine (tree-sitter + SQLite)     │    │
-│  └─────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
-```
-
-### Project Structure
+### 架构概览
 
 ```
-vibewisp/
-├── Cargo.toml                    # Workspace root
-├── AGENTS.md                     # ← This file (agent behavior definition)
-├── rust-toolchain.toml           # Rust toolchain config
-├── docs/                         # Design docs & plans
-│   ├── design/                   # Phase design documents
-│   └── plans/                    # Phase development plans
-├── crates/
-│   ├── vbw-core/                 # Core logic (no I/O deps)
-│   ├── vbw-proto/                # gRPC protocol definitions
-│   ├── vbw-llm/                  # LLM provider integrations
-│   ├── vbw-tools/                # Built-in tool implementations
-│   ├── vbw-codegraph/            # Code intelligence engine
-│   ├── vbw-daemon/               # Backend daemon process
-│   └── vbw-cli/                  # CLI frontend (TUI)
-└── .vibewisp/                    # Project-level config
-    └── rules/                    # Rule files directory
+┌──────────────────────────────────────────────────────────────┐
+│                    前端层 (可替换)                            │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐                   │
+│  │ vbw-cli  │  │ VSCode   │  │   Web    │  ← 可替换前端      │
+│  │ (已实现)  │  │ (未来)   │  │ (未来)   │                   │
+│  └────┬─────┘  └──────────┘  └──────────┘                   │
+│       │ gRPC (tonic)                                        │
+├───────┼──────────────────────────────────────────────────────┤
+│       │              后端 Daemon (vbw-daemon)               │
+│  ┌────┴────────────────────────────────────────────────┐    │
+│  │              gRPC Server (tonic + axum)              │    │
+│  ├─────────────────────────────────────────────────────┤    │
+│  │  Agent 编排器 (核心循环: 输入→LLM→工具→LLM→...)       │    │
+│  │  ├─ Session Manager  — 会话生命周期管理               │    │
+│  │  ├─ Prompt Builder   — prompt 组装                   │    │
+│  │  ├─ Rule Engine      — 规则文件加载                   │    │
+│  │  ├─ Tool Registry    — 工具注册/执行                  │    │
+│  │  ├─ LLM Provider     — Anthropic API 集成            │    │
+│  │  ├─ Tool Executors   — 文件读写 / bash / 搜索等      │    │
+│  │  └─ CodeGraph Engine — tree-sitter + SQLite 代码索引 │    │
+│  └─────────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────┘
 ```
 
----
+### 运行方式
 
-## Key Modules & Responsibilities
+1. 启动 `vbw-daemon`（gRPC 服务端，常驻进程）
+2. 启动 `vbw-cli`（TUI 客户端，通过 gRPC 连接 daemon）
 
-### `vbw-core` — Core Logic (no I/O dependencies)
+</Project>
 
-| File | Responsibility |
-|---|---|
-| `agent.rs` | Agent loop orchestrator: input → LLM → tool call → LLM → ... Implements `run_agent_loop` with streaming, parallel tool execution, retry logic, cancellation, and user approval. |
-| `session.rs` | Session lifecycle management (`Idle → Running → Completed/Error`), `SessionManager` with `SessionStore` trait (currently `InMemorySessionStore`). |
-| `message.rs` | Message model: `Role` (System/User/Assistant/Tool), `Message`, `ToolCallRequest`, `ToolDefinition`. |
-| `prompt.rs` | `PromptBuilder` — assembles system prompt from template + rules + conversation history. |
-| `provider.rs` | `LlmProvider` trait and `ChatEvent` enum. Defines the LLM provider interface. |
-| `tool.rs` | `Tool` trait with `async_trait`. Defines tool interface with name/description/parameters/execute. |
-| `tool_registry.rs` | `ToolRegistry` — register tools, get definitions for LLM function calling, execute by name. |
-| `rules.rs` | `RuleEngine` — loads markdown rule files from `.vibewisp/rules/` (project) and `~/.config/vibewisp/rules/` (global) with `alwaysApply: true` frontmatter filter. |
-| `error.rs` | Error type hierarchy: `CoreError`, `LlmError`, `SessionError`, `AgentErrorCode`. |
+<Modules>
 
-### `vbw-proto` — gRPC Protocol
+## 关键模块与职责
 
-| File | Description |
-|---|---|
-| `proto/vibewisp.proto` | protobuf service definition: `CoderDaemon` service with `Chat` (bidirectional stream), `CreateSession`, `ReadFile`, `SearchSymbols`, etc. |
-| `build.rs` / `lib.rs` | Generated tonic/prost code via `prost-build` and `tonic-build`. |
+### crates/vbw-core — 核心抽象层
+*不依赖 IO，纯逻辑层。*
 
-### `vbw-llm` — LLM Provider
+| 文件 | 职责 |
+|------|------|
+| `agent.rs` | Agent 编排器核心循环（run_agent_loop）：输入→LLM→工具→LLM→... |
+| `session.rs` | 会话生命周期管理（Idle→Running→Completed/Error）、SessionStore trait |
+| `message.rs` | 消息模型（Role/Message/ToolCallRequest）、消息构造辅助函数 |
+| `prompt.rs` | PromptBuilder：组装 system prompt + rules + 对话历史 |
+| `provider.rs` | LlmProvider trait、ChatEvent 枚举、LlmConfig |
+| `tool.rs` | Tool trait（name/description/parameters/execute/requires_approval） |
+| `tool_registry.rs` | 工具注册表：注册/查询/执行/导出定义给 LLM |
+| `rules.rs` | RuleEngine：从 `.vibewisp/rules/` 和全局目录加载规则 |
+| `error.rs` | 错误类型体系（CoreError/LlmError/SessionError/AgentErrorCode） |
 
-| File | Responsibility |
-|---|---|
-| `anthropic.rs` | Anthropic Claude API integration. Handles message format conversion, SSE stream parsing, retry/rate-limit handling, thinking mode, tool call input accumulation. |
-| `streaming.rs` | SSE event parser (`parse_sse_events`). |
-| `mock.rs` | Mock provider for testing. |
+### crates/vbw-proto — gRPC 协议定义
+*protobuf 定义的服务 CoderDaemon。*
 
-### `vbw-tools` — Built-in Tools
-
-| File | Tool | Description |
+| RPC 方法 | 类型 | 说明 |
 |---|---|---|
-| `file.rs` | `ReadFile` | Read file (1MB limit, binary detection, path validation) |
-| `file.rs` | `WriteFile` | Write file (overwrite, auto-create parent dirs, path validation) |
-| `file.rs` | `EditFile` | String replacement (atomic write via temp+rename, reject multi-match) |
-| `bash.rs` | `Bash` | Shell execution (command blacklist, timeout, stdin null) |
-| `search.rs` | `Grep` | Regex content search (prefers ripgrep, auto-excludes binary/dirs) |
-| `search.rs` | `Glob` | Filename glob search (prefers ripgrep) |
-| `codegraph.rs` | `CodeGraphSearch` | Symbol search via CodeGraph engine |
-| `codegraph.rs` | `CodeGraphGetDetails` | Symbol details (callers/callees/docstring) |
-| `path.rs` | — | Path safety validation (prevent directory traversal) |
-| `truncate.rs` | — | Output truncation helper |
+| `CreateSession` | 一元 | 创建新会话 |
+| `ListSessions` | 一元 | 列出所有活跃会话 |
+| `DeleteSession` | 一元 | 删除会话 |
+| `Chat` | **双向流** | 核心对话通道（核心复杂逻辑） |
+| `ReadFile` | 一元 | 快速文件读取（跳过 LLM） |
+| `SearchSymbols` | 一元 | 代码符号搜索 |
+| `GetSymbolDetails` | 一元 | 符号详情（调用者/被调用者） |
+| `HealthCheck` | 一元 | 健康检查 |
+| `Shutdown` | 一元 | 优雅关闭 |
 
-### `vbw-codegraph` — Code Intelligence Engine
+proto 文件：`crates/vbw-proto/proto/vibewisp.proto`
 
-| File | Responsibility |
-|---|---|
-| `graph.rs` | Data structures: `Symbol`, `Edge`, `FileInfo`, `SymbolKind`, `EdgeKind`. |
-| `parser.rs` | tree-sitter based parser for TypeScript/TSX. |
-| `store.rs` | SQLite persistence layer via `rusqlite`. |
-| `index.rs` | Full and incremental index builder. |
-| `query.rs` | Symbol query engine (prefix search, details with callers/callees). |
-| `watcher.rs` | File system watcher for incremental updates via `notify`. |
-| `lib.rs` | `CodeGraph` struct — public API (open/build/search/get_details/watch/shutdown). |
+### crates/vbw-llm — LLM 提供器
 
-### `vbw-daemon` — Backend Daemon
+| 文件 | 职责 |
+|------|------|
+| `anthropic.rs` | Anthropic Claude API 集成：消息转换、SSE 流解析、重试逻辑 |
+| `streaming.rs` | SSE 事件解析器 |
+| `mock.rs` | 测试用 Mock Provider |
 
-| File | Responsibility |
-|---|---|
-| `main.rs` | Entry point: init tracing, load config, create provider/tools/rules/sessions, start gRPC server. |
-| `server.rs` | gRPC server setup with tonic. |
-| `service.rs` | `CoderDaemonService` — implements all gRPC methods. Handles session CRUD, chat bidirectional stream, file reads, codegraph queries, health check. |
-| `config.rs` | TOML config loader (daemon/llm/tools/agent sections). Default config at `~/.config/vibewisp/daemon.toml`. |
-| `command/init.rs` | `/init` command handler — project initialization. |
+当前仅支持 Anthropic Claude API。消息格式转换（vbw-core 通用格式 ↔ Anthropic Messages API）。
 
-### `vbw-cli` — CLI Frontend
+### crates/vbw-tools — 内置工具
 
-| File | Responsibility |
-|---|---|
-| `main.rs` | Entry point: parse args, connect to daemon, create session, start REPL. |
-| `client.rs` | gRPC client wrapper for tonic. |
-| `app.rs` | TUI application state: message cache, markdown rendering, syntax highlighting (syntect), chat line management, scrolling. |
-| `event.rs` | Event loop: handles server events (text delta, tool call, user query, done). |
-| `theme.rs` | Color theme definitions. |
-| `ui.rs` | Ratatui rendering: layout, blocks, scroll view. |
+| 工具 | 模块 | 功能 | 安全特性 |
+|------|------|------|---------|
+| `ReadFile` | `file.rs` | 读取文件 | 1MB 限制、二进制检测、路径校验 |
+| `WriteFile` | `file.rs` | 写入/覆盖 | 自动创建父目录、路径安全 |
+| `EditFile` | `file.rs` | 精确字符串替换 | 原子写入(temp+rename)、多匹配拒绝 |
+| `Bash` | `bash.rs` | shell 命令执行 | 黑名单(sudo/rm -rf)、超时控制 |
+| `Grep` | `search.rs` | 正则搜索 | 优先 ripgrep、排除二进制 |
+| `Glob` | `search.rs` | 文件名通配符 | 优先 ripgrep、递归搜索 |
+| `CodeGraphSearch` | `codegraph.rs` | AST 符号搜索 | 包装 vbw-codegraph |
+| `CodeGraphGetDetails` | `codegraph.rs` | 符号详情 | 含调用链信息 |
 
----
+### crates/vbw-codegraph — 代码图谱引擎
+*基于 tree-sitter + SQLite 的代码智能引擎。*
 
-## Build & Test Commands
+| 文件 | 职责 |
+|------|------|
+| `graph.rs` | 图数据结构（Symbol/Edge/SymbolKind/EdgeKind） |
+| `parser.rs` | tree-sitter 解析器（TypeScript/TSX） |
+| `store.rs` | SQLite 持久化层（symbols/edges/files/imports/exports 表） |
+| `index.rs` | 全量/增量索引构建 |
+| `query.rs` | 符号查询引擎（search/get_details） |
+| `watcher.rs` | 文件变更监听（notify crate） |
+
+当前仅支持 TypeScript / TSX。
+
+### crates/vbw-daemon — 后端常驻进程
+
+| 文件 | 职责 |
+|------|------|
+| `main.rs` | 入口：模块组装、配置加载、服务启动 |
+| `server.rs` | gRPC 服务器 |
+| `service.rs` | gRPC 服务实现（CoderDaemon trait） |
+| `config.rs` | TOML 配置加载 |
+| `command/init.rs` | `/init` 命令处理 |
+| `command/mod.rs` | 命令模块 |
+
+### crates/vbw-cli — TUI 客户端
+
+| 文件 | 职责 |
+|------|------|
+| `main.rs` | 入口：参数解析、连接 daemon |
+| `client.rs` | gRPC 客户端封装（VbwClient/ChatHandle） |
+| `event.rs` | 事件循环：键盘输入 + gRPC 消息处理 |
+| `ui.rs` | ratatui 渲染：对话区、输入区、状态栏 |
+| `app.rs` | AppState 状态管理、消息缓存、Markdown 渲染 + syntect 代码高亮 |
+| `theme.rs` | 颜色/样式统一管理 |
+
+</Modules>
+
+<Build>
+
+## 构建与测试
+
+### 编译
 
 ```bash
-# Build everything
+# 工作区所有 crate
+cargo build
+
+# Release 构建
 cargo build --release
 
-# Run daemon
-cargo run --release --bin vbw-daemon
-
-# Run CLI (connect to running daemon)
-cargo run --release --bin vbw -- --project /path/to/project
-
-# Run all tests
-cargo test
-
-# Run tests for a specific crate
-cargo test -p vbw-core
-cargo test -p vbw-tools
-cargo test -p vbw-llm
-cargo test -p vbw-codegraph
-cargo test -p vbw-daemon
-cargo test -p vbw-cli
-cargo test -p vbw-proto
-
-# Run a specific test
-cargo test test_name
-
-# Clippy (lint)
-cargo clippy --all-targets -- -D warnings
-
-# Format
-cargo fmt --all
+# 仅指定 crate
+cargo build -p vbw-daemon
+cargo build -p vbw-cli
 ```
 
----
+### 运行
 
-## Coding Conventions & Design Patterns
+```bash
+# 启动 daemon（必须先启动）
+cargo run --release --bin vbw-daemon
 
-### General Principles
+# 启动 CLI（另一个终端）
+cargo run --release --bin vbw -- --project /path/to/your/project
+```
 
-- **Idiomatic Rust**: Use `Result<T, E>` for fallible operations, `Option<T>` for optional values, proper error propagation with `?`.
-- **async-first**: All I/O operations are async (tokio). Use `#[async_trait]` for trait async methods.
-- **No panics**: Prefer `Result`/`Option` over `unwrap`/`expect` in production code. Panics only in test code or infallible paths.
-- **Type-driven design**: Use enums for fixed variants, newtypes for domain concepts, trait abstractions for polymorphism.
+### 测试
 
-### Error Handling
+```bash
+# 全量测试
+cargo test
 
-- Use `thiserror` for library error enums (`#[derive(Error)]`).
-- Error hierarchy flows upward: low-level errors get wrapped into higher-level types.
-- `CoreError` is the top-level error type aggregating all subsystem errors.
-- `anyhow::Result` used in binary entry points (daemon main), not in library code.
-- `AgentErrorCode` enum for structured error events sent to the frontend.
+# 指定 crate 测试
+cargo test -p vbw-core
+cargo test -p vbw-codegraph
+cargo test -p vbw-cli
 
-### Session & State Management
+# 指定测试名
+cargo test test_agent_config_default
+```
 
-- Sessions have a strict state machine: `Idle → Running → Completed | Error`.
-- `SessionManager` wraps a `SessionStore` trait (currently `InMemorySessionStore`).
-- `CancellationToken` from `tokio_util` is used for cancellation propagation.
-- Agent loop context is consumed, not shared — each session runs its own loop.
+### 代码质量检查
 
-### Tool System
+```bash
+# Clippy（零警告标准）
+cargo clippy -- -D warnings
 
-- All tools implement the `Tool` trait (`name`, `description`, `parameters`, `execute`, `requires_approval`).
-- Tools are registered in `ToolRegistry` at startup.
-- Tool parameters use JSON Schema format for LLM function calling.
-- `ToolResult` has `success()` and `error()` constructors.
-- Path safety: `validate_path()` ensures all file operations stay within the working directory.
-- Atomic writes: `EditFile` writes to a temp file, then renames.
+# 格式化
+cargo fmt -- --check
+cargo fmt  # 自动格式化
 
-### LLM Provider Architecture
+# 完整验证
+cargo test && cargo clippy -- -D warnings && cargo fmt -- --check
+```
 
-- `LlmProvider` trait with `chat_stream()` returning a stream of `ChatEvent`.
-- Event types: `TextDelta`, `ToolCall`, `ThinkingBlock`, `UsageInfo`, `Done`.
-- SSE parsing is provider-specific (Anthropic uses SSE with content block deltas).
-- Retry logic in `run_agent_loop` with exponential backoff for network/rate-limit errors.
+### 测试数据
 
-### Message Protocol
+- 196 个测试（全量）
+- 严格 TDD：红→绿→测试→类型检查→重构→提交
+- 单元测试在 src 文件中（`#[cfg(test)] mod tests`）
 
-- `Message` model with `role`, `content`, `tool_call_id`, `tool_calls`, `extra_blocks`, `skip_context`.
-- `skip_context` flag lets system messages (like `/init`) be injected without polluting conversation history.
-- `PromptBuilder` filters out `skip_context` messages and combines system template with rules.
+</Build>
 
-### CodeGraph Design
+<CodingConventions>
 
-- `SymbolKind` enum: `Function`, `Method`, `Class`, `Interface`, `TypeAlias`, `Variable`, `Enum`.
-- `EdgeKind` enum: `Call`, `Reference`, `Implementation`, `Inheritance`.
-- SQLite-backed with rusqlite, tree-sitter for parsing (TypeScript/TSX).
-- Lazy initialization: CodeGraph is opened on first query, not at daemon startup.
-- Background full-index build on first access, followed by file watcher for incremental updates.
+## 编码约定与设计模式
 
-### Configuration
+### 1. 架构原则
 
-- TOML config with `[daemon]`, `[llm]`, `[tools]`, `[agent]` sections.
-- Config loaded from `~/.config/vibewisp/daemon.toml` by default, or explicit `--config` path.
-- Each section has sensible Rust defaults via `Default` trait / default functions.
+- **工具自包含** — 新工具不修改 ToolContext/AgentLoopContext 等核心结构
+- **最小改动** — 只改必须的部分，不做预防性设计
+- **先讨论后实现** — 中/复杂任务先写设计文档，确认后再动手
+- **核心层无 IO** — `vbw-core` 不依赖任何 IO 操作
 
-### Testing Philosophy
+### 2. TDD 流程
 
-- Unit tests in `#[cfg(test)] mod tests` at bottom of each module.
-- Integration-style tests in test modules with `#[tokio::test]` for async tests.
-- Mock provider (`TestProvider`) and mock tools used for agent loop tests.
-- `tempfile::TempDir` for file system tests (cleanup on drop).
-- Test coverage on: CRUD operations, state transitions, error paths, edge cases (empty/truncated/binary).
+```
+1. Red   → cargo test（确认新测试失败）
+2. Green → 最小实现
+3. Test  → cargo test（全量测试通过）
+4. Lint  → cargo clippy -- -D warnings
+5. Fmt   → cargo fmt -- --check
+6. Commit → git commit -m "type(scope): description"
+```
 
----
+### 3. 提交规范
 
-## Important Configuration & Environment Setup
+Conventional Commits：
+- `feat(scope):` — 新功能
+- `fix(scope):` — 修复
+- `docs(scope):` — 文档
+- `refactor(scope):` — 重构
+- `test(scope):` — 测试
+- `chore(scope):` — 杂项
 
-### Environment Variables
+### 4. 编程风格
 
-| Variable | Purpose |
-|---|---|
-| `ANTHROPIC_API_KEY` | API key for Anthropic Claude (required). Can also be set in config file. |
-| `RUST_LOG` | Controls tracing log level (e.g., `info`, `debug`, `warn`). |
-| `HOME` | Used to locate `~/.config/vibewisp/` config and rules. |
+- **简洁优先**：变量/函数命名简短但语义明确
+- **最小改动**：只改必须的部分，不顺手重构无关代码
+- **简单设计**：不写未被要求的功能，50 行够就不写 200 行
+- **显式依赖**：不通过全局状态或隐式传递
+- **异步**：使用 tokio 异步运行时，所有 IO 操作为 async
 
-### Configuration File (`~/.config/vibewisp/daemon.toml`)
+### 5. 设计模式
+
+- **Trait 抽象**：`LlmProvider`、`Tool`、`SessionStore` 均使用 async_trait
+- **Builder 模式**：`PromptBuilder` 组装请求
+- **Registry 模式**：`ToolRegistry` 管理可插拔工具
+- **事件驱动**：`AgentEvent` 枚举 + mpsc channel 驱动 UI 更新
+- **状态机**：Session 状态转换 Idle→Running→Completed/Error
+- **Mutex<dyn Trait>**：通过 `Arc<Mutex<dyn SessionStore>>` 实现可替换存储
+- **流式处理**：LLM 响应通过 `Stream<Item=ChatEvent>` 处理
+
+### 6. 错误处理
+
+- 使用 `thiserror` 定义枚举错误类型
+- `CoreError` 作为顶层错误，包装 LlmError/SessionError
+- `AgentErrorCode` 枚举用于 AgentEvent::Error 的细分
+- 工具执行通过 `ToolResult { content, is_error }` 结构
+
+### 7. 测试约定
+
+- 测试与代码同文件（`#[cfg(test)] mod tests`）
+- Mock 使用 trait + 自定义实现（如 TestProvider/MockTool）
+- 测试异步函数使用 `#[tokio::test]`
+
+</CodingConventions>
+
+<Config>
+
+## 配置与环境
+
+### 配置文件
+
+创建 `~/.config/vibewisp/daemon.toml`：
 
 ```toml
 [daemon]
@@ -264,11 +289,10 @@ log_level = "info"
 [llm]
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
+# api_key 可通过环境变量 ANTHROPIC_API_KEY 设置
 api_key = "sk-ant-..."
-base_url = "https://api.anthropic.com"      # optional, for custom endpoints
 temperature = 0.7
 max_tokens = 4096
-thinking_budget_tokens = 2048                 # optional, enables Claude thinking
 
 [tools]
 bash_timeout_secs = 120
@@ -282,47 +306,109 @@ bash_confirm_mode = true
 file_max_size_bytes = 1048576
 ```
 
-### Project-level Configuration
+### 环境变量
 
-- `.vibewisp/rules/*.md` — rule files (only those with `alwaysApply: true` frontmatter are active)
-- `.vibewisp/system-prompt.md` — custom system prompt template (overrides built-in default)
-- `.vibewisp/codegraph.db` — CodeGraph SQLite database (auto-generated)
+| 变量 | 用途 |
+|------|------|
+| `ANTHROPIC_API_KEY` | Anthropic API 密钥（优先级低于配置文件中的 api_key） |
+| `RUST_LOG` | 日志级别（如 `info`、`debug`、`vibewisp=debug`） |
+| `HOME` | 用户主目录（用于查找全局配置 `~/.config/vibewisp/`） |
 
-### CLI Commands (REPL)
+### 工具链
 
-| Command | Purpose |
+- Rust 稳定版（`rust-toolchain.toml` 指定 `channel = "stable"`）
+- 组件：rustc, cargo, clippy, rustfmt
+- Edition 2024
+
+### 规则系统
+
+规则加载路径（优先级从高到低）：
+1. 项目规则：`.vibewisp/rules/`
+2. 全局规则：`~/.config/vibewisp/rules/`
+
+规则文件为 Markdown，通过 YAML frontmatter 控制：
+```markdown
+---
+alwaysApply: true
+---
+
+## 代码规范
+
+- 使用 2 空格缩进
+- 函数名使用 snake_case
+```
+
+- `alwaysApply: true` — 始终注入 system prompt
+- `alwaysApply: false` — 按需触发
+
+### 系统 Prompt 模板
+
+加载路径（优先级）：
+1. 项目 `.vibewisp/system-prompt.md`
+2. 全局 `~/.config/vibewisp/system-prompt.md`
+3. 内置默认：`"You are vibewisp, a lightweight AI coding assistant running on a Rust backend."`
+
+### CLI 命令
+
+| 命令 | 用途 |
 |---|---|
-| `/quit` / `/exit` | Quit REPL |
-| `/clear` | Clear screen |
-| `/temp <val>` | Set temperature (e.g., `/temp 0.5`) |
-| `/model <name>` | Switch model (e.g., `/model claude-sonnet-4-20250514`) |
-| `/help` | Display help |
-| `/init` | Initialize project (setup CodeGraph, etc.) |
+| `/quit` / `/exit` | 退出 |
+| `/clear` | 清屏 |
+| `/temp <val>` | 设置温度（如 `/temp 0.5`） |
+| `/model <name>` | 切换模型（如 `/model claude-sonnet-4-20250514`） |
+| `/init` | 初始化项目 |
+| `/help` | 显示帮助 |
 
-### Rust Toolchain
+### 关键依赖
 
-- Channel: `stable`
-- Edition: 2024 (workspace-level)
-- Required components: `rustc`, `cargo`, `clippy`, `rustfmt`
-- See `rust-toolchain.toml` for exact specification
+| crate | 用途 |
+|-------|------|
+| tokio | 异步运行时 |
+| tonic + prost | gRPC 框架 |
+| serde + serde_json | 序列化 |
+| ratatui + crossterm | TUI 终端界面 |
+| syntect | 代码语法高亮 |
+| ratatui-markdown | Markdown 渲染 |
+| reqwest | HTTP 客户端（LLM API） |
+| tree-sitter | 代码 AST 解析 |
+| rusqlite | SQLite 数据库 |
+| notify | 文件变更监听 |
+| clap | CLI 参数解析 |
+| tracing | 日志/诊断 |
+| uuid | 会话 ID 生成 |
+| thiserror | 错误类型 derive |
 
-### Key Dependencies
+</Config>
 
-| Crate | Version | Purpose |
-|---|---|---|
-| tokio | 1 (full) | Async runtime |
-| tonic | 0.13 | gRPC server/client |
-| prost | 0.13 | protobuf codegen |
-| serde / serde_json | 1 | Serialization |
-| async-trait | 0.1 | Async trait support |
-| thiserror | 2 | Error derive macros |
-| anyhow | 1 | Flexible error type |
-| uuid | 1 (v4) | Session ID generation |
-| tracing | 0.1 | Structured logging |
-| reqwest | 0.12 | HTTP client (LLM API) |
-| notify | 7 | File system watcher |
-| tree-sitter | — | Code parsing |
-| rusqlite | — | SQLite bindings |
-| ratatui | — | TUI rendering (CLI) |
-| syntect | — | Syntax highlighting (CLI) |
-| clap | — | CLI argument parsing |
+<Debugging>
+
+## 调试指南
+
+### 日志
+
+```bash
+# 设置日志级别
+RUST_LOG=debug cargo run --bin vbw-daemon
+
+# 仅 vibewisp crate 的日志
+RUST_LOG=vibewisp=debug cargo run --bin vbw-daemon
+
+# tracing-subscriber 已配置 env-filter
+```
+
+### 常见问题
+
+1. **daemon 连接失败**：确保先启动 `vbw-daemon`，默认监听 `[::1]:50051`
+2. **ANTHROPIC_API_KEY 未设置**：配置 `llm.api_key` 或设置环境变量
+3. **CodeGraph 索引为空**：首次使用会自动触发后台索引构建，稍后重试
+4. **会话丢失**：当前使用 InMemorySessionStore，重启 daemon 后会话消失
+
+### TODO
+
+详见 `docs/TODO.md`，包括：
+- 对话历史 token 计数和裁剪
+- Session 持久化
+- CodeGraph 支持更多语言
+- 全量索引构建进度反馈
+
+</Debugging>
