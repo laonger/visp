@@ -128,6 +128,26 @@ fn llm_error_to_code(err: &LlmError) -> (AgentErrorCode, String) {
     }
 }
 
+/// 格式化工具参数为用户友好的显示文本
+fn format_tool_args(args_json: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(args_json) {
+        Ok(serde_json::Value::Object(obj)) => {
+            let parts: Vec<String> = obj
+                .iter()
+                .map(|(k, v)| {
+                    let val = match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    format!("{k}: {val}")
+                })
+                .collect();
+            parts.join(", ")
+        }
+        _ => args_json.to_string(),
+    }
+}
+
 // ── Agent loop ───────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -387,7 +407,7 @@ pub async fn run_agent_loop(
 
                 if requires_approval {
                     let (resp_tx, resp_rx) = oneshot::channel::<bool>();
-                    let args_display = serde_json::to_string(&tc.arguments).unwrap_or_default();
+                    let args_display = format_tool_args(&tc.arguments);
                     let _ = tx
                         .send(AgentEvent::UserQuery {
                             query_id: tc.id.clone(),
