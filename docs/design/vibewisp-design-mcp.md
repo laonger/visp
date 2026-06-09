@@ -588,6 +588,32 @@ MCP 协议除工具外还支持 Resources 和 Prompts：
 - 在 `McpSession` 中预留 `list_resources()` 和 `list_prompts()` 的接口
 - 未来可通过 `McpResourceAdapter` 类似机制扩展
 
+### 5.18 锁顺序约束
+
+涉及三个锁，获取顺序必须严格遵守，否则可能死锁：
+
+| 锁 | 持有者 | 获取时机 |
+|---|---|---|
+| ToolRegistry.RwLock（写锁） | ToolRegistry | MCP 注册/更新/移除工具 |
+| ToolRegistry.RwLock（读锁） | 任意 get/definitions 调用方 | Agent 循环遍历工具 |
+| McpSession.Mutex | McpToolAdapter | 执行工具调用时获取 session |
+| McpManager.Mutex | McpManager | 管理 sessions HashMap |
+
+**强制约束**：任何路径都不允许在持有 `McpSession.Mutex` 的同时获取 `ToolRegistry` 的写锁。
+
+```
+✅ 允许的路径：
+  ToolRegistry(读锁) → McpSession.Mutex        (Agent 调用工具)
+  ToolRegistry(写锁) → [不获取 McpSession 锁]   (MCP 重连后注册)
+
+❌ 禁止的路径：
+  McpSession.Mutex → ToolRegistry(写锁)         (重连时在持有 session 锁的情况下注册)
+```
+
+**实现要点**：
+- `McpManager` 重连时：先准备好所有 `McpToolAdapter`（此时可持有 McpSession 锁），**释放 McpSession 锁后**，再获取 ToolRegistry 写锁执行注册
+- 工具调用路径天然安全：Agent 先获取 ToolRegistry 读锁找到工具，再调用 `McpToolAdapter.execute()` 获取 McpSession 锁——读锁在 execute 前已释放（读锁不跨 await 持有）
+
 ## 6. 不做什么
 
 - ❌ 不支持 MCP Resources（文件/数据资源读取）
