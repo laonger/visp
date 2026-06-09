@@ -18,6 +18,36 @@ fn is_blocked(command: &str) -> bool {
 /// Bash 命令执行工具
 pub struct Bash;
 
+/// 判断 bash 命令是否包含删除/清理等危险操作
+fn is_destructive_command(command: &str) -> bool {
+    let lower = command.to_lowercase();
+    let destructive_patterns = [
+        " rm ",
+        " rm -",
+        " rm\t",
+        "\nrm ", // remove
+        " rmdir ",
+        "\nrmdir ", // remove dir
+        " del ",
+        " del\t",
+        "\ndel ", // Windows delete
+        " rd ",
+        "\nrd ", // Windows rmdir
+        " clean ",
+        " cleanup ",  // clean/cleanup
+        " truncate ", // truncate
+        " dd ",
+        "\ndd ", // disk destroyer
+        " format ",
+        "\nformat ", // format
+        " mkfs ",
+        "\nmkfs ", // make filesystem
+        " > ",
+        "> ", // redirect overwrite
+    ];
+    destructive_patterns.iter().any(|p| lower.contains(p))
+}
+
 #[async_trait]
 impl Tool for Bash {
     fn name(&self) -> &str {
@@ -60,6 +90,14 @@ impl Tool for Bash {
             },
             "required": ["command"]
         })
+    }
+
+    fn requires_approval_for(&self, arguments: &serde_json::Value) -> bool {
+        arguments
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(is_destructive_command)
+            .unwrap_or(false)
     }
 
     async fn execute(&self, arguments: serde_json::Value, context: &ToolContext) -> ToolResult {

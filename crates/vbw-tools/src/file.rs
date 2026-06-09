@@ -110,6 +110,10 @@ impl Tool for WriteFile {
         "common"
     }
 
+    fn requires_approval(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         "Write content to a file, creating or overwriting it. \
          Use this to create new files, update existing ones, or generate code/output. \
@@ -183,6 +187,10 @@ impl Tool for EditFile {
 
     fn category(&self) -> &str {
         "common"
+    }
+
+    fn requires_approval(&self) -> bool {
+        true
     }
 
     fn description(&self) -> &str {
