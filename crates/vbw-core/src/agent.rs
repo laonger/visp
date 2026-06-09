@@ -295,10 +295,45 @@ pub async fn run_agent_loop(
                 return;
             }
         };
+        // 生成日期字符串
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        let days = now.as_secs() / 86400;
+        let mut y = 1970i64;
+        let mut remaining = days;
+        loop {
+            let days_in_year = if is_leap(y) { 366 } else { 365 };
+            if remaining >= days_in_year {
+                remaining -= days_in_year;
+                y += 1;
+            } else {
+                break;
+            }
+        }
+        let month_days = if is_leap(y) {
+            [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        } else {
+            [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        };
+        let mut m = 1u32;
+        for &md in month_days.iter() {
+            if remaining >= md {
+                remaining -= md;
+                m += 1;
+            } else {
+                break;
+            }
+        }
+        let d = remaining + 1;
+        let date_str = format!("{y:04}-{m:02}-{d:02}");
+
         let messages = PromptBuilder::build(
             &session.system_prompt_template,
             &rule_engine.get_active_rules(),
             &ctx.history,
+            &ctx.working_dir,
+            &date_str,
         );
 
         // c. Get tool definitions
@@ -658,6 +693,10 @@ pub async fn run_agent_loop(
     let _ = session_mgr.finish_loop(&ctx.session_id, SessionStatus::Error);
 }
 
+fn is_leap(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -815,6 +854,16 @@ mod tests {
         }
 
         (events, setup.session_mgr, sid)
+    }
+
+    // ── is_leap ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_leap_year() {
+        assert!(is_leap(2000));
+        assert!(!is_leap(1900));
+        assert!(!is_leap(2023));
+        assert!(is_leap(2024));
     }
 
     // ── Existing tests ─────────────────────────────────────────────────────

@@ -97,8 +97,26 @@ impl SessionStore for InMemorySessionStore {
     }
 }
 
-const DEFAULT_SYSTEM_PROMPT: &str =
-    "You are vibewisp, a lightweight AI coding assistant running on a Rust backend.";
+const DEFAULT_SYSTEM_PROMPT: &str = concat!(
+    "## Role\n",
+    "- You are vibewisp, a lightweight AI coding assistant running on a Rust backend (gRPC + tonic).\n",
+    "- Backend: Rust, gRPC (tonic), tokio runtime.\n",
+    "\n",
+    "## Coding Conventions\n",
+    "- 简洁优先：只写解决问题所需的最少代码，不做预防性设计\n",
+    "- 手术刀式修改：只改必须改的部分，不顺手清理无关代码\n",
+    "- TDD 流程：先写测试 → 最小实现 → 测试通过 → 重构 → 提交\n",
+    "- 命名风格：变量/函数命名简短但语义明确\n",
+    "- 错误处理：使用 thiserror 定义枚举错误，返回清晰消息\n",
+    "- 提交格式：Conventional Commits\n",
+    "\n",
+    "## Interaction Rules\n",
+    "- 工具调用后必须等待结果，不要假设结果\n",
+    "- 单次回复中可并行调用多个工具\n",
+    "- 工具执行需要用户确认时会弹出确认栏（Approve / Deny / Always Allow）\n",
+    "- 始终等一个工具执行完再继续下一个，除非可以并行\n",
+    "- 如需用户选择，可在回复末尾使用 [USER_QUERY] 标记\n",
+);
 
 /// 按优先级加载系统 prompt 模板：
 /// 1. 项目目录 `.vibewisp/system-prompt.md`
@@ -640,6 +658,31 @@ mod tests {
         assert!(result.contains("A custom skill"));
         assert!(result.contains("Do something useful."));
         assert!(result.contains("Available Skills"));
+    }
+
+    // ── DEFAULT_SYSTEM_PROMPT ─────────────────────────────────────────────
+
+    #[test]
+    fn test_default_prompt_contains_role() {
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("vibewisp"));
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("Rust"));
+    }
+
+    #[test]
+    fn test_default_prompt_contains_conventions() {
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("Conventional Commits"));
+    }
+
+    #[test]
+    fn test_default_prompt_contains_interaction_rules() {
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("[USER_QUERY]"));
+    }
+
+    #[test]
+    fn test_default_prompt_no_hardcoded_tools() {
+        // 不应硬编码工具名，工具由动态指南渲染
+        assert!(!DEFAULT_SYSTEM_PROMPT.contains("ReadFile"));
+        assert!(!DEFAULT_SYSTEM_PROMPT.contains("Bash"));
     }
 
     #[test]
