@@ -22,13 +22,25 @@ impl RuleEngine {
     pub fn new(project_path: &Path) -> std::io::Result<Self> {
         let mut files = Vec::new();
 
-        // Project rules: .vibewisp/rules/
+        // 1. Project AGENTS.md (highest priority)
+        let agents_md = project_path.join("AGENTS.md");
+        if agents_md.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&agents_md) {
+                let header = format!("Instructions from: {}", agents_md.display());
+                files.push(RuleFile {
+                    path: agents_md,
+                    content: format!("{header}\n{content}"),
+                });
+            }
+        }
+
+        // 2. Project rules: .vibewisp/rules/
         let project_rules = project_path.join(".vibewisp").join("rules");
         if project_rules.is_dir() {
             collect_rules(&project_rules, &mut files)?;
         }
 
-        // Global rules: ~/.config/vibewisp/rules/
+        // 3. Global rules: ~/.config/vibewisp/rules/
         if let Some(home) = home_dir() {
             let global_rules = home.join(".config").join("vibewisp").join("rules");
             if global_rules.is_dir() {
@@ -241,5 +253,52 @@ mod tests {
         let engine = RuleEngine::new(dir.path()).unwrap();
         let rules = engine.get_active_rules();
         assert!(rules.contains("# Rule with whitespace"));
+    }
+
+    #[test]
+    fn test_loads_project_agents_md() {
+        let dir = tempdir().unwrap();
+        let agents_path = dir.path().join("AGENTS.md");
+        fs::write(
+            &agents_path,
+            "<Role>\nYou are a Rust coding assistant.\n</Role>",
+        )
+        .unwrap();
+
+        let engine = RuleEngine::new(dir.path()).unwrap();
+        let rules = engine.get_active_rules();
+        assert!(rules.contains("Instructions from:"));
+        assert!(rules.contains("Rust coding assistant"));
+    }
+
+    #[test]
+    fn test_missing_agents_md_no_error() {
+        let dir = tempdir().unwrap();
+        // No AGENTS.md file exists
+        let engine = RuleEngine::new(dir.path()).unwrap();
+        // Should contain nothing (no rules dirs either)
+        assert!(engine.get_active_rules().is_empty());
+    }
+
+    #[test]
+    fn test_agents_md_before_rules_order() {
+        let dir = tempdir().unwrap();
+        // Create AGENTS.md
+        fs::write(dir.path().join("AGENTS.md"), "<Role>Agent role</Role>").unwrap();
+        // Create .vibewisp/rules/ with a rule
+        let rules_dir = dir.path().join(".vibewisp").join("rules");
+        fs::create_dir_all(&rules_dir).unwrap();
+        fs::write(
+            rules_dir.join("test.md"),
+            "alwaysApply: true\n# Custom rule",
+        )
+        .unwrap();
+
+        let engine = RuleEngine::new(dir.path()).unwrap();
+        let rules = engine.get_active_rules();
+        // AGENTS.md should come first (higher priority)
+        let agents_pos = rules.find("Agent role").unwrap();
+        let rule_pos = rules.find("Custom rule").unwrap();
+        assert!(agents_pos < rule_pos);
     }
 }
