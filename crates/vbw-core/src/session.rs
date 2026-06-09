@@ -105,20 +105,7 @@ const DEFAULT_SYSTEM_PROMPT: &str = concat!(
     "- Multiple tools can be called in parallel within a single reply\n",
     "- When a tool requires approval, a confirmation bar will appear (Approve / Deny / Always Allow)\n",
     "- Wait for each tool to complete before proceeding, unless tools can run in parallel\n",
-    "- **When you need the user to make a choice, you MUST append a [USER_QUERY] marker at the very end of your response. Do NOT ask the user to choose in plain text.**\n",
-    "  Two modes:\n",
-    "  - Predefined options: user picks from a fixed list\n",
-    "    [USER_QUERY]\n",
-    "    Which approach?\n",
-    "    - SQLite\n",
-    "    - PostgreSQL\n",
-    "    [/USER_QUERY]\n",
-    "  - Free input (allow_other=true): user types custom content\n",
-    "    [USER_QUERY allow_other=true]\n",
-    "    What do you think?\n",
-    "    [/USER_QUERY]\n",
-    "  **Do NOT create fake listening options like \"你来说说看\" or \"I'll listen\" — use allow_other=true instead.**\n",
-    "  Options use `- ` prefix format. The marker must be at the very end of your response.\n",
+    "- When you need the user to make a choice, use the [USER_QUERY] marker (see detailed instructions at end of prompt)\n",
 );
 
 /// 按优先级加载系统 prompt 模板：
@@ -679,15 +666,10 @@ mod tests {
     #[test]
     fn test_default_prompt_contains_interaction_rules() {
         assert!(DEFAULT_SYSTEM_PROMPT.contains("[USER_QUERY]"));
-        // 必须有格式示例
-        assert!(DEFAULT_SYSTEM_PROMPT.contains("allow_other=true"));
-        // 必须禁止"listening"类选项
-        assert!(DEFAULT_SYSTEM_PROMPT.contains("listening options"));
-        // 语气必须强硬
-        assert!(DEFAULT_SYSTEM_PROMPT.contains("MUST"));
-        // 必须区分两种模式
-        assert!(DEFAULT_SYSTEM_PROMPT.contains("Predefined options"));
-        assert!(DEFAULT_SYSTEM_PROMPT.contains("Free input"));
+        // 引用详细说明，但不包含完整格式
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("see detailed instructions"));
+        // 通用工具规则
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("tool results"));
     }
 
     #[test]
