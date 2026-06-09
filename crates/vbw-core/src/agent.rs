@@ -382,41 +382,43 @@ pub async fn run_agent_loop(
         let mut output_tokens: u32 = 0;
 
         let mut pin_stream = Box::pin(stream);
-        while let Some(event) = pin_stream.next().await {
-            match event {
-                Ok(ChatEvent::TextDelta(delta)) => {
-                    text_buffer.push_str(&delta);
-                    try_send!(AgentEvent::TextDelta(delta));
-                }
-                Ok(ChatEvent::ThinkingBlock(block)) => {
-                    thinking_blocks.push(block.clone());
-                    try_send!(AgentEvent::ThinkingBlock(block));
-                }
-                Ok(ChatEvent::UsageInfo {
-                    input_tokens: it,
-                    output_tokens: ot,
-                    ..
-                }) => {
-                    input_tokens = it;
-                    output_tokens = ot;
-                }
-                Ok(ChatEvent::ToolCall {
-                    id,
-                    name,
-                    arguments,
-                }) => {
-                    tool_calls.push(ToolCallRequest {
-                        id,
-                        name,
-                        arguments,
+        loop {
+            tokio::select! {
+                biased;
+                _ = ctx.cancel_token.cancelled() => {
+                    try_send!(AgentEvent::Error {
+                        code: AgentErrorCode::Cancelled,
+                        message: "Agent loop cancelled".into(),
                     });
-                }
-                Ok(ChatEvent::Done) => break,
-                Err(e) => {
-                    let (code, msg) = llm_error_to_code(&e);
-                    try_send!(AgentEvent::Error { code, message: msg });
                     let _ = session_mgr.finish_loop(&ctx.session_id, SessionStatus::Error);
                     return;
+                }
+                event = pin_stream.next() => {
+                    match event {
+                        Some(Ok(ChatEvent::TextDelta(delta))) => {
+                            text_buffer.push_str(&delta);
+                            try_send!(AgentEvent::TextDelta(delta));
+                        }
+                        Some(Ok(ChatEvent::ThinkingBlock(block))) => {
+                            thinking_blocks.push(block.clone());
+                            try_send!(AgentEvent::ThinkingBlock(block));
+                        }
+                        Some(Ok(ChatEvent::UsageInfo { input_tokens: it, output_tokens: ot, .. })) => {
+                            input_tokens = it;
+                            output_tokens = ot;
+                        }
+                        Some(Ok(ChatEvent::ToolCall { id, name, arguments })) => {
+                            tool_calls.push(ToolCallRequest { id, name, arguments });
+                        }
+                        Some(Ok(ChatEvent::Done)) => break,
+                        Some(Err(e)) => {
+                            let (code, msg) = llm_error_to_code(&e);
+                            try_send!(AgentEvent::Error { code, message: msg });
+                            let _ = session_mgr.finish_loop(&ctx.session_id, SessionStatus::Error);
+                            return;
+                        }
+                        None => break,
+                    }
                 }
             }
         }
@@ -667,12 +669,34 @@ pub async fn run_agent_loop(
             }));
         }
 
-        // Join all tasks
-        let task_results = futures::future::join_all(exec_tasks).await;
+        // Join all tasks, with cancellation support
+        let task_results = {
+            let mut exec_tasks = Some(exec_tasks);
+            tokio::select! {
+                biased;
+                _ = ctx.cancel_token.cancelled() => {
+                    if let Some(tasks) = exec_tasks.take() {
+                        for h in &tasks { h.abort(); }
+                    }
+                    Vec::new()
+                }
+                results = futures::future::join_all(
+                    exec_tasks.take().unwrap()
+                ) => {
+                    results.into_iter().filter_map(|r| match r {
+                        Ok(result) => Some(result),
+                        Err(e) if e.is_cancelled() => None,
+                        Err(e) => {
+                            tracing::warn!("tool task failed: {e}");
+                            None
+                        }
+                    }).collect()
+                }
+            }
+        };
 
         // h. Append tool results to history (in original order)
-        let mut sorted_results: Vec<ToolExecResult> =
-            task_results.into_iter().filter_map(|r| r.ok()).collect();
+        let mut sorted_results: Vec<ToolExecResult> = task_results;
         sorted_results.sort_by_key(|r| r.index);
 
         for tr in sorted_results {
