@@ -80,15 +80,27 @@ impl CoderDaemonService {
         }
         drop(map);
 
-        let cg = CodeGraph::open(Path::new(project_path))
+        let mut cg = CodeGraph::open(Path::new(project_path))
             .map_err(|e| Status::internal(format!("codegraph open: {e}")))?;
+
+        // Start file watcher for incremental indexing
+        if let Err(e) = cg
+            .start_watching(
+                Path::new(project_path),
+                vbw_codegraph::index::CodeGraphConfig::default(),
+            )
+            .await
+        {
+            tracing::warn!("codegraph watcher start failed for {project_path}: {e}");
+        }
+
         let cg = Arc::new(cg);
 
-        // Background index build
+        // Background full index build (incremental updates will come via watcher)
         let bg = cg.clone();
         let pp = project_path.to_owned();
+        let config = vbw_codegraph::index::CodeGraphConfig::default();
         tokio::spawn(async move {
-            let config = vbw_codegraph::index::CodeGraphConfig::default();
             if let Err(e) = bg.build_full(Path::new(&pp), &config).await {
                 tracing::warn!("codegraph build_full failed for {pp}: {e}");
             }
