@@ -49,10 +49,10 @@ impl PromptBuilder {
     ) -> Vec<Message> {
         let mut system_content = match (system_template.is_empty(), rules.is_empty()) {
             (true, true) => USER_QUERY_INSTRUCTION.trim_start().to_string(),
-            (true, false) => format!("{rules}{USER_QUERY_INSTRUCTION}"),
+            (true, false) => format!("## Instructions\n\n{rules}{USER_QUERY_INSTRUCTION}"),
             (false, true) => format!("{system_template}{USER_QUERY_INSTRUCTION}"),
             (false, false) => {
-                format!("{system_template}\n\n{rules}{USER_QUERY_INSTRUCTION}")
+                format!("{system_template}\n\n## Instructions\n\n{rules}{USER_QUERY_INSTRUCTION}")
             }
         };
 
@@ -92,7 +92,7 @@ mod tests {
         assert!(
             messages[0]
                 .content
-                .starts_with("You are helpful\n\nBe concise")
+                .starts_with("You are helpful\n\n## Instructions\n\nBe concise")
         );
         assert!(messages[0].content.contains("[USER_QUERY]"));
         assert!(messages[0].content.contains("allow_other=true"));
@@ -120,7 +120,7 @@ mod tests {
         assert!(
             messages[0]
                 .content
-                .starts_with("You are helpful\n\nBe concise")
+                .starts_with("You are helpful\n\n## Instructions\n\nBe concise")
         );
         assert_eq!(messages[1], Message::user("Hello"));
         assert_eq!(messages[2], Message::assistant("Hi!"));
@@ -140,7 +140,7 @@ mod tests {
     fn test_empty_template() {
         let messages = PromptBuilder::build("", "Be concise", &[], Path::new("/tmp"), "2026-06-09");
         assert_eq!(messages.len(), 1);
-        assert!(messages[0].content.starts_with("Be concise"));
+        assert!(messages[0].content.starts_with("## Instructions\n\nBe concise"));
         assert!(messages[0].content.contains("[USER_QUERY]"));
     }
 
