@@ -28,7 +28,7 @@
 
 当前：静态常量 `DEFAULT_SYSTEM_PROMPT`。
 
-改造后：仍然是一个静态常量字符串，但内容大幅扩展。包含以下区块：
+改造后：仍为静态常量，用 `concat!()` 宏拼接多段字符串，保持可读性。包含以下区块：
 
 #### 角色定义
 - 名称：vibewisp
@@ -79,9 +79,19 @@
 ```
 
 来源：
-- 日期：`chrono::Local::now().format("%Y-%m-%d")`（或 `std::time`）
+- 日期：由调用方格式化后传入（如 `"2026-06-09"`）
 - 工作目录：从 `AgentLoopContext.working_dir` 获取
 - 技能：已从 `load_skills()` 加载到 system_prompt_template 中
+
+#### 3.2.1 工具注册顺序
+
+工具在 `ToolRegistry` 中的注册顺序影响 LLM 看到的工具列表顺序，进而影响 LLM 的选择倾向。常用工具应排在前面：
+
+1. Bash（最常用）
+2. ReadFile / WriteFile / EditFile（文件操作）
+3. Grep / Glob（搜索）
+4. WebFetch（网络）
+5. CodeGraphSearch / CodeGraphGetDetails（代码智能，低频）
 
 ### 3.3 工具描述优化
 
@@ -125,25 +135,24 @@ When you need the user to make a choice, append the following at the end of your
 
 - **默认 system prompt** 改动影响所有使用默认模板的会话。如果项目有自定义 `.vibewisp/system-prompt.md`，则不受影响（自定义模板优先级更高）。
 - **工具描述** 改动影响 LLM 看到的工具定义，不需要改协议。
-- **运行时上下文注入** 需要修改 `PromptBuilder::build()` 签名，增加 `working_dir` 参数。
+- **运行时上下文注入** `PromptBuilder::build()` 签名从 `(system_template, rules, history)` 扩展为 `(system_template, rules, history, working_dir, date_str)`，新增 working_dir 和 date_str 参数。调用方（`agent.rs`）在调用前用 `std::time::SystemTime` 生成日期字符串传入。
 
 ## 5. 不做什么
 
-- ❌ 不改动提示组合架构（保持当前的 `build(system_template, rules, history)` 签名）
 - ❌ 不引入持久化上下文纪元（OpenCode 的 context epoch 机制）
 - ❌ 不增加多代理支持
 - ❌ 不改工具注册/执行流程，只改描述文本
 
 ## 6. 验收标准
 
-1. **角色清晰**：LLM 知道自己是 vibewisp，后端是 Rust
-2. **工具使用准确**：LLM 能准确选择工具完成用户请求（验证：多个典型场景的 tool call 正确率）
-3. **问答有上下文**：LLM 回答中体现项目环境信息（日期、路径等）
-4. **编码规范体现**：输出的代码和 commit message 符合规范
-5. **`[USER_QUERY]` 正确使用**：LLM 知道何时以及如何使用此功能
+1. **角色清晰**（人工验证）：LLM 知道自己是 vibewisp，后端是 Rust
+2. **工具使用准确**（人工验证）：LLM 能准确选择工具完成用户请求（多个典型场景的 tool call 正确率）
+3. **问答有上下文**（人工验证）：LLM 回答中体现项目环境信息（日期、路径等）
+4. **编码规范体现**（人工验证）：输出的代码和 commit message 符合规范
+5. **`[USER_QUERY]` 正确使用**（人工验证）：LLM 知道何时以及如何使用此功能
 6. **兼容性**：自定义 `.vibewisp/system-prompt.md` 项目不受影响
-7. **测试通过**：`cargo test` 全量通过
-8. **Clippy 零警告**
+7. **测试通过**（CI 自动化）：`cargo test` 全量通过
+8. **Clippy 零警告**（CI 自动化）：`cargo clippy -- -D warnings`**
 
 ## 7. 拆分策略
 
@@ -151,7 +160,7 @@ When you need the user to make a choice, append the following at the end of your
 
 **步骤 1：System Prompt + 上下文注入**
 - 重写 `DEFAULT_SYSTEM_PROMPT` 常量
-- 修改 `PromptBuilder::build()` 增加 `working_dir` 参数、注入日期
+- 修改 `PromptBuilder::build()` 签名增加 `working_dir` 和 `date_str` 参数、注入运行时上下文
 - 更新 `[USER_QUERY]` 指令文案
 - 更新测试
 
