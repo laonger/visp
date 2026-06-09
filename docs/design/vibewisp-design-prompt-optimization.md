@@ -43,23 +43,11 @@
 - 错误处理：使用 `thiserror`，返回清晰错误信息
 - 提交格式：Conventional Commits
 
-#### 可用工具列表
-每个工具列出：名称、用途、使用场景、重要参数说明。按使用频率分组：
-
-**常用工具**：
-- ReadFile / WriteFile / EditFile：文件操作
-- Bash：执行 shell 命令（含安全限制说明）
-- Grep / Glob：搜索代码和文件
-
-**低频工具**：
-- CodeGraphSearch / CodeGraphGetDetails：代码智能搜索
-- WebFetch：获取网页内容
-
 #### 交互规范
 - 工具调用后必须等待结果
 - 一个回复里可以同时调用多个工具（并行执行）
-- 需要用户确认时会弹出确认栏
-- 可通过 `[USER_QUERY]` 向用户提问
+- 需要用户确认时会弹出确认栏（Approve / Deny / Always Allow）
+- 可通过 `[USER_QUERY]` 向用户提问（仅输出末尾使用）
 
 #### 当前上下文
 - 当前日期
@@ -93,6 +81,35 @@
 4. WebFetch（网络）
 5. CodeGraphSearch / CodeGraphGetDetails（代码智能，低频）
 
+#### 3.2.2 动态工具指南
+
+不硬编码工具列表，改为从 `ToolRegistry` 动态渲染。方法：
+
+**Tool trait 新增 `category()` 方法**：
+- 默认实现返回 `"other"`
+- 各工具按需 override：`"common"`（常用）、`"analyze"`（代码分析）、`"network"`（网络）等
+- 不改已有工具（默认 "other"），需分组的工具只需加一行 `fn category() -> &str`
+
+**渲染逻辑**（在 `agent.rs` 中，调用 `build()` 之前）：
+1. 遍历 `tool_registry.definitions()`，获取每个工具的 name + category
+2. 按 category 分组，每组内保持注册顺序
+3. 渲染为：
+
+```
+## Available Tools
+
+Common (prefer these first):
+  Bash, ReadFile, WriteFile, EditFile, Grep, Glob
+
+Analyze:
+  CodeGraphSearch, CodeGraphGetDetails
+
+Network:
+  WebFetch
+```
+
+4. 将渲染结果拼接到 system_template 末尾，再传入 `build()`
+
 ### 3.3 工具描述优化
 
 每个 Tool 的 `description()` 应改为多句描述，包含：
@@ -115,6 +132,12 @@
 - 不适合什么场景
 - 重要参数说明
 - 安全/限制信息
+
+**`parameters()` 参数描述优化**：同步 review 每个工具 `parameters()` 返回的 JSON Schema 中各属性的 `description` 字段，确保：
+
+- 参数名自解释不够的，补充 description
+- 参数格式、取值范围、默认值清晰说明
+- 与 `description()` 中的描述不矛盾
 
 ### 3.4 `[USER_QUERY]` 指令优化
 
@@ -141,7 +164,7 @@ When you need the user to make a choice, append the following at the end of your
 
 - ❌ 不引入持久化上下文纪元（OpenCode 的 context epoch 机制）
 - ❌ 不增加多代理支持
-- ❌ 不改工具注册/执行流程，只改描述文本
+- ❌ 不改工具执行流程（只改 Tool trait 增加 category 默认方法，不改 execute 逻辑）
 
 ## 6. 验收标准
 
@@ -159,12 +182,16 @@ When you need the user to make a choice, append the following at the end of your
 分两步执行：
 
 **步骤 1：System Prompt + 上下文注入**
-- 重写 `DEFAULT_SYSTEM_PROMPT` 常量
+- 重写 `DEFAULT_SYSTEM_PROMPT` 常量（`concat!()`）
 - 修改 `PromptBuilder::build()` 签名增加 `working_dir` 和 `date_str` 参数、注入运行时上下文
 - 更新 `[USER_QUERY]` 指令文案
 - 更新测试
 
-**步骤 2：工具描述优化**
-- 逐个 review 各 Tool 的 `description()`，改为多句描述
-- 确保每个工具的使用场景、限制、参数说明清晰
-- 不需要改测试（描述文本变化不影响逻辑测试）
+**步骤 2：工具描述优化 + 动态工具指南**
+- Tool trait 新增 `category()` 默认方法（返回 "other"）
+- 各工具按需 override category（bash → "common", codegraph → "analyze", 等）
+- 逐个 review 各 Tool 的 `description()` 和 `parameters()`，改为多句描述（用途、场景、限制、参数说明）
+- 确保 JSON Schema 各属性有清晰 description
+- 在 `agent.rs` 中实现动态工具指南渲染逻辑（从 registry 按 category 分组输出）
+- 调整 `main.rs` 中的工具注册顺序
+- 不需要改逻辑测试（描述文本变化不影响逻辑）
