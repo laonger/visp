@@ -323,61 +323,6 @@ fn render_confirm_bar(app: &AppState, f: &mut Frame, area: Rect) {
             labels
         };
 
-        // 计算总宽度和滚动偏移
-        let sep = "  ";
-        let avail_w = area.width as usize;
-        let item_widths: Vec<usize> = all_labels.iter().map(|l| l.len() + sep.len()).collect();
-        let total_w: usize = item_widths.iter().sum::<usize>().saturating_sub(sep.len());
-
-        // 判断是否超宽
-        let total_items = all_labels.len();
-
-        // 根据 selected_index 计算 scroll_offset
-        let mut scroll_offset = 0usize;
-        if total_w > avail_w && total_items > 0 {
-            // 超宽：确保选中项可见
-            let mut cum_w = 0usize;
-            for (i, &iw) in item_widths.iter().enumerate() {
-                if i < confirm.selected_index {
-                    cum_w += iw;
-                } else {
-                    break;
-                }
-            }
-            // 如果选中项在可见范围之外，滚动到选中项
-            if cum_w + item_widths[confirm.selected_index] > avail_w {
-                // 从后往前找：确保选中项右对齐在可见区
-                let mut w = 0usize;
-                let mut offset = confirm.selected_index;
-                loop {
-                    w += item_widths[offset];
-                    if w > avail_w {
-                        break;
-                    }
-                    if offset == 0 {
-                        break;
-                    }
-                    offset -= 1;
-                }
-                scroll_offset = offset;
-            }
-        }
-
-        // 检测是否有隐藏的左侧/右侧
-        let has_hidden_left = scroll_offset > 0;
-        let mut visible_end = scroll_offset;
-        {
-            let mut w = 0usize;
-            for (i, &iw) in item_widths.iter().enumerate().skip(scroll_offset) {
-                if w + iw > avail_w {
-                    break;
-                }
-                w += iw;
-                visible_end = i + 1;
-            }
-        }
-        let has_hidden_right = visible_end < total_items;
-
         // 消息行
         let msg_line = Line::from(vec![
             Span::styled("❓ ", Style::default().fg(theme::CONFIRM_FG)),
@@ -387,20 +332,7 @@ fn render_confirm_bar(app: &AppState, f: &mut Frame, area: Rect) {
         // 构建选项行
         let mut option_spans: Vec<Span> = Vec::new();
 
-        // 左指示器
-        if has_hidden_left {
-            option_spans.push(Span::styled(
-                "< ",
-                Style::default().fg(theme::CONFIRM_SCROLL_FG),
-            ));
-        }
-
-        for (i, label) in all_labels
-            .iter()
-            .enumerate()
-            .skip(scroll_offset)
-            .take(visible_end.saturating_sub(scroll_offset))
-        {
+        for (i, label) in all_labels.iter().enumerate() {
             let is_selected = i == confirm.selected_index && !confirm.other_active;
 
             if is_selected {
@@ -430,17 +362,9 @@ fn render_confirm_bar(app: &AppState, f: &mut Frame, area: Rect) {
                 }
             }
 
-            if i + 1 < visible_end {
-                option_spans.push(Span::raw(sep));
+            if i < all_labels.len() - 1 {
+                option_spans.push(Span::raw("  "));
             }
-        }
-
-        // 右指示器
-        if has_hidden_right {
-            option_spans.push(Span::styled(
-                " >",
-                Style::default().fg(theme::CONFIRM_SCROLL_FG),
-            ));
         }
 
         // 两行文本

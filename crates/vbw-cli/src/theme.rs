@@ -73,8 +73,6 @@ pub const CONFIRM_SELECTED_BG: Color = Color::from_u32(0x004A6A8E);
 pub const CONFIRM_OPTION_LABEL_FG: Color = Color::Cyan;
 /// 确认栏普通选项文字
 pub const CONFIRM_OPTION_FG: Color = Color::White;
-/// 确认栏指示器（< >）前景色
-pub const CONFIRM_SCROLL_FG: Color = Color::DarkGray;
 
 // ════════════════════════════════════════════════════════════════
 // BlockStyle — 消息块布局参数
