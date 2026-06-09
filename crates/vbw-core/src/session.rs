@@ -98,7 +98,7 @@ impl SessionStore for InMemorySessionStore {
 }
 
 const DEFAULT_SYSTEM_PROMPT: &str = concat!(
-    "You are vibewisp, a lightweight AI coding assistant running on a Rust backend (gRPC + tonic).\n",
+    "You are vibewisp, a lightweight AI coding assistant.\n",
     "\n",
     "## Interaction Rules\n",
     "- 工具调用后必须等待结果，不要假设结果\n",
@@ -668,7 +668,6 @@ mod tests {
     #[test]
     fn test_default_prompt_contains_role() {
         assert!(DEFAULT_SYSTEM_PROMPT.contains("vibewisp"));
-        assert!(DEFAULT_SYSTEM_PROMPT.contains("Rust"));
     }
 
     #[test]
