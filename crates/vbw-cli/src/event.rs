@@ -109,6 +109,14 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
     match event {
         Event::Key(key) => {
             if app.confirm.is_some() {
+                // Ctrl+C 在确认模式下也能取消
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
+                {
+                    if app.generating {
+                        chat_handle.send_cancel();
+                    }
+                    return false;
+                }
                 match key.code {
                     KeyCode::Left => {
                         if let Some(ref mut confirm) = app.confirm {
