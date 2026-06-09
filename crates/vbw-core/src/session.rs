@@ -101,24 +101,24 @@ const DEFAULT_SYSTEM_PROMPT: &str = concat!(
     "You are vibewisp, a lightweight AI coding assistant.\n",
     "\n",
     "## Interaction Rules\n",
-    "- 工具调用后必须等待结果，不要假设结果\n",
-    "- 单次回复中可并行调用多个工具\n",
-    "- 工具执行需要用户确认时会弹出确认栏（Approve / Deny / Always Allow）\n",
-    "- 始终等一个工具执行完再继续下一个，除非可以并行\n",
-    "- **如需用户选择，必须在回复末尾使用 [USER_QUERY] 标记，不得用文字提问让用户选择**\n",
-    "  两种模式：\n",
-    "  - 预设选项：让用户从固定选项中选一个\n",
+    "- Always wait for tool results; do not assume outcomes\n",
+    "- Multiple tools can be called in parallel within a single reply\n",
+    "- When a tool requires approval, a confirmation bar will appear (Approve / Deny / Always Allow)\n",
+    "- Wait for each tool to complete before proceeding, unless tools can run in parallel\n",
+    "- **When you need the user to make a choice, you MUST append a [USER_QUERY] marker at the very end of your response. Do NOT ask the user to choose in plain text.**\n",
+    "  Two modes:\n",
+    "  - Predefined options: user picks from a fixed list\n",
     "    [USER_QUERY]\n",
     "    Which approach?\n",
     "    - SQLite\n",
     "    - PostgreSQL\n",
     "    [/USER_QUERY]\n",
-    "  - 自由输入（allow_other=true）：让用户自由发言或输入自定义内容\n",
+    "  - Free input (allow_other=true): user types custom content\n",
     "    [USER_QUERY allow_other=true]\n",
     "    What do you think?\n",
     "    [/USER_QUERY]\n",
-    "  **禁止创建假装是选项的\"你说/你讲\"类选项，需要用户自由发言时用 allow_other=true**\n",
-    "  选项用 `- ` 前缀列表格式，标记必须放在回复最末尾。\n",
+    "  **Do NOT create fake listening options like \"你来说说看\" or \"I'll listen\" — use allow_other=true instead.**\n",
+    "  Options use `- ` prefix format. The marker must be at the very end of your response.\n",
 );
 
 /// 按优先级加载系统 prompt 模板：
@@ -683,13 +683,13 @@ mod tests {
         assert!(DEFAULT_SYSTEM_PROMPT.contains("[USER_QUERY]"));
         // 必须有格式示例
         assert!(DEFAULT_SYSTEM_PROMPT.contains("allow_other=true"));
-        // 必须有禁止"你说"类选项的说明
-        assert!(DEFAULT_SYSTEM_PROMPT.contains("你说"));
+        // 必须禁止"listening"类选项
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("listening options"));
         // 语气必须强硬
-        assert!(DEFAULT_SYSTEM_PROMPT.contains("必须在"));
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("MUST"));
         // 必须区分两种模式
-        assert!(DEFAULT_SYSTEM_PROMPT.contains("预设选项"));
-        assert!(DEFAULT_SYSTEM_PROMPT.contains("自由输入"));
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("Predefined options"));
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("Free input"));
     }
 
     #[test]
