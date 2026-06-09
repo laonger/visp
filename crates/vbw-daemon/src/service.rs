@@ -183,8 +183,9 @@ impl CoderDaemon for CoderDaemonService {
         let agent_config = self.agent_config.clone();
 
         tokio::spawn(async move {
-            let pending_queries: Arc<Mutex<HashMap<String, oneshot::Sender<UserQueryResult>>>> =
-                Arc::new(Mutex::new(HashMap::new()));
+            let pending_queries: Arc<
+                Mutex<HashMap<String, (String, oneshot::Sender<UserQueryResult>)>>,
+            > = Arc::new(Mutex::new(HashMap::new()));
             let mut running_sessions: Vec<String> = Vec::new();
 
             while let Some(msg_result) = in_stream.next().await {
@@ -322,7 +323,9 @@ impl CoderDaemon for CoderDaemonService {
                                         allow_other,
                                         respond,
                                     } => {
-                                        pq.lock().await.insert(query_id.clone(), respond);
+                                        pq.lock()
+                                            .await
+                                            .insert(query_id.clone(), (sid2.clone(), respond));
                                         proto::ServerMessage {
                                             payload: Some(
                                                 proto::server_message::Payload::UserQuery(
@@ -401,7 +404,7 @@ impl CoderDaemon for CoderDaemonService {
                     }
                     Some(proto::client_message::Payload::UserResponse(resp)) => {
                         let sender = pending_queries.lock().await.remove(&resp.query_id);
-                        if let Some(sender) = sender {
+                        if let Some((_sid, sender)) = sender {
                             let _ = sender.send(UserQueryResult {
                                 selected_index: resp.selected_index,
                                 text: resp.text,
@@ -414,6 +417,9 @@ impl CoderDaemon for CoderDaemonService {
                             Ok(s) if s.status == SessionStatus::Running => {
                                 session_mgr.cancel_agent(sid);
                                 running_sessions.retain(|id| id != sid);
+                                // 清理该会话的所有 pending queries，双重保险
+                                let mut pq = pending_queries.lock().await;
+                                pq.retain(|_, (sess_id, _)| sess_id != sid);
                             }
                             _ => {
                                 // 不存在或非 Running 状态 → 静默忽略
