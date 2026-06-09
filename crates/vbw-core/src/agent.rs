@@ -258,6 +258,12 @@ pub async fn run_agent_loop(
         return;
     }
 
+    // Clean up orphan tool_uses from previous cancelled runs.
+    // If the last assistant message has tool_calls but no corresponding
+    // tool_result messages follow it, strip the tool_calls to prevent
+    // Anthropic API 400 errors (tool_use without tool_result).
+    cleanup_orphan_tool_uses(&mut ctx.history);
+
     // 1. Append user message to session store and local history
     if let Err(e) = session_mgr.append_message(&ctx.session_id, user_message.clone()) {
         let _ = tx
@@ -727,6 +733,25 @@ pub async fn run_agent_loop(
 
 fn is_leap(year: i64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+/// 清理历史中残留的 orphan tool_uses。
+/// 如果最后一条 assistant 消息包含 tool_calls，但没有对应的 tool_result
+/// 消息紧随其后，则清空 tool_calls。这发生在 Cancel 终止了 agent 循环，
+/// 导致 tool_use 被发送给 Anthropic 但没来得及追加 tool_result，
+/// 后续请求会报 400 错误。
+fn cleanup_orphan_tool_uses(history: &mut [Message]) {
+    // 从后往前找最后一条 assistant 消息
+    if let Some(idx) = history
+        .iter()
+        .rposition(|m| m.role == Role::Assistant && m.tool_calls.is_some())
+    {
+        // 检查之后是否有 tool_result 消息，没有则清理
+        let has_results = history[idx + 1..].iter().any(|m| m.role == Role::Tool);
+        if !has_results && history.get_mut(idx).is_some() {
+            history[idx].tool_calls = None;
+        }
+    }
 }
 
 /// 根据注册的工具定义，生成按分类分组的动态工具指南 Markdown 文本
