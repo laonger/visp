@@ -225,7 +225,8 @@ fn extract_frontmatter_field(content: &str, field: &str) -> Option<String> {
     None
 }
 
-/// 去除 YAML frontmatter，返回正文
+/// 去除 YAML frontmatter，返回正文（仅测试用）
+#[cfg(test)]
 fn strip_frontmatter(content: &str) -> &str {
     let content = content.trim();
     if !content.starts_with("---") {
