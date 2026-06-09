@@ -188,14 +188,11 @@ fn load_skills(project_path: &Path) -> String {
         };
         // 提取 YAML frontmatter 中的 description（如果有）
         let description = extract_frontmatter_field(&content, "description");
-        let body = strip_frontmatter(&content);
 
         let mut section = format!("### {skill_name}");
         if let Some(desc) = description {
             section.push_str(&format!("\n{desc}"));
         }
-        section.push('\n');
-        section.push_str(body.trim());
         sections.push(section);
     }
 
@@ -659,7 +656,7 @@ mod tests {
         let result = load_skills(tmp.path());
         assert!(result.contains("my-skill"));
         assert!(result.contains("A custom skill"));
-        assert!(result.contains("Do something useful."));
+        assert!(!result.contains("Do something useful.")); // body 不应包含在提示词中
         assert!(result.contains("Available Skills"));
     }
 
