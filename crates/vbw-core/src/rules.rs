@@ -22,25 +22,38 @@ impl RuleEngine {
     pub fn new(project_path: &Path) -> std::io::Result<Self> {
         let mut files = Vec::new();
 
-        // 1. Project AGENTS.md (highest priority)
-        let agents_md = project_path.join("AGENTS.md");
-        if agents_md.is_file()
-            && let Ok(content) = std::fs::read_to_string(&agents_md)
-        {
-            let header = format!("Instructions from: {}", agents_md.display());
-            files.push(RuleFile {
-                path: agents_md,
-                content: format!("{header}\n{content}"),
-            });
+        // 1. AGENTS.md from project directory upward to root (closest first)
+        for md in discover_agents_md(project_path) {
+            if let Ok(content) = std::fs::read_to_string(&md) {
+                let header = format!("Instructions from: {}", md.display());
+                files.push(RuleFile {
+                    path: md,
+                    content: format!("{header}\n{content}"),
+                });
+            }
         }
 
-        // 2. Project rules: .vibewisp/rules/
+        // 2. Global AGENTS.md: ~/.config/vibewisp/AGENTS.md
+        if let Some(home) = home_dir() {
+            let global_agents = home.join(".config").join("vibewisp").join("AGENTS.md");
+            if global_agents.is_file()
+                && let Ok(content) = std::fs::read_to_string(&global_agents)
+            {
+                let header = format!("Instructions from: {}", global_agents.display());
+                files.push(RuleFile {
+                    path: global_agents,
+                    content: format!("{header}\n{content}"),
+                });
+            }
+        }
+
+        // 3. Project rules: .vibewisp/rules/
         let project_rules = project_path.join(".vibewisp").join("rules");
         if project_rules.is_dir() {
             collect_rules(&project_rules, &mut files)?;
         }
 
-        // 3. Global rules: ~/.config/vibewisp/rules/
+        // 4. Global rules: ~/.config/vibewisp/rules/
         if let Some(home) = home_dir() {
             let global_rules = home.join(".config").join("vibewisp").join("rules");
             if global_rules.is_dir() {
@@ -66,6 +79,28 @@ impl RuleEngine {
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
+}
+
+/// 从 project_path 向上遍历到根目录，寻找所有 AGENTS.md 文件。
+/// 返回结果按距离 project_path 从近到远排序。
+fn discover_agents_md(project_path: &Path) -> Vec<PathBuf> {
+    let mut result = Vec::new();
+    let mut current = Some(project_path.to_path_buf());
+
+    while let Some(path) = current {
+        let agents = path.join("AGENTS.md");
+        if agents.is_file() {
+            result.push(agents);
+        }
+        // Walk up to parent
+        current = path.parent().map(|p| p.to_path_buf());
+        // Stop at filesystem root
+        if path == path.parent().unwrap_or(&path) {
+            break;
+        }
+    }
+
+    result
 }
 
 pub(crate) fn collect_rules(dir: &Path, files: &mut Vec<RuleFile>) -> std::io::Result<()> {
@@ -300,5 +335,44 @@ mod tests {
         let agents_pos = rules.find("Agent role").unwrap();
         let rule_pos = rules.find("Custom rule").unwrap();
         assert!(agents_pos < rule_pos);
+    }
+
+    #[test]
+    fn test_discover_ancestor_agents_md() {
+        // Simulate: project/subdir/ with AGENTS.md in project/
+        let tmp = tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let subdir = project.join("subdir");
+        fs::create_dir_all(&subdir).unwrap();
+
+        // AGENTS.md in parent directory (project root)
+        fs::write(project.join("AGENTS.md"), "Ancestor instructions").unwrap();
+
+        // RuleEngine created from subdir should discover ancestor AGENTS.md
+        let engine = RuleEngine::new(&subdir).unwrap();
+        let rules = engine.get_active_rules();
+        assert!(rules.contains("Ancestor instructions"));
+    }
+
+    #[test]
+    fn test_agents_md_closest_highest_priority() {
+        // Simulate: project/AGENTS.md and project/subdir/AGENTS.md
+        let tmp = tempdir().unwrap();
+        let subdir = tmp.path().join("subdir");
+        fs::create_dir_all(&subdir).unwrap();
+
+        fs::write(tmp.path().join("AGENTS.md"), "Root instructions").unwrap();
+        fs::write(subdir.join("AGENTS.md"), "Subdir instructions").unwrap();
+
+        // RuleEngine created from subdir should have both, subdir first
+        let engine = RuleEngine::new(&subdir).unwrap();
+        let rules = engine.get_active_rules();
+        assert!(rules.contains("Root instructions"));
+        assert!(rules.contains("Subdir instructions"));
+
+        // Subdir instructions should come first (closer)
+        let sub_pos = rules.find("Subdir instructions").unwrap();
+        let root_pos = rules.find("Root instructions").unwrap();
+        assert!(sub_pos < root_pos);
     }
 }
