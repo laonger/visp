@@ -30,6 +30,10 @@ struct Cli {
 async fn main() {
     let cli = Cli::parse();
 
+    // Resolve sibling binary paths (same dir as launcher for cargo run, or PATH)
+    let daemon_bin = resolve_bin("vbw-daemon");
+    let cli_bin = resolve_bin("vbw-cli");
+
     // 1. Create log directory
     let log_dir = get_log_dir();
     tokio::fs::create_dir_all(&log_dir)
@@ -53,7 +57,7 @@ async fn main() {
 
     // 3. Start daemon
     eprintln!("[vbw] Starting daemon (log: {})...", log_path.display());
-    let mut daemon = match Command::new("vbw-daemon")
+    let mut daemon = match Command::new(&daemon_bin)
         .arg("--listen-addr")
         .arg(&cli.addr)
         .stdout(log_file_stdout.into_std().await)
@@ -110,7 +114,7 @@ async fn main() {
     }
 
     // 6. Start CLI
-    let mut cli_child = match Command::new("vbw-cli")
+    let mut cli_child = match Command::new(&cli_bin)
         .args(&cli_args[1..]) // skip the program name
         .spawn()
     {
@@ -153,6 +157,21 @@ async fn main() {
 fn get_log_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".vibewisp").join("logs")
+}
+
+/// 查找二进制路径：优先同目录（cargo run 场景），其次 PATH。
+fn resolve_bin(name: &str) -> PathBuf {
+    // 检查 launcher 同目录
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(parent) = exe.parent()
+    {
+        let sibling = parent.join(name);
+        if sibling.is_file() {
+            return sibling;
+        }
+    }
+    // 回退到 PATH
+    PathBuf::from(name)
 }
 
 async fn wait_for_health(addr: &str) -> bool {
