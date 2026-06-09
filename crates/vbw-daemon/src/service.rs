@@ -10,7 +10,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 use vbw_codegraph::CodeGraph;
 use vbw_core::{
-    agent::{AgentConfig, AgentEvent, run_agent_loop},
+    agent::{AgentConfig, AgentEvent, UserQueryResult, run_agent_loop},
     message::Message,
     provider::{LlmConfig, LlmProvider},
     rules::RuleEngine,
@@ -171,7 +171,7 @@ impl CoderDaemon for CoderDaemonService {
         let agent_config = self.agent_config.clone();
 
         tokio::spawn(async move {
-            let pending_queries: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>> =
+            let pending_queries: Arc<Mutex<HashMap<String, oneshot::Sender<UserQueryResult>>>> =
                 Arc::new(Mutex::new(HashMap::new()));
             let mut running_sessions: Vec<String> = Vec::new();
 
@@ -306,6 +306,8 @@ impl CoderDaemon for CoderDaemonService {
                                     AgentEvent::UserQuery {
                                         query_id,
                                         message,
+                                        options,
+                                        allow_other,
                                         respond,
                                     } => {
                                         pq.lock().await.insert(query_id.clone(), respond);
@@ -316,6 +318,8 @@ impl CoderDaemon for CoderDaemonService {
                                                         query_id,
                                                         message,
                                                         session_id: sid2.clone(),
+                                                        options,
+                                                        allow_other,
                                                     },
                                                 ),
                                             ),
@@ -386,7 +390,10 @@ impl CoderDaemon for CoderDaemonService {
                     Some(proto::client_message::Payload::UserResponse(resp)) => {
                         let sender = pending_queries.lock().await.remove(&resp.query_id);
                         if let Some(sender) = sender {
-                            let _ = sender.send(resp.approved);
+                            let _ = sender.send(UserQueryResult {
+                                selected_index: resp.selected_index,
+                                text: resp.text,
+                            });
                         }
                     }
                     Some(proto::client_message::Payload::Cancel(cancel)) => {
@@ -695,6 +702,7 @@ fn agent_event_to_server_message(event: AgentEvent, session_id: &str) -> proto::
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::sync::Arc as StdArc;
     use vbw_core::session::InMemorySessionStore;
     use vbw_core::session::Session;
@@ -801,6 +809,7 @@ mod tests {
             history: vec![],
             config: LlmConfig::default(),
             system_prompt_template: "default".into(),
+            approved_tools: HashSet::new(),
         };
 
         let proto = session_to_proto(&session);
@@ -821,6 +830,7 @@ mod tests {
                 history: vec![],
                 config: LlmConfig::default(),
                 system_prompt_template: "".into(),
+                approved_tools: HashSet::new(),
             }
         };
 
@@ -916,10 +926,12 @@ mod tests {
 
     #[test]
     fn test_agent_event_to_server_message_user_query_skipped() {
-        let (tx, _rx) = oneshot::channel::<bool>();
+        let (tx, _rx) = oneshot::channel::<UserQueryResult>();
         let event = AgentEvent::UserQuery {
             query_id: "q-1".into(),
             message: "confirm?".into(),
+            options: vec![],
+            allow_other: false,
             respond: tx,
         };
         let msg = agent_event_to_server_message(event, "sess-1");
