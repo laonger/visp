@@ -119,8 +119,11 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 match key.code {
                     KeyCode::Left => {
                         if let Some(ref mut confirm) = app.confirm {
-                            let total =
-                                confirm.options.len() + if confirm.allow_other { 1 } else { 0 };
+                            let total = if confirm.options.is_empty() {
+                                3 // Approve, Deny, Always Allow
+                            } else {
+                                confirm.options.len() + if confirm.allow_other { 1 } else { 0 }
+                            };
                             if confirm.other_active {
                                 confirm.other_active = false;
                             } else if confirm.selected_index == 0 {
@@ -132,8 +135,11 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                     }
                     KeyCode::Right => {
                         if let Some(ref mut confirm) = app.confirm {
-                            let total =
-                                confirm.options.len() + if confirm.allow_other { 1 } else { 0 };
+                            let total = if confirm.options.is_empty() {
+                                3 // Approve, Deny, Always Allow
+                            } else {
+                                confirm.options.len() + if confirm.allow_other { 1 } else { 0 }
+                            };
                             if confirm.other_active {
                                 confirm.other_active = false;
                             } else {
@@ -154,10 +160,18 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                                 app.textarea = ratatui_textarea::TextArea::default();
                                 app.textarea.set_placeholder_text("Type your message...");
                                 chat_handle.send_response(&q.query_id, -1, &text);
-                            } else if confirm.allow_other
-                                && confirm.selected_index == confirm.options.len()
-                            {
-                                confirm.other_active = true;
+                            } else if confirm.allow_other {
+                                let opts_len = if confirm.options.is_empty() {
+                                    3 // Approve, Deny, Always Allow
+                                } else {
+                                    confirm.options.len()
+                                };
+                                if confirm.selected_index == opts_len {
+                                    confirm.other_active = true;
+                                    return false;
+                                }
+                                let q = app.confirm.take().unwrap();
+                                chat_handle.send_response(&q.query_id, q.selected_index as i32, "");
                             } else {
                                 let q = app.confirm.take().unwrap();
                                 chat_handle.send_response(&q.query_id, q.selected_index as i32, "");
