@@ -307,18 +307,51 @@ fn render_confirm_bar(app: &AppState, f: &mut Frame, area: Rect) {
             confirm.options.clone()
         };
 
+        // 计算可用宽度
+        let avail_w = area.width as usize;
+        let num_opts = options.len() + if confirm.allow_other { 1 } else { 0 };
+        let sep_w = 2; // "  " between options
+        let prefix_w = 4; // "[X] "
+        // 总宽度 = 所有前缀 + 所有文本 + 分隔符
+        // 平均分配每个选项的文本宽度
+        let text_w = if num_opts > 0 {
+            let total_overhead = num_opts * prefix_w + (num_opts.saturating_sub(1)) * sep_w;
+            if total_overhead >= avail_w {
+                0 // 极端情况：标签前缀就占满了
+            } else {
+                (avail_w - total_overhead) / num_opts
+            }
+        } else {
+            0
+        };
+
+        // 截断工具函数
+        let truncate = |s: &str, max: usize| -> String {
+            if s.len() <= max || max == 0 {
+                s.to_string()
+            } else if max <= 1 {
+                s.chars().take(1).collect()
+            } else {
+                let mut result: String = s.chars().take(max - 1).collect();
+                result.push('…');
+                result
+            }
+        };
+
         let all_labels: Vec<String> = {
             let mut labels: Vec<String> = options
                 .iter()
                 .enumerate()
                 .map(|(i, opt)| {
                     let letter = (b'A' + i as u8) as char;
-                    format!("[{}] {}", letter, opt)
+                    let truncated = truncate(opt, text_w);
+                    format!("[{}] {}", letter, truncated)
                 })
                 .collect();
             if confirm.allow_other {
                 let letter = (b'A' + options.len() as u8) as char;
-                labels.push(format!("[{}] Other", letter));
+                let truncated = truncate("Other", text_w);
+                labels.push(format!("[{}] {}", letter, truncated));
             }
             labels
         };
