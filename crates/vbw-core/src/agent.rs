@@ -779,6 +779,7 @@ pub(crate) fn render_tool_guide(registry: &ToolRegistry) -> String {
         ("Common (prefer these first)", "common"),
         ("Analyze", "analyze"),
         ("Network", "network"),
+        ("External (MCP)", "mcp"),
     ];
 
     for (label, cat) in &categories {
