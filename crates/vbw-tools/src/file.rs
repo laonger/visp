@@ -17,15 +17,27 @@ impl Tool for ReadFile {
         "read_file"
     }
 
+    fn category(&self) -> &str {
+        "common"
+    }
+
     fn description(&self) -> &str {
-        "读取文件内容。必须提供 path 参数。"
+        "Read the contents of a file from the local filesystem. \
+         Use this to view source code, configuration files, logs, or any text file. \
+         File size is limited to 1MB (detected early to avoid large reads). \
+         Binary files are detected and rejected automatically. \
+         Paths are validated to prevent directory traversal attacks. \
+         Symlinks are not followed for security."
     }
 
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "文件路径" }
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to read, relative to the project root."
+                }
             },
             "required": ["path"]
         })
@@ -94,16 +106,30 @@ impl Tool for WriteFile {
         "write_file"
     }
 
+    fn category(&self) -> &str {
+        "common"
+    }
+
     fn description(&self) -> &str {
-        "写入文件（覆盖）。必须提供 path 和 content 参数。"
+        "Write content to a file, creating or overwriting it. \
+         Use this to create new files, update existing ones, or generate code/output. \
+         Automatically creates parent directories if they don't exist. \
+         Paths are validated to prevent directory traversal. \
+         File size is limited to 1MB."
     }
 
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "文件路径" },
-                "content": { "type": "string", "description": "文件内容" }
+                "path": {
+                    "type": "string",
+                    "description": "Target file path, relative to the project root."
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Content to write to the file."
+                }
             },
             "required": ["path", "content"]
         })
@@ -155,17 +181,34 @@ impl Tool for EditFile {
         "edit_file"
     }
 
+    fn category(&self) -> &str {
+        "common"
+    }
+
     fn description(&self) -> &str {
-        "在文件中进行精确字符串替换。必须提供 path, old_string, new_string 参数。"
+        "Apply an exact string replacement in a file. \
+         Use this for surgical edits to existing files (e.g., fix a bug, rename a variable). \
+         Uses atomic write (temp file + rename) to prevent data loss on failure. \
+         If the old string matches multiple times, the operation is rejected — \
+         provide more surrounding context in the old string to make it unique."
     }
 
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "文件路径" },
-                "old_string": { "type": "string", "description": "原文本" },
-                "new_string": { "type": "string", "description": "新文本" }
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to edit, relative to the project root."
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "Exact string to search for in the file."
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "String to replace the old string with."
+                }
             },
             "required": ["path", "old_string", "new_string"]
         })

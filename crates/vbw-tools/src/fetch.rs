@@ -133,8 +133,18 @@ impl Tool for WebFetch {
         "fetch_web"
     }
 
+    fn category(&self) -> &str {
+        "network"
+    }
+
     fn description(&self) -> &str {
-        "获取网页内容并转为 Markdown。参数：url (必填) — HTTP/HTTPS 地址。"
+        "Fetch the content of a URL and extract the main text content as Markdown. \
+         Use this to read documentation pages, API references, or any web resource. \
+         Supports HTTP and HTTPS URLs. Only textual content (HTML, plain text, JSON, XML) \
+         is extracted. Binary content (images, PDFs) is rejected. \
+         Respects the project's allowed domain whitelist if configured. \
+         Timeout defaults to 30s (max 120s). \
+         Prefer reading local files with ReadFile when the content is already available locally."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -143,7 +153,11 @@ impl Tool for WebFetch {
             "properties": {
                 "url": {
                     "type": "string",
-                    "description": "要获取的 HTTP/HTTPS URL"
+                    "description": "The HTTP or HTTPS URL to fetch."
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Optional timeout in seconds (default: 30, max: 120)."
                 }
             },
             "required": ["url"]

@@ -78,6 +78,12 @@ pub trait Tool: Send + Sync {
     fn requires_approval_for(&self, _arguments: &serde_json::Value) -> bool {
         self.requires_approval()
     }
+
+    /// 工具分类（用于动态工具指南的分组展示）
+    /// 默认分类为 "other"，各工具可根据功能覆盖
+    fn category(&self) -> &str {
+        "other"
+    }
 }
 
 #[cfg(test)]
@@ -154,5 +160,31 @@ mod tests_tool_approval {
         let tool = ApprovalForTool;
         let args = serde_json::json!({"url": "https://evil.com"});
         assert!(tool.requires_approval_for(&args));
+    }
+
+    // ── category() tests ──────────────────────────────────────────────────────
+
+    struct CategoryTool;
+
+    #[async_trait]
+    impl Tool for CategoryTool {
+        fn name(&self) -> &str {
+            "category_test"
+        }
+        fn description(&self) -> &str {
+            "category test tool"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn execute(&self, _args: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::success("ok")
+        }
+    }
+
+    #[test]
+    fn test_tool_default_category() {
+        let tool = NoApprovalTool;
+        assert_eq!(tool.category(), "other");
     }
 }

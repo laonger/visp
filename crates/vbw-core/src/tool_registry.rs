@@ -36,6 +36,7 @@ impl ToolRegistry {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
                 parameters: t.parameters(),
+                category: t.category().to_string(),
             })
             .collect()
     }

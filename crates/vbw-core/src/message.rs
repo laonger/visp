@@ -90,4 +90,5 @@ pub struct ToolDefinition {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value, // JSON Schema
+    pub category: String,              // 工具分类，用于动态工具指南的分组展示
 }

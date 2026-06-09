@@ -24,8 +24,17 @@ impl Tool for Bash {
         "bash"
     }
 
+    fn category(&self) -> &str {
+        "common"
+    }
+
     fn description(&self) -> &str {
-        "执行 shell 命令。必须提供 command 参数指定要执行的命令。"
+        "Execute a single shell command string on the host system with the user's permissions. \
+         Use this for running scripts, build tools, git operations, file manipulation, and other CLI tasks. \
+         The command runs in a persistent shell session with timeout control. \
+         Not suitable for interactive programs (no stdin/stdout). \
+         Blocked commands: sudo, rm -rf with top-level paths. \
+         Timeout is configurable (default 120s, max 600s)."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -34,7 +43,19 @@ impl Tool for Bash {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "要执行的 shell 命令"
+                    "description": "Shell command string to execute. Can include pipes, redirects, and multiple commands separated by && or ;."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional brief description of what this command does (5-10 words). Shown to the user during approval."
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Optional timeout in milliseconds (default: 120000, max: 600000)."
+                },
+                "workdir": {
+                    "type": "string",
+                    "description": "Optional working directory. Defaults to the project root."
                 }
             },
             "required": ["command"]

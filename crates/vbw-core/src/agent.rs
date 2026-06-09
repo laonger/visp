@@ -328,8 +328,16 @@ pub async fn run_agent_loop(
         let d = remaining + 1;
         let date_str = format!("{y:04}-{m:02}-{d:02}");
 
+        // 渲染动态工具指南并追加到 system prompt
+        let tool_guide = render_tool_guide(&tool_registry);
+        let enriched_template = if tool_guide.is_empty() {
+            session.system_prompt_template.clone()
+        } else {
+            format!("{}{}", session.system_prompt_template, tool_guide)
+        };
+
         let messages = PromptBuilder::build(
-            &session.system_prompt_template,
+            &enriched_template,
             &rule_engine.get_active_rules(),
             &ctx.history,
             &ctx.working_dir,
@@ -695,6 +703,51 @@ pub async fn run_agent_loop(
 
 fn is_leap(year: i64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+/// 根据注册的工具定义，生成按分类分组的动态工具指南 Markdown 文本
+pub(crate) fn render_tool_guide(registry: &ToolRegistry) -> String {
+    let defs = registry.definitions();
+    if defs.is_empty() {
+        return String::new();
+    }
+
+    use std::collections::HashMap;
+    let mut grouped: HashMap<&str, Vec<&str>> = HashMap::new();
+    for def in &defs {
+        let cat = if def.category.is_empty() {
+            "other"
+        } else {
+            def.category.as_str()
+        };
+        grouped.entry(cat).or_default().push(def.name.as_str());
+    }
+
+    let mut parts = vec!["\n\n## Available Tools".to_string()];
+
+    // 按固定顺序输出 category
+    let categories = [
+        ("Common (prefer these first)", "common"),
+        ("Analyze", "analyze"),
+        ("Network", "network"),
+    ];
+
+    for (label, cat) in &categories {
+        if let Some(tools) = grouped.remove(*cat)
+            && !tools.is_empty()
+        {
+            parts.push(format!("\n**{label}**:\n  {}", tools.join(", ")));
+        }
+    }
+
+    // 剩余的 category
+    for (cat, tools) in grouped {
+        if !tools.is_empty() {
+            parts.push(format!("\n**{cat}**:\n  {}", tools.join(", ")));
+        }
+    }
+
+    parts.join("\n")
 }
 
 #[cfg(test)]
@@ -1728,5 +1781,74 @@ mod tests {
         }
 
         assert!(found, "Expected UserQuery with allow_other");
+    }
+
+    // ── render_tool_guide tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_render_tool_guide_empty() {
+        let registry = ToolRegistry::new();
+        let guide = render_tool_guide(&registry);
+        assert!(guide.is_empty());
+    }
+
+    #[test]
+    fn test_render_tool_guide_with_tools() {
+        use crate::tool::ToolContext;
+        use crate::tool::ToolResult;
+
+        struct CategorisedTool {
+            name: &'static str,
+            cat: &'static str,
+        }
+
+        #[async_trait::async_trait]
+        impl Tool for CategorisedTool {
+            fn name(&self) -> &str {
+                self.name
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn execute(&self, _args: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+                ToolResult::success("ok")
+            }
+            fn category(&self) -> &str {
+                self.cat
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(CategorisedTool {
+                name: "bash",
+                cat: "common",
+            }))
+            .unwrap();
+        registry
+            .register(Box::new(CategorisedTool {
+                name: "codegraph",
+                cat: "analyze",
+            }))
+            .unwrap();
+        registry
+            .register(Box::new(CategorisedTool {
+                name: "fetch",
+                cat: "network",
+            }))
+            .unwrap();
+
+        let guide = render_tool_guide(&registry);
+        assert!(!guide.is_empty());
+        assert!(guide.contains("## Available Tools"));
+        assert!(guide.contains("Common (prefer these first)"));
+        assert!(guide.contains("bash"));
+        assert!(guide.contains("Analyze"));
+        assert!(guide.contains("codegraph"));
+        assert!(guide.contains("Network"));
+        assert!(guide.contains("fetch"));
     }
 }

@@ -100,16 +100,30 @@ impl Tool for Grep {
         "grep"
     }
 
+    fn category(&self) -> &str {
+        "common"
+    }
+
     fn description(&self) -> &str {
-        "内容搜索（正则）。必须提供 pattern 参数。"
+        "Search file contents using regular expressions. \
+         Use this to find code patterns, error messages, or any text across the project. \
+         Uses ripgrep for fast recursive search. \
+         Binary files and hidden directories are excluded by default. \
+         Supports full regex syntax (e.g., 'fn\\\\s+\\\\w+' for function definitions)."
     }
 
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "pattern": { "type": "string", "description": "搜索模式" },
-                "path": { "type": "string", "description": "搜索路径（可选，默认工作目录）" }
+                "pattern": {
+                    "type": "string",
+                    "description": "Regular expression pattern to search for."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Optional search path (directory), relative to project root. Defaults to the working directory."
+                }
             },
             "required": ["pattern"]
         })
@@ -181,16 +195,30 @@ impl Tool for Glob {
         "glob"
     }
 
+    fn category(&self) -> &str {
+        "common"
+    }
+
     fn description(&self) -> &str {
-        "文件名搜索（通配符）。必须提供 pattern 参数。"
+        "Find files by filename pattern using glob/wildcard matching. \
+         Use this to locate files when you know the name pattern but not the path. \
+         Supports patterns like '**/*.rs', 'src/**/test*.ts', '*.toml'. \
+         Results are sorted by modification time (newest first). \
+         Uses ripgrep for fast recursive search."
     }
 
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "pattern": { "type": "string", "description": "通配符模式" },
-                "path": { "type": "string", "description": "搜索路径（可选）" }
+                "pattern": {
+                    "type": "string",
+                    "description": "Glob pattern to match filenames (e.g., '**/*.rs', '*.toml')."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Optional search directory, relative to project root. Defaults to working directory."
+                }
             },
             "required": ["pattern"]
         })

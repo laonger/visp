@@ -9,8 +9,16 @@ impl Tool for CodeGraphSearch {
         "codegraph_search"
     }
 
+    fn category(&self) -> &str {
+        "analyze"
+    }
+
     fn description(&self) -> &str {
-        "Search symbols in the project codebase by name. Use this to find where functions, classes, interfaces, variables are defined. Returns results with file path, line number, kind, and signature."
+        "Search for symbols in the codebase using AST-aware indexing. \
+         Use this to find function definitions, class declarations, variable references, etc. \
+         Supports prefix-based search and kind filtering (function, class, interface, variable). \
+         Only available after the codebase has been indexed by CodeGraph. \
+         Slower than Grep for simple text search — prefer Grep for literal text patterns."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -86,8 +94,17 @@ impl Tool for CodeGraphGetDetails {
         "codegraph_get_details"
     }
 
+    fn category(&self) -> &str {
+        "analyze"
+    }
+
     fn description(&self) -> &str {
-        "Get detailed information about a symbol, including its signature, docstring, callers, and callees."
+        "Get detailed information about a specific symbol, including its callers and callees. \
+         Use this to understand how a function/class is used across the codebase. \
+         Returns: definition location, source code, list of callers (what calls it), \
+         list of callees (what it calls). \
+         Requires the codebase to be indexed by CodeGraph. \
+         For finding a symbol in the first place, use CodeGraphSearch first."
     }
 
     fn parameters(&self) -> serde_json::Value {
