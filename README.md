@@ -46,12 +46,62 @@
 
 ## 核心特性
 
-- **Agent 编排循环**：用户输入 → LLM → 工具调用 → LLM → ...，支持流式输出、多工具并行、自动重试、用户确认、取消机制
-- **会话管理**：独立会话生命周期（Idle → Running → Completed/Error），内存存储（可替换持久化）
-- **内置工具**：文件读写、Bash 执行、Grep/Glob 搜索、WebFetch 网页获取、CodeGraph 代码分析
-- **规则引擎**：从 `.visp/rules/` 和 `~/.config/visp/rules/` 加载 Markdown 规则，自动注入 system prompt
-- **代码图谱**：tree-sitter 解析 + SQLite 索引，支持 TS/TSX、Rust、Python、C/C++、Go
-- **gRPC 协议**：`CoderDaemon` 服务，提供 Chat 双向流、会话管理、文件读取、符号搜索等 RPC
+### Agent 编排循环
+用户输入 → LLM → 工具调用 → LLM → ... 的完整循环，支持：
+- 流式输出（实时推送 text delta）
+- 多工具并行执行（LLM 一次返回多个 tool_use 时并行跑，结果排序拼回上下文）
+- 自动重试（网络错误/速率限制，指数退避）
+- Thinking 模式（整合 Claude thinking blocks，配置 `thinking_budget_tokens` 控制预算）
+- Token 用量统计（每轮对话返回 input/output token 数）
+- 最大迭代保护（防止无限循环）
+
+### 工具系统
+9 个内置工具，详见 [visp-tools](crates/visp-tools/README.md)：
+
+| 工具 | 功能 |
+|------|------|
+| `ReadFile` / `WriteFile` / `EditFile` | 文件读写与精确替换 |
+| `Bash` | Shell 命令执行（安全黑名单 + 超时控制） |
+| `Grep` / `Glob` | 正则搜索 / 文件名搜索 |
+| `WebFetch` | 网页内容获取与提取 |
+| `CodeGraphSearch` / `CodeGraphGetDetails` | AST 符号搜索与调用链查询 |
+
+### 用户确认
+高危工具（如 `Bash`、`WebFetch` 非白名单域名）可通过 `[USER_QUERY]` 机制让用户逐条审批后再执行，支持单条允许/拒绝或一键全部通过。
+
+### 取消机制
+基于 `CancellationToken`，用户可随时取消运行中的 Agent 循环，清理进行中的工具调用。
+
+### 会话管理
+独立会话生命周期（Idle → Running → Completed/Error），每个会话维护独立的对话历史和 LLM 配置。当前为内存存储，可通过 `SessionStore` trait 替换为持久化实现。
+
+### Skills 技能系统
+从 `.visp/skills/` 加载技能定义，用于注入领域知识或工作流指令。每个技能是一个子目录，包含 `SKILL.md`（YAML frontmatter + Markdown 内容），自动合并到 system prompt 中：
+
+```
+.visp/skills/
+├── my-workflow/
+│   └── SKILL.md     # ---\nname: my-workflow\ndescription: ...\n---\n具体指令内容
+└── another-skill/
+    └── SKILL.md
+```
+
+### 规则引擎
+从 `.visp/rules/`（项目级）和 `~/.config/visp/rules/`（全局）加载 Markdown 规则，通过 `alwaysApply: true/false` 控制注入时机。同时支持 AGENTS.md 从项目目录向上查找。
+
+### 代码图谱
+tree-sitter 解析 + SQLite 索引，支持符号搜索、调用者/被调用者查询、调用路径追踪。支持 TS/TSX、Rust、Python、C/C++、Go。文件监听器自动触发增量索引更新。
+
+### gRPC 通信
+`CoderDaemon` 服务，基于 tonic：
+
+| RPC | 类型 | 说明 |
+|-----|------|------|
+| `Chat` | 双向流 | 核心对话通道 |
+| `CreateSession` / `ListSessions` / `DeleteSession` | 一元 | 会话管理 |
+| `ReadFile` | 一元 | 快速文件读取（跳过 LLM） |
+| `SearchSymbols` / `GetSymbolDetails` | 一元 | 代码符号查询 |
+| `HealthCheck` / `Shutdown` | 一元 | 健康检查 / 优雅关闭 |
 
 ## 快速开始
 
