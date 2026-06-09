@@ -302,37 +302,7 @@ pub async fn run_agent_loop(
             }
         };
         // 生成日期字符串
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap();
-        let days = now.as_secs() / 86400;
-        let mut y = 1970i64;
-        let mut remaining = days;
-        loop {
-            let days_in_year = if is_leap(y) { 366 } else { 365 };
-            if remaining >= days_in_year {
-                remaining -= days_in_year;
-                y += 1;
-            } else {
-                break;
-            }
-        }
-        let month_days = if is_leap(y) {
-            [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-        } else {
-            [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-        };
-        let mut m = 1u32;
-        for &md in month_days.iter() {
-            if remaining >= md {
-                remaining -= md;
-                m += 1;
-            } else {
-                break;
-            }
-        }
-        let d = remaining + 1;
-        let date_str = format!("{y:04}-{m:02}-{d:02}");
+        let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
 
         // 渲染动态工具指南并追加到 system prompt
         let tool_guide = render_tool_guide(&tool_registry);
@@ -734,10 +704,6 @@ pub async fn run_agent_loop(
     let _ = session_mgr.finish_loop(&ctx.session_id, SessionStatus::Error);
 }
 
-fn is_leap(year: i64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
-}
-
 /// 清理历史中残留的 orphan tool_uses。
 /// 如果最后一条 assistant 消息包含 tool_calls，但没有对应的 tool_result
 /// 消息紧随其后，则清空 tool_calls。这发生在 Cancel 终止了 agent 循环，
@@ -984,16 +950,6 @@ mod tests {
         }
 
         (events, setup.session_mgr, sid)
-    }
-
-    // ── is_leap ────────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_is_leap_year() {
-        assert!(is_leap(2000));
-        assert!(!is_leap(1900));
-        assert!(!is_leap(2023));
-        assert!(is_leap(2024));
     }
 
     // ── Existing tests ─────────────────────────────────────────────────────
