@@ -171,7 +171,8 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                                 app.textarea = ratatui_textarea::TextArea::default();
                                 app.textarea.set_placeholder_text("Type your message...");
                             } else {
-                                app.confirm.take();
+                                let q = app.confirm.take().unwrap();
+                                chat_handle.send_response(&q.query_id, 1, "");
                                 if app.generating {
                                     chat_handle.send_cancel();
                                 }
