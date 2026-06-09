@@ -391,6 +391,11 @@ fn handle_grpc_message(
             });
         }
         Some(server_message::Payload::Error(err)) => {
+            // Skip stale Error from cancelled request (cancel sends Error, not Done)
+            if app.stale_done_expected {
+                app.stale_done_expected = false;
+                return;
+            }
             app.add_message(LineType::Error, format!("{}: {}", err.code, err.message));
             app.generating = false;
             app.current_request_id = None;
