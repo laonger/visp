@@ -353,8 +353,8 @@ pub async fn run_agent_loop(
         // c. Get tool definitions
         let tools = tool_registry.definitions();
 
-        // 调试：保存完整 prompt 到文件
-        dump_prompt_to_file(&ctx.working_dir, &messages, &tools);
+        // 调试：取消注释下方行，将完整 prompt（messages + tools）保存到 .vibewisp/last-prompt.json
+        // dump_prompt_to_file(&ctx.working_dir, &messages, &tools);
 
         // d. Call LLM with retry
         let stream = {
@@ -804,7 +804,10 @@ pub(crate) fn render_tool_guide(registry: &ToolRegistry) -> String {
 }
 
 /// 将当前 prompt（messages + tools）保存到 `.vibewisp/last-prompt.json`，
-/// 方便调试和检查实际发送给 LLM 的内容。写入失败时静默忽略。
+/// 方便调试和检查实际发送给 LLM 的内容。
+/// 取消注释上方 `dump_prompt_to_file(&ctx.working_dir, &messages, &tools);` 以启用。
+/// 写入失败时静默忽略。
+#[allow(dead_code)]
 fn dump_prompt_to_file(
     working_dir: &std::path::Path,
     messages: &[crate::message::Message],
