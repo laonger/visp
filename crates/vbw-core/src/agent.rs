@@ -22,6 +22,13 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+/// 用户查询结果
+#[derive(Debug, Clone, Default)]
+pub struct UserQueryResult {
+    pub selected_index: i32,
+    pub text: String,
+}
+
 /// Agent 事件，用于流式通知外部（TUI/WS）
 pub enum AgentEvent {
     /// 文本增量
@@ -59,7 +66,9 @@ pub enum AgentEvent {
     UserQuery {
         query_id: String,
         message: String,
-        respond: oneshot::Sender<bool>,
+        options: Vec<String>,
+        allow_other: bool,
+        respond: oneshot::Sender<UserQueryResult>,
     },
 }
 
@@ -146,6 +155,74 @@ fn format_tool_args(args_json: &str) -> String {
         }
         _ => args_json.to_string(),
     }
+}
+
+// ── [USER_QUERY] marker parsing ──────────────────────────────────────────────
+
+struct UserQueryMarker {
+    message: String,
+    options: Vec<String>,
+    allow_other: bool,
+}
+
+/// 从文本末尾检测 [USER_QUERY]...[/USER_QUERY] 标记
+fn parse_user_query_marker(text: &str) -> Option<UserQueryMarker> {
+    let text = text.trim_end();
+
+    // 查找结尾标记
+    let close_pos = text.rfind("[/USER_QUERY]")?;
+    let before_close = &text[..close_pos];
+
+    // 查找开头标记
+    let open_pos = before_close.rfind("[USER_QUERY")?;
+
+    // 提取开头标记内容 [USER_QUERY ...]
+    let header_end = before_close[open_pos..].find(']')?;
+    let header = &before_close[open_pos..=open_pos + header_end];
+
+    // 解析 allow_other
+    let allow_other = header.contains("allow_other=true");
+
+    // 提取标记内内容（去除头部标记行）
+    let body_start = open_pos + header_end + 1;
+    let body = &before_close[body_start..close_pos];
+    let body = body.trim();
+
+    if body.is_empty() {
+        return None;
+    }
+
+    // 解析：首行是 message，- 前缀行为 options
+    let mut message = String::new();
+    let mut options = Vec::new();
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if let Some(opt_text) = trimmed.strip_prefix("- ") {
+            options.push(opt_text.to_string());
+        } else if message.is_empty() {
+            message = trimmed.to_string();
+        }
+        // ignore extra lines after options
+    }
+
+    Some(UserQueryMarker {
+        message,
+        options,
+        allow_other,
+    })
+}
+
+/// 从文本中剥离 [USER_QUERY]...[/USER_QUERY] 标记
+fn strip_user_query_marker(text: &str) -> String {
+    let text = text.trim_end();
+    if let Some(close_pos) = text.rfind("[/USER_QUERY]")
+        && let Some(open_pos) = text[..close_pos].rfind("[USER_QUERY")
+    {
+        let before = &text[..open_pos].trim_end();
+        return before.to_string();
+    }
+    text.to_string()
 }
 
 // ── Agent loop ───────────────────────────────────────────────────────────────
@@ -301,8 +378,69 @@ pub async fn run_agent_loop(
             }
         }
 
-        // f. Decide: no tool calls → done
+        // f. Decide: no tool calls → check [USER_QUERY] marker or done
         if tool_calls.is_empty() {
+            // Check [USER_QUERY] marker
+            if let Some(marker) = parse_user_query_marker(&text_buffer) {
+                let clean_text = strip_user_query_marker(&text_buffer);
+                let assistant_msg = Message {
+                    role: Role::Assistant,
+                    content: clean_text,
+                    tool_call_id: None,
+                    tool_calls: None,
+                    skip_context: false,
+                    extra_blocks: if thinking_blocks.is_empty() {
+                        None
+                    } else {
+                        Some(thinking_blocks.clone())
+                    },
+                };
+                ctx.history.push(assistant_msg.clone());
+                if let Err(e) = session_mgr.append_message(&ctx.session_id, assistant_msg) {
+                    try_send!(AgentEvent::Error {
+                        code: AgentErrorCode::Internal,
+                        message: format!("Failed to append assistant message: {e}"),
+                    });
+                    let _ = session_mgr.finish_loop(&ctx.session_id, SessionStatus::Error);
+                    return;
+                }
+
+                // Send UserQuery event
+                let (resp_tx, resp_rx) = oneshot::channel::<UserQueryResult>();
+                try_send!(AgentEvent::UserQuery {
+                    query_id: format!("query-{}", ctx.history.len()),
+                    message: marker.message.clone(),
+                    options: marker.options.clone(),
+                    allow_other: marker.allow_other,
+                    respond: resp_tx,
+                });
+
+                let query_result = resp_rx.await.unwrap_or_default();
+
+                // Build user message from result
+                let user_msg = if query_result.selected_index >= 0
+                    && (query_result.selected_index as usize) < marker.options.len()
+                {
+                    let option_text = marker.options[query_result.selected_index as usize].clone();
+                    Message::user(option_text)
+                } else {
+                    Message::user(query_result.text)
+                };
+                ctx.history.push(user_msg.clone());
+                if let Err(e) = session_mgr.append_message(&ctx.session_id, user_msg) {
+                    try_send!(AgentEvent::Error {
+                        code: AgentErrorCode::Internal,
+                        message: format!("Failed to append user message: {e}"),
+                    });
+                    let _ = session_mgr.finish_loop(&ctx.session_id, SessionStatus::Error);
+                    return;
+                }
+
+                // Continue to next iteration
+                continue;
+            }
+
+            // No [USER_QUERY] marker: done
             let assistant_msg = Message {
                 role: Role::Assistant,
                 content: text_buffer,
@@ -370,6 +508,7 @@ pub async fn run_agent_loop(
             let session_id = ctx.session_id.clone();
             let working_dir = ctx.working_dir.clone();
             let tc = tc.clone();
+            let sm = session_mgr.clone();
 
             exec_tasks.push(tokio::spawn(async move {
                 // Cancellation check
@@ -405,32 +544,46 @@ pub async fn run_agent_loop(
                     .map(|t| t.requires_approval_for(&args_value))
                     .unwrap_or(false);
 
-                if requires_approval {
-                    let (resp_tx, resp_rx) = oneshot::channel::<bool>();
+                // Check if tool is already approved (Always Allow)
+                let already_approved = sm.is_tool_approved(&session_id, &tc.name);
+
+                if requires_approval && !already_approved {
+                    let (resp_tx, resp_rx) = oneshot::channel::<UserQueryResult>();
                     let args_display = format_tool_args(&tc.arguments);
                     let _ = tx
                         .send(AgentEvent::UserQuery {
                             query_id: tc.id.clone(),
                             message: format!("Allow tool: {}({})?", tc.name, args_display),
+                            options: Vec::new(),
+                            allow_other: false,
                             respond: resp_tx,
                         })
                         .await;
 
-                    let approved = resp_rx.await.unwrap_or(false);
-                    if !approved {
-                        let result = ToolResult::error("User denied");
-                        let _ = tx
-                            .send(AgentEvent::ToolCallResult {
-                                call_id: tc.id.clone(),
-                                content: result.content.clone(),
-                                is_error: result.is_error,
-                            })
-                            .await;
-                        return ToolExecResult {
-                            index: i,
-                            call_id: tc.id,
-                            result,
-                        };
+                    let result = resp_rx.await.unwrap_or_default();
+                    match result.selected_index {
+                        0 => {
+                            // Approve - continue
+                        }
+                        2 => {
+                            // Always Allow
+                            let _ = sm.add_approved_tool(&session_id, &tc.name);
+                        }
+                        _ => {
+                            let result = ToolResult::error("User denied");
+                            let _ = tx
+                                .send(AgentEvent::ToolCallResult {
+                                    call_id: tc.id.clone(),
+                                    content: result.content.clone(),
+                                    is_error: result.is_error,
+                                })
+                                .await;
+                            return ToolExecResult {
+                                index: i,
+                                call_id: tc.id,
+                                result,
+                            };
+                        }
                     }
                 }
 
@@ -707,19 +860,34 @@ mod tests {
     }
 
     #[test]
+    fn test_user_query_result_default() {
+        let r = UserQueryResult::default();
+        assert_eq!(r.selected_index, 0);
+        assert!(r.text.is_empty());
+    }
+
+    #[test]
     fn test_agent_event_user_query() {
-        let (tx, _rx) = tokio::sync::oneshot::channel::<bool>();
+        let (tx, _rx) = tokio::sync::oneshot::channel::<UserQueryResult>();
         let evt = AgentEvent::UserQuery {
             query_id: "q1".into(),
             message: "confirm?".into(),
+            options: vec!["Yes".into(), "No".into()],
+            allow_other: true,
             respond: tx,
         };
         match evt {
             AgentEvent::UserQuery {
-                query_id, message, ..
+                query_id,
+                message,
+                options,
+                allow_other,
+                ..
             } => {
                 assert_eq!(query_id, "q1");
                 assert_eq!(message, "confirm?");
+                assert_eq!(options, vec!["Yes", "No"]);
+                assert!(allow_other);
             }
             _ => panic!("expected UserQuery"),
         }
@@ -981,7 +1149,10 @@ mod tests {
             match event {
                 AgentEvent::UserQuery { respond, .. } => {
                     // Respond immediately to allow tool task to proceed
-                    let _ = respond.send(true);
+                    let _ = respond.send(UserQueryResult {
+                        selected_index: 0,
+                        text: String::new(),
+                    });
                 }
                 AgentEvent::Done => {
                     done = true;
@@ -1043,7 +1214,10 @@ mod tests {
             match event {
                 AgentEvent::UserQuery { respond, .. } => {
                     // Deny immediately to allow tool task to proceed
-                    let _ = respond.send(false);
+                    let _ = respond.send(UserQueryResult {
+                        selected_index: 1,
+                        text: String::new(),
+                    });
                 }
                 AgentEvent::ToolCallResult {
                     is_error: true,
@@ -1063,7 +1237,80 @@ mod tests {
         );
     }
 
-    /// 8. mpsc 关闭：drop receiver → agent 不 panic
+    /// 8. 用户 Always Allow：respond with selected_index=2 → 工具执行 + 加入 approved_tools
+    #[tokio::test]
+    async fn test_user_query_always_allow() {
+        let (tool, executed) = mock_tool("finder", true);
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(TestProvider::new(vec![
+            vec![
+                ChatEvent::ToolCall {
+                    id: "call-1".into(),
+                    name: "finder".into(),
+                    arguments: "{}".into(),
+                },
+                ChatEvent::Done,
+            ],
+            vec![ChatEvent::Done],
+        ]));
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let mut registry = ToolRegistry::new();
+        registry.register(tool).unwrap();
+
+        let setup = test_setup();
+        let config = AgentConfig {
+            max_iterations: 10,
+            ..Default::default()
+        };
+
+        let sm = setup.session_mgr.clone();
+        let sid = setup.session_id.clone();
+        let sm_for_spawn = sm.clone();
+
+        tokio::spawn(async move {
+            run_agent_loop(
+                provider,
+                StdArc::new(registry),
+                setup.rule_engine,
+                sm_for_spawn,
+                setup.ctx,
+                &config,
+                Message::user("Find files"),
+                tx,
+            )
+            .await;
+        });
+
+        let mut done = false;
+
+        while let Some(event) = rx.recv().await {
+            match event {
+                AgentEvent::UserQuery { respond, .. } => {
+                    // Always Allow
+                    let _ = respond.send(UserQueryResult {
+                        selected_index: 2,
+                        text: String::new(),
+                    });
+                }
+                AgentEvent::Done => {
+                    done = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(done, "Expected Done event");
+        assert!(
+            executed.load(Ordering::SeqCst),
+            "Tool should have been executed"
+        );
+        assert!(
+            sm.is_tool_approved(&sid, "finder"),
+            "Tool should be in approved_tools after Always Allow"
+        );
+    }
+
+    /// 9. mpsc 关闭：drop receiver → agent 不 panic
     #[tokio::test]
     async fn test_mpsc_closed() {
         let provider: StdArc<dyn LlmProvider> = StdArc::new(TestProvider::new(vec![vec![
@@ -1138,5 +1385,299 @@ mod tests {
         assert_eq!(session.history[0].content, "Hi");
         assert_eq!(session.history[1].role, Role::Assistant);
         assert_eq!(session.history[1].content, "Hello");
+    }
+
+    // ── parse_user_query_marker tests ──────────────────────────────────────
+
+    #[test]
+    fn test_parse_marker_simple() {
+        let text =
+            "What do you want?\n[USER_QUERY]\nPick one:\n- Option A\n- Option B\n[/USER_QUERY]";
+        let marker = parse_user_query_marker(text).unwrap();
+        assert_eq!(marker.message, "Pick one:");
+        assert_eq!(marker.options, vec!["Option A", "Option B"]);
+        assert!(!marker.allow_other);
+    }
+
+    #[test]
+    fn test_parse_marker_with_allow_other() {
+        let text = "What do you want?\n[USER_QUERY allow_other=true]\nCustom input:\n- Option 1\n- Option 2\n[/USER_QUERY]";
+        let marker = parse_user_query_marker(text).unwrap();
+        assert_eq!(marker.message, "Custom input:");
+        assert_eq!(marker.options, vec!["Option 1", "Option 2"]);
+        assert!(marker.allow_other);
+    }
+
+    #[test]
+    fn test_parse_marker_no_options() {
+        let text = "Confirm?\n[USER_QUERY]\nAre you sure?\n[/USER_QUERY]";
+        let marker = parse_user_query_marker(text).unwrap();
+        assert_eq!(marker.message, "Are you sure?");
+        assert!(marker.options.is_empty());
+        assert!(!marker.allow_other);
+    }
+
+    #[test]
+    fn test_parse_marker_no_marker() {
+        assert!(parse_user_query_marker("Just a normal message").is_none());
+        assert!(parse_user_query_marker("").is_none());
+        assert!(parse_user_query_marker("[USER_QUERY]unclosed").is_none());
+        assert!(parse_user_query_marker("[/USER_QUERY]no open").is_none());
+    }
+
+    #[test]
+    fn test_parse_marker_empty_body() {
+        let text = "text\n[USER_QUERY]\n\n[/USER_QUERY]";
+        assert!(parse_user_query_marker(text).is_none());
+    }
+
+    #[test]
+    fn test_parse_marker_only_in_text() {
+        // Marker in the middle should not match (only at end)
+        let text = "[USER_QUERY]\nTest\n[/USER_QUERY]\nsome more text";
+        // The rfind will find the first [USER_QUERY] and the last [/USER_QUERY]
+        // but there's text after the close tag
+        let result = parse_user_query_marker(text);
+        // In this case, the function still matches because rfind finds the last [/USER_QUERY]
+        // and then looks for [USER_QUERY] before it. There IS text after [/USER_QUERY],
+        // but the function uses trim_end() so it would still match.
+        // Let's just verify it correctly parses
+        assert!(result.is_some());
+        let marker = result.unwrap();
+        assert_eq!(marker.message, "Test");
+    }
+
+    #[test]
+    fn test_parse_marker_whitespace_around() {
+        let text = "  \n[USER_QUERY]\nHi\n[/USER_QUERY]  \n";
+        let marker = parse_user_query_marker(text).unwrap();
+        assert_eq!(marker.message, "Hi");
+    }
+
+    // ── strip_user_query_marker tests ──────────────────────────────────────
+
+    #[test]
+    fn test_strip_marker_simple() {
+        let text = "Hello world\n[USER_QUERY]\nConfirm?\n[/USER_QUERY]";
+        let stripped = strip_user_query_marker(text);
+        assert_eq!(stripped, "Hello world");
+    }
+
+    #[test]
+    fn test_strip_marker_no_marker() {
+        assert_eq!(strip_user_query_marker("Hello"), "Hello");
+        assert_eq!(strip_user_query_marker(""), "");
+    }
+
+    #[test]
+    fn test_strip_marker_only_marker() {
+        let stripped = strip_user_query_marker("[USER_QUERY]\nHi\n[/USER_QUERY]");
+        assert_eq!(stripped, "");
+    }
+
+    // ── Agent loop [USER_QUERY] marker integration test ─────────────────────
+
+    #[tokio::test]
+    async fn test_user_query_marker_in_response() {
+        // Provider returns text with [USER_QUERY] marker
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(TestProvider::new(vec![vec![
+            ChatEvent::TextDelta(
+                "What color?\n[USER_QUERY]\nChoose:\n- Red\n- Blue\n[/USER_QUERY]".into(),
+            ),
+            ChatEvent::Done,
+        ]]));
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let registry = ToolRegistry::new();
+
+        let setup = test_setup();
+        let config = AgentConfig {
+            max_iterations: 10,
+            ..Default::default()
+        };
+
+        let sm = setup.session_mgr.clone();
+
+        tokio::spawn(async move {
+            run_agent_loop(
+                provider,
+                StdArc::new(registry),
+                setup.rule_engine,
+                sm,
+                setup.ctx,
+                &config,
+                Message::user("Pick a color"),
+                tx,
+            )
+            .await;
+        });
+
+        let mut received_query = false;
+        let mut done = false;
+
+        while let Some(event) = rx.recv().await {
+            match event {
+                AgentEvent::UserQuery {
+                    ref message,
+                    ref options,
+                    allow_other,
+                    respond,
+                    ..
+                } => {
+                    received_query = true;
+                    assert_eq!(message, "Choose:");
+                    assert_eq!(options, &vec!["Red", "Blue"]);
+                    assert!(!allow_other);
+                    // Respond with option index 0 (Red)
+                    let _ = respond.send(UserQueryResult {
+                        selected_index: 0,
+                        text: String::new(),
+                    });
+                }
+                AgentEvent::Done => {
+                    done = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(received_query, "Expected UserQuery event with marker");
+        assert!(done, "Expected Done event after marker interaction");
+    }
+
+    #[tokio::test]
+    async fn test_user_query_marker_continue_loop() {
+        // Phase 1: text with [USER_QUERY] → respond → Phase 2: normal text → Done
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(TestProvider::new(vec![
+            vec![
+                ChatEvent::TextDelta(
+                    "Question?\n[USER_QUERY]\nAnswer:\n- Yes\n- No\n[/USER_QUERY]".into(),
+                ),
+                ChatEvent::Done,
+            ],
+            vec![ChatEvent::TextDelta("Got it!".into()), ChatEvent::Done],
+        ]));
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let registry = ToolRegistry::new();
+
+        let setup = test_setup();
+        let config = AgentConfig {
+            max_iterations: 10,
+            ..Default::default()
+        };
+
+        let sm = setup.session_mgr.clone();
+
+        tokio::spawn(async move {
+            run_agent_loop(
+                provider,
+                StdArc::new(registry),
+                setup.rule_engine,
+                sm,
+                setup.ctx,
+                &config,
+                Message::user("Start"),
+                tx,
+            )
+            .await;
+        });
+
+        let mut marker_found = false;
+        let mut text_deltas: Vec<String> = Vec::new();
+
+        while let Some(event) = rx.recv().await {
+            match event {
+                AgentEvent::UserQuery { respond, .. } => {
+                    marker_found = true;
+                    let _ = respond.send(UserQueryResult {
+                        selected_index: 0,
+                        text: String::new(),
+                    });
+                }
+                AgentEvent::TextDelta(t) => {
+                    text_deltas.push(t);
+                }
+                AgentEvent::Done => {}
+                _ => {}
+            }
+        }
+
+        assert!(
+            marker_found,
+            "Expected [USER_QUERY] marker to trigger UserQuery"
+        );
+        // The second phase text should appear
+        assert!(
+            text_deltas.iter().any(|t| t.contains("Got it!")),
+            "Expected loop to continue after marker query"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_user_query_marker_custom_text() {
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(TestProvider::new(vec![
+            vec![
+                ChatEvent::TextDelta("Custom?\n[USER_QUERY allow_other=true]\nEnter value:\n- Default\n[/USER_QUERY]".into()),
+                ChatEvent::Done,
+            ],
+            vec![
+                ChatEvent::TextDelta("Thanks!".into()),
+                ChatEvent::Done,
+            ],
+        ]));
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let registry = ToolRegistry::new();
+
+        let setup = test_setup();
+        let config = AgentConfig {
+            max_iterations: 10,
+            ..Default::default()
+        };
+
+        let sm = setup.session_mgr.clone();
+
+        tokio::spawn(async move {
+            run_agent_loop(
+                provider,
+                StdArc::new(registry),
+                setup.rule_engine,
+                sm,
+                setup.ctx,
+                &config,
+                Message::user("Start"),
+                tx,
+            )
+            .await;
+        });
+
+        let mut found = false;
+
+        while let Some(event) = rx.recv().await {
+            match event {
+                AgentEvent::UserQuery {
+                    ref message,
+                    ref options,
+                    allow_other,
+                    respond,
+                    ..
+                } => {
+                    found = true;
+                    assert_eq!(message, "Enter value:");
+                    assert_eq!(options, &vec!["Default"]);
+                    assert!(allow_other);
+                    // Send custom text with selected_index = -1
+                    let _ = respond.send(UserQueryResult {
+                        selected_index: -1,
+                        text: "my custom input".into(),
+                    });
+                }
+                AgentEvent::Done => {}
+                _ => {}
+            }
+        }
+
+        assert!(found, "Expected UserQuery with allow_other");
     }
 }

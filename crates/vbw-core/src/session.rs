@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -30,6 +30,8 @@ pub struct Session {
     pub history: Vec<Message>,
     pub config: LlmConfig,
     pub system_prompt_template: String,
+    /// 已审批的工具名称集合（Always Allow）
+    pub approved_tools: HashSet<String>,
 }
 
 /// 会话存储抽象 trait
@@ -157,6 +159,7 @@ impl SessionManager {
             history: Vec::new(),
             config,
             system_prompt_template: prompt_template,
+            approved_tools: HashSet::new(),
         };
 
         let mut store = self.store.lock().unwrap();
@@ -258,6 +261,23 @@ impl SessionManager {
             token.cancel();
         }
     }
+
+    /// 检查工具是否已被审批（Always Allow）
+    pub fn is_tool_approved(&self, session_id: &str, tool_name: &str) -> bool {
+        let store = self.store.lock().unwrap();
+        match store.get(session_id) {
+            Ok(session) => session.approved_tools.contains(tool_name),
+            Err(_) => false,
+        }
+    }
+
+    /// 将工具加入已审批集合（Always Allow）
+    pub fn add_approved_tool(&self, session_id: &str, tool_name: &str) -> Result<(), SessionError> {
+        let mut store = self.store.lock().unwrap();
+        let mut session = store.get(session_id)?.clone();
+        session.approved_tools.insert(tool_name.to_string());
+        store.update(session)
+    }
 }
 
 #[cfg(test)]
@@ -279,6 +299,7 @@ mod tests {
             history: vec![],
             config: LlmConfig::default(),
             system_prompt_template: "default".into(),
+            approved_tools: HashSet::new(),
         };
 
         // create
@@ -423,5 +444,45 @@ mod tests {
 
         let s = manager.get(&session.id).unwrap();
         assert_eq!(s.config.model, "gpt-4");
+    }
+
+    #[test]
+    fn test_session_approved_tools_empty_on_create() {
+        let manager = SessionManager::new(InMemorySessionStore::new());
+        let session = manager
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        assert!(session.approved_tools.is_empty());
+    }
+
+    #[test]
+    fn test_session_approved_tools_clone() {
+        let manager = SessionManager::new(InMemorySessionStore::new());
+        let session1 = manager
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session1.id.clone();
+        manager.add_approved_tool(&sid, "bash").unwrap();
+        let s = manager.get(&sid).unwrap();
+        assert!(s.approved_tools.contains("bash"));
+    }
+
+    #[test]
+    fn test_session_is_tool_approved() {
+        let manager = SessionManager::new(InMemorySessionStore::new());
+        let session = manager
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+
+        // Before adding, not approved
+        assert!(!manager.is_tool_approved(&sid, "bash"));
+
+        // Add and verify
+        manager.add_approved_tool(&sid, "bash").unwrap();
+        assert!(manager.is_tool_approved(&sid, "bash"));
+
+        // Other tool still not approved
+        assert!(!manager.is_tool_approved(&sid, "write_file"));
     }
 }
