@@ -112,6 +112,13 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 // Ctrl+C 在确认模式下也能取消
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                     if app.generating {
+                        if let Some(q) = app.confirm.take() {
+                            chat_handle.send_response(&q.query_id, 1, "");
+                        }
+                        app.stale_done_expected = true;
+                        app.streaming_text.clear();
+                        app.pending_usage = None;
+                        app.current_request_id = None;
                         chat_handle.send_cancel();
                     }
                     return false;
@@ -188,6 +195,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                                 let q = app.confirm.take().unwrap();
                                 chat_handle.send_response(&q.query_id, 1, "");
                                 if app.generating {
+                                    app.stale_done_expected = true;
                                     app.streaming_text.clear();
                                     app.pending_usage = None;
                                     app.current_request_id = None;
@@ -211,6 +219,10 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
             // Ctrl+C: 取消正在生成的请求
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                 if app.generating {
+                    app.stale_done_expected = true;
+                    app.streaming_text.clear();
+                    app.pending_usage = None;
+                    app.current_request_id = None;
                     chat_handle.send_cancel();
                 }
                 return false;
@@ -384,6 +396,10 @@ fn handle_grpc_message(
             app.current_request_id = None;
         }
         Some(server_message::Payload::Done(_)) => {
+            if app.stale_done_expected {
+                app.stale_done_expected = false;
+                return;
+            }
             if let Some((it, ot, tc)) = app.pending_usage.take() {
                 let time = chrono::Local::now().format("%H:%M:%S");
                 let usage = format!(
