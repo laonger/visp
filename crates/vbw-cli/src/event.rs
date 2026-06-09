@@ -326,24 +326,11 @@ fn handle_grpc_message(
     app.needs_render = true;
     match msg.payload {
         Some(server_message::Payload::TextDelta(delta)) => app.append_streaming(&delta.delta),
-        Some(server_message::Payload::ToolCall(tc)) => app.add_tool_line(
-            LineType::ToolCall,
-            match serde_json::from_str::<serde_json::Value>(&tc.arguments) {
-                Ok(serde_json::Value::Object(obj)) => {
-                    let vals: Vec<String> = obj
-                        .values()
-                        .filter_map(|v| v.as_str().map(|s| format!("\"{}\"", s)))
-                        .collect();
-                    if vals.is_empty() {
-                        format!("{} {}", tc.tool_name, tc.arguments)
-                    } else {
-                        format!("{}: {}", tc.tool_name, vals.join(" "))
-                    }
-                }
-                _ => format!("{}: {}", tc.tool_name, tc.arguments),
-            },
-            &tc.call_id,
-        ),
+        Some(server_message::Payload::ToolCall(tc)) => {
+            app.flush_streaming();
+            let args_display = tc_display(&tc);
+            app.add_tool_line(LineType::ToolCall, args_display, &tc.call_id);
+        }
         Some(server_message::Payload::ToolResult(tr)) => app.insert_tool_result(
             &tr.call_id,
             format!(
@@ -353,6 +340,7 @@ fn handle_grpc_message(
             ),
         ),
         Some(server_message::Payload::ThinkingBlock(tb)) => {
+            app.flush_streaming();
             let text = format!("[Thinking] {}", tb.thinking);
             app.add_message(LineType::Thinking, text)
         }
@@ -388,12 +376,29 @@ fn handle_grpc_message(
             }
             app.flush_streaming();
             app.generating = false;
-            // 收到 Done 后发送 ack，通知服务端该请求已完成
             if let Some(rid) = app.current_request_id.take() {
                 chat_handle.send_ack(rid);
             }
         }
         None => {}
+    }
+}
+
+/// 格式化工具调用参数显示
+fn tc_display(tc: &vbw_proto::vibewisp::ToolCall) -> String {
+    match serde_json::from_str::<serde_json::Value>(&tc.arguments) {
+        Ok(serde_json::Value::Object(obj)) => {
+            let vals: Vec<String> = obj
+                .values()
+                .filter_map(|v| v.as_str().map(|s| format!("\"{}\"", s)))
+                .collect();
+            if vals.is_empty() {
+                format!("{} {}", tc.tool_name, tc.arguments)
+            } else {
+                format!("{}: {}", tc.tool_name, vals.join(" "))
+            }
+        }
+        _ => format!("{}: {}", tc.tool_name, tc.arguments),
     }
 }
 
