@@ -55,11 +55,9 @@ async fn main() {
     let log_file_stdout = log_file.try_clone().await.unwrap();
     let log_file_stderr = log_file.try_clone().await.unwrap();
 
-    // 3. Start daemon
+    // 3. Start daemon (no args — uses default addr [::1]:50051 or ~/.config/vibewisp/daemon.toml)
     eprintln!("[vbw] Starting daemon (log: {})...", log_path.display());
     let mut daemon = match Command::new(&daemon_bin)
-        .arg("--listen-addr")
-        .arg(&cli.addr)
         .stdout(log_file_stdout.into_std().await)
         .stderr(log_file_stderr.into_std().await)
         .spawn()
@@ -67,7 +65,7 @@ async fn main() {
         Ok(child) => child,
         Err(e) => {
             eprintln!("[vbw] Failed to start daemon: {e}");
-            eprintln!("[vbw] Make sure 'vbw-daemon' is installed. Try: cargo build");
+            eprintln!("[vbw] Make sure 'vbw-daemon' is built. Try: cargo build");
             std::process::exit(1);
         }
     };
