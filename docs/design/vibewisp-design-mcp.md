@@ -557,8 +557,11 @@ Stdio 子进程默认继承 daemon 的完整环境变量。配置的 `env` 字�
 
 ### 5.15 进程崩溃与重连
 
-Stdio 模式的 MCP 服务器可能崩溃：
-- 通过独立 tokio task 做 `child.wait()` 异步检测退出
+Stdio 模式的 MCP 服务器可能崩溃。`TokioChildProcess` 内部管理子进程生命周期，子进程退出时 `rmcp` 传输层会报错。
+
+检测与重连策略：
+- 工具调用（`call_tool()`）返回传输错误时触发重连逻辑
+- 也可通过独立 tokio task 定期发送 `ping`（`list_tools()`）检测连接健康
 - 自动重连策略：最多重试 3 次，指数退避
 - 重连后重新发现工具并更新 ToolRegistry（通过 `ToolRegistry::update()`）
 - 重连失败后该服务器的工具从 Registry 移除
