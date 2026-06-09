@@ -67,13 +67,16 @@ message ConfigUpdate {
 
 message UserResponse {
     string query_id = 1;
-    bool approved = 2;
+    int32 selected_index = 2; // 选中项索引；-1 = Other 自定义输入
+    string text = 3;          // 自定义文本（selected_index==-1 时使用）
 }
 
 message UserQuery {
     string query_id = 1;
     string message = 2;
     string session_id = 3;
+    repeated string options = 4;  // LLM 提供选项；空列表 = 工具审批模式
+    bool allow_other = 5;        // 是否显示 Other 按钮
 }
 
 message ThinkingBlock {

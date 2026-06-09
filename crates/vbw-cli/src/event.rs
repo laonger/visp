@@ -112,11 +112,11 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 match key.code {
                     KeyCode::Char('y' | 'Y') => {
                         let q = app.confirm.take().unwrap();
-                        chat_handle.send_response(&q.query_id, true);
+                        chat_handle.send_response(&q.query_id, 0, "");
                     }
                     KeyCode::Char('n' | 'N') | KeyCode::Enter | KeyCode::Esc => {
                         let q = app.confirm.take().unwrap();
-                        chat_handle.send_response(&q.query_id, false);
+                        chat_handle.send_response(&q.query_id, 1, "");
                     }
                     _ => {
                         app.needs_render = false; // 忽略其他按键，不触发渲染

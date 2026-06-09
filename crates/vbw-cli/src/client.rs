@@ -106,11 +106,12 @@ impl ChatHandle {
         });
     }
 
-    pub fn send_response(&self, query_id: &str, approved: bool) {
+    pub fn send_response(&self, query_id: &str, selected_index: i32, text: &str) {
         let msg = ClientMessage {
             payload: Some(client_message::Payload::UserResponse(UserResponse {
                 query_id: query_id.to_string(),
-                approved,
+                selected_index,
+                text: text.to_string(),
             })),
         };
         let tx = self.request_tx.clone();
