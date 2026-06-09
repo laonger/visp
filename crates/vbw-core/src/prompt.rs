@@ -140,7 +140,11 @@ mod tests {
     fn test_empty_template() {
         let messages = PromptBuilder::build("", "Be concise", &[], Path::new("/tmp"), "2026-06-09");
         assert_eq!(messages.len(), 1);
-        assert!(messages[0].content.starts_with("## Instructions\n\nBe concise"));
+        assert!(
+            messages[0]
+                .content
+                .starts_with("## Instructions\n\nBe concise")
+        );
         assert!(messages[0].content.contains("[USER_QUERY]"));
     }
 
