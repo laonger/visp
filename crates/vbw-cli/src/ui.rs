@@ -309,32 +309,43 @@ fn render_confirm_bar(app: &AppState, f: &mut Frame, area: Rect) {
 
         // 计算可用宽度
         let avail_w = area.width as usize;
-        let num_opts = options.len() + if confirm.allow_other { 1 } else { 0 };
+        let has_other = confirm.allow_other;
+        let other_label = "[X] Other";
+        let other_full_w = if has_other { other_label.len() } else { 0 };
+        let num_opts = options.len();
         let sep_w = 2; // "  " between options
         let prefix_w = 4; // "[X] "
-        // 总宽度 = 所有前缀 + 所有文本 + 分隔符
-        // 平均分配每个选项的文本宽度
+
+        // 先预留 Other 的完整宽度，剩余宽度平分给其他选项
+        let other_w = if has_other { other_full_w } else { 0 };
+        let other_sep = if has_other && num_opts > 0 { sep_w } else { 0 }; // Other 前的分隔符
+        let avail_for_normal = avail_w.saturating_sub(other_w + other_sep);
+
+        let total_sep_normal = num_opts.saturating_sub(1) * sep_w;
+        let total_prefix_normal = num_opts * prefix_w;
         let text_w = if num_opts > 0 {
-            let total_overhead = num_opts * prefix_w + (num_opts.saturating_sub(1)) * sep_w;
-            if total_overhead >= avail_w {
-                0 // 极端情况：标签前缀就占满了
+            let overhead = total_prefix_normal + total_sep_normal;
+            if overhead >= avail_for_normal {
+                0
             } else {
-                (avail_w - total_overhead) / num_opts
+                (avail_for_normal - overhead)
+                    .checked_div(num_opts)
+                    .unwrap_or(0)
             }
         } else {
             0
         };
 
-        // 截断工具函数
+        // 截断工具函数（用 chars().count() 确保中文字符正确处理）
         let truncate = |s: &str, max: usize| -> String {
-            if s.len() <= max || max == 0 {
+            let char_count = s.chars().count();
+            if char_count <= max || max == 0 {
                 s.to_string()
             } else if max <= 1 {
                 s.chars().take(1).collect()
             } else {
-                let mut result: String = s.chars().take(max - 1).collect();
-                result.push('…');
-                result
+                let result: String = s.chars().take(max - 1).collect();
+                format!("{}…", result)
             }
         };
 
@@ -348,10 +359,9 @@ fn render_confirm_bar(app: &AppState, f: &mut Frame, area: Rect) {
                     format!("[{}] {}", letter, truncated)
                 })
                 .collect();
-            if confirm.allow_other {
-                let letter = (b'A' + options.len() as u8) as char;
-                let truncated = truncate("Other", text_w);
-                labels.push(format!("[{}] {}", letter, truncated));
+            if has_other {
+                let letter = (b'A' + num_opts as u8) as char;
+                labels.push(format!("[{}] Other", letter)); // 不截断 Other
             }
             labels
         };
