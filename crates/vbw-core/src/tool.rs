@@ -164,24 +164,6 @@ mod tests_tool_approval {
 
     // ── category() tests ──────────────────────────────────────────────────────
 
-    struct CategoryTool;
-
-    #[async_trait]
-    impl Tool for CategoryTool {
-        fn name(&self) -> &str {
-            "category_test"
-        }
-        fn description(&self) -> &str {
-            "category test tool"
-        }
-        fn parameters(&self) -> serde_json::Value {
-            serde_json::json!({})
-        }
-        async fn execute(&self, _args: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
-            ToolResult::success("ok")
-        }
-    }
-
     #[test]
     fn test_tool_default_category() {
         let tool = NoApprovalTool;

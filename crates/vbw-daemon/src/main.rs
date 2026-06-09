@@ -58,6 +58,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Create tool registry
     let mut tool_registry = ToolRegistry::new();
+
+    // ── 常用工具 ──
+    tool_registry
+        .register(Box::new(Bash))
+        .map_err(|e| format!("register bash: {e}"))?;
     tool_registry
         .register(Box::new(ReadFile))
         .map_err(|e| format!("register read_file: {e}"))?;
@@ -68,23 +73,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .register(Box::new(EditFile))
         .map_err(|e| format!("register edit_file: {e}"))?;
     tool_registry
-        .register(Box::new(Bash))
-        .map_err(|e| format!("register bash: {e}"))?;
-    tool_registry
         .register(Box::new(Grep))
         .map_err(|e| format!("register grep: {e}"))?;
     tool_registry
         .register(Box::new(Glob))
         .map_err(|e| format!("register glob: {e}"))?;
+
+    // ── 网络工具 ──
+    tool_registry
+        .register(Box::new(WebFetch::from_toml(config.tool.get("webfetch"))))
+        .map_err(|e| format!("register fetch_web: {e}"))?;
+
+    // ── 代码分析工具 ──
     tool_registry
         .register(Box::new(CodeGraphSearch))
         .map_err(|e| format!("register codegraph_search: {e}"))?;
     tool_registry
         .register(Box::new(CodeGraphGetDetails))
         .map_err(|e| format!("register codegraph_get_details: {e}"))?;
-    tool_registry
-        .register(Box::new(WebFetch::from_toml(config.tool.get("webfetch"))))
-        .map_err(|e| format!("register fetch_web: {e}"))?;
     let tool_registry = Arc::new(tool_registry);
 
     // 5. Create rule engine
