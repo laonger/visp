@@ -119,6 +119,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                         app.streaming_text.clear();
                         app.pending_usage = None;
                         app.current_request_id = None;
+                        app.generating = false;
                         chat_handle.send_cancel();
                     }
                     return false;
@@ -199,6 +200,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                                     app.streaming_text.clear();
                                     app.pending_usage = None;
                                     app.current_request_id = None;
+                                    app.generating = false;
                                     chat_handle.send_cancel();
                                 }
                             }
@@ -223,6 +225,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                     app.streaming_text.clear();
                     app.pending_usage = None;
                     app.current_request_id = None;
+                    app.generating = false;
                     chat_handle.send_cancel();
                 }
                 return false;
