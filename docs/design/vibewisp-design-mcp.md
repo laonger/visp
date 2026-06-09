@@ -468,7 +468,7 @@ MCP 服务器的连接和工具发现不应阻塞 daemon 启动。
 - Agent 调用未就绪的 MCP 工具时返回 `"tool {name} from {server} is not ready yet"`
 - daemon 启动后即可使用，MCP 工具延迟可用
 
-### 5.6 MCP 服务器认证
+### 5.5 MCP 服务器认证
 
 Stdio 方式通过 `env` 字段传递认证凭据（如 API key）。SSE 方式需要 HTTP header 支持。
 
@@ -491,7 +491,7 @@ transport = { type = "sse", url = "http://localhost:3000/mcp",
               headers = { Authorization = "Bearer sk-xxx" } }
 ```
 
-### 5.7 MCP 工具调用超时
+### 5.6 MCP 工具调用超时
 
 MCP 工具调用需要超时控制，防止慢服务器卡住 Agent 循环。
 
@@ -508,7 +508,7 @@ pub tool_timeout_secs: u64,  // 默认 60
 - **超时处理**：标记 `McpSession.connected = false`，废弃当前连接。下一次工具调用时自动重建连接（重新 spawn 子进程或重新连 SSE）。防止协议失步（残留 JSON-RPC 响应被误认）。
 - 超时 → 返回 `ToolResult::error("Tool call timed out, reconnecting...")`
 
-### 5.8 McpManager 生命周期归属
+### 5.7 McpManager 生命周期归属
 
 `McpManager` 需在 daemon 生命周期内持续可访问，用于重连、健康检查、优雅关闭。
 
@@ -525,29 +525,29 @@ pub struct CoderDaemonService {
 - shutdown 时 `mcp_manager.shutdown_all().await`
 - 未来 `/mcp restart <name>` 等管理命令可访问
 
-### 5.9 MCP 协议版本协商
+### 5.8 MCP 协议版本协商
 
 **决策**：协议版本协商委托给 `rmcp` crate 处理（`initialize` / `InitializeResult` 握手由 rmcp 内部完成）。初始化失败时（如版本不兼容），该服务器标记为不可用，log error。
 
-### 5.10 工具名称冲突
+### 5.9 工具名称冲突
 
 **MCP vs 内置**：MCP 工具不允许覆盖内置工具。冲突时 log warning 并跳过注册。
 
 **MCP vs MCP**：同一名称的 MCP 工具通过 `tool_prefix` 配置区分。无前缀时后注册的覆盖先注册的（log warning）。
 
-### 5.11 进程崩溃检测
+### 5.10 进程崩溃检测
 
 Stdio 模式通过独立 tokio task 执行 `child.wait()` 异步检测进程退出，退出时自动触发重连逻辑。不使用轮询方式。
 
-### 5.12 环境变量继承
+### 5.11 环境变量继承
 
 Stdio 子进程默认继承 daemon 的完整环境变量。配置的 `env` 字段作为叠加/覆盖。
 
-### 5.13 MCP 工具分类
+### 5.12 MCP 工具分类
 
 `McpToolAdapter::category()` 返回 `"mcp"`，动态工具指南中 `render_tool_guide()` 的分类映射表增加 `("External (MCP)", "mcp")`，渲染为 "External (MCP)" 分组。
 
-### 5.14 MCP 工具默认需审批
+### 5.13 MCP 工具默认需审批
 
 外部 MCP 工具（非内置）默认 `requires_approval = true`，因为：
 - MCP 服务器可能有安全隐患（如可执行任意 shell 命令）
@@ -555,7 +555,7 @@ Stdio 子进程默认继承 daemon 的完整环境变量。配置的 `env` 字�
 
 用户可通过 `Always Allow`（已实现）记住选择。
 
-### 5.15 进程崩溃与重连
+### 5.14 进程崩溃与重连
 
 Stdio 模式的 MCP 服务器可能崩溃。`TokioChildProcess` 内部管理子进程生命周期，子进程退出时 `rmcp` 传输层会报错。
 
@@ -566,7 +566,7 @@ Stdio 模式的 MCP 服务器可能崩溃。`TokioChildProcess` 内部管理子�
 - 重连后重新发现工具并更新 ToolRegistry（通过 `ToolRegistry::update()`）
 - 重连失败后该服务器的工具从 Registry 移除
 
-### 5.16 关闭顺序
+### 5.15 关闭顺序
 
 Daemon 关闭时需确保 MCP 服务器进程被优雅终止：
 
@@ -581,14 +581,14 @@ Daemon 关闭
   └─ 4. 退出进程
 ```
 
-### 5.17 资源/提示的扩展预留
+### 5.16 资源/提示的扩展预留
 
 MCP 协议除工具外还支持 Resources 和 Prompts：
 - 当前阶段 **不做** Resources 和 Prompts 的支持
 - 在 `McpSession` 中预留 `list_resources()` 和 `list_prompts()` 的接口
 - 未来可通过 `McpResourceAdapter` 类似机制扩展
 
-### 5.18 锁顺序约束
+### 5.17 锁顺序约束
 
 涉及三个锁，获取顺序必须严格遵守，否则可能死锁：
 
