@@ -174,6 +174,9 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                                 let q = app.confirm.take().unwrap();
                                 chat_handle.send_response(&q.query_id, 1, "");
                                 if app.generating {
+                                    app.streaming_text.clear();
+                                    app.pending_usage = None;
+                                    app.current_request_id = None;
                                     chat_handle.send_cancel();
                                 }
                             }
