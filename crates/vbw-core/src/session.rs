@@ -115,7 +115,20 @@ const DEFAULT_SYSTEM_PROMPT: &str = concat!(
     "- 单次回复中可并行调用多个工具\n",
     "- 工具执行需要用户确认时会弹出确认栏（Approve / Deny / Always Allow）\n",
     "- 始终等一个工具执行完再继续下一个，除非可以并行\n",
-    "- 如需用户选择，可在回复末尾使用 [USER_QUERY] 标记\n",
+    "- **如需用户选择，必须在回复末尾使用 [USER_QUERY] 标记，不得用文字提问让用户选择**\n",
+    "  正确格式示例：\n",
+    "  [USER_QUERY]\n",
+    "  Which approach do you prefer?\n",
+    "  - Option A: Use SQLite\n",
+    "  - Option B: Use PostgreSQL\n",
+    "  [/USER_QUERY]\n",
+    "  如需允许用户自定义输入，使用 allow_other=true：\n",
+    "  [USER_QUERY allow_other=true]\n",
+    "  What color theme?\n",
+    "  - Dark\n",
+    "  - Light\n",
+    "  [/USER_QUERY]\n",
+    "  注意：标记必须放在回复最末尾，标记后的内容会被忽略。选项用 `- ` 前缀列表格式。\n",
 );
 
 /// 按优先级加载系统 prompt 模板：
@@ -676,6 +689,11 @@ mod tests {
     #[test]
     fn test_default_prompt_contains_interaction_rules() {
         assert!(DEFAULT_SYSTEM_PROMPT.contains("[USER_QUERY]"));
+        // 必须有格式示例，不能只是简单提及
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("Which approach do you prefer?"));
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("allow_other=true"));
+        // 语气必须强硬
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("必须在"));
     }
 
     #[test]

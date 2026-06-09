@@ -4,7 +4,12 @@ use crate::message::Message;
 
 pub struct PromptBuilder;
 
-const USER_QUERY_INSTRUCTION: &str = "\n\nWhen you need the user to make a choice, you can append the following at the very end of your response (not in the middle):\n\
+const USER_QUERY_INSTRUCTION: &str = "\n\n## IMPORTANT: How to ask the user to choose\n\
+\n\
+When you need the user to make a decision, you MUST use the [USER_QUERY] marker at the very end of your response. \
+Do NOT ask the user to choose using plain text — it will not trigger the selection UI.\n\
+\n\
+Correct format (MUST use at end of response):\n\
 \n\
 [USER_QUERY]\n\
 Which approach do you prefer?\n\
@@ -12,14 +17,18 @@ Which approach do you prefer?\n\
 - Option B: Use PostgreSQL\n\
 [/USER_QUERY]\n\
 \n\
-You can allow custom input by using:\n\
+To allow custom input:\n\
 [USER_QUERY allow_other=true]\n\
 What color theme?\n\
 - Dark\n\
 - Light\n\
 [/USER_QUERY]\n\
 \n\
-Use this only when you actually need the user to decide something. Do NOT use it for rhetorical questions or minor preferences.";
+Rules:\n\
+- Marker MUST be at the very end of your response\n\
+- Options MUST be listed as `- description` (one per line)\n\
+- Only use when you genuinely need user input\n\
+- The selection UI lets the user navigate with arrow keys and confirm with Enter";
 
 impl PromptBuilder {
     pub fn build(
@@ -156,5 +165,8 @@ mod tests {
         assert!(instruction.contains("[USER_QUERY]"));
         assert!(instruction.contains("[/USER_QUERY]"));
         assert!(instruction.contains("allow_other=true"));
+        // 语气必须强硬，不能是 suggestion
+        assert!(instruction.contains("MUST"));
+        assert!(!instruction.contains("you can"));
     }
 }
