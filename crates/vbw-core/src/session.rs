@@ -98,17 +98,7 @@ impl SessionStore for InMemorySessionStore {
 }
 
 const DEFAULT_SYSTEM_PROMPT: &str = concat!(
-    "## Role\n",
-    "- You are vibewisp, a lightweight AI coding assistant running on a Rust backend (gRPC + tonic).\n",
-    "- Backend: Rust, gRPC (tonic), tokio runtime.\n",
-    "\n",
-    "## Coding Conventions\n",
-    "- 简洁优先：只写解决问题所需的最少代码，不做预防性设计\n",
-    "- 手术刀式修改：只改必须改的部分，不顺手清理无关代码\n",
-    "- TDD 流程：先写测试 → 最小实现 → 测试通过 → 重构 → 提交\n",
-    "- 命名风格：变量/函数命名简短但语义明确\n",
-    "- 错误处理：使用 thiserror 定义枚举错误，返回清晰消息\n",
-    "- 提交格式：Conventional Commits\n",
+    "You are vibewisp, a lightweight AI coding assistant running on a Rust backend (gRPC + tonic).\n",
     "\n",
     "## Interaction Rules\n",
     "- 工具调用后必须等待结果，不要假设结果\n",
@@ -682,8 +672,11 @@ mod tests {
     }
 
     #[test]
-    fn test_default_prompt_contains_conventions() {
-        assert!(DEFAULT_SYSTEM_PROMPT.contains("Conventional Commits"));
+    fn test_default_prompt_no_project_specific_content() {
+        // Coding conventions 已移到 AGENTS.md，不应出现在 DEFAULT 中
+        assert!(!DEFAULT_SYSTEM_PROMPT.contains("Conventional Commits"));
+        assert!(!DEFAULT_SYSTEM_PROMPT.contains("简洁优先"));
+        assert!(!DEFAULT_SYSTEM_PROMPT.contains("TDD"));
     }
 
     #[test]
