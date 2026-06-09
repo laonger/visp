@@ -1,0 +1,11 @@
+[package]
+name = "visp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+chrono.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+visp-proto = { path = "../visp-proto" }

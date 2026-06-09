@@ -1,0 +1,958 @@
+use std::collections::HashMap;
+use std::path::Path;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use futures::StreamExt;
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
+use tonic::{Request, Response, Status, Streaming};
+
+use visp_codegraph::CodeGraph;
+use visp_core::{
+    agent::{AgentConfig, AgentEvent, UserQueryResult, run_agent_loop},
+    message::Message,
+    provider::{LlmConfig, LlmProvider},
+    rules::RuleEngine,
+    session::{SessionManager, SessionStatus},
+    tool::ToolContext,
+    tool_registry::ToolRegistry,
+};
+use visp_proto::visp::{self as proto, coder_daemon_server::CoderDaemon};
+
+use crate::config::LlmSection;
+
+type ResponseStream =
+    Pin<Box<dyn futures::Stream<Item = Result<proto::ServerMessage, tonic::Status>> + Send>>;
+type CodeGraphMap = Arc<RwLock<HashMap<String, Arc<CodeGraph>>>>;
+
+pub struct CoderDaemonService {
+    provider: Arc<dyn LlmProvider>,
+    tool_registry: Arc<ToolRegistry>,
+    rule_engine: Arc<RuleEngine>,
+    session_mgr: Arc<SessionManager>,
+    agent_config: AgentConfig,
+    start_time: Instant,
+    /// Phase 5: lazy-loaded CodeGraph instances per project path
+    codegraphs: CodeGraphMap,
+    /// 默认 LLM 配置（来自 daemon.toml），create_session 时与客户端配置合并
+    default_llm_config: LlmConfig,
+}
+
+impl CoderDaemonService {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        provider: Arc<dyn LlmProvider>,
+        tool_registry: Arc<ToolRegistry>,
+        rule_engine: Arc<RuleEngine>,
+        session_mgr: Arc<SessionManager>,
+        agent_config: AgentConfig,
+        llm_section: LlmSection,
+    ) -> Self {
+        let mut extra = std::collections::HashMap::new();
+        if let Some(budget) = llm_section.thinking_budget_tokens {
+            extra.insert("thinking_budget_tokens".into(), budget.to_string());
+        }
+        let default_llm_config = LlmConfig {
+            model: llm_section.model,
+            temperature: llm_section.temperature,
+            max_tokens: llm_section.max_tokens,
+            extra,
+        };
+        Self {
+            provider,
+            tool_registry,
+            rule_engine,
+            session_mgr,
+            agent_config,
+            start_time: Instant::now(),
+            codegraphs: Arc::new(RwLock::new(HashMap::new())),
+            default_llm_config,
+        }
+    }
+
+    /// Phase 5: lazy-load a CodeGraph for a project path.
+    /// Triggers background build_full on first access.
+    async fn get_codegraph(&self, project_path: &str) -> Result<Arc<CodeGraph>, Status> {
+        let map = self.codegraphs.read().await;
+        if let Some(cg) = map.get(project_path) {
+            return Ok(cg.clone());
+        }
+        drop(map);
+
+        let mut cg = CodeGraph::open(Path::new(project_path))
+            .map_err(|e| Status::internal(format!("codegraph open: {e}")))?;
+
+        // Start file watcher for incremental indexing
+        if let Err(e) = cg
+            .start_watching(
+                Path::new(project_path),
+                visp_codegraph::index::CodeGraphConfig::default(),
+            )
+            .await
+        {
+            tracing::warn!("codegraph watcher start failed for {project_path}: {e}");
+        }
+
+        let cg = Arc::new(cg);
+
+        // Background full index build (incremental updates will come via watcher)
+        let bg = cg.clone();
+        let pp = project_path.to_owned();
+        let config = visp_codegraph::index::CodeGraphConfig::default();
+        tokio::spawn(async move {
+            if let Err(e) = bg.build_full(Path::new(&pp), &config).await {
+                tracing::warn!("codegraph build_full failed for {pp}: {e}");
+            }
+        });
+
+        let mut map = self.codegraphs.write().await;
+        map.insert(project_path.to_owned(), cg.clone());
+        Ok(cg)
+    }
+}
+
+// ── trait implementation ──────────────────────────────────────────────────────
+
+#[tonic::async_trait]
+impl CoderDaemon for CoderDaemonService {
+    type ChatStream = ResponseStream;
+
+    async fn create_session(
+        &self,
+        request: Request<proto::CreateSessionRequest>,
+    ) -> Result<Response<proto::Session>, Status> {
+        let req = request.into_inner();
+        // 从客户端配置开始，然后用 daemon 默认值覆盖未设置的字段
+        let mut config = req.config.as_ref().map(map_llm_config).unwrap_or_default();
+        if config.extra.is_empty() {
+            config.extra = self.default_llm_config.extra.clone();
+        }
+        // 客户端未传的字段用 daemon 默认值
+        if config.model == LlmConfig::default().model {
+            config.model = self.default_llm_config.model.clone();
+        }
+        if (config.temperature - LlmConfig::default().temperature).abs() < f64::EPSILON {
+            config.temperature = self.default_llm_config.temperature;
+        }
+        if config.max_tokens == LlmConfig::default().max_tokens {
+            config.max_tokens = self.default_llm_config.max_tokens;
+        }
+        let session = self
+            .session_mgr
+            .create(Path::new(&req.project_path), config)
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(session_to_proto(&session)))
+    }
+
+    async fn list_sessions(
+        &self,
+        _request: Request<()>,
+    ) -> Result<Response<proto::ListSessionsResponse>, Status> {
+        let sessions = self
+            .session_mgr
+            .list()
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(proto::ListSessionsResponse {
+            sessions: sessions.iter().map(session_to_proto).collect(),
+        }))
+    }
+
+    async fn delete_session(
+        &self,
+        request: Request<proto::DeleteSessionRequest>,
+    ) -> Result<Response<()>, Status> {
+        let session_id = request.into_inner().session_id;
+        self.session_mgr
+            .delete(&session_id)
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(()))
+    }
+
+    async fn chat(
+        &self,
+        request: Request<Streaming<proto::ClientMessage>>,
+    ) -> Result<Response<Self::ChatStream>, Status> {
+        let mut in_stream = request.into_inner();
+        let (tx, rx) = mpsc::channel::<Result<proto::ServerMessage, Status>>(128);
+
+        let provider = self.provider.clone();
+        let tool_registry = self.tool_registry.clone();
+        let rule_engine = self.rule_engine.clone();
+        let session_mgr = self.session_mgr.clone();
+        let agent_config = self.agent_config.clone();
+
+        tokio::spawn(async move {
+            let pending_queries: Arc<
+                Mutex<HashMap<String, (String, oneshot::Sender<UserQueryResult>)>>,
+            > = Arc::new(Mutex::new(HashMap::new()));
+            let mut running_sessions: Vec<String> = Vec::new();
+
+            while let Some(msg_result) = in_stream.next().await {
+                let msg = match msg_result {
+                    Ok(m) => m,
+                    Err(e) => {
+                        let _ = tx.send(Err(Status::internal(e.to_string()))).await;
+                        break;
+                    }
+                };
+
+                match msg.payload {
+                    Some(proto::client_message::Payload::UserInput(input)) => {
+                        let session_id = input.session_id;
+                        let text = input.text;
+                        tracing::info!(session_id = %session_id, text = %text, "[DAEMON] received UserInput");
+
+                        // Validate session exists and is Idle
+                        let session = match session_mgr.get(&session_id) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                let _ = tx
+                                    .send(Ok(session_error_msg(
+                                        "SessionNotFound",
+                                        &e.to_string(),
+                                        &session_id,
+                                    )))
+                                    .await;
+                                continue;
+                            }
+                        };
+
+                        if session.status != SessionStatus::Idle {
+                            let _ = tx
+                                .send(Ok(session_error_msg(
+                                    "SessionBusy",
+                                    "Session is not idle",
+                                    &session_id,
+                                )))
+                                .await;
+                            continue;
+                        }
+
+                        // Start agent loop
+                        let text = if text.trim().starts_with("/init") {
+                            match crate::command::init::prepare(&session.project_path, &text).await
+                            {
+                                Ok((init_msg, statuses)) => {
+                                    for s in &statuses {
+                                        let _ = tx
+                                            .send(Ok(proto::ServerMessage {
+                                                payload: Some(
+                                                    proto::server_message::Payload::StatusUpdate(
+                                                        proto::StatusUpdate {
+                                                            message: s.clone(),
+                                                            session_id: session_id.clone(),
+                                                        },
+                                                    ),
+                                                ),
+                                            }))
+                                            .await;
+                                    }
+                                    init_msg.content
+                                }
+                                Err(e) => {
+                                    let _ = tx
+                                        .send(Ok(session_error_msg("InitError", &e, &session_id)))
+                                        .await;
+                                    continue;
+                                }
+                            }
+                        } else {
+                            text
+                        };
+                        let ctx = match session_mgr.start_loop(&session_id) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                let _ = tx
+                                    .send(Ok(session_error_msg(
+                                        "InternalError",
+                                        &e.to_string(),
+                                        &session_id,
+                                    )))
+                                    .await;
+                                continue;
+                            }
+                        };
+
+                        // Append user message
+                        let user_msg = Message::user(&text);
+                        if let Err(e) = session_mgr.append_message(&session_id, user_msg.clone()) {
+                            let _ = session_mgr.finish_loop(&session_id, SessionStatus::Error);
+                            let _ = tx
+                                .send(Ok(session_error_msg(
+                                    "InternalError",
+                                    &e.to_string(),
+                                    &session_id,
+                                )))
+                                .await;
+                            continue;
+                        }
+
+                        // Clone Arc refs for the inner spawn
+                        let p = provider.clone();
+                        let tr = tool_registry.clone();
+                        let re = rule_engine.clone();
+                        let sm = session_mgr.clone();
+                        let ac = agent_config.clone();
+
+                        let (agent_tx, mut agent_rx) = mpsc::channel(64);
+                        let tx_events = tx.clone();
+                        let sid = session_id.clone();
+                        let pq = pending_queries.clone();
+
+                        running_sessions.push(session_id.clone());
+
+                        let sid2 = sid.clone();
+                        tokio::spawn(async move {
+                            tracing::info!(session_id = %sid, "[DAEMON] agent loop started");
+                            run_agent_loop(p, tr, re, sm, ctx, &ac, user_msg, agent_tx).await;
+                            tracing::info!(session_id = %sid, "[DAEMON] agent loop finished");
+                        });
+
+                        tokio::spawn(async move {
+                            while let Some(event) = agent_rx.recv().await {
+                                let is_done = matches!(event, AgentEvent::Done);
+                                if is_done {
+                                    tracing::info!(session_id = %sid2, "[DAEMON] forwarding Done to client");
+                                }
+                                let msg = match event {
+                                    AgentEvent::UserQuery {
+                                        query_id,
+                                        message,
+                                        options,
+                                        allow_other,
+                                        respond,
+                                    } => {
+                                        pq.lock()
+                                            .await
+                                            .insert(query_id.clone(), (sid2.clone(), respond));
+                                        proto::ServerMessage {
+                                            payload: Some(
+                                                proto::server_message::Payload::UserQuery(
+                                                    proto::UserQuery {
+                                                        query_id,
+                                                        message,
+                                                        session_id: sid2.clone(),
+                                                        options,
+                                                        allow_other,
+                                                    },
+                                                ),
+                                            ),
+                                        }
+                                    }
+                                    _ => agent_event_to_server_message(event, &sid2),
+                                };
+                                if tx_events.send(Ok(msg)).await.is_err() {
+                                    break;
+                                }
+                            }
+                        });
+                    }
+                    Some(proto::client_message::Payload::ConfigUpdate(update)) => {
+                        let session_id = update.session_id;
+
+                        let session = match session_mgr.get(&session_id) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                let _ = tx
+                                    .send(Ok(session_error_msg(
+                                        "SessionNotFound",
+                                        &e.to_string(),
+                                        &session_id,
+                                    )))
+                                    .await;
+                                continue;
+                            }
+                        };
+
+                        if session.status != SessionStatus::Idle {
+                            let _ = tx
+                                .send(Ok(session_error_msg(
+                                    "SessionBusy",
+                                    "Cannot update config while session is running",
+                                    &session_id,
+                                )))
+                                .await;
+                            continue;
+                        }
+
+                        let mut config = session.config.clone();
+                        if let Some(update_config) = &update.config {
+                            if let Some(model) = &update_config.model {
+                                config.model = model.clone();
+                            }
+                            if let Some(temp) = update_config.temperature {
+                                config.temperature = temp;
+                            }
+                            if let Some(tokens) = update_config.max_tokens {
+                                config.max_tokens = tokens;
+                            }
+                            if !update_config.extra.is_empty() {
+                                config.extra.extend(update_config.extra.clone());
+                            }
+                        }
+
+                        if let Err(e) = session_mgr.update_config(&session_id, config) {
+                            let _ = tx
+                                .send(Ok(session_error_msg(
+                                    "InternalError",
+                                    &e.to_string(),
+                                    &session_id,
+                                )))
+                                .await;
+                        }
+                    }
+                    Some(proto::client_message::Payload::UserResponse(resp)) => {
+                        let sender = pending_queries.lock().await.remove(&resp.query_id);
+                        if let Some((_sid, sender)) = sender {
+                            let _ = sender.send(UserQueryResult {
+                                selected_index: resp.selected_index,
+                                text: resp.text,
+                            });
+                        }
+                    }
+                    Some(proto::client_message::Payload::Cancel(cancel)) => {
+                        let sid = &cancel.session_id;
+                        match session_mgr.get(sid) {
+                            Ok(s) if s.status == SessionStatus::Running => {
+                                session_mgr.cancel_agent(sid);
+                                running_sessions.retain(|id| id != sid);
+                                // 清理该会话的所有 pending queries，双重保险
+                                let mut pq = pending_queries.lock().await;
+                                pq.retain(|_, (sess_id, _)| sess_id != sid);
+                            }
+                            _ => {
+                                // 不存在或非 Running 状态 → 静默忽略
+                            }
+                        }
+                    }
+                    Some(proto::client_message::Payload::Ack(ack)) => {
+                        tracing::info!(request_id = %ack.request_id, "[DAEMON] received client Ack");
+                        // 后续可据此清理 request 级状态
+                    }
+                    None => {}
+                }
+            }
+
+            // 客户端断开 → 取消此连接上所有运行中的 agent loop
+            for sid in &running_sessions {
+                session_mgr.cancel_agent(sid);
+            }
+            if !running_sessions.is_empty() {
+                tracing::info!(
+                    "[DAEMON] client disconnected, cancelled {} sessions",
+                    running_sessions.len()
+                );
+            }
+        });
+
+        let out_stream = futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        });
+
+        Ok(Response::new(Box::pin(out_stream)))
+    }
+
+    async fn read_file(
+        &self,
+        request: Request<proto::ReadFileRequest>,
+    ) -> Result<Response<proto::ReadFileResponse>, Status> {
+        let req = request.into_inner();
+        let path = req.path.clone();
+
+        let working_dir = self
+            .session_mgr
+            .get(&req.session_id)
+            .map(|s| s.project_path.clone())
+            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+        let ctx = ToolContext {
+            working_dir,
+            session_id: Some(req.session_id),
+        };
+
+        let args = serde_json::json!({ "path": path });
+        let result = self
+            .tool_registry
+            .execute("read_file", args, &ctx)
+            .await
+            .ok_or_else(|| Status::internal("Tool 'read_file' not found"))?;
+
+        if result.is_error {
+            return Err(Status::internal(result.content));
+        }
+
+        Ok(Response::new(proto::ReadFileResponse {
+            content: result.content,
+            path: req.path,
+        }))
+    }
+
+    async fn search_symbols(
+        &self,
+        request: Request<proto::SearchSymbolsRequest>,
+    ) -> Result<Response<proto::SearchSymbolsResponse>, Status> {
+        let req = request.into_inner();
+        let project_path = req.project_path;
+        let query = req.query;
+        let limit = if req.limit <= 0 {
+            20
+        } else {
+            req.limit as usize
+        };
+
+        let cg = self.get_codegraph(&project_path).await?;
+        let symbols = cg.search(&query, limit).map_err(Status::internal)?;
+
+        Ok(Response::new(proto::SearchSymbolsResponse {
+            symbols: symbols
+                .into_iter()
+                .map(|s| proto::SymbolInfo {
+                    name: s.name,
+                    kind: s.kind,
+                    file_path: s.file_path,
+                    line: s.line,
+                    column: s.column,
+                    signature: s.signature.unwrap_or_default(),
+                })
+                .collect(),
+        }))
+    }
+
+    async fn get_symbol_details(
+        &self,
+        request: Request<proto::GetSymbolDetailsRequest>,
+    ) -> Result<Response<proto::SymbolDetails>, Status> {
+        let req = request.into_inner();
+        let project_path = req.project_path;
+        let symbol_name = req.symbol_name;
+
+        let cg = self.get_codegraph(&project_path).await?;
+        let mut details = cg.get_details(&symbol_name).map_err(Status::internal)?;
+
+        let d = details
+            .drain(..)
+            .next()
+            .ok_or_else(|| Status::not_found(format!("Symbol '{symbol_name}' not found")))?;
+
+        Ok(Response::new(proto::SymbolDetails {
+            name: d.name,
+            kind: d.kind,
+            file_path: d.file_path,
+            line: d.line,
+            column: d.column,
+            signature: d.signature.unwrap_or_default(),
+            docstring: d.docstring.unwrap_or_default(),
+            source: d.source,
+            callers: d.callers,
+            callees: d.callees,
+        }))
+    }
+
+    async fn health_check(
+        &self,
+        _request: Request<()>,
+    ) -> Result<Response<proto::HealthStatus>, Status> {
+        let uptime = self.start_time.elapsed().as_secs();
+        Ok(Response::new(proto::HealthStatus {
+            alive: true,
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            uptime_seconds: uptime,
+        }))
+    }
+
+    async fn shutdown(
+        &self,
+        _request: Request<proto::ShutdownRequest>,
+    ) -> Result<Response<()>, Status> {
+        Ok(Response::new(()))
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn session_to_proto(session: &visp_core::session::Session) -> proto::Session {
+    let status = match session.status {
+        SessionStatus::Idle => proto::SessionStatus::Idle,
+        SessionStatus::Running => proto::SessionStatus::Running,
+        SessionStatus::Completed => proto::SessionStatus::Completed,
+        SessionStatus::Error => proto::SessionStatus::Error,
+    };
+
+    let elapsed = session.created_at.elapsed();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let created_secs = now.as_secs() as i64 - elapsed.as_secs() as i64;
+
+    proto::Session {
+        session_id: session.id.clone(),
+        status: status.into(),
+        project_path: session.project_path.to_string_lossy().to_string(),
+        created_at: Some(prost_types::Timestamp {
+            seconds: created_secs,
+            nanos: 0,
+        }),
+    }
+}
+
+fn map_llm_config(proto: &proto::LlmConfig) -> LlmConfig {
+    let mut config = LlmConfig::default();
+    if let Some(model) = &proto.model {
+        config.model = model.clone();
+    }
+    if let Some(temperature) = proto.temperature {
+        config.temperature = temperature;
+    }
+    if let Some(max_tokens) = proto.max_tokens {
+        config.max_tokens = max_tokens;
+    }
+    config.extra = proto.extra.clone();
+    config
+}
+
+fn session_error_msg(code: &str, message: &str, session_id: &str) -> proto::ServerMessage {
+    proto::ServerMessage {
+        payload: Some(proto::server_message::Payload::Error(proto::Error {
+            code: code.to_owned(),
+            message: message.to_owned(),
+            session_id: session_id.to_owned(),
+        })),
+    }
+}
+
+fn agent_event_to_server_message(event: AgentEvent, session_id: &str) -> proto::ServerMessage {
+    let sid = session_id.to_owned();
+    match event {
+        AgentEvent::TextDelta(delta) => proto::ServerMessage {
+            payload: Some(proto::server_message::Payload::TextDelta(
+                proto::TextDelta {
+                    delta,
+                    session_id: sid,
+                },
+            )),
+        },
+        AgentEvent::ToolCallRequest {
+            call_id,
+            tool_name,
+            arguments,
+        } => proto::ServerMessage {
+            payload: Some(proto::server_message::Payload::ToolCall(proto::ToolCall {
+                call_id,
+                tool_name,
+                arguments,
+                session_id: sid,
+            })),
+        },
+        AgentEvent::ToolCallResult {
+            call_id,
+            content,
+            is_error,
+        } => proto::ServerMessage {
+            payload: Some(proto::server_message::Payload::ToolResult(
+                proto::ToolResult {
+                    call_id,
+                    content,
+                    is_error,
+                    session_id: sid,
+                },
+            )),
+        },
+        AgentEvent::UsageInfo {
+            input_tokens,
+            output_tokens,
+            tool_calls,
+        } => proto::ServerMessage {
+            payload: Some(proto::server_message::Payload::UsageInfo(
+                proto::UsageInfo {
+                    input_tokens,
+                    output_tokens,
+                    tool_calls,
+                    session_id: sid,
+                },
+            )),
+        },
+        AgentEvent::ThinkingBlock(block) => {
+            let thinking = block.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
+            let signature = block
+                .get("signature")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            proto::ServerMessage {
+                payload: Some(proto::server_message::Payload::ThinkingBlock(
+                    proto::ThinkingBlock {
+                        thinking: thinking.to_string(),
+                        signature: signature.to_string(),
+                        session_id: sid,
+                    },
+                )),
+            }
+        }
+        AgentEvent::StatusUpdate(message) => proto::ServerMessage {
+            payload: Some(proto::server_message::Payload::StatusUpdate(
+                proto::StatusUpdate {
+                    message,
+                    session_id: sid,
+                },
+            )),
+        },
+        AgentEvent::UserQuery { .. } => {
+            // Handled separately in the chat handler (sender extraction)
+            proto::ServerMessage { payload: None }
+        }
+        AgentEvent::Error { code, message } => proto::ServerMessage {
+            payload: Some(proto::server_message::Payload::Error(proto::Error {
+                code: code.to_string(),
+                message,
+                session_id: sid,
+            })),
+        },
+        AgentEvent::Done => proto::ServerMessage {
+            payload: Some(proto::server_message::Payload::Done(proto::Done {
+                session_id: sid,
+            })),
+        },
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::sync::Arc as StdArc;
+    use visp_core::session::InMemorySessionStore;
+    use visp_core::session::Session;
+    use visp_core::session::SessionStatus as CoreStatus;
+
+    // ── Cancel tests ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_cancel_during_agent_loop() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = mgr.create(Path::new("/tmp"), LlmConfig::default()).unwrap();
+        let ctx = mgr.start_loop(&session.id).unwrap();
+        let token = ctx.cancel_token.clone();
+        assert!(
+            !token.is_cancelled(),
+            "token should not be cancelled initially"
+        );
+
+        // Simulate Cancel handler: retrieve session, check Running, cancel agent
+        let s = mgr.get(&session.id).unwrap();
+        assert_eq!(s.status, CoreStatus::Running);
+        mgr.cancel_agent(&session.id);
+
+        assert!(
+            token.is_cancelled(),
+            "token should be cancelled after cancel_agent"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_idle_session() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = mgr.create(Path::new("/tmp"), LlmConfig::default()).unwrap();
+
+        // Simulate Cancel handler: retrieve session, check status
+        let s = mgr.get(&session.id).unwrap();
+        assert_eq!(s.status, CoreStatus::Idle);
+
+        // Even if cancel_agent were called on idle session, it should be no-op
+        mgr.cancel_agent(&session.id);
+
+        let s = mgr.get(&session.id).unwrap();
+        assert_eq!(
+            s.status,
+            CoreStatus::Idle,
+            "idle session should remain idle after cancel"
+        );
+    }
+
+    #[test]
+    fn test_map_llm_config_empty() {
+        let config = proto::LlmConfig {
+            model: None,
+            temperature: None,
+            max_tokens: None,
+            extra: HashMap::new(),
+        };
+        let llm = map_llm_config(&config);
+        assert_eq!(llm.model, "claude-3-7-sonnet-20250219");
+        assert!((llm.temperature - 0.7).abs() < f64::EPSILON);
+        assert_eq!(llm.max_tokens, 4096);
+    }
+
+    #[test]
+    fn test_map_llm_config_full() {
+        let mut extra = HashMap::new();
+        extra.insert("custom_key".into(), "custom_val".into());
+        let config = proto::LlmConfig {
+            model: Some("gpt-4".into()),
+            temperature: Some(0.5),
+            max_tokens: Some(2048),
+            extra,
+        };
+
+        let llm = map_llm_config(&config);
+        assert_eq!(llm.model, "gpt-4");
+        assert!((llm.temperature - 0.5).abs() < f64::EPSILON);
+        assert_eq!(llm.max_tokens, 2048);
+        assert_eq!(llm.extra.get("custom_key").unwrap(), "custom_val");
+    }
+
+    #[test]
+    fn test_map_llm_config_partial() {
+        let config = proto::LlmConfig {
+            model: Some("gpt-4".into()),
+            temperature: None,
+            max_tokens: None,
+            extra: HashMap::new(),
+        };
+
+        let llm = map_llm_config(&config);
+        assert_eq!(llm.model, "gpt-4");
+        assert!((llm.temperature - 0.7).abs() < f64::EPSILON);
+        assert_eq!(llm.max_tokens, 4096);
+    }
+
+    #[test]
+    fn test_session_to_proto_idle() {
+        let session = Session {
+            id: "test-1".into(),
+            project_path: "/tmp".into(),
+            status: SessionStatus::Idle,
+            created_at: Instant::now(),
+            history: vec![],
+            config: LlmConfig::default(),
+            system_prompt_template: "default".into(),
+            approved_tools: HashSet::new(),
+        };
+
+        let proto = session_to_proto(&session);
+        assert_eq!(proto.session_id, "test-1");
+        assert_eq!(proto.status, proto::SessionStatus::Idle as i32);
+        assert_eq!(proto.project_path, "/tmp");
+        assert!(proto.created_at.is_some());
+    }
+
+    #[test]
+    fn test_session_to_proto_status_mapping() {
+        let base = |status: SessionStatus| -> Session {
+            Session {
+                id: "s".into(),
+                project_path: "/p".into(),
+                status,
+                created_at: Instant::now(),
+                history: vec![],
+                config: LlmConfig::default(),
+                system_prompt_template: "".into(),
+                approved_tools: HashSet::new(),
+            }
+        };
+
+        assert_eq!(
+            session_to_proto(&base(SessionStatus::Idle)).status,
+            proto::SessionStatus::Idle as i32
+        );
+        assert_eq!(
+            session_to_proto(&base(SessionStatus::Running)).status,
+            proto::SessionStatus::Running as i32
+        );
+        assert_eq!(
+            session_to_proto(&base(SessionStatus::Completed)).status,
+            proto::SessionStatus::Completed as i32
+        );
+        assert_eq!(
+            session_to_proto(&base(SessionStatus::Error)).status,
+            proto::SessionStatus::Error as i32
+        );
+    }
+
+    #[test]
+    fn test_session_error_msg_contains_fields() {
+        let msg = session_error_msg("SessionNotFound", "test error", "sess-1");
+        match msg.payload {
+            Some(proto::server_message::Payload::Error(e)) => {
+                assert_eq!(e.code, "SessionNotFound");
+                assert_eq!(e.message, "test error");
+                assert_eq!(e.session_id, "sess-1");
+            }
+            _ => panic!("expected Error payload"),
+        }
+    }
+
+    #[test]
+    fn test_agent_event_to_server_message_text_delta() {
+        let msg = agent_event_to_server_message(AgentEvent::TextDelta("hello".into()), "sess-1");
+        match msg.payload {
+            Some(proto::server_message::Payload::TextDelta(t)) => {
+                assert_eq!(t.delta, "hello");
+                assert_eq!(t.session_id, "sess-1");
+            }
+            _ => panic!("expected TextDelta"),
+        }
+    }
+
+    #[test]
+    fn test_agent_event_to_server_message_tool_call() {
+        let event = AgentEvent::ToolCallRequest {
+            call_id: "call-1".into(),
+            tool_name: "bash".into(),
+            arguments: r#"{"cmd":"ls"}"#.into(),
+        };
+        let msg = agent_event_to_server_message(event, "sess-1");
+        match msg.payload {
+            Some(proto::server_message::Payload::ToolCall(t)) => {
+                assert_eq!(t.call_id, "call-1");
+                assert_eq!(t.tool_name, "bash");
+                assert_eq!(t.arguments, r#"{"cmd":"ls"}"#);
+                assert_eq!(t.session_id, "sess-1");
+            }
+            _ => panic!("expected ToolCall"),
+        }
+    }
+
+    #[test]
+    fn test_agent_event_to_server_message_done() {
+        let msg = agent_event_to_server_message(AgentEvent::Done, "sess-1");
+        match msg.payload {
+            Some(proto::server_message::Payload::Done(d)) => {
+                assert_eq!(d.session_id, "sess-1");
+            }
+            _ => panic!("expected Done"),
+        }
+    }
+
+    #[test]
+    fn test_agent_event_to_server_message_error() {
+        let event = AgentEvent::Error {
+            code: visp_core::error::AgentErrorCode::MaxIterations,
+            message: "max reached".into(),
+        };
+        let msg = agent_event_to_server_message(event, "sess-1");
+        match msg.payload {
+            Some(proto::server_message::Payload::Error(e)) => {
+                assert_eq!(e.code, "Maximum iterations reached");
+                assert_eq!(e.message, "max reached");
+                assert_eq!(e.session_id, "sess-1");
+            }
+            _ => panic!("expected Error"),
+        }
+    }
+
+    #[test]
+    fn test_agent_event_to_server_message_user_query_skipped() {
+        let (tx, _rx) = oneshot::channel::<UserQueryResult>();
+        let event = AgentEvent::UserQuery {
+            query_id: "q-1".into(),
+            message: "confirm?".into(),
+            options: vec![],
+            allow_other: false,
+            respond: tx,
+        };
+        let msg = agent_event_to_server_message(event, "sess-1");
+        assert!(msg.payload.is_none());
+    }
+}

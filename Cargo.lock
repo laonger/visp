@@ -3702,18 +3702,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
-name = "vbw"
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+
+[[package]]
+name = "version_check"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "visp"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "clap",
  "tokio",
  "tonic",
- "vbw-proto",
+ "visp-proto",
 ]
 
 [[package]]
-name = "vbw-cli"
+name = "visp-cli"
 version = "0.1.0"
 dependencies = [
  "chrono",
@@ -3731,11 +3743,11 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tui-scrollview",
- "vbw-proto",
+ "visp-proto",
 ]
 
 [[package]]
-name = "vbw-codegraph"
+name = "visp-codegraph"
 version = "0.1.0"
 dependencies = [
  "notify",
@@ -3749,12 +3761,12 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",
- "vbw-core",
+ "visp-core",
  "walkdir",
 ]
 
 [[package]]
-name = "vbw-core"
+name = "visp-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -3767,11 +3779,11 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
- "vbw-llm",
+ "visp-llm",
 ]
 
 [[package]]
-name = "vbw-daemon"
+name = "visp-daemon"
 version = "0.1.0"
 dependencies = [
  "futures",
@@ -3786,15 +3798,15 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "vbw-codegraph",
- "vbw-core",
- "vbw-llm",
- "vbw-proto",
- "vbw-tools",
+ "visp-codegraph",
+ "visp-core",
+ "visp-llm",
+ "visp-proto",
+ "visp-tools",
 ]
 
 [[package]]
-name = "vbw-llm"
+name = "visp-llm"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -3804,11 +3816,11 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "vbw-core",
+ "visp-core",
 ]
 
 [[package]]
-name = "vbw-proto"
+name = "visp-proto"
 version = "0.1.0"
 dependencies = [
  "prost",
@@ -3818,7 +3830,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "vbw-tools"
+name = "visp-tools"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -3829,21 +3841,9 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "toml",
- "vbw-codegraph",
- "vbw-core",
+ "visp-codegraph",
+ "visp-core",
 ]
-
-[[package]]
-name = "vcpkg"
-version = "0.2.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
-
-[[package]]
-name = "version_check"
-version = "0.9.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vtparse"

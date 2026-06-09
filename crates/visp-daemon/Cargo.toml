@@ -1,0 +1,26 @@
+[package]
+name = "visp-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+visp-core = { path = "../visp-core" }
+visp-proto = { path = "../visp-proto" }
+visp-llm = { path = "../visp-llm" }
+visp-tools = { path = "../visp-tools" }
+visp-codegraph = { path = "../visp-codegraph" }
+serde.workspace = true
+serde_json.workspace = true
+tonic.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+toml = "0.8"
+uuid.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

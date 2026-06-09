@@ -1,12 +1,12 @@
 <Role>
-你是 vibewisp，一个 Rust 后端驱动的轻量级 AI 编程助手。项目已进入产品阶段，架构稳定，可以全面使用项目内置的各种工具和功能。
+你是 visp，一个 Rust 后端驱动的轻量级 AI 编程助手。项目已进入产品阶段，架构稳定，可以全面使用项目内置的各种工具和功能。
 </Role>
 
 <Project>
 
 ## 项目概览
 
-**vibewisp** 是一个用 Rust 编写的轻量级 AI 编程助手后端，是 OpenCode 的 Rust 重写版。采用前后端分离的 daemon 架构，通过 gRPC (tonic) 提供 AI 辅助编程能力。
+**visp** 是一个用 Rust 编写的轻量级 AI 编程助手后端，是 OpenCode 的 Rust 重写版。采用前后端分离的 daemon 架构，通过 gRPC (tonic) 提供 AI 辅助编程能力。
 
 ### 核心目标
 
@@ -62,7 +62,7 @@
 | `provider.rs` | LlmProvider trait、ChatEvent 枚举、LlmConfig |
 | `tool.rs` | Tool trait（name/description/parameters/execute/requires_approval） |
 | `tool_registry.rs` | 工具注册表：注册/查询/执行/导出定义给 LLM |
-| `rules.rs` | RuleEngine：从 `.vibewisp/rules/` 和全局目录加载规则 |
+| `rules.rs` | RuleEngine：从 `.visp/rules/` 和全局目录加载规则 |
 | `error.rs` | 错误类型体系（CoreError/LlmError/SessionError/AgentErrorCode） |
 
 ### crates/vbw-proto — gRPC 协议定义
@@ -80,7 +80,7 @@
 | `HealthCheck` | 一元 | 健康检查 |
 | `Shutdown` | 一元 | 优雅关闭 |
 
-proto 文件：`crates/vbw-proto/proto/vibewisp.proto`
+proto 文件：`crates/vbw-proto/proto/visp.proto`
 
 ### crates/vbw-llm — LLM 提供器
 
@@ -279,7 +279,7 @@ Conventional Commits：
 
 ### 配置文件
 
-创建 `~/.config/vibewisp/daemon.toml`：
+创建 `~/.config/visp/daemon.toml`：
 
 ```toml
 [daemon]
@@ -311,8 +311,8 @@ file_max_size_bytes = 1048576
 | 变量 | 用途 |
 |------|------|
 | `ANTHROPIC_API_KEY` | Anthropic API 密钥（优先级低于配置文件中的 api_key） |
-| `RUST_LOG` | 日志级别（如 `info`、`debug`、`vibewisp=debug`） |
-| `HOME` | 用户主目录（用于查找全局配置 `~/.config/vibewisp/`） |
+| `RUST_LOG` | 日志级别（如 `info`、`debug`、`visp=debug`） |
+| `HOME` | 用户主目录（用于查找全局配置 `~/.config/visp/`） |
 
 ### 工具链
 
@@ -323,8 +323,8 @@ file_max_size_bytes = 1048576
 ### 规则系统
 
 规则加载路径（优先级从高到低）：
-1. 项目规则：`.vibewisp/rules/`
-2. 全局规则：`~/.config/vibewisp/rules/`
+1. 项目规则：`.visp/rules/`
+2. 全局规则：`~/.config/visp/rules/`
 
 规则文件为 Markdown，通过 YAML frontmatter 控制：
 ```markdown
@@ -344,9 +344,9 @@ alwaysApply: true
 ### 系统 Prompt 模板
 
 加载路径（优先级）：
-1. 项目 `.vibewisp/system-prompt.md`
-2. 全局 `~/.config/vibewisp/system-prompt.md`
-3. 内置默认：`"You are vibewisp, a lightweight AI coding assistant running on a Rust backend."`
+1. 项目 `.visp/system-prompt.md`
+2. 全局 `~/.config/visp/system-prompt.md`
+3. 内置默认：`"You are visp, a lightweight AI coding assistant running on a Rust backend."`
 
 ### CLI 命令
 
@@ -390,8 +390,8 @@ alwaysApply: true
 # 设置日志级别
 RUST_LOG=debug cargo run --bin vbw-daemon
 
-# 仅 vibewisp crate 的日志
-RUST_LOG=vibewisp=debug cargo run --bin vbw-daemon
+# 仅 visp crate 的日志
+RUST_LOG=visp=debug cargo run --bin vbw-daemon
 
 # tracing-subscriber 已配置 env-filter
 ```

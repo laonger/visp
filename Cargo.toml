@@ -1,21 +1,21 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/vbw",
-    "crates/vbw-cli",
-    "crates/vbw-codegraph",
-    "crates/vbw-core",
-    "crates/vbw-daemon",
-    "crates/vbw-llm",
-    "crates/vbw-proto",
-    "crates/vbw-tools",
+    "crates/visp",
+    "crates/visp-cli",
+    "crates/visp-codegraph",
+    "crates/visp-core",
+    "crates/visp-daemon",
+    "crates/visp-llm",
+    "crates/visp-proto",
+    "crates/visp-tools",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/laonger/vibewisp"
+repository = "https://github.com/laonger/visp"
 
 [workspace.dependencies]
 chrono = { version = "0.4", features = ["clock"] }

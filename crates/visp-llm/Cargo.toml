@@ -1,0 +1,14 @@
+[package]
+name = "visp-llm"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+visp-core = { path = "../visp-core" }
+reqwest.workspace = true
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+futures.workspace = true
+async-trait.workspace = true

@@ -10,10 +10,10 @@
 | 1 | 项目骨架 + 核心抽象 | ✅ |
 | 2 | LLM Provider + 内置工具 | ✅ |
 | 3 | Agent 核心 + Daemon | ✅ |
-| 4 | CLI 前端 (vbw-cli) | ✅ |
+| 4 | CLI 前端 (visp-cli) | ✅ |
 | 5 | CodeGraph 代码智能 | ✅ |
 
-**测试分布**：vbw-codegraph 18+64 · vbw-core 53 · vbw-daemon 17 · vbw-llm 22 · vbw-tools 27
+**测试分布**：visp-codegraph 18+64 · visp-core 53 · visp-daemon 17 · visp-llm 22 · visp-tools 27
 
 ---
 
