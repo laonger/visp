@@ -63,7 +63,11 @@ async fn main() {
         None
     };
 
-    let session = match client.create_session(&cli.project, config).await {
+    let project = std::path::PathBuf::from(&cli.project);
+    let project_path = project.canonicalize().unwrap_or(project);
+    let project_str = project_path.to_string_lossy().to_string();
+
+    let session = match client.create_session(&project_str, config).await {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to create session: {}", e);
