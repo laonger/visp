@@ -132,6 +132,96 @@ fn load_system_prompt_template(project_path: &Path) -> String {
     DEFAULT_SYSTEM_PROMPT.to_string()
 }
 
+/// 从 `.vibewisp/skills/` 加载技能定义，格式化为 prompt 附加内容。
+/// 每个技能目录下需有 `SKILL.md` 文件。
+fn load_skills(project_path: &Path) -> String {
+    let skills_dir = project_path.join(".vibewisp").join("skills");
+    if !skills_dir.is_dir() {
+        return String::new();
+    }
+
+    let mut sections = Vec::new();
+
+    let mut entries: Vec<_> = match std::fs::read_dir(&skills_dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
+        Err(_) => return String::new(),
+    };
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in &entries {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let skill_name = match path.file_name() {
+            Some(n) => n.to_string_lossy().to_string(),
+            None => continue,
+        };
+        let skill_file = path.join("SKILL.md");
+        if !skill_file.is_file() {
+            continue;
+        }
+        let content = match std::fs::read_to_string(&skill_file) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        // 提取 YAML frontmatter 中的 description（如果有）
+        let description = extract_frontmatter_field(&content, "description");
+        let body = strip_frontmatter(&content);
+
+        let mut section = format!("### {skill_name}");
+        if let Some(desc) = description {
+            section.push_str(&format!("\n{desc}"));
+        }
+        section.push('\n');
+        section.push_str(body.trim());
+        sections.push(section);
+    }
+
+    if sections.is_empty() {
+        return String::new();
+    }
+
+    format!(
+        "\n\n## Available Skills\n\n{}",
+        sections.join("\n\n---\n\n")
+    )
+}
+
+/// 从 YAML frontmatter 中提取指定字段值
+fn extract_frontmatter_field(content: &str, field: &str) -> Option<String> {
+    let content = content.trim();
+    if !content.starts_with("---") {
+        return None;
+    }
+    let rest = content.strip_prefix("---")?;
+    let end = rest.find("\n---")?;
+    let frontmatter = &rest[..end];
+    let prefix = format!("{field}:");
+    for line in frontmatter.lines() {
+        let trimmed = line.trim();
+        if let Some(val) = trimmed.strip_prefix(&prefix) {
+            return Some(val.trim().to_string());
+        }
+    }
+    None
+}
+
+/// 去除 YAML frontmatter，返回正文
+fn strip_frontmatter(content: &str) -> &str {
+    let content = content.trim();
+    if !content.starts_with("---") {
+        return content;
+    }
+    let rest = content.strip_prefix("---").unwrap();
+    if let Some(end) = rest.find("\n---") {
+        let after = &rest[end + 4..]; // skip \n + ---
+        after.trim()
+    } else {
+        content
+    }
+}
+
 /// 会话管理器
 pub struct SessionManager {
     store: Arc<Mutex<dyn SessionStore>>,
@@ -146,10 +236,14 @@ impl SessionManager {
         }
     }
 
-    /// 创建会话，自动加载系统 prompt 模板
+    /// 创建会话，自动加载系统 prompt 模板和技能
     pub fn create(&self, project_path: &Path, config: LlmConfig) -> Result<Session, SessionError> {
         let id = Uuid::new_v4().to_string();
-        let prompt_template = load_system_prompt_template(project_path);
+        let mut prompt_template = load_system_prompt_template(project_path);
+        let skills = load_skills(project_path);
+        if !skills.is_empty() {
+            prompt_template.push_str(&skills);
+        }
 
         let session = Session {
             id,
@@ -484,5 +578,88 @@ mod tests {
 
         // Other tool still not approved
         assert!(!manager.is_tool_approved(&sid, "write_file"));
+    }
+
+    // ── Skill loading ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_frontmatter_field_found() {
+        let content = "---\nname: test-skill\ndescription: A test skill\n---\n\nContent here";
+        assert_eq!(
+            extract_frontmatter_field(content, "description"),
+            Some("A test skill".into())
+        );
+    }
+
+    #[test]
+    fn test_extract_frontmatter_field_missing() {
+        let content = "---\nname: test\n---\n\nContent";
+        assert_eq!(extract_frontmatter_field(content, "description"), None);
+    }
+
+    #[test]
+    fn test_extract_frontmatter_field_no_frontmatter() {
+        let content = "Just content";
+        assert_eq!(extract_frontmatter_field(content, "name"), None);
+    }
+
+    #[test]
+    fn test_strip_frontmatter_removes_yaml() {
+        let content = "---\nname: test\n---\nBody text";
+        assert_eq!(strip_frontmatter(content), "Body text");
+    }
+
+    #[test]
+    fn test_strip_frontmatter_no_frontmatter() {
+        let content = "Just body";
+        assert_eq!(strip_frontmatter(content), "Just body");
+    }
+
+    #[test]
+    fn test_load_skills_empty_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // No skills dir → empty
+        let result = load_skills(tmp.path());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_load_skills_with_skill_file() {
+        use std::io::Write;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let skills_dir = tmp.path().join(".vibewisp").join("skills").join("my-skill");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        let mut f = std::fs::File::create(skills_dir.join("SKILL.md")).unwrap();
+        f.write_all(
+            b"---\nname: my-skill\ndescription: A custom skill\n---\n\nDo something useful.\n",
+        )
+        .unwrap();
+
+        let result = load_skills(tmp.path());
+        assert!(result.contains("my-skill"));
+        assert!(result.contains("A custom skill"));
+        assert!(result.contains("Do something useful."));
+        assert!(result.contains("Available Skills"));
+    }
+
+    #[test]
+    fn test_load_skills_ignores_non_skill_dirs() {
+        use std::io::Write;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let skills_dir = tmp.path().join(".vibewisp").join("skills").join("my-skill");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        let mut f = std::fs::File::create(skills_dir.join("SKILL.md")).unwrap();
+        f.write_all(b"---\nname: my-skill\n---\n\nContent").unwrap();
+        // Add a non-skill file/dir
+        std::fs::create_dir_all(
+            tmp.path()
+                .join(".vibewisp")
+                .join("skills")
+                .join("not-a-skill"),
+        )
+        .unwrap();
+
+        let result = load_skills(tmp.path());
+        assert!(result.contains("my-skill"));
     }
 }
