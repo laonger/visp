@@ -40,6 +40,13 @@ impl Tool for CodeGraphRebuild {
 
 pub struct CodeGraphSearch;
 
+impl CodeGraphSearch {
+    /// 从 daemon 配置构造（目前无配置项）
+    pub fn from_toml(_raw: Option<&toml::Value>) -> Self {
+        Self
+    }
+}
+
 #[async_trait]
 impl Tool for CodeGraphSearch {
     fn name(&self) -> &str {
@@ -124,6 +131,13 @@ impl Tool for CodeGraphSearch {
 }
 
 pub struct CodeGraphGetDetails;
+
+impl CodeGraphGetDetails {
+    /// 从 daemon 配置构造（目前无配置项）
+    pub fn from_toml(_raw: Option<&toml::Value>) -> Self {
+        Self
+    }
+}
 
 #[async_trait]
 impl Tool for CodeGraphGetDetails {

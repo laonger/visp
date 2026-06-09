@@ -29,10 +29,19 @@ fn has_rg() -> bool {
 }
 
 /// 构建 grep/rg 命令参数
-fn build_grep_args(pattern: &str, path: &str, use_rg: bool) -> (&'static str, Vec<String>) {
+fn build_grep_args(
+    pattern: &str,
+    path: &str,
+    use_rg: bool,
+    exclude_dirs: &[String],
+) -> (&'static str, Vec<String>) {
     if use_rg {
         let mut args: Vec<String> = vec!["-n".into()];
         for dir in EXCLUDE_DIRS {
+            args.push("-g".into());
+            args.push(format!("!{}", dir));
+        }
+        for dir in exclude_dirs {
             args.push("-g".into());
             args.push(format!("!{}", dir));
         }
@@ -64,9 +73,13 @@ fn build_glob_args(pattern: &str, path: &str, use_rg: bool) -> (&'static str, Ve
 }
 
 /// 执行命令并处理超时/错误，返回 (stdout, stderr)
-async fn run_command(program: &str, args: &[String]) -> Result<(String, String), ToolResult> {
+async fn run_command(
+    program: &str,
+    args: &[String],
+    timeout_secs: u64,
+) -> Result<(String, String), ToolResult> {
     let cmd_output = match timeout(
-        Duration::from_secs(GREP_TIMEOUT_SECS),
+        Duration::from_secs(timeout_secs),
         Command::new(program).args(args).output(),
     )
     .await
@@ -81,7 +94,7 @@ async fn run_command(program: &str, args: &[String]) -> Result<(String, String),
         Err(_) => {
             return Err(ToolResult::error(format!(
                 "{} timed out after {}s",
-                program, GREP_TIMEOUT_SECS
+                program, timeout_secs
             )));
         }
     };
@@ -91,8 +104,48 @@ async fn run_command(program: &str, args: &[String]) -> Result<(String, String),
     Ok((stdout, stderr))
 }
 
-/// Grep 内容搜索
-pub struct Grep;
+/// Grep 内容搜索，支持 per-tool 配置
+pub struct Grep {
+    timeout_secs: u64,
+    exclude_dirs: Vec<String>,
+}
+
+impl Default for Grep {
+    fn default() -> Self {
+        Self {
+            timeout_secs: GREP_TIMEOUT_SECS,
+            exclude_dirs: Vec::new(),
+        }
+    }
+}
+
+impl Grep {
+    /// 从 daemon 配置的 raw toml 值构造
+    /// raw = config.tool.get("grep") → Option<&toml::Value>
+    pub fn from_toml(raw: Option<&toml::Value>) -> Self {
+        let mut timeout = GREP_TIMEOUT_SECS;
+        let mut exclude: Vec<String> = Vec::new();
+
+        if let Some(config) = raw.and_then(|v| v.as_table()) {
+            if let Some(t) = config.get("timeout_secs").and_then(|v| v.as_integer())
+                && t > 0
+            {
+                timeout = t as u64;
+            }
+            if let Some(dirs) = config.get("exclude_dirs").and_then(|v| v.as_array()) {
+                exclude = dirs
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
+            }
+        }
+
+        Self {
+            timeout_secs: timeout,
+            exclude_dirs: exclude,
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for Grep {
@@ -156,9 +209,9 @@ impl Tool for Grep {
         };
 
         let use_rg = has_rg();
-        let (program, args) = build_grep_args(pattern, path_str, use_rg);
+        let (program, args) = build_grep_args(pattern, path_str, use_rg, &self.exclude_dirs);
 
-        let (stdout, stderr) = match run_command(program, &args).await {
+        let (stdout, stderr) = match run_command(program, &args, self.timeout_secs).await {
             Ok(v) => v,
             Err(e) => return e,
         };
@@ -186,8 +239,37 @@ impl Tool for Grep {
     }
 }
 
-/// Glob 文件名搜索
-pub struct Glob;
+/// Glob 文件名搜索，支持 per-tool 配置
+pub struct Glob {
+    timeout_secs: u64,
+}
+
+impl Default for Glob {
+    fn default() -> Self {
+        Self {
+            timeout_secs: GREP_TIMEOUT_SECS,
+        }
+    }
+}
+
+impl Glob {
+    /// 从 daemon 配置的 raw toml 值构造
+    /// raw = config.tool.get("glob") → Option<&toml::Value>
+    pub fn from_toml(raw: Option<&toml::Value>) -> Self {
+        let mut timeout = GREP_TIMEOUT_SECS;
+
+        if let Some(config) = raw.and_then(|v| v.as_table())
+            && let Some(t) = config.get("timeout_secs").and_then(|v| v.as_integer())
+            && t > 0
+        {
+            timeout = t as u64;
+        }
+
+        Self {
+            timeout_secs: timeout,
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for Glob {
@@ -253,7 +335,7 @@ impl Tool for Glob {
         let use_rg = has_rg();
         let (program, args) = build_glob_args(pattern, path_str, use_rg);
 
-        let (stdout, stderr) = match run_command(program, &args).await {
+        let (stdout, stderr) = match run_command(program, &args, self.timeout_secs).await {
             Ok(v) => v,
             Err(e) => return e,
         };
@@ -293,7 +375,7 @@ mod tests {
         fs::write(dir.path().join("a.txt"), b"hello world\n").unwrap();
         fs::write(dir.path().join("b.bin"), b"hello\0binary\n").unwrap();
 
-        let grep = Grep;
+        let grep = Grep::default();
         let ctx = ToolContext {
             working_dir: dir.path().to_path_buf(),
             session_id: None,
@@ -318,7 +400,7 @@ mod tests {
     #[tokio::test]
     async fn test_grep_missing_pattern() {
         let dir = tempdir().unwrap();
-        let grep = Grep;
+        let grep = Grep::default();
         let ctx = ToolContext {
             working_dir: dir.path().to_path_buf(),
             session_id: None,
@@ -335,7 +417,7 @@ mod tests {
         fs::write(dir.path().join("b.rs"), "").unwrap();
         fs::write(dir.path().join("c.txt"), "").unwrap();
 
-        let glob = Glob;
+        let glob = Glob::default();
         let ctx = ToolContext {
             working_dir: dir.path().to_path_buf(),
             session_id: None,
@@ -370,7 +452,7 @@ mod tests {
         fs::write(sub.join("nested.rs"), "").unwrap();
         fs::write(dir.path().join("root.rs"), "").unwrap();
 
-        let glob = Glob;
+        let glob = Glob::default();
         let ctx = ToolContext {
             working_dir: dir.path().to_path_buf(),
             session_id: None,
@@ -395,7 +477,7 @@ mod tests {
     #[tokio::test]
     async fn test_glob_missing_pattern() {
         let dir = tempdir().unwrap();
-        let glob = Glob;
+        let glob = Glob::default();
         let ctx = ToolContext {
             working_dir: dir.path().to_path_buf(),
             session_id: None,
@@ -403,5 +485,70 @@ mod tests {
         let result = glob.execute(serde_json::json!({}), &ctx).await;
         assert!(result.is_error);
         assert!(result.content.contains("pattern"));
+    }
+
+    // ── from_toml 测试 ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_grep_from_toml_default() {
+        let grep = Grep::from_toml(None);
+        assert_eq!(grep.timeout_secs, GREP_TIMEOUT_SECS);
+        assert!(grep.exclude_dirs.is_empty());
+    }
+
+    #[test]
+    fn test_grep_from_toml_exclude_dirs() {
+        let value: toml::Value = toml::from_str(
+            r#"
+timeout_secs = 60
+exclude_dirs = ["vendor", ".build"]
+"#,
+        )
+        .unwrap();
+        let grep = Grep::from_toml(Some(&value));
+        assert_eq!(grep.timeout_secs, 60);
+        assert_eq!(grep.exclude_dirs, vec!["vendor", ".build"]);
+    }
+
+    #[test]
+    fn test_grep_from_toml_zero_timeout_ignored() {
+        let value: toml::Value = toml::from_str(
+            r#"
+timeout_secs = 0
+"#,
+        )
+        .unwrap();
+        let grep = Grep::from_toml(Some(&value));
+        assert_eq!(grep.timeout_secs, GREP_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn test_glob_from_toml_default() {
+        let glob = Glob::from_toml(None);
+        assert_eq!(glob.timeout_secs, GREP_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn test_glob_from_toml_timeout() {
+        let value: toml::Value = toml::from_str(
+            r#"
+timeout_secs = 45
+"#,
+        )
+        .unwrap();
+        let glob = Glob::from_toml(Some(&value));
+        assert_eq!(glob.timeout_secs, 45);
+    }
+
+    #[test]
+    fn test_glob_from_toml_zero_timeout_ignored() {
+        let value: toml::Value = toml::from_str(
+            r#"
+timeout_secs = 0
+"#,
+        )
+        .unwrap();
+        let glob = Glob::from_toml(Some(&value));
+        assert_eq!(glob.timeout_secs, GREP_TIMEOUT_SECS);
     }
 }

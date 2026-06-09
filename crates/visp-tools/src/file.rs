@@ -9,7 +9,30 @@ const MAX_FILE_SIZE: u64 = 1_048_576; // 1MB
 const BINARY_SCAN_BYTES: usize = 8000;
 
 /// 读取文件
-pub struct ReadFile;
+pub struct ReadFile {
+    max_file_size: u64,
+}
+
+impl Default for ReadFile {
+    fn default() -> Self {
+        Self {
+            max_file_size: MAX_FILE_SIZE,
+        }
+    }
+}
+
+impl ReadFile {
+    pub fn from_toml(raw: Option<&toml::Value>) -> Self {
+        let mut max_file_size = MAX_FILE_SIZE;
+        if let Some(config) = raw.and_then(|v| v.as_table())
+            && let Some(s) = config.get("max_file_size").and_then(|v| v.as_integer())
+            && s > 0
+        {
+            max_file_size = s as u64;
+        }
+        Self { max_file_size }
+    }
+}
 
 #[async_trait]
 impl Tool for ReadFile {
@@ -72,11 +95,11 @@ impl Tool for ReadFile {
             Err(e) => return ToolResult::error(format!("Failed to read file metadata: {}", e)),
         };
 
-        if metadata.len() > MAX_FILE_SIZE {
+        if metadata.len() > self.max_file_size {
             return ToolResult::error(format!(
                 "File too large: {} bytes (max {} bytes)",
                 metadata.len(),
-                MAX_FILE_SIZE
+                self.max_file_size
             ));
         }
 
@@ -161,7 +184,32 @@ impl Tool for ReadFile {
 // ---------------------------------------------------------------------------
 
 /// 写入文件（覆盖）
-pub struct WriteFile;
+pub struct WriteFile {
+    /// 仅兼容，不使用
+    #[allow(dead_code)]
+    max_file_size: u64,
+}
+
+impl Default for WriteFile {
+    fn default() -> Self {
+        Self {
+            max_file_size: MAX_FILE_SIZE,
+        }
+    }
+}
+
+impl WriteFile {
+    pub fn from_toml(raw: Option<&toml::Value>) -> Self {
+        let mut max_file_size = MAX_FILE_SIZE;
+        if let Some(config) = raw.and_then(|v| v.as_table())
+            && let Some(s) = config.get("max_file_size").and_then(|v| v.as_integer())
+            && s > 0
+        {
+            max_file_size = s as u64;
+        }
+        Self { max_file_size }
+    }
+}
 
 #[async_trait]
 impl Tool for WriteFile {
@@ -243,7 +291,30 @@ impl Tool for WriteFile {
 // ---------------------------------------------------------------------------
 
 /// 精确字符串替换编辑
-pub struct EditFile;
+pub struct EditFile {
+    max_file_size: u64,
+}
+
+impl Default for EditFile {
+    fn default() -> Self {
+        Self {
+            max_file_size: MAX_FILE_SIZE,
+        }
+    }
+}
+
+impl EditFile {
+    pub fn from_toml(raw: Option<&toml::Value>) -> Self {
+        let mut max_file_size = MAX_FILE_SIZE;
+        if let Some(config) = raw.and_then(|v| v.as_table())
+            && let Some(s) = config.get("max_file_size").and_then(|v| v.as_integer())
+            && s > 0
+        {
+            max_file_size = s as u64;
+        }
+        Self { max_file_size }
+    }
+}
 
 #[async_trait]
 impl Tool for EditFile {
@@ -314,6 +385,15 @@ impl Tool for EditFile {
             Ok(c) => c,
             Err(e) => return ToolResult::error(format!("Failed to read file: {}", e)),
         };
+
+        // 检查文件大小
+        if content.len() as u64 > self.max_file_size {
+            return ToolResult::error(format!(
+                "File too large: {} bytes (max {} bytes)",
+                content.len(),
+                self.max_file_size
+            ));
+        }
 
         // 查找匹配次数和位置
         let matches: Vec<_> = content.match_indices(old_string).collect();
@@ -416,7 +496,7 @@ mod tests {
         let file_path = tmp.path().join("test.txt");
         std::fs::write(&file_path, "hello world").unwrap();
 
-        let tool = ReadFile;
+        let tool = ReadFile::default();
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
@@ -437,7 +517,7 @@ mod tests {
     #[test]
     fn test_read_file_not_found() {
         let tmp = TempDir::new().unwrap();
-        let tool = ReadFile;
+        let tool = ReadFile::default();
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
@@ -457,7 +537,7 @@ mod tests {
         let content = vec![b'a'; (MAX_FILE_SIZE + 1) as usize];
         std::fs::write(&file_path, &content).unwrap();
 
-        let tool = ReadFile;
+        let tool = ReadFile::default();
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
@@ -480,7 +560,7 @@ mod tests {
         content[1] = b'i';
         std::fs::write(&file_path, &content).unwrap();
 
-        let tool = ReadFile;
+        let tool = ReadFile::default();
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
@@ -691,7 +771,7 @@ mod tests {
     #[test]
     fn test_write_file_success() {
         let tmp = TempDir::new().unwrap();
-        let tool = WriteFile;
+        let tool = WriteFile::default();
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
@@ -714,7 +794,7 @@ mod tests {
     #[test]
     fn test_write_file_auto_create_parent() {
         let tmp = TempDir::new().unwrap();
-        let tool = WriteFile;
+        let tool = WriteFile::default();
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
@@ -744,7 +824,7 @@ mod tests {
         let file_path = tmp.path().join("edit.txt");
         std::fs::write(&file_path, "hello world foo").unwrap();
 
-        let tool = EditFile;
+        let tool = EditFile::default();
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
@@ -774,7 +854,7 @@ mod tests {
         let file_path = tmp.path().join("edit.txt");
         std::fs::write(&file_path, "hello world").unwrap();
 
-        let tool = EditFile;
+        let tool = EditFile::default();
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
@@ -798,7 +878,7 @@ mod tests {
         let file_path = tmp.path().join("edit.txt");
         std::fs::write(&file_path, "foo bar foo baz foo").unwrap();
 
-        let tool = EditFile;
+        let tool = EditFile::default();
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
@@ -825,7 +905,7 @@ mod tests {
         let file_path = tmp.path().join("edit.txt");
         std::fs::write(&file_path, "hello world").unwrap();
 
-        let tool = EditFile;
+        let tool = EditFile::default();
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
@@ -856,5 +936,59 @@ mod tests {
         );
         let temp_path = file_path.with_file_name(&temp_name);
         assert!(!temp_path.exists(), "temp file should be cleaned up");
+    }
+
+    // ── from_toml ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_read_file_from_toml_default() {
+        let tool = ReadFile::from_toml(None);
+        assert_eq!(tool.max_file_size, MAX_FILE_SIZE);
+    }
+
+    #[test]
+    fn test_read_file_from_toml_max_file_size() {
+        let toml_str = "max_file_size = 500";
+        let value: toml::Value = toml::from_str(toml_str).unwrap();
+        let tool = ReadFile::from_toml(Some(&value));
+        assert_eq!(tool.max_file_size, 500);
+    }
+
+    #[test]
+    fn test_write_file_from_toml_default() {
+        let tool = WriteFile::from_toml(None);
+        assert_eq!(tool.max_file_size, MAX_FILE_SIZE);
+    }
+
+    #[test]
+    fn test_edit_file_from_toml_default() {
+        let tool = EditFile::from_toml(None);
+        assert_eq!(tool.max_file_size, MAX_FILE_SIZE);
+    }
+
+    #[test]
+    fn test_edit_file_too_large() {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("edit_too_large.txt");
+        // Write 600 bytes
+        let content = vec![b'a'; 600];
+        std::fs::write(&file_path, &content).unwrap();
+
+        let tool = EditFile { max_file_size: 500 };
+        let ctx = ToolContext {
+            working_dir: tmp.path().to_path_buf(),
+            session_id: None,
+        };
+        let args = serde_json::json!({
+            "path": "edit_too_large.txt",
+            "old_string": "aaa",
+            "new_string": "bbb"
+        });
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tool.execute(args, &ctx));
+        assert!(result.is_error);
+        assert!(result.content.contains("too large"));
     }
 }

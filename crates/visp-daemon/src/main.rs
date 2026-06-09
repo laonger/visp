@@ -80,26 +80,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(provider = %config.llm.provider, "LLM provider created");
 
     // 4. Create tool registry
-    let mut tool_registry = ToolRegistry::new();
+    let tool_registry = ToolRegistry::new();
 
     // ── 常用工具 ──
     tool_registry
-        .register(Box::new(Bash))
+        .register(Box::new(Bash::from_toml(config.tool.get("bash"))))
         .map_err(|e| format!("register bash: {e}"))?;
     tool_registry
-        .register(Box::new(ReadFile))
+        .register(Box::new(ReadFile::from_toml(config.tool.get("read_file"))))
         .map_err(|e| format!("register read_file: {e}"))?;
     tool_registry
-        .register(Box::new(WriteFile))
+        .register(Box::new(WriteFile::from_toml(
+            config.tool.get("write_file"),
+        )))
         .map_err(|e| format!("register write_file: {e}"))?;
     tool_registry
-        .register(Box::new(EditFile))
+        .register(Box::new(EditFile::from_toml(config.tool.get("edit_file"))))
         .map_err(|e| format!("register edit_file: {e}"))?;
     tool_registry
-        .register(Box::new(Grep))
+        .register(Box::new(Grep::from_toml(config.tool.get("grep"))))
         .map_err(|e| format!("register grep: {e}"))?;
     tool_registry
-        .register(Box::new(Glob))
+        .register(Box::new(Glob::from_toml(config.tool.get("glob"))))
         .map_err(|e| format!("register glob: {e}"))?;
 
     // ── 网络工具 ──
@@ -109,10 +111,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 代码分析工具 ──
     tool_registry
-        .register(Box::new(CodeGraphSearch))
+        .register(Box::new(CodeGraphSearch::from_toml(
+            config.tool.get("codegraph_search"),
+        )))
         .map_err(|e| format!("register codegraph_search: {e}"))?;
     tool_registry
-        .register(Box::new(CodeGraphGetDetails))
+        .register(Box::new(CodeGraphGetDetails::from_toml(
+            config.tool.get("codegraph_get_details"),
+        )))
         .map_err(|e| format!("register codegraph_get_details: {e}"))?;
     tool_registry
         .register(Box::new(CodeGraphRebuild))
