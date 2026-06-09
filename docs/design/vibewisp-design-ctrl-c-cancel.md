@@ -28,7 +28,7 @@
 
 | 层次 | 改动内容 |
 |------|---------|
-| **vbw-core** | Agent 循环：join_all 改为可被 cancel token 中断 + abort 所有工具 task |
+| **vbw-core** | Agent 循环：LLM stream 和 join_all 均改为可被 cancel token 中断；abort 所有工具 task |
 | **vbw-daemon** | Cancel handler：清理 pending_queries（需关联 session_id） |
 | **vbw-cli** | Ctrl+C handler：统一行为，清理状态；确认模式下先发 deny 再发 cancel |
 | **vbw-proto** | 无改动 |
@@ -43,22 +43,45 @@
 
 **改造后两个分支统一行为**：
 
-1. 清理流式状态：`streaming_text.clear()`、`pending_usage = None`、`current_request_id = None`
-2. 如果有确认栏正在显示：先发 deny 响应（释放 agent 循环中的 `resp_rx.await`），再发 cancel
-3. 如果没有确认栏：直接发 cancel
+1. 设置 `stale_done_expected = true`（标记后续的 Done 为陈旧，防止竞态）
+2. 清理流式状态：`streaming_text.clear()`、`pending_usage = None`、`current_request_id = None`
+3. 如果有确认栏正在显示：先发 deny 响应（释放 agent 循环中的 `resp_rx.await`），再发 cancel
+4. 如果没有确认栏：直接发 cancel
 
 清理状态的目的是：Cancel 后 agent 循环终止会发 Done，Done 的 `flush_streaming()` 和 `pending_usage.take()` 不应再创建任何消息。让 Done 成为一个空操作。
 
 ### 4.2 Agent 循环 — join_all 可中断 + abort 工具 task
 
-当前代码：
+当前 agent 循环有两个串行阻塞点：
+
 ```
-for each tool_call:
-  tokio::spawn(async move { ... 执行工具 ... })
-task_results = join_all(exec_tasks).await  ← 此处阻塞，无法检查 cancel token
-for each result:
-  处理结果
+LLM 推理阶段
+  while let Some(event) = pin_stream.next().await  ← 阻塞，无法检查 cancel token
+  ↓
+工具执行阶段
+  join_all(exec_tasks).await  ← 方案 B 解决此阻塞
 ```
+
+**改造 LLM 流**：用 `tokio::select!` 包装 stream 迭代，每次循环检查 cancel token：
+
+```
+tokio::select! {
+    biased;
+    _ = ctx.cancel_token.cancelled() => {
+        try_send!(AgentEvent::Error {
+            code: AgentErrorCode::Cancelled,
+            message: "Agent loop cancelled".into(),
+        });
+        let _ = session_mgr.finish_loop(&ctx.session_id, SessionStatus::Error);
+        return;
+    }
+    event = pin_stream.next() => {
+        match event { ... }
+    }
+}
+```
+
+改造后三个阻塞点全部可打断：LLM 流 → 方案 B 改造 → join_all，形成完整覆盖。
 
 **改造后**：
 
@@ -91,11 +114,11 @@ let task_results = tokio::select! {
 
 `Option::take()` 在运行时确定 `exec_tasks` 的所有权归属——cancel 分支和 `join_all` 分支只有一条会执行到 `.take()`，另一条被 select 丢弃。详见 `docs/learn/rust-ownership-select-joinall.md`。
 
-`JoinHandle::abort()` 会真正终止 tokio task，不会让工具在后台空转。已被 abort 的 task 返回 `JoinError::Cancelled`，被 `filter_map` 过滤掉；其他 panic 等异常打印 warn 日志。
+两条分支互斥：cancel 触发时直接返回空 Vec，不执行 filter_map；join_all 完成时 filter_map 过滤 panic 崩溃的 task，打印 warn 日志。
 
 ### 4.3 Daemon — Cancel 时清理 pending_queries（双重保险）
 
-当前 daemon 的 `get_codegraph` 方法中有一个 `pending_queries: Arc<Mutex<HashMap<String, Sender<UserQueryResult>>>>`（按 query_id 索引）。当 Cancel 到达时，只做了 `session_mgr.cancel_agent(sid)`（取消 token），但没清理 pending_queries。
+daemon 的 chat handler 中有一个 `pending_queries: Arc<Mutex<HashMap<String, Sender<UserQueryResult>>>>`（按 query_id 索引），用于暂存等待用户响应的 UserQuery sender。当 Cancel 到达时，只做了 `session_mgr.cancel_agent(sid)`（取消 token），但没清理 pending_queries。
 
 改造：
 1. `pending_queries` 的 value 类型从 `Sender<UserQueryResult>` 改为 `(String, Sender<UserQueryResult>)`，其中 `String` 是 `session_id`
@@ -107,15 +130,16 @@ let task_results = tokio::select! {
 ### 4.4 边界情况
 
 - **Ctrl+C 时没有生成任务（idle）**：不做任何事
-- **Ctrl+C 后快速按 Enter 发新消息（竞态）**：在 `AppState` 中增加 `stale_done_expected: bool` 标志位。Cancel 时设 true，Done 处理时检查：
+- **Ctrl+C 后快速按 Enter 发新消息（竞态）**：在 `AppState` 中增加 `stale_done_expected: bool` 标志位。Cancel 或 Esc 时设 true，Done 处理时最先检查：
   ```
   if stale_done_expected:
       stale_done_expected = false
-      return  // 跳过这个陈旧的 Done
+      return  // 跳过这个陈旧的 Done，不碰任何后续状态
   ```
-  新请求发起时不影响该标志，新请求的 Done 到达时标志已被重置为 false，正常处理。**
+  新请求发起时不影响该标志。旧 Done 在最开头被跳过，新请求的 streaming_text/pending_usage/generating/current_request_id 完全不受影响。
 - **连续按 Ctrl+C**：幂等，第二次取消无效果（token 已取消）
 - **多工具并行 + 一个已执行完**：abort 会终止所有未完成的 task，已完成的 task 结果被丢弃
+- **abort 后子进程可能变成孤儿**：`JoinHandle::abort()` 会终止 tokio task，但正在运行的 shell 命令（如 Bash 工具）可能不会被杀死。这是 `tokio::process::Command` 的限制——drop future 不保证杀掉子进程。工具内部集成 cancel token 可彻底解决，但当前设计不涉及。
 
 ## 5. 不做什么
 
@@ -138,12 +162,15 @@ let task_results = tokio::select! {
 
 ## 7. 拆分策略
 
-**步骤 1：Client Ctrl+C 状态清理**
+**步骤 1：Client Ctrl+C + Esc 状态清理 + 防竞态**
 - event.rs：统一 confirm 内外的 Ctrl+C handler，清理 streaming_text/pending_usage/current_request_id
+- AppState 新增 stale_done_expected 标志位，Ctrl+C 和 Esc 时均设 true
 - confirm 模式下先发 deny 再发 cancel
+- Done handler 最先检查 stale_done_expected，跳过陈旧 Done 后立即重置
 
-**步骤 2：Agent 循环 join_all 可中断**
-- agent.rs：用 `tokio::select!` 替代 `join_all`，abort 所有 task
+**步骤 2：Agent 循环 LLM 流可中断 + join_all 可中断**
+- agent.rs：LLM stream 的 `while let` 改为 `tokio::select!` 支持取消
+- agent.rs：`join_all` 改为 `tokio::select!` + `Option` 包装 + abort
 
 **步骤 3：Daemon pending_queries 清理**
 - service.rs：pending_queries value 加 session_id，Cancel handler 中匹配删除
