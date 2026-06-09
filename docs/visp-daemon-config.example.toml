@@ -102,16 +102,22 @@
 # max_file_size = 1048576
 
 # ----- write_file -----
-# 文件写入工具
+# 文件写入工具（默认无需审批）
 [tool.write_file]
 # 文件大小限制（字节，仅兼容，当前不使用）
 # max_file_size = 1048576
 
+# 是否要求用户审批（默认 false，项目目录内写文件无需确认）
+# require_approval = false
+
 # ----- edit_file -----
-# 文件精确替换编辑工具
+# 文件精确替换编辑工具（默认无需审批）
 [tool.edit_file]
 # 文件大小限制（字节）
 # max_file_size = 1048576
+
+# 是否要求用户审批（默认 false，项目目录内编辑文件无需确认）
+# require_approval = false
 
 # ----- grep -----
 # 内容搜索工具（支持正则）

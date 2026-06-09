@@ -188,12 +188,14 @@ pub struct WriteFile {
     /// 仅兼容，不使用
     #[allow(dead_code)]
     max_file_size: u64,
+    require_approval: bool,
 }
 
 impl Default for WriteFile {
     fn default() -> Self {
         Self {
             max_file_size: MAX_FILE_SIZE,
+            require_approval: false,
         }
     }
 }
@@ -201,13 +203,21 @@ impl Default for WriteFile {
 impl WriteFile {
     pub fn from_toml(raw: Option<&toml::Value>) -> Self {
         let mut max_file_size = MAX_FILE_SIZE;
-        if let Some(config) = raw.and_then(|v| v.as_table())
-            && let Some(s) = config.get("max_file_size").and_then(|v| v.as_integer())
-            && s > 0
-        {
-            max_file_size = s as u64;
+        let mut require_approval = false;
+        if let Some(config) = raw.and_then(|v| v.as_table()) {
+            if let Some(s) = config.get("max_file_size").and_then(|v| v.as_integer())
+                && s > 0
+            {
+                max_file_size = s as u64;
+            }
+            if let Some(b) = config.get("require_approval").and_then(|v| v.as_bool()) {
+                require_approval = b;
+            }
         }
-        Self { max_file_size }
+        Self {
+            max_file_size,
+            require_approval,
+        }
     }
 }
 
@@ -222,7 +232,7 @@ impl Tool for WriteFile {
     }
 
     fn requires_approval(&self) -> bool {
-        true
+        self.require_approval
     }
 
     fn description(&self) -> &str {
@@ -293,12 +303,14 @@ impl Tool for WriteFile {
 /// 精确字符串替换编辑
 pub struct EditFile {
     max_file_size: u64,
+    require_approval: bool,
 }
 
 impl Default for EditFile {
     fn default() -> Self {
         Self {
             max_file_size: MAX_FILE_SIZE,
+            require_approval: false,
         }
     }
 }
@@ -306,13 +318,21 @@ impl Default for EditFile {
 impl EditFile {
     pub fn from_toml(raw: Option<&toml::Value>) -> Self {
         let mut max_file_size = MAX_FILE_SIZE;
-        if let Some(config) = raw.and_then(|v| v.as_table())
-            && let Some(s) = config.get("max_file_size").and_then(|v| v.as_integer())
-            && s > 0
-        {
-            max_file_size = s as u64;
+        let mut require_approval = false;
+        if let Some(config) = raw.and_then(|v| v.as_table()) {
+            if let Some(s) = config.get("max_file_size").and_then(|v| v.as_integer())
+                && s > 0
+            {
+                max_file_size = s as u64;
+            }
+            if let Some(b) = config.get("require_approval").and_then(|v| v.as_bool()) {
+                require_approval = b;
+            }
         }
-        Self { max_file_size }
+        Self {
+            max_file_size,
+            require_approval,
+        }
     }
 }
 
@@ -327,7 +347,7 @@ impl Tool for EditFile {
     }
 
     fn requires_approval(&self) -> bool {
-        true
+        self.require_approval
     }
 
     fn description(&self) -> &str {
@@ -974,7 +994,10 @@ mod tests {
         let content = vec![b'a'; 600];
         std::fs::write(&file_path, &content).unwrap();
 
-        let tool = EditFile { max_file_size: 500 };
+        let tool = EditFile {
+            max_file_size: 500,
+            require_approval: false,
+        };
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
