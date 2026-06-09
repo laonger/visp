@@ -353,6 +353,9 @@ pub async fn run_agent_loop(
         // c. Get tool definitions
         let tools = tool_registry.definitions();
 
+        // 调试：保存完整 prompt 到文件
+        dump_prompt_to_file(&ctx.working_dir, &messages, &tools);
+
         // d. Call LLM with retry
         let stream = {
             let mut attempt = 0u32;
@@ -798,6 +801,27 @@ pub(crate) fn render_tool_guide(registry: &ToolRegistry) -> String {
     }
 
     parts.join("\n")
+}
+
+/// 将当前 prompt（messages + tools）保存到 `.vibewisp/last-prompt.json`，
+/// 方便调试和检查实际发送给 LLM 的内容。写入失败时静默忽略。
+fn dump_prompt_to_file(
+    working_dir: &std::path::Path,
+    messages: &[crate::message::Message],
+    tools: &[crate::message::ToolDefinition],
+) {
+    let dir = working_dir.join(".vibewisp");
+    if !dir.is_dir() {
+        return;
+    }
+    let path = dir.join("last-prompt.json");
+    let content = serde_json::json!({
+        "messages": messages,
+        "tools": tools,
+    });
+    if let Ok(json) = serde_json::to_string_pretty(&content) {
+        let _ = std::fs::write(&path, json);
+    }
 }
 
 #[cfg(test)]
