@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(clippy::bool_assert_comparison)]
 
 use ratatui::{
     style::Style,
@@ -207,6 +208,10 @@ pub struct ChatLine {
 pub struct ConfirmState {
     pub query_id: String,
     pub message: String,
+    pub options: Vec<String>,
+    pub allow_other: bool,
+    pub selected_index: usize,
+    pub other_active: bool,
 }
 
 pub struct MessageCache {
@@ -701,5 +706,51 @@ mod tests {
         // result 追加到各自的 call 后面
         assert_eq!(app.messages[0].content, "cmd1\nresult1");
         assert_eq!(app.messages[1].content, "cmd2\nresult2");
+    }
+
+    #[test]
+    fn test_confirm_state_new() {
+        let cs = ConfirmState {
+            query_id: "q1".into(),
+            message: "test?".into(),
+            options: vec!["Yes".into(), "No".into()],
+            allow_other: false,
+            selected_index: 0,
+            other_active: false,
+        };
+        assert_eq!(cs.selected_index, 0);
+        assert!(!cs.other_active);
+    }
+
+    #[test]
+    fn test_confirm_state_tool_approval() {
+        let cs = ConfirmState {
+            query_id: "q1".into(),
+            message: "Allow tool?".into(),
+            options: vec![],
+            allow_other: false,
+            selected_index: 0,
+            other_active: false,
+        };
+        assert!(cs.options.is_empty());
+    }
+
+    #[test]
+    fn test_confirm_state_other_mode() {
+        let mut cs = ConfirmState {
+            query_id: "q1".into(),
+            message: "Choose?".into(),
+            options: vec!["Yes".into(), "No".into()],
+            allow_other: true,
+            selected_index: 0,
+            other_active: false,
+        };
+        assert!(!cs.other_active);
+        cs.other_active = true;
+        assert!(cs.other_active);
+        cs.other_active = false;
+        // selected_index 指向 "Other"（index == options.len()）
+        cs.selected_index = cs.options.len();
+        assert_eq!(cs.selected_index, 2);
     }
 }

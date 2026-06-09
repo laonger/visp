@@ -110,17 +110,73 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
         Event::Key(key) => {
             if app.confirm.is_some() {
                 match key.code {
-                    KeyCode::Char('y' | 'Y') => {
-                        let q = app.confirm.take().unwrap();
-                        chat_handle.send_response(&q.query_id, 0, "");
+                    KeyCode::Left => {
+                        if let Some(ref mut confirm) = app.confirm {
+                            let total =
+                                confirm.options.len() + if confirm.allow_other { 1 } else { 0 };
+                            if confirm.other_active {
+                                confirm.other_active = false;
+                            } else if confirm.selected_index == 0 {
+                                confirm.selected_index = total.saturating_sub(1);
+                            } else {
+                                confirm.selected_index -= 1;
+                            }
+                        }
                     }
-                    KeyCode::Char('n' | 'N') | KeyCode::Enter | KeyCode::Esc => {
-                        let q = app.confirm.take().unwrap();
-                        chat_handle.send_response(&q.query_id, 1, "");
+                    KeyCode::Right => {
+                        if let Some(ref mut confirm) = app.confirm {
+                            let total =
+                                confirm.options.len() + if confirm.allow_other { 1 } else { 0 };
+                            if confirm.other_active {
+                                confirm.other_active = false;
+                            } else {
+                                let next = confirm.selected_index + 1;
+                                if next >= total {
+                                    confirm.selected_index = 0;
+                                } else {
+                                    confirm.selected_index = next;
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if let Some(ref mut confirm) = app.confirm {
+                            if confirm.other_active {
+                                let q = app.confirm.take().unwrap();
+                                let text = app.textarea.lines().join("\n");
+                                app.textarea = ratatui_textarea::TextArea::default();
+                                app.textarea.set_placeholder_text("Type your message...");
+                                chat_handle.send_response(&q.query_id, -1, &text);
+                            } else if confirm.allow_other
+                                && confirm.selected_index == confirm.options.len()
+                            {
+                                confirm.other_active = true;
+                            } else {
+                                let q = app.confirm.take().unwrap();
+                                chat_handle.send_response(&q.query_id, q.selected_index as i32, "");
+                            }
+                        }
+                    }
+                    KeyCode::Esc => {
+                        if let Some(ref mut confirm) = app.confirm {
+                            if confirm.other_active {
+                                confirm.other_active = false;
+                                app.textarea = ratatui_textarea::TextArea::default();
+                                app.textarea.set_placeholder_text("Type your message...");
+                            } else {
+                                let q = app.confirm.take().unwrap();
+                                chat_handle.send_response(&q.query_id, 1, "");
+                            }
+                        }
                     }
                     _ => {
-                        app.needs_render = false; // 忽略其他按键，不触发渲染
-                        return false;
+                        if let Some(ref confirm) = app.confirm {
+                            if confirm.other_active {
+                                app.textarea.input(build_input_from_key(key));
+                            } else {
+                                app.needs_render = false;
+                            }
+                        }
                     }
                 }
                 return false;
@@ -301,6 +357,10 @@ fn handle_grpc_message(
             app.confirm = Some(ConfirmState {
                 query_id: uq.query_id,
                 message: uq.message,
+                options: uq.options,
+                allow_other: uq.allow_other,
+                selected_index: 0,
+                other_active: false,
             });
         }
         Some(server_message::Payload::Error(err)) => {

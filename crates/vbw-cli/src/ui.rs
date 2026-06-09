@@ -4,7 +4,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    text::{Line, Text},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph},
 };
 
@@ -300,13 +300,154 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
 /// 确认栏：工具调用需用户确认时显示
 fn render_confirm_bar(app: &AppState, f: &mut Frame, area: Rect) {
     if let Some(ref confirm) = app.confirm {
-        let text = format!("❓ {} [y/N]", confirm.message);
+        // 构建选项标签
+        let options: Vec<String> = if confirm.options.is_empty() {
+            vec!["Approve".into(), "Deny".into(), "Always Allow".into()]
+        } else {
+            confirm.options.clone()
+        };
+
+        let all_labels: Vec<String> = {
+            let mut labels: Vec<String> = options
+                .iter()
+                .enumerate()
+                .map(|(i, opt)| {
+                    let letter = (b'A' + i as u8) as char;
+                    format!("[{}] {}", letter, opt)
+                })
+                .collect();
+            if confirm.allow_other {
+                let letter = (b'A' + options.len() as u8) as char;
+                labels.push(format!("[{}] Other", letter));
+            }
+            labels
+        };
+
+        // 计算总宽度和滚动偏移
+        let sep = "  ";
+        let avail_w = area.width as usize;
+        let item_widths: Vec<usize> = all_labels.iter().map(|l| l.len() + sep.len()).collect();
+        let total_w: usize = item_widths.iter().sum::<usize>().saturating_sub(sep.len());
+
+        // 判断是否超宽
+        let total_items = all_labels.len();
+
+        // 根据 selected_index 计算 scroll_offset
+        let mut scroll_offset = 0usize;
+        if total_w > avail_w && total_items > 0 {
+            // 超宽：确保选中项可见
+            let mut cum_w = 0usize;
+            for (i, &iw) in item_widths.iter().enumerate() {
+                if i < confirm.selected_index {
+                    cum_w += iw;
+                } else {
+                    break;
+                }
+            }
+            // 如果选中项在可见范围之外，滚动到选中项
+            if cum_w + item_widths[confirm.selected_index] > avail_w {
+                // 从后往前找：确保选中项右对齐在可见区
+                let mut w = 0usize;
+                let mut offset = confirm.selected_index;
+                loop {
+                    w += item_widths[offset];
+                    if w > avail_w {
+                        break;
+                    }
+                    if offset == 0 {
+                        break;
+                    }
+                    offset -= 1;
+                }
+                scroll_offset = offset;
+            }
+        }
+
+        // 检测是否有隐藏的左侧/右侧
+        let has_hidden_left = scroll_offset > 0;
+        let mut visible_end = scroll_offset;
+        {
+            let mut w = 0usize;
+            for (i, &iw) in item_widths.iter().enumerate().skip(scroll_offset) {
+                if w + iw > avail_w {
+                    break;
+                }
+                w += iw;
+                visible_end = i + 1;
+            }
+        }
+        let has_hidden_right = visible_end < total_items;
+
+        // 消息行
+        let msg_line = Line::from(vec![
+            Span::styled("❓ ", Style::default().fg(theme::CONFIRM_FG)),
+            Span::styled(&confirm.message, Style::default().fg(theme::ASSISTANT_FG)),
+        ]);
+
+        // 构建选项行
+        let mut option_spans: Vec<Span> = Vec::new();
+
+        // 左指示器
+        if has_hidden_left {
+            option_spans.push(Span::styled(
+                "< ",
+                Style::default().fg(theme::CONFIRM_SCROLL_FG),
+            ));
+        }
+
+        for (i, label) in all_labels
+            .iter()
+            .enumerate()
+            .skip(scroll_offset)
+            .take(visible_end.saturating_sub(scroll_offset))
+        {
+            let is_selected = i == confirm.selected_index && !confirm.other_active;
+
+            if is_selected {
+                option_spans.push(Span::styled(
+                    label.clone(),
+                    Style::default()
+                        .fg(theme::CONFIRM_FG)
+                        .bg(theme::CONFIRM_SELECTED_BG),
+                ));
+            } else {
+                // 解析 [A] 部分和选项名称部分，分别着色
+                if let Some(bracket_end) = label.find(']') {
+                    let (tag, rest) = label.split_at(bracket_end + 1);
+                    option_spans.push(Span::styled(
+                        tag.to_string(),
+                        Style::default().fg(theme::CONFIRM_OPTION_LABEL_FG),
+                    ));
+                    option_spans.push(Span::styled(
+                        rest.to_string(),
+                        Style::default().fg(theme::CONFIRM_OPTION_FG),
+                    ));
+                } else {
+                    option_spans.push(Span::styled(
+                        label.clone(),
+                        Style::default().fg(theme::CONFIRM_OPTION_FG),
+                    ));
+                }
+            }
+
+            if i + 1 < visible_end {
+                option_spans.push(Span::raw(sep));
+            }
+        }
+
+        // 右指示器
+        if has_hidden_right {
+            option_spans.push(Span::styled(
+                " >",
+                Style::default().fg(theme::CONFIRM_SCROLL_FG),
+            ));
+        }
+
+        // 两行文本
+        let text = Text::from(vec![msg_line, Line::from(option_spans)]);
+
         let p = Paragraph::new(text)
-            .style(
-                Style::default()
-                    .fg(theme::CONFIRM_FG)
-                    .bg(theme::CONFIRM_FONT_BG),
-            )
+            .style(Style::default().bg(theme::CONFIRM_FONT_BG))
             .block(
                 Block::default()
                     .borders(Borders::TOP)
@@ -319,8 +460,13 @@ fn render_confirm_bar(app: &AppState, f: &mut Frame, area: Rect) {
 /// 输入区：tui-textarea 封装
 fn render_input_area(app: &AppState, f: &mut Frame, area: Rect) {
     let mut textarea = app.textarea.clone();
-    textarea.set_style(Style::default().fg(theme::INPUT_FG));
-    if app.generating {
+
+    let is_other_mode = app.confirm.as_ref().is_some_and(|c| c.other_active);
+
+    if is_other_mode {
+        textarea.set_style(Style::default().fg(theme::INPUT_FG));
+        textarea.set_placeholder_text("Type your custom input...");
+    } else if app.generating {
         textarea.set_style(Style::default().fg(theme::INPUT_NOTICE_FG));
         textarea.set_placeholder_text("[Generating...]");
     } else {
