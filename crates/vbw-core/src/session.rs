@@ -116,19 +116,19 @@ const DEFAULT_SYSTEM_PROMPT: &str = concat!(
     "- 工具执行需要用户确认时会弹出确认栏（Approve / Deny / Always Allow）\n",
     "- 始终等一个工具执行完再继续下一个，除非可以并行\n",
     "- **如需用户选择，必须在回复末尾使用 [USER_QUERY] 标记，不得用文字提问让用户选择**\n",
-    "  正确格式示例：\n",
-    "  [USER_QUERY]\n",
-    "  Which approach do you prefer?\n",
-    "  - Option A: Use SQLite\n",
-    "  - Option B: Use PostgreSQL\n",
-    "  [/USER_QUERY]\n",
-    "  如需允许用户自定义输入，使用 allow_other=true：\n",
-    "  [USER_QUERY allow_other=true]\n",
-    "  What color theme?\n",
-    "  - Dark\n",
-    "  - Light\n",
-    "  [/USER_QUERY]\n",
-    "  注意：标记必须放在回复最末尾，标记后的内容会被忽略。选项用 `- ` 前缀列表格式。\n",
+    "  两种模式：\n",
+    "  - 预设选项：让用户从固定选项中选一个\n",
+    "    [USER_QUERY]\n",
+    "    Which approach?\n",
+    "    - SQLite\n",
+    "    - PostgreSQL\n",
+    "    [/USER_QUERY]\n",
+    "  - 自由输入（allow_other=true）：让用户自由发言或输入自定义内容\n",
+    "    [USER_QUERY allow_other=true]\n",
+    "    What do you think?\n",
+    "    [/USER_QUERY]\n",
+    "  **禁止创建假装是选项的\"你说/你讲\"类选项，需要用户自由发言时用 allow_other=true**\n",
+    "  选项用 `- ` 前缀列表格式，标记必须放在回复最末尾。\n",
 );
 
 /// 按优先级加载系统 prompt 模板：
@@ -689,11 +689,15 @@ mod tests {
     #[test]
     fn test_default_prompt_contains_interaction_rules() {
         assert!(DEFAULT_SYSTEM_PROMPT.contains("[USER_QUERY]"));
-        // 必须有格式示例，不能只是简单提及
-        assert!(DEFAULT_SYSTEM_PROMPT.contains("Which approach do you prefer?"));
+        // 必须有格式示例
         assert!(DEFAULT_SYSTEM_PROMPT.contains("allow_other=true"));
+        // 必须有禁止"你说"类选项的说明
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("你说"));
         // 语气必须强硬
         assert!(DEFAULT_SYSTEM_PROMPT.contains("必须在"));
+        // 必须区分两种模式
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("预设选项"));
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("自由输入"));
     }
 
     #[test]

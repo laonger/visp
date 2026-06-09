@@ -9,26 +9,35 @@ const USER_QUERY_INSTRUCTION: &str = "\n\n## IMPORTANT: How to ask the user to c
 When you need the user to make a decision, you MUST use the [USER_QUERY] marker at the very end of your response. \
 Do NOT ask the user to choose using plain text — it will not trigger the selection UI.\n\
 \n\
-Correct format (MUST use at end of response):\n\
+### Use regular options when the user should pick from predefined choices:\n\
 \n\
 [USER_QUERY]\n\
 Which approach do you prefer?\n\
-- Option A: Use SQLite\n\
-- Option B: Use PostgreSQL\n\
+- SQLite\n\
+- PostgreSQL\n\
 [/USER_QUERY]\n\
 \n\
-To allow custom input:\n\
+### Use allow_other=true when you want the user to speak freely or provide custom input:\n\
+\n\
 [USER_QUERY allow_other=true]\n\
-What color theme?\n\
-- Dark\n\
-- Light\n\
+What's on your mind?\n\
 [/USER_QUERY]\n\
 \n\
-Rules:\n\
-- Marker MUST be at the very end of your response\n\
-- Options MUST be listed as `- description` (one per line)\n\
-- Only use when you genuinely need user input\n\
-- The selection UI lets the user navigate with arrow keys and confirm with Enter";
+Or with some suggestions:\n\
+[USER_QUERY allow_other=true]\n\
+How should we fix this bug?\n\
+- Refactor the module\n\
+- Add a quick patch\n\
+[/USER_QUERY]\n\
+\n\
+### Rules:\n\
+- Marker MUST be at the very end of your response (not in the middle)\n\
+- Each option MUST be on its own line starting with `- `\n\
+- Options should be REAL choices, not invitations to talk\n\
+- Do NOT create \"listening\" options like \"你来说说看\" or \"I'll listen\" — use allow_other=true instead\n\
+- Only use [USER_QUERY] when you genuinely need user input\n\
+- The selection UI lets the user navigate with arrow keys and confirm with Enter\n\
+- `allow_other=true` adds an \"Other\" button that opens a text input field";
 
 impl PromptBuilder {
     pub fn build(
