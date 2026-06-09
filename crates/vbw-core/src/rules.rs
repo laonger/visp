@@ -24,14 +24,14 @@ impl RuleEngine {
 
         // 1. Project AGENTS.md (highest priority)
         let agents_md = project_path.join("AGENTS.md");
-        if agents_md.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&agents_md) {
-                let header = format!("Instructions from: {}", agents_md.display());
-                files.push(RuleFile {
-                    path: agents_md,
-                    content: format!("{header}\n{content}"),
-                });
-            }
+        if agents_md.is_file()
+            && let Ok(content) = std::fs::read_to_string(&agents_md)
+        {
+            let header = format!("Instructions from: {}", agents_md.display());
+            files.push(RuleFile {
+                path: agents_md,
+                content: format!("{header}\n{content}"),
+            });
         }
 
         // 2. Project rules: .vibewisp/rules/
