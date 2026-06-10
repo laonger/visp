@@ -63,6 +63,7 @@ visp 采用 **前后端分离的 daemon 架构**，核心决策是让后端（Da
 | [visp-context](crates/visp-context/) | 上下文裁剪器 — token 预算 + 轮次剪枝 + 工具输出压缩 | [README](crates/visp-context/README.md) |
 | [visp-daemon](crates/visp-daemon/) | gRPC 服务端 — 组装所有模块 | [README](crates/visp-daemon/README.md) |
 | [visp-cli](crates/visp-cli/) | TUI 客户端 — ratatui 终端界面 | [README](crates/visp-cli/README.md) |
+| [visp-mcp](crates/visp-mcp/) | MCP 客户端 — 连接外部 MCP 服务器获取动态工具 | [README](crates/visp-mcp/README.md) |
 
 ## 核心特性
 
@@ -99,6 +100,43 @@ tree-sitter 解析 + SQLite 索引，支持符号搜索、调用者/被调用者
 
 ### gRPC 通信
 `CoderDaemon` 服务基于 tonic，提供 Chat（双向流）、会话管理、文件读取、符号查询、健康检查等 RPC。详见 [visp-proto](crates/visp-proto/README.md)。
+
+### MCP 支持（动态工具扩展）
+
+visp 支持 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)，可连接外部 MCP 服务器，将其提供的工具动态集成到 Tool Registry 中，与内置工具一视同仁。
+
+**支持的传输方式**：
+- **stdio**：daemon 以子进程方式启动 MCP 服务器，通过 stdin/stdout 通信
+- **SSE**：通过 HTTP Server-Sent Events 连接已运行的 MCP 服务器
+
+**配置示例**（`~/.config/visp/daemon.toml`）：
+
+```toml
+[mcp]
+
+[[mcp.servers]]
+name = "playwright"
+transport = { type = "stdio", command = "npx", args = ["@anthropic-ai/mcp-playwright"] }
+
+[[mcp.servers]]
+name = "filesystem"
+transport = { type = "stdio", command = "npx", args = ["@anthropic-ai/mcp-filesystem"] }
+
+[[mcp.servers]]
+name = "custom-sse"
+transport = { type = "sse", url = "http://localhost:3000/mcp" }
+enabled = false  # 可通过 restart API 按需启用
+tool_prefix = "custom_"  # 防止工具名冲突
+tool_timeout_secs = 120  # 覆盖默认 60s 超时
+```
+
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `enabled` | 是否自动连接 | `true` |
+| `tool_prefix` | 工具名称前缀，防冲突 | 无 |
+| `tool_timeout_secs` | 单次工具调用超时 | `60` |
+
+MCP 工具与内置工具同属一个 Registry，Agent 循环自动识别与调用。工具名冲突时 MCP 工具会被跳过（内置工具优先级更高）。
 
 ## 快速开始
 
@@ -225,7 +263,7 @@ cargo test && cargo clippy -- -D warnings && cargo fmt -- --check
 
 ## 技术栈
 
-Rust (edition 2024) · tokio · tonic + prost · serde · ratatui + crossterm · tree-sitter · SQLite (rusqlite) · notify · tracing · reqwest · clap
+Rust (edition 2024) · tokio · tonic + prost · serde · ratatui + crossterm · tree-sitter · SQLite (rusqlite) · notify · tracing · reqwest · clap · rmcp (MCP 协议)
 
 ## 已知限制
 
