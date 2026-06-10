@@ -329,6 +329,20 @@ pub async fn run_agent_loop(
         // c. Get tool definitions
         let tools = tool_registry.definitions();
 
+        // 记录上下文大小
+        let total_estimated: u32 = messages
+            .iter()
+            .map(crate::message::estimate_message_tokens)
+            .sum();
+        tracing::debug!(
+            session_id = %ctx.session_id,
+            messages = messages.len(),
+            budget = ctx.config.max_context_tokens,
+            estimated_tokens = total_estimated,
+            max_output_tokens = ctx.config.max_tokens,
+            "prompt built, calling LLM"
+        );
+
         // 调试：取消注释下方行，将完整 prompt（messages + tools）保存到 .visp/last-prompt.json
         // dump_prompt_to_file(&ctx.working_dir, &messages, &tools);
 
