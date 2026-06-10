@@ -67,11 +67,15 @@
 | `WebFetch` | 网页内容获取与提取 |
 | `CodeGraphSearch` / `CodeGraphGetDetails` | AST 符号搜索与调用链查询 |
 
-### 用户确认
-高危工具（如 `Bash`、`WebFetch` 非白名单域名）可通过 `[USER_QUERY]` 机制让用户逐条审批后再执行，支持单条允许/拒绝或一键全部通过。
+### 权限系统
+工具执行前经过多级审批检查，用户通过弹窗审批，支持"允许/拒绝/始终允许"：
 
-### 取消机制
-基于 `CancellationToken`，用户可随时取消运行中的 Agent 循环，清理进行中的工具调用。
+- **工具级审批**：每个工具可定义是否需要审批。`WriteFile`/`EditFile` 始终弹窗，`Bash` 仅对危险命令（`rm`、`dd`、`>` 等）弹窗，`WebFetch` 对非白名单域名弹窗，搜索/读取类工具默认放行
+- **Always Allow**：审批时选择"始终允许"后，该工具在当前会话内不再弹窗
+- **Bash 确认模式**：配置 `bash_confirm_mode = true/false`（默认 `true`）控制是否对危险命令审批
+- **WebFetch 域名白名单**：支持两层白名单——daemon 级（`[tool.webfetch].allow_domains`）和项目级（`.visp/webfetch.toml`），命中白名单自动放行
+
+**审批流程**：LLM 请求执行工具 → `requires_approval_for(args)` → 已始终允许？→ 执行；否则弹出对话框 → 用户选择【允许 / 拒绝 / 始终允许】。
 
 ### 会话管理
 独立会话生命周期（Idle → Running → Completed/Error），每个会话维护独立的对话历史和 LLM 配置。当前为内存存储，可通过 `SessionStore` trait 替换为持久化实现。
