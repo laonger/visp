@@ -334,7 +334,7 @@ pub async fn run_agent_loop(
             .iter()
             .map(crate::message::estimate_message_tokens)
             .sum();
-        tracing::debug!(
+        tracing::info!(
             session_id = %ctx.session_id,
             messages = messages.len(),
             budget = ctx.config.max_context_tokens,
@@ -598,6 +598,8 @@ pub async fn run_agent_loop(
         // g. Execute tools in parallel
         let num_tools = tool_calls.len();
         let mut exec_tasks = Vec::with_capacity(num_tools);
+        // Store tool IDs indexed by spawn order, for error recovery when a task panics.
+        let tool_ids: Vec<String> = tool_calls.iter().map(|tc| tc.id.clone()).collect();
 
         for (i, tc) in tool_calls.iter().enumerate() {
             let tx = tx.clone();
@@ -736,12 +738,19 @@ pub async fn run_agent_loop(
                 results = futures::future::join_all(
                     exec_tasks.take().unwrap()
                 ) => {
-                    results.into_iter().filter_map(|r| match r {
+                    results.into_iter().enumerate().filter_map(|(idx, r)| match r {
                         Ok(result) => Some(result),
                         Err(e) if e.is_cancelled() => None,
                         Err(e) => {
-                            tracing::warn!("tool task failed: {e}");
-                            None
+                            tracing::warn!("tool task {} failed: {e}", idx);
+                            // Create an error result so every tool_call gets a corresponding
+                            // tool_result in history, preventing Anthropic 400 errors.
+                            let call_id = tool_ids.get(idx).cloned().unwrap_or_default();
+                            Some(ToolExecResult {
+                                index: idx,
+                                call_id,
+                                result: ToolResult::error(format!("Tool execution panicked: {e}")),
+                            })
                         }
                     }).collect()
                 }
@@ -779,21 +788,32 @@ pub async fn run_agent_loop(
 }
 
 /// 清理历史中残留的 orphan tool_uses。
-/// 如果最后一条 assistant 消息包含 tool_calls，但没有对应的 tool_result
+/// 如果一条 assistant 消息包含 tool_calls，但没有对应的 tool_result
 /// 消息紧随其后，则清空 tool_calls。这发生在 Cancel 终止了 agent 循环，
 /// 导致 tool_use 被发送给 Anthropic 但没来得及追加 tool_result，
 /// 后续请求会报 400 错误。
+///
+/// 注意：支持部分 tool_result 的情况——如果 assistant 消息有 3 个 tool_calls
+/// 但只有 2 个 tool_results 跟随，也会清空 tool_calls。
 fn cleanup_orphan_tool_uses(history: &mut [Message]) {
-    // 从后往前遍历所有 assistant 消息，清理所有没有对应 tool_result 的 tool_calls。
-    // 多次取消/中断可能产生多条孤儿 tool_use，只清理最后一条是不够的。
     let len = history.len();
-    for i in (0..len).rev() {
-        if history[i].role == Role::Assistant && history[i].tool_calls.is_some() {
-            let has_results = history[i + 1..].iter().any(|m| m.role == Role::Tool);
-            if !has_results {
+    let mut i = len;
+    while i > 0 {
+        i -= 1;
+        if history[i].role == Role::Assistant
+            && let Some(ref calls) = history[i].tool_calls
+        {
+            // 检查此 assistant 之后有没有足够的 tool_result 配对
+            let num_calls = calls.len();
+            let num_results = history[i + 1..]
+                .iter()
+                .filter(|m| m.role == Role::Tool)
+                .count();
+            if num_results < num_calls {
                 history[i].tool_calls = None;
+                // 继续检查更早的 assistant 消息（可能也有孤儿）
             } else {
-                // 找到了匹配的 tool_result，之前的 assistant 不需要再检查
+                // 找到了完整配对的 tool_result，更早的 assistant 不需要再检查
                 break;
             }
         }
@@ -818,7 +838,15 @@ pub(crate) fn render_tool_guide(registry: &ToolRegistry) -> String {
         grouped.entry(cat).or_default().push(def.name.as_str());
     }
 
-    let mut parts = vec!["\n\n## Available Tools".to_string()];
+    let mut parts = vec![
+        "\n\n## Available Tools".to_string(),
+        "\n**IMPORTANT**: Prefer specialized tools over `bash` when possible: \
+        use `read_file` to read files, `edit_file`/`write_file` to modify them, \
+        `grep`/`glob` to search files, and `codegraph_search`/`codegraph_context` \
+        for code understanding. Only use `bash` when no other tool fits \
+        (e.g. running build commands, git operations, or multi-step shell scripts)."
+            .to_string(),
+    ];
 
     // 按固定顺序输出 category
     let categories = [
