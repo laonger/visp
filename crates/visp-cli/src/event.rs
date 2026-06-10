@@ -1,5 +1,25 @@
 #![allow(dead_code)]
 
+/// 写入 /tmp/visp-cli-debug.log，用于诊断 textarea 折行/粘贴等问题。
+/// 不在生产环境启用，无性能影响（为空时直接返回）。
+#[macro_export]
+macro_rules! debug_log {
+    ($($arg:tt)*) => {{
+        #[cfg(debug_assertions)]
+        {
+            use std::io::Write;
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/visp-cli-debug.log")
+                .and_then(|mut f| {
+                    let ts = chrono::Local::now().format("%H:%M:%S%.3f");
+                    writeln!(f, "[{ts}] {}", format!($($arg)*))
+                });
+        }
+    }};
+}
+
 use crate::app::{AppState, ConfirmState, LineType};
 use crate::client::ChatHandle;
 use crate::ui::render;
@@ -10,9 +30,16 @@ use visp_proto::visp::{LlmConfig, server_message};
 /// 将一段文本插入到 textarea 中（模拟逐字输入）
 /// 注意：`\n` 必须映射为 `Key::Enter`，否则 ratatui_textarea 会丢弃换行符前的内容
 fn paste_text(textarea: &mut ratatui_textarea::TextArea<'static>, text: &str) {
+    let has_cr = text.contains('\r');
+    let newline_count = text.chars().filter(|&c| c == '\n' || c == '\r').count();
+    debug_log!(
+        "paste: len={}, newlines={}, contains_cr={has_cr}",
+        text.len(),
+        newline_count
+    );
     // 统一换行符：\r\n → \n, \r → \n
     // 终端粘贴可能携带 \r\n(Windows) 或 \r(旧 Mac)，不处理会导致多余空行或光标回行首覆盖
-    let text = if text.contains('\r') {
+    let text = if has_cr {
         text.replace("\r\n", "\n").replace('\r', "\n")
     } else {
         text.to_string()
@@ -49,6 +76,9 @@ impl Drop for TerminalGuard {
 }
 
 pub async fn run(session_id: String, mut chat_handle: ChatHandle, model: String) -> io::Result<()> {
+    if let Ok((w, h)) = crossterm::terminal::size() {
+        debug_log!("session start: {w}x{h}, model={model}");
+    }
     crossterm::terminal::enable_raw_mode()?;
     // 只启用 mouse mode 1000（按钮点击事件），保留拖拽给终端做原生选择复制
     // 不启用 1002/1003，这样 drag 不会拦截终端选择
@@ -357,7 +387,13 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                         .set_offset(ratatui::layout::Position::new(0, y.saturating_add(10)));
                 }
                 _ => {
-                    app.textarea.input(build_input_from_key(key));
+                    let input = build_input_from_key(key);
+                    debug_log!(
+                        "key -> textarea: {:?} (lines={})",
+                        input.key,
+                        app.textarea.lines().len()
+                    );
+                    app.textarea.input(input);
                 }
             }
         }
@@ -398,6 +434,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
         },
         // 处理终端粘贴事件（bracketed paste）
         Event::Paste(text) if app.confirm.as_ref().is_none_or(|c| c.other_active) => {
+            debug_log!("paste event received: len={}", text.len());
             paste_text(&mut app.textarea, &text);
         }
         _ => {}

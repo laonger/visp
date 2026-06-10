@@ -9,6 +9,7 @@ use ratatui::{
 };
 
 use crate::app::{AppState, MessageCache, pad_to_width};
+use crate::debug_log;
 use crate::theme;
 use unicode_width::UnicodeWidthStr;
 
@@ -450,6 +451,16 @@ fn render_confirm_bar(app: &AppState, f: &mut Frame, area: Rect) {
 /// 输入区：tui-textarea 封装
 fn render_input_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     let input_area = Rect::new(area.x, area.y, area.width, area.height);
+
+    // debug: log textarea state before rendering
+    let line_count = app.textarea.lines().len();
+    let total_chars: usize = app.textarea.lines().iter().map(|l| l.len()).sum();
+    debug_log!(
+        "render_input_area: input_area.width={}, lines={}, total_chars={}",
+        input_area.width,
+        line_count,
+        total_chars
+    );
 
     // 直接在 app.textarea 上设 style/block，再通过 Widget::render 设置内部 area。
     // 这样后续事件处理中 screen_map_load 使用正确宽度，使折行和上下键导航正常。
