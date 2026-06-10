@@ -146,12 +146,15 @@ allow_domains = ["github.com", "docs.rs"]
 ### 运行
 
 ```bash
+# 编译
+cargo build --release
+
 # 一键启动（推荐）
-cargo run --bin visp -- -p /path/to/project
+./target/release/visp -p /path/to/project
 
 # 手动分别启动（调试用）
-cargo run --bin visp-daemon              # 终端 1
-cargo run --bin visp-cli -- -p <path>    # 终端 2
+./target/release/visp-daemon              # 终端 1
+./target/release/visp-cli -p /path        # 终端 2
 ```
 
 ### CLI 参数
