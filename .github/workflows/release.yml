@@ -31,6 +31,14 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
+      - name: Install protoc (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
       - name: Build release
         run: cargo build --release --workspace --target ${{ matrix.target }}
         env:
