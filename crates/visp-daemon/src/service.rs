@@ -61,12 +61,22 @@ impl CoderDaemonService {
         for (k, v) in llm_section.extra.iter() {
             extra.insert(k.clone(), v.clone());
         }
-        let default_llm_config = LlmConfig {
-            model: llm_section.model,
-            temperature: llm_section.temperature,
-            max_tokens: llm_section.max_tokens,
-            max_context_tokens: llm_section.max_context_tokens,
-            extra,
+        let default_llm_config = {
+            let mut model = llm_section.model.clone();
+            // 当 provider 为 openai 且 model 是默认的 Claude 时，自动切换为 GPT
+            if llm_section.provider == "openai"
+                && model == *crate::config::default_model()
+            {
+                model = "gpt-4o".to_string();
+                tracing::info!("provider=openai, overriding default model to gpt-4o");
+            }
+            LlmConfig {
+                model,
+                temperature: llm_section.temperature,
+                max_tokens: llm_section.max_tokens,
+                max_context_tokens: llm_section.max_context_tokens,
+                extra,
+            }
         };
         Self {
             provider,

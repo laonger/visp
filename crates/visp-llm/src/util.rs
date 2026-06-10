@@ -5,3 +5,11 @@ pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok())
 }
+
+/// 构建共享的 reqwest Client（含超时配置）
+pub fn build_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .expect("failed to build reqwest Client")
+}

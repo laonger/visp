@@ -77,7 +77,7 @@ fn default_log_level() -> String {
 fn default_provider() -> String {
     "anthropic".into()
 }
-fn default_model() -> String {
+pub(crate) fn default_model() -> String {
     "claude-3-7-sonnet-20250219".into()
 }
 fn default_temperature() -> f64 {

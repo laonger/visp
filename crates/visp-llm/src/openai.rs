@@ -6,7 +6,7 @@ use visp_core::error::LlmError;
 use visp_core::message::{Message, Role, ToolDefinition};
 use visp_core::provider::{ChatEvent, LlmConfig, LlmProvider};
 
-use crate::util::parse_retry_after;
+use crate::util::{build_client, parse_retry_after};
 
 /// 构建 OpenAI API 请求体
 pub fn build_openai_request(
@@ -46,8 +46,13 @@ pub fn build_openai_request(
     // 支持: "auto" / "none" / "required" / 或 JSON 对象 {"type":"function","function":{"name":"..."}}
     if let Some(tool_choice) = config.extra.get("tool_choice") {
         if tool_choice.starts_with('{') {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(tool_choice) {
-                request["tool_choice"] = val;
+            match serde_json::from_str::<serde_json::Value>(tool_choice) {
+                Ok(val) => {
+                    request["tool_choice"] = val;
+                }
+                Err(e) => {
+                    tracing::warn!("invalid tool_choice JSON {:?}: {e}", tool_choice);
+                }
             }
         } else {
             request["tool_choice"] = serde_json::Value::String(tool_choice.clone());
@@ -63,27 +68,47 @@ pub fn build_openai_request(
     }
 
     // seed
-    if let Some(seed) = config.extra.get("seed")
-        && let Ok(n) = seed.parse::<u64>()
-    {
-        request["seed"] = serde_json::json!(n);
+    if let Some(seed) = config.extra.get("seed") {
+        match seed.parse::<u64>() {
+            Ok(n) => {
+                request["seed"] = serde_json::json!(n);
+            }
+            Err(e) => {
+                tracing::warn!("invalid seed value {:?}: {e}", seed);
+            }
+        }
     }
 
     // frequency_penalty / presence_penalty / top_p
-    if let Some(val) = config.extra.get("frequency_penalty")
-        && let Ok(n) = val.parse::<f64>()
-    {
-        request["frequency_penalty"] = serde_json::json!(n);
+    if let Some(val) = config.extra.get("frequency_penalty") {
+        match val.parse::<f64>() {
+            Ok(n) => {
+                request["frequency_penalty"] = serde_json::json!(n);
+            }
+            Err(e) => {
+                tracing::warn!("invalid frequency_penalty value {:?}: {e}", val);
+            }
+        }
     }
-    if let Some(val) = config.extra.get("presence_penalty")
-        && let Ok(n) = val.parse::<f64>()
-    {
-        request["presence_penalty"] = serde_json::json!(n);
+    if let Some(val) = config.extra.get("presence_penalty") {
+        match val.parse::<f64>() {
+            Ok(n) => {
+                request["presence_penalty"] = serde_json::json!(n);
+            }
+            Err(e) => {
+                tracing::warn!("invalid presence_penalty value {:?}: {e}", val);
+            }
+        }
     }
-    if let Some(val) = config.extra.get("top_p")
-        && let Ok(n) = val.parse::<f64>()
-    {
-        request["top_p"] = serde_json::json!(n);
+    if let Some(val) = config.extra.get("top_p") {
+        match val.parse::<f64>() {
+            Ok(n) => {
+                request["top_p"] = serde_json::json!(n);
+            }
+            Err(e) => {
+                tracing::warn!("invalid top_p value {:?}: {e}", val);
+            }
+        }
     }
 
     request
@@ -133,9 +158,15 @@ pub fn build_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                 }));
             }
             Role::Assistant => {
+                let content: serde_json::Value = if msg.content.is_empty() && msg.tool_calls.is_some() {
+                    // OpenAI 规范：纯 tool_calls 消息 content 应为 null
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::String(msg.content.clone())
+                };
                 let mut assistant_msg = serde_json::json!({
                     "role": "assistant",
-                    "content": msg.content,
+                    "content": content,
                 });
 
                 // 添加 tool_calls（如果有）
@@ -158,11 +189,13 @@ pub fn build_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
 
                 // 合并 extra_blocks（如 thinking）到 assistant message 顶层字段
                 // 部分 OpenAI 兼容模型支持这些扩展字段
+                // 跳过 OpenAI 保留字段，避免意外覆盖
+                const RESERVED_FIELDS: &[&str] = &["type", "role", "content", "tool_calls", "name"];
                 if let Some(ref blocks) = msg.extra_blocks {
                     for block in blocks {
                         if let Some(obj) = block.as_object() {
                             for (key, val) in obj {
-                                if key != "type" {
+                                if !RESERVED_FIELDS.contains(&key.as_str()) {
                                     assistant_msg[key] = val.clone();
                                 }
                             }
@@ -217,6 +250,8 @@ pub(crate) enum OpenAiStreamEvent {
         input_tokens: u32,
         output_tokens: u32,
     },
+    /// 流结束标记 `[DONE]`
+    StreamEnd,
     /// 跳过（忽略事件）
     Skip,
 }
@@ -230,7 +265,10 @@ pub(crate) enum OpenAiStreamEvent {
 /// data: [DONE]
 /// ```
 pub(crate) fn parse_openai_sse_data(data: &str) -> Result<OpenAiStreamEvent, LlmError> {
-    if data == "[DONE]" || data.trim().is_empty() {
+    if data == "[DONE]" {
+        return Ok(OpenAiStreamEvent::StreamEnd);
+    }
+    if data.trim().is_empty() {
         return Ok(OpenAiStreamEvent::Skip);
     }
 
@@ -326,6 +364,8 @@ fn byte_stream_to_chat_events(
         tool_acc: HashMap<usize, (String, String, String)>,
         /// 待发射的工具调用列表: (id, name, arguments)
         pending_tool_calls: Vec<(String, String, String)>,
+        /// 已完成的工具调用数量（用于 UsageInfo）
+        tool_call_count: u32,
         input_tokens: u32,
         output_tokens: u32,
         /// 标记流是否已结束
@@ -341,6 +381,7 @@ fn byte_stream_to_chat_events(
         buf: String::new(),
         tool_acc: HashMap::new(),
         pending_tool_calls: Vec::new(),
+        tool_call_count: 0,
         input_tokens: 0,
         output_tokens: 0,
         stream_ended: false,
@@ -383,6 +424,7 @@ fn byte_stream_to_chat_events(
                             }
                             Ok(OpenAiStreamEvent::Finish { .. }) => {
                                 if !state.tool_acc.is_empty() {
+                                    state.tool_call_count = state.tool_acc.len() as u32;
                                     let calls: Vec<(String, String, String)> = state
                                         .tool_acc
                                         .drain()
@@ -406,21 +448,23 @@ fn byte_stream_to_chat_events(
                                 }
                             }
                             Ok(OpenAiStreamEvent::Skip) => {}
+                            Ok(OpenAiStreamEvent::StreamEnd) => {
+                                state.stream_ended = true;
+
+                                if !state.tool_acc.is_empty() {
+                                    state.tool_call_count = state.tool_acc.len() as u32;
+                                    let calls: Vec<(String, String, String)> = state
+                                        .tool_acc
+                                        .drain()
+                                        .map(|(_, (id, name, args))| (id, name, args))
+                                        .collect();
+                                    state.pending_tool_calls =
+                                        calls.into_iter().rev().collect();
+                                }
+                            }
                             Err(e) => {
                                 return Some((Err(e), state));
                             }
-                        }
-                    } else if line == "data: [DONE]" {
-                        state.stream_ended = true;
-
-                        if !state.tool_acc.is_empty() {
-                            let calls: Vec<(String, String, String)> = state
-                                .tool_acc
-                                .drain()
-                                .map(|(_, (id, name, args))| (id, name, args))
-                                .collect();
-                            state.pending_tool_calls =
-                                calls.into_iter().rev().collect();
                         }
                     } else if !line.trim().is_empty() {
                         tracing::trace!(?line, "ignored non-data SSE line");
@@ -451,7 +495,7 @@ fn byte_stream_to_chat_events(
                         Ok(ChatEvent::UsageInfo {
                             input_tokens: state.input_tokens,
                             output_tokens: state.output_tokens,
-                            tool_calls: state.tool_acc.len() as u32,
+                            tool_calls: state.tool_call_count,
                         }),
                         state,
                     ));
@@ -480,6 +524,7 @@ fn byte_stream_to_chat_events(
                     state.stream_ended = true;
 
                     if !state.tool_acc.is_empty() {
+                        state.tool_call_count = state.tool_acc.len() as u32;
                         let calls: Vec<(String, String, String)> = state
                             .tool_acc
                             .drain()
@@ -500,6 +545,7 @@ fn byte_stream_to_chat_events(
 pub struct OpenAiProvider {
     api_key: String,
     api_url: String,
+    client: reqwest::Client,
 }
 
 impl OpenAiProvider {
@@ -507,6 +553,7 @@ impl OpenAiProvider {
         Self {
             api_key,
             api_url: "https://api.openai.com".to_string(),
+            client: build_client(),
         }
     }
 
@@ -514,6 +561,7 @@ impl OpenAiProvider {
         Self {
             api_key,
             api_url: base_url,
+            client: build_client(),
         }
     }
 }
@@ -533,11 +581,7 @@ impl LlmProvider for OpenAiProvider {
         let body = build_openai_request(messages, tools, config);
         let headers = build_openai_headers(&self.api_key);
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
-            .build()
-            .map_err(|e| LlmError::Network(e.to_string()))?;
-        let response = client
+        let response = self.client
             .post(&url)
             .headers(headers)
             .json(&body)
@@ -680,6 +724,42 @@ mod tests {
         assert_eq!(assistant["signature"], "sig_123");
         // "type" 字段应被跳过，不出现在消息中
         assert!(assistant.get("type").is_none());
+    }
+
+    #[test]
+    fn test_extra_blocks_does_not_overwrite_reserved_fields() {
+        let msgs = vec![
+            Message::user("Try to override fields"),
+            Message {
+                role: Role::Assistant,
+                content: "Original content".into(),
+                tool_calls: Some(vec![ToolCallRequest {
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                }]),
+                tool_call_id: None,
+                extra_blocks: Some(vec![
+                    serde_json::json!({
+                        "role": "user",
+                        "content": "malicious content",
+                        "tool_calls": "should not appear",
+                        "name": "should not appear",
+                        "thinking": "this is fine",
+                    }),
+                ]),
+                skip_context: false,
+                estimated_tokens: 0,
+            },
+        ];
+        let result = build_openai_messages(&msgs);
+        let assistant = &result[1];
+        // 保留字段不能被覆盖
+        assert_eq!(assistant["role"], "assistant");
+        assert_eq!(assistant["content"], "Original content");
+        assert!(assistant["tool_calls"].is_array());
+        // 非保留字段应被合并
+        assert_eq!(assistant["thinking"], "this is fine");
     }
 
     // --- build_openai_request 测试 ---
@@ -835,7 +915,7 @@ mod tests {
     #[test]
     fn test_parse_done_marker() {
         let result = parse_openai_sse_data("[DONE]").unwrap();
-        assert!(matches!(result, OpenAiStreamEvent::Skip));
+        assert!(matches!(result, OpenAiStreamEvent::StreamEnd));
     }
 
     #[test]

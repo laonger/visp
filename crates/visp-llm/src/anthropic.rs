@@ -5,7 +5,7 @@ use visp_core::error::LlmError;
 use visp_core::message::{Message, Role, ToolDefinition};
 use visp_core::provider::{ChatEvent, LlmConfig, LlmProvider};
 
-use crate::util::parse_retry_after;
+use crate::util::{build_client, parse_retry_after};
 
 /// 构建 Anthropic API 请求体
 pub fn build_anthropic_request(
@@ -54,13 +54,18 @@ pub fn build_anthropic_request(
     }
 
     // 从 extra 配置读取 thinking_budget_tokens 启用 thinking 模式
-    if let Some(budget_str) = config.extra.get("thinking_budget_tokens")
-        && let Ok(budget) = budget_str.parse::<u32>()
-    {
-        request["thinking"] = serde_json::json!({
-            "type": "enabled",
-            "budget_tokens": budget,
-        });
+    if let Some(budget_str) = config.extra.get("thinking_budget_tokens") {
+        match budget_str.parse::<u32>() {
+            Ok(budget) => {
+                request["thinking"] = serde_json::json!({
+                    "type": "enabled",
+                    "budget_tokens": budget,
+                });
+            }
+            Err(e) => {
+                tracing::warn!("invalid thinking_budget_tokens value {:?}: {e}", budget_str);
+            }
+        }
     }
 
     // Anthropic API 流式请求
@@ -366,6 +371,7 @@ pub(crate) fn parse_anthropic_event(event_name: &str, data: &str) -> Result<Pars
 pub struct AnthropicProvider {
     api_key: String,
     api_url: String,
+    client: reqwest::Client,
 }
 
 impl AnthropicProvider {
@@ -373,6 +379,7 @@ impl AnthropicProvider {
         Self {
             api_key,
             api_url: "https://api.anthropic.com".to_string(),
+            client: build_client(),
         }
     }
 
@@ -380,6 +387,7 @@ impl AnthropicProvider {
         Self {
             api_key,
             api_url: base_url,
+            client: build_client(),
         }
     }
 }
@@ -396,11 +404,8 @@ impl LlmProvider for AnthropicProvider {
         let body = build_anthropic_request(messages, tools, config);
         let headers = build_anthropic_headers(&self.api_key);
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
-            .build()
-            .map_err(|e| LlmError::Network(e.to_string()))?;
-        let response = client
+        let response = self
+            .client
             .post(&url)
             .headers(headers)
             .json(&body)
