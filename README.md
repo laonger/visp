@@ -108,6 +108,17 @@ tree-sitter 解析 + SQLite 索引，支持符号搜索、调用者/被调用者
 - macOS / Linux
 - `ANTHROPIC_API_KEY` 环境变量
 
+### 下载
+
+从 [GitHub Releases](https://github.com/laonger/visp/releases) 下载预编译二进制包（tar.gz）：
+
+| 平台 | 包名 |
+|------|------|
+| Linux x86_64 | `visp-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS ARM | `visp-aarch64-apple-darwin.tar.gz` |
+
+解压后包含 `visp`（启动器）、`visp-daemon`（后台服务）、`visp-cli`（终端界面）三个二进制文件，可直接运行。
+
 ### 编译
 
 ```bash
