@@ -341,6 +341,13 @@ pub async fn run_agent_loop(
                     Err(e @ (LlmError::RateLimit { .. } | LlmError::Network(_))) => {
                         if attempt >= agent_config.llm_retry_attempts {
                             let (code, msg) = llm_error_to_code(&e);
+                            tracing::error!(
+                                session_id = %ctx.session_id,
+                                error_code = ?code,
+                                error_msg = %msg,
+                                attempts = attempt + 1,
+                                "LLM provider error after retries exhausted"
+                            );
                             try_send!(AgentEvent::Error { code, message: msg });
                             let _ = session_mgr.finish_loop(&ctx.session_id, SessionStatus::Error);
                             return;
@@ -351,6 +358,12 @@ pub async fn run_agent_loop(
                     }
                     Err(e) => {
                         let (code, msg) = llm_error_to_code(&e);
+                        tracing::error!(
+                            session_id = %ctx.session_id,
+                            error_code = ?code,
+                            error_msg = %msg,
+                            "LLM provider error"
+                        );
                         try_send!(AgentEvent::Error { code, message: msg });
                         let _ = session_mgr.finish_loop(&ctx.session_id, SessionStatus::Error);
                         return;
