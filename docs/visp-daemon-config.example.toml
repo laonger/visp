@@ -172,8 +172,15 @@
 # name = "fetch"
 # transport = { type = "stdio", command = "uvx", args = ["mcp-server-fetch"] }
 
+# ----- stdio 示例（自定义脚本 + API Key） -----
+# API Key 通过 env 传入环境变量，子进程继承 daemon 环境 + 此处叠加/覆盖
+# [[mcp.servers]]
+# name = "custom-script"
+# transport = { type = "stdio", command = "python", args = ["server.py"], env = { API_KEY = "sk-xxx" } }
+
 # ----- SSE 示例（连接已运行的 MCP HTTP 服务器） -----
+# API Key 通过 headers 传入 HTTP 请求头
 # [[mcp.servers]]
 # name = "custom-api"
-# transport = { type = "sse", url = "http://localhost:8080/mcp" }
+# transport = { type = "sse", url = "http://localhost:8080/mcp", headers = { Authorization = "Bearer sk-xxx" } }
 # tool_prefix = "custom_"
