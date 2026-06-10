@@ -196,7 +196,7 @@ cargo build --release
 |------|------|
 | `Enter` | 发送消息 / 确认审批 |
 | `Alt+Enter` | 插入换行（不发送） |
-| `Alt+M` | 切换鼠标捕获模式（任何时候生效） |
+| `Alt+M` / `Ctrl+Shift+M` | 切换鼠标捕获模式（任何时候生效） |
 | `↑` / `↓` | 上/下一条历史输入 |
 | `PgUp` / `PgDn` | 向上/下滚动 10 行 |
 | `Tab` | 命令自动补全 |
@@ -211,7 +211,7 @@ cargo build --release
 | 命令 | 用途 |
 |------|------|
 | `/temp <val>` / `/model <name>` | 设置 LLM 参数 |
-| `/mouse` | 切换鼠标捕获模式（Mouse ↔ Select） |
+| `/mouse` | 切换鼠标捕获模式（或点按状态栏的 `[Mouse]` / `[Select]`） |
 | `/init` | 初始化项目配置 |
 | `/clear` | 清屏 |
 | `/help` | 显示帮助 |

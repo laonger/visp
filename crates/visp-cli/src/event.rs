@@ -120,8 +120,12 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
     app.needs_render = true;
     match event {
         Event::Key(key) => {
-            // Alt+M: 切换鼠标捕获模式，任何时候都生效
-            if key.code == KeyCode::Char('m') && key.modifiers.contains(KeyModifiers::ALT) {
+            // Alt+M 或 Ctrl+Shift+M: 切换鼠标捕获模式，任何时候都生效
+            if (key.code == KeyCode::Char('m')
+                && key.modifiers.contains(KeyModifiers::ALT))
+                || (key.code == KeyCode::Char('M')
+                    && key.modifiers == KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+            {
                 toggle_mouse_mode(app);
                 return false;
             }
@@ -340,6 +344,26 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 _ => {
                     app.textarea.input(build_input_from_key(key));
                 }
+            }
+        }
+        // 状态栏点击切换鼠标模式
+        Event::Mouse(m)
+            if m.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left)
+                && m.column >= 2 =>
+        {
+            if let Ok((term_cols, term_rows)) = crossterm::terminal::size() {
+                // 状态栏在去掉上下左右边距后的最底部，[Mouse] / [Select] 在状态栏最右侧
+                let status_row = (term_rows.saturating_sub(2)) as u16;
+                // 从右侧起算 [Mouse] 的大致起始列
+                let text_start = (term_cols.saturating_sub(14)) as u16;
+                if m.row == status_row && m.column >= text_start {
+                    toggle_mouse_mode(app);
+                    return false;
+                }
+            }
+            // 非状态栏区域的左键点击，走默认处理
+            match m.kind {
+                _ => {}
             }
         }
         Event::Mouse(m) => match m.kind {
