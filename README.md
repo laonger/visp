@@ -32,6 +32,22 @@
 └─────────────────────────────────────────────────────────────┘
 ```
 
+### 设计思路
+
+visp 采用 **前后端分离的 daemon 架构**，核心决策是让后端（Daemon）保持独立运行，前端（CLI、编辑器插件、Web 界面）通过 gRPC 与之通信。这种分离的好处：
+
+- **语言无关**：前端可以是任何支持 gRPC 的语言，不限于 Rust
+- **状态持久**：Daemon 后台常驻，Agent 循环和会话不会因终端关闭中断
+- **进程隔离**：UI 卡顿不影响后端工作，后端 OOM 不拖垮编辑器
+
+三个二进制文件的关系：
+
+**Launcher（`visp`）** — 一键式入口。不参与运行时架构，只做启动编排：start daemon → health check → start CLI → CLI 退出后 shutdown daemon。本身启动完即退出。
+
+**Daemon（`visp-daemon`）** — 核心服务进程，常驻后台。负责 Agent 编排、LLM 调用、工具执行、CodeGraph、会话管理、上下文裁剪、规则引擎、Skills 等全部 AI 能力。这是唯一直接使用 AI 模型和系统资源的进程。
+
+**CLI（`visp-cli`）** — TUI 前端（ratatui），通过 gRPC 连接 Daemon，提供聊天界面、审批弹窗、命令系统（`/model`、`/init` 等）。CLI 是默认前端，gRPC 接口同样可被 VSCode 插件、Web 界面等其他前端复用。
+
 ## Crate 列表
 
 每个 crate 有独立的 `README.md`，点击查看详情：
