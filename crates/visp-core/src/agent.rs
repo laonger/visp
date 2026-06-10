@@ -803,13 +803,17 @@ fn cleanup_orphan_tool_uses(history: &mut [Message]) {
         if history[i].role == Role::Assistant
             && let Some(ref calls) = history[i].tool_calls
         {
-            // 检查此 assistant 之后有没有足够的 tool_result 配对
             let num_calls = calls.len();
-            let num_results = history[i + 1..]
-                .iter()
-                .filter(|m| m.role == Role::Tool)
-                .count();
-            if num_results < num_calls {
+            // 紧跟在此 assistant 后面的 num_calls 条消息必须全是 Tool 角色，
+            // 否则说明此 assistant 的 tool_calls 是孤儿（中断未执行完）。
+            // 之前用 count() 统计 i 之后 ALL tool 消息会误判——后续成功轮次的
+            // tool_result 会让本应清理的孤儿漏网。
+            let all_have_results = (1..=num_calls).all(|offset| {
+                let idx = i + offset;
+                idx < len && history[idx].role == Role::Tool
+            });
+
+            if !all_have_results {
                 history[i].tool_calls = None;
                 // 继续检查更早的 assistant 消息（可能也有孤儿）
             } else {
