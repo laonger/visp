@@ -493,6 +493,21 @@ pub async fn run_agent_loop(
             }
 
             // No [USER_QUERY] marker: done
+            if text_buffer.is_empty() && tool_calls.is_empty() && thinking_blocks.is_empty() {
+                tracing::warn!(
+                    session_id = %ctx.session_id,
+                    input_tokens,
+                    output_tokens,
+                    "LLM returned empty response (no text, no tool calls, no thinking)"
+                );
+            } else if text_buffer.is_empty() {
+                tracing::info!(
+                    session_id = %ctx.session_id,
+                    tool_calls = tool_calls.len(),
+                    thinking_blocks = thinking_blocks.len(),
+                    "LLM returned response with no text (only tool_calls/thinking)"
+                );
+            }
             let mut assistant_msg = Message {
                 role: Role::Assistant,
                 content: text_buffer,

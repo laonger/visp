@@ -337,6 +337,9 @@ impl CoderDaemon for CoderDaemonService {
                                 if is_done {
                                     tracing::info!(session_id = %sid2, "[DAEMON] forwarding Done to client");
                                 }
+                                if matches!(&event, AgentEvent::TextDelta(d) if d.is_empty()) {
+                                    tracing::warn!(session_id = %sid2, "[DAEMON] forwarding empty TextDelta");
+                                }
                                 let msg = match event {
                                     AgentEvent::UserQuery {
                                         query_id,
