@@ -84,7 +84,7 @@ async fn main() {
         }
     };
 
-    let model = cli.model.unwrap_or_else(|| "deepseek-v4-flash".into());
+    let model = cli.model.clone().unwrap_or(session.model);
     if let Err(e) = event::run(session.session_id, chat_handle, model).await {
         eprintln!("Event loop error: {}", e);
     }

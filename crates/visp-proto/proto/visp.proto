@@ -10,6 +10,7 @@ message Session {
     SessionStatus status = 2;
     string project_path = 3;
     google.protobuf.Timestamp created_at = 4;
+    string model = 5;
 }
 
 enum SessionStatus {

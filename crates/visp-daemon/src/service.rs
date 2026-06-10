@@ -599,6 +599,7 @@ fn session_to_proto(session: &visp_core::session::Session) -> proto::Session {
         session_id: session.id.clone(),
         status: status.into(),
         project_path: session.project_path.to_string_lossy().to_string(),
+        model: session.config.model.clone(),
         created_at: Some(prost_types::Timestamp {
             seconds: created_secs,
             nanos: 0,
