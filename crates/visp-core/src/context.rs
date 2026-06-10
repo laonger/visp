@@ -33,6 +33,22 @@ pub trait ContextTrimmer: Send + Sync {
     ) -> Vec<Message>;
 }
 
+/// 无操作裁剪器：直接返回原始历史，不进行任何裁剪。
+/// 可作为默认值使用，或在不需裁剪的场景下使用。
+pub struct NoopTrimmer;
+
+impl ContextTrimmer for NoopTrimmer {
+    fn trim(
+        &self,
+        history: &[Message],
+        _max_context_tokens: u32,
+        _system_overhead: u32,
+        _output_tokens: u32,
+    ) -> Vec<Message> {
+        history.to_vec()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -85,6 +85,8 @@ pub struct AgentLoopContext {
     pub config: LlmConfig,
     /// 取消令牌
     pub cancel_token: CancellationToken,
+    /// 上下文裁剪器
+    pub context_trimmer: Arc<dyn crate::context::ContextTrimmer + Send + Sync>,
 }
 
 /// Agent 执行配置
@@ -321,6 +323,7 @@ pub async fn run_agent_loop(
             &date_str,
             Some(ctx.config.max_context_tokens),
             ctx.config.max_tokens,
+            ctx.context_trimmer.as_ref(),
         );
 
         // c. Get tool definitions
@@ -805,11 +808,25 @@ fn dump_prompt_to_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::ContextTrimmer;
     use crate::session::InMemorySessionStore;
     use crate::tool::Tool;
     use std::path::Path;
     use std::sync::Arc as StdArc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct MockTrimmer;
+    impl ContextTrimmer for MockTrimmer {
+        fn trim(
+            &self,
+            h: &[crate::message::Message],
+            _: u32,
+            _: u32,
+            _: u32,
+        ) -> Vec<crate::message::Message> {
+            h.to_vec()
+        }
+    }
 
     // ── Mock tool for tests ─────────────────────────────────────────────────
 
@@ -907,7 +924,8 @@ mod tests {
         let session = session_mgr
             .create(Path::new("/tmp"), LlmConfig::default())
             .unwrap();
-        let ctx = session_mgr.start_loop(&session.id).unwrap();
+        let trimmer: StdArc<dyn ContextTrimmer + Send + Sync> = StdArc::new(MockTrimmer);
+        let ctx = session_mgr.start_loop(&session.id, &trimmer).unwrap();
         let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
         TestSetup {
             session_mgr,
@@ -1040,12 +1058,15 @@ mod tests {
     #[test]
     fn test_agent_loop_context_fields() {
         let cancel = tokio_util::sync::CancellationToken::new();
+        let trimmer: std::sync::Arc<dyn ContextTrimmer + Send + Sync> =
+            std::sync::Arc::new(MockTrimmer);
         let ctx = AgentLoopContext {
             session_id: "sess-1".into(),
             history: vec![],
             working_dir: PathBuf::from("/tmp"),
             config: crate::provider::LlmConfig::default(),
             cancel_token: cancel.clone(),
+            context_trimmer: trimmer,
         };
         assert_eq!(ctx.session_id, "sess-1");
         assert!(ctx.history.is_empty());

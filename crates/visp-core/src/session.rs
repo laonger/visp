@@ -281,7 +281,11 @@ impl SessionManager {
     }
 
     /// 启动 agent 循环，检查状态必须为 Idle
-    pub fn start_loop(&self, id: &str) -> Result<AgentLoopContext, SessionError> {
+    pub fn start_loop(
+        &self,
+        id: &str,
+        context_trimmer: &Arc<dyn crate::context::ContextTrimmer + Send + Sync>,
+    ) -> Result<AgentLoopContext, SessionError> {
         let token = CancellationToken::new();
 
         let mut store = self.store.lock().unwrap();
@@ -309,6 +313,7 @@ impl SessionManager {
             working_dir: session.project_path,
             config: session.config,
             cancel_token: token,
+            context_trimmer: Arc::clone(context_trimmer),
         })
     }
 
@@ -383,8 +388,17 @@ impl SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::ContextTrimmer;
+    use crate::message::Message;
     use crate::message::Role;
     use std::path::Path;
+
+    struct MockTrimmer;
+    impl ContextTrimmer for MockTrimmer {
+        fn trim(&self, history: &[Message], _: u32, _: u32, _: u32) -> Vec<Message> {
+            history.to_vec()
+        }
+    }
 
     // ── InMemorySessionStore CRUD ──────────────────────────────────────────
 
@@ -452,7 +466,8 @@ mod tests {
             .create(Path::new("/tmp"), LlmConfig::default())
             .unwrap();
 
-        let ctx = manager.start_loop(&session.id).unwrap();
+        let trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(MockTrimmer);
+        let ctx = manager.start_loop(&session.id, &trimmer).unwrap();
         assert_eq!(ctx.session_id, session.id);
         assert_eq!(ctx.working_dir, Path::new("/tmp"));
 
@@ -466,9 +481,11 @@ mod tests {
         let session = manager
             .create(Path::new("/tmp"), LlmConfig::default())
             .unwrap();
-        let _ctx = manager.start_loop(&session.id).unwrap();
 
-        match manager.start_loop(&session.id) {
+        let trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(MockTrimmer);
+        let _ctx = manager.start_loop(&session.id, &trimmer).unwrap();
+
+        match manager.start_loop(&session.id, &trimmer) {
             Err(SessionError::SessionBusy { session_id }) => {
                 assert_eq!(session_id, session.id);
             }
@@ -482,7 +499,9 @@ mod tests {
         let session = manager
             .create(Path::new("/tmp"), LlmConfig::default())
             .unwrap();
-        let _ctx = manager.start_loop(&session.id).unwrap();
+
+        let trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(MockTrimmer);
+        let _ctx = manager.start_loop(&session.id, &trimmer).unwrap();
         manager
             .finish_loop(&session.id, SessionStatus::Completed)
             .unwrap();
@@ -497,7 +516,9 @@ mod tests {
         let session = manager
             .create(Path::new("/tmp"), LlmConfig::default())
             .unwrap();
-        let ctx = manager.start_loop(&session.id).unwrap();
+
+        let trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(MockTrimmer);
+        let ctx = manager.start_loop(&session.id, &trimmer).unwrap();
         let token = ctx.cancel_token.clone();
         assert!(!token.is_cancelled());
 
