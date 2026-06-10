@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use visp_core::{
     agent::AgentConfig,
+    context::ContextTrimmer,
     rules::RuleEngine,
     session::{InMemorySessionStore, SessionManager},
     tool_registry::ToolRegistry,
@@ -100,6 +101,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 6. Create session manager
     let session_mgr = Arc::new(SessionManager::new(InMemorySessionStore::new()));
 
+    // 6.5. Create context trimmer
+    let context_trimmer: Arc<dyn ContextTrimmer + Send + Sync> =
+        Arc::new(visp_context::DefaultContextTrimmer::default());
+
     // 7. Agent config
     let agent_config = AgentConfig {
         max_iterations: config.agent.max_iterations,
@@ -117,6 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         session_mgr,
         agent_config,
         config.llm,
+        context_trimmer,
     );
 
     // 9. Start gRPC server

@@ -11,6 +11,7 @@ use tonic::{Request, Response, Status, Streaming};
 use visp_codegraph::CodeGraph;
 use visp_core::{
     agent::{AgentConfig, AgentEvent, UserQueryResult, run_agent_loop},
+    context::ContextTrimmer,
     message::Message,
     provider::{LlmConfig, LlmProvider},
     rules::RuleEngine,
@@ -37,6 +38,8 @@ pub struct CoderDaemonService {
     codegraphs: CodeGraphMap,
     /// 默认 LLM 配置（来自 daemon.toml），create_session 时与客户端配置合并
     default_llm_config: LlmConfig,
+    /// 上下文裁剪器
+    context_trimmer: Arc<dyn ContextTrimmer + Send + Sync>,
 }
 
 impl CoderDaemonService {
@@ -48,6 +51,7 @@ impl CoderDaemonService {
         session_mgr: Arc<SessionManager>,
         agent_config: AgentConfig,
         llm_section: LlmSection,
+        context_trimmer: Arc<dyn ContextTrimmer + Send + Sync>,
     ) -> Self {
         let mut extra = std::collections::HashMap::new();
         if let Some(budget) = llm_section.thinking_budget_tokens {
@@ -69,6 +73,7 @@ impl CoderDaemonService {
             start_time: Instant::now(),
             codegraphs: Arc::new(RwLock::new(HashMap::new())),
             default_llm_config,
+            context_trimmer,
         }
     }
 
@@ -185,6 +190,7 @@ impl CoderDaemon for CoderDaemonService {
         let rule_engine = self.rule_engine.clone();
         let session_mgr = self.session_mgr.clone();
         let agent_config = self.agent_config.clone();
+        let context_trimmer = self.context_trimmer.clone();
 
         tokio::spawn(async move {
             let pending_queries: Arc<
@@ -264,7 +270,7 @@ impl CoderDaemon for CoderDaemonService {
                         } else {
                             text
                         };
-                        let ctx = match session_mgr.start_loop(&session_id) {
+                        let ctx = match session_mgr.start_loop(&session_id, &context_trimmer) {
                             Ok(c) => c,
                             Err(e) => {
                                 let _ = tx
@@ -740,7 +746,9 @@ mod tests {
     async fn test_cancel_during_agent_loop() {
         let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
         let session = mgr.create(Path::new("/tmp"), LlmConfig::default()).unwrap();
-        let ctx = mgr.start_loop(&session.id).unwrap();
+        let trimmer: Arc<dyn ContextTrimmer + Send + Sync> =
+            Arc::new(visp_core::context::NoopTrimmer);
+        let ctx = mgr.start_loop(&session.id, &trimmer).unwrap();
         let token = ctx.cancel_token.clone();
         assert!(
             !token.is_cancelled(),
@@ -845,6 +853,7 @@ mod tests {
             start_time: Instant::now(),
             codegraphs: Arc::new(RwLock::new(HashMap::new())),
             default_llm_config,
+            context_trimmer: Arc::new(visp_core::context::NoopTrimmer),
         };
 
         let request = tonic::Request::new(proto::CreateSessionRequest {
@@ -880,6 +889,7 @@ mod tests {
             start_time: Instant::now(),
             codegraphs: Arc::new(RwLock::new(HashMap::new())),
             default_llm_config,
+            context_trimmer: Arc::new(visp_core::context::NoopTrimmer),
         };
 
         let request = tonic::Request::new(proto::CreateSessionRequest {
