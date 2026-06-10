@@ -5,11 +5,13 @@ pub mod query;
 pub mod store;
 pub mod watcher;
 
+pub use crate::index::CodeGraphConfig;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use crate::index::{CodeGraphConfig, Indexer};
+use crate::index::Indexer;
 use crate::query::{QueryEngine, SymbolDetails, SymbolInfo};
 use crate::store::Store;
 use crate::watcher::Watcher;

@@ -17,7 +17,7 @@ use visp_llm::anthropic::AnthropicProvider;
 use visp_llm::openai::OpenAiProvider;
 use visp_tools::{
     bash::Bash,
-    codegraph::{CodeGraphGetDetails, CodeGraphSearch},
+    codegraph::{CodeGraphGetDetails, CodeGraphRebuild, CodeGraphSearch},
     fetch::WebFetch,
     file::{EditFile, ReadFile, WriteFile},
     search::{Glob, Grep},
@@ -114,6 +114,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tool_registry
         .register(Box::new(CodeGraphGetDetails))
         .map_err(|e| format!("register codegraph_get_details: {e}"))?;
+    tool_registry
+        .register(Box::new(CodeGraphRebuild))
+        .map_err(|e| format!("register codegraph_rebuild: {e}"))?;
     let tool_registry = Arc::new(tool_registry);
 
     // 5. Create rule engine

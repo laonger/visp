@@ -21,31 +21,61 @@ pub struct Bash;
 /// 判断 bash 命令是否包含删除/清理等危险操作
 fn is_destructive_command(command: &str) -> bool {
     let lower = command.to_lowercase();
-    let destructive_patterns = [
+    // trim 掉前导空格，使得命令开头的 rm 也能被检测到
+    let trimmed = lower.trim_start();
+
+    // 这些模式匹配命令中间或换行后的危险操作（带前导空格/换行）
+    let mid_patterns = [
         " rm ",
         " rm -",
         " rm\t",
-        "\nrm ", // remove
+        "\nrm ",
         " rmdir ",
-        "\nrmdir ", // remove dir
+        "\nrmdir ",
         " del ",
         " del\t",
-        "\ndel ", // Windows delete
+        "\ndel ",
         " rd ",
-        "\nrd ", // Windows rmdir
+        "\nrd ",
         " clean ",
-        " cleanup ",  // clean/cleanup
-        " truncate ", // truncate
+        " cleanup ",
+        " truncate ",
         " dd ",
-        "\ndd ", // disk destroyer
+        "\ndd ",
         " format ",
-        "\nformat ", // format
+        "\nformat ",
         " mkfs ",
-        "\nmkfs ", // make filesystem
-        " > ",
-        "> ", // redirect overwrite
+        "\nmkfs ",
+        " > ", // echo > file
     ];
-    destructive_patterns.iter().any(|p| lower.contains(p))
+    if mid_patterns.iter().any(|p| lower.contains(p)) {
+        return true;
+    }
+
+    // 这些模式匹配命令开头（trim 后）的危险命令
+    // 用 starts_with 而不是 contains 避免误匹配单词中间的片段（如 "format" 在 "transform" 中）
+    let start_patterns = [
+        "rm ",
+        "rm -",
+        "rm\t",
+        "rmdir ",
+        "del ",
+        "del\t",
+        "rd ",
+        "clean ",
+        "cleanup ",
+        "truncate ",
+        "dd ",
+        "format ",
+        "mkfs ",
+        "mkfs.", // mkfs.ext4 etc.
+        "> ",    // redirect at start
+    ];
+    if start_patterns.iter().any(|p| trimmed.starts_with(p)) {
+        return true;
+    }
+
+    false
 }
 
 #[async_trait]
@@ -248,6 +278,71 @@ mod tests {
             canonical.to_string_lossy().as_ref(),
             "pwd should match working_dir"
         );
+    }
+
+    // ── is_destructive_command 测试 ───────────────────────────────────────
+
+    #[test]
+    fn test_destructive_rm_start() {
+        assert!(is_destructive_command("rm -rf /"));
+    }
+
+    #[test]
+    fn test_destructive_rm_with_leading_spaces() {
+        assert!(is_destructive_command("  rm -rf /"));
+    }
+
+    #[test]
+    fn test_destructive_rm_in_middle() {
+        assert!(is_destructive_command("echo hello && rm -rf /"));
+    }
+
+    #[test]
+    fn test_destructive_rm_after_newline() {
+        assert!(is_destructive_command("echo hello\nrm -rf /"));
+    }
+
+    #[test]
+    fn test_destructive_dd_start() {
+        assert!(is_destructive_command("dd if=/dev/zero of=/dev/sda bs=1M"));
+    }
+
+    #[test]
+    fn test_destructive_mkfs_start() {
+        assert!(is_destructive_command("mkfs.ext4 /dev/sdb1"));
+    }
+
+    #[test]
+    fn test_destructive_redirect() {
+        assert!(is_destructive_command("echo hello > /etc/passwd"));
+    }
+
+    #[test]
+    fn test_destructive_redirect_at_start() {
+        assert!(is_destructive_command("> /etc/passwd"));
+    }
+
+    #[test]
+    fn test_non_destructive_echo() {
+        assert!(!is_destructive_command("echo hello"));
+    }
+
+    #[test]
+    fn test_non_destructive_grep_rm() {
+        // "rm" in "grep" or "foorm" should not trigger
+        assert!(!is_destructive_command("grep -r 'pattern' ."));
+        assert!(!is_destructive_command("echo foorm"));
+    }
+
+    #[test]
+    fn test_non_destructive_read() {
+        assert!(!is_destructive_command("cat /etc/passwd"));
+    }
+
+    #[test]
+    fn test_non_destructive_transform() {
+        // "format" inside "transform" should not trigger
+        assert!(!is_destructive_command("echo transform_data"));
     }
 
     #[tokio::test]

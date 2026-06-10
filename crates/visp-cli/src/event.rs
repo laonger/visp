@@ -168,7 +168,10 @@ pub async fn run(
                     );
                 }
                 Err(e) => {
-                    app.add_message(LineType::Error, format!("Failed to create new session: {e}"));
+                    app.add_message(
+                        LineType::Error,
+                        format!("Failed to create new session: {e}"),
+                    );
                     app.pending_new_session = false;
                 }
             }

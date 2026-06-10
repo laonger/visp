@@ -1,6 +1,43 @@
 use async_trait::async_trait;
 use visp_core::tool::{Tool, ToolContext, ToolResult};
 
+/// Rebuild the CodeGraph index from scratch.
+pub struct CodeGraphRebuild;
+
+#[async_trait]
+impl Tool for CodeGraphRebuild {
+    fn name(&self) -> &str {
+        "codegraph_rebuild"
+    }
+
+    fn category(&self) -> &str {
+        "analyze"
+    }
+
+    fn description(&self) -> &str {
+        "Rebuild the CodeGraph index from scratch for the current project. \
+         This rescans all supported source files and updates the symbol database. \
+         Use this after making significant changes to the codebase, or when the index is stale. \
+         Note: this may take a while depending on the project size."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {}, "required": [] })
+    }
+
+    async fn execute(&self, _arguments: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let cg = match visp_codegraph::CodeGraph::open(&context.working_dir) {
+            Ok(cg) => cg,
+            Err(e) => return ToolResult::error(format!("CodeGraph open failed: {e}")),
+        };
+        let config = visp_codegraph::CodeGraphConfig::default();
+        match cg.build_full(&context.working_dir, &config).await {
+            Ok(()) => ToolResult::success("CodeGraph index rebuilt successfully."),
+            Err(e) => ToolResult::error(format!("CodeGraph rebuild failed: {e}")),
+        }
+    }
+}
+
 pub struct CodeGraphSearch;
 
 #[async_trait]

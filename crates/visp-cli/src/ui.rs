@@ -335,7 +335,11 @@ fn render_confirm_bar(app: &AppState, f: &mut Frame, area: Rect) {
         let avail_w = area.width as usize;
         let has_other = confirm.allow_other;
         let other_label = "[X] Other";
-        let other_full_w = if has_other { UnicodeWidthStr::width(other_label) } else { 0 };
+        let other_full_w = if has_other {
+            UnicodeWidthStr::width(other_label)
+        } else {
+            0
+        };
         let num_opts = options.len();
         let sep_w = 2; // "  " between options
         let prefix_w = 4; // "[X] "
@@ -379,7 +383,7 @@ fn render_confirm_bar(app: &AppState, f: &mut Frame, area: Rect) {
                 let mut current_w = 0;
                 for c in s.chars() {
                     let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-                    if current_w + cw + 1 <= max {
+                    if current_w + cw < max {
                         result.push(c);
                         current_w += cw;
                     } else {
