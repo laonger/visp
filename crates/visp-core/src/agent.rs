@@ -406,6 +406,16 @@ pub async fn run_agent_loop(
                         }
                         // None 代表 stream 意外中断（API 超时断连等），未收到 Done 标记
                         None => {
+                            let partial_len = text_buffer.len();
+                            let tool_count = tool_calls.len();
+                            let thinking_count = thinking_blocks.len();
+                            tracing::warn!(
+                                session_id = %ctx.session_id,
+                                partial_response_len = partial_len,
+                                tool_calls_received = tool_count,
+                                thinking_blocks = thinking_count,
+                                "LLM stream ended without Done event — connection likely dropped"
+                            );
                             try_send!(AgentEvent::Error {
                                 code: AgentErrorCode::Internal,
                                 message: "LLM stream ended unexpectedly — the response may be incomplete, check API connection".into(),
