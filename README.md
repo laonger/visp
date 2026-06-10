@@ -126,7 +126,7 @@ api_key = "sk-ant-..."          # 或设置 ANTHROPIC_API_KEY 环境变量
 
 不创建也能运行，仅配 `api_key` 和 `model` 即可。完整的注解模板见 [`docs/daemon.toml`](docs/daemon.toml)，完整结构见 [`config.rs`](crates/visp-daemon/src/config.rs)。
 
-### 规则文件
+### 规则文件（rules）
 
 项目级规则放在 `.visp/rules/`，全局规则放在 `~/.config/visp/rules/`，Markdown 格式：
 
@@ -143,7 +143,7 @@ alwaysApply: true
 
 `alwaysApply: true` 表示无条件注入 prompt，`false` 则按需注入。也支持 `AGENTS.md` 从项目目录向上查找。
 
-### 技能文件
+### 技能文件（skills）
 
 领域知识或工作流指令放在 `.visp/skills/` 下，每个技能一个子目录，包含 `SKILL.md`：
 
