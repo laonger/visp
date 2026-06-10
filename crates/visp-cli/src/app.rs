@@ -342,10 +342,8 @@ pub(crate) fn wrap_text(text: &str, screen_width: u16) -> Vec<String> {
                 w += cw;
                 end = start + i + 1;
 
-                // 刚好填满一行时直接结束
-                if w == sw && i + 1 < chars[start..].len() {
-                    break;
-                }
+                // 不主动在 w == sw 时断行，留给下一轮 overflow 逻辑
+                // 处理，确保在单词边界折行，而非截断单词
             }
 
             result.push(chars[start..end].iter().collect());
@@ -527,6 +525,89 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ════════════════════════════════════════════════════════════
+    // wrap_text 测试
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_wrap_text_exact_fit() {
+        // 刚好填满一行，无截断问题
+        let result = wrap_text("12345", 5);
+        assert_eq!(result, vec!["12345"]);
+    }
+
+    #[test]
+    fn test_wrap_text_word_boundary() {
+        // 单词边界折行：hello word, width=7
+        // 修复前：["hello w", "ord"]（单词被截断）
+        // 修复后：["hello", "word"]
+        let result = wrap_text("hello word", 7);
+        assert_eq!(result, vec!["hello", "word"]);
+    }
+
+    #[test]
+    fn test_wrap_text_word_boundary_exact() {
+        // 前一个单词刚好填满，后续还有单词
+        let result = wrap_text("hello word", 5);
+        assert_eq!(result, vec!["hello", "word"]);
+    }
+
+    #[test]
+    fn test_wrap_text_long_word_breaks_char() {
+        // 单词超过一行宽度，允许字符级断行
+        let result = wrap_text("Helloworld", 5);
+        assert_eq!(result, vec!["Hello", "world"]);
+    }
+
+    #[test]
+    fn test_wrap_text_multi_word_boundary() {
+        // 多个单词，每次都在单词边界折行
+        let result = wrap_text("This is a test hello", 8);
+        assert_eq!(result, vec!["This is", "a test", "hello"]);
+    }
+
+    #[test]
+    fn test_wrap_text_chinese_english_mixed() {
+        // 中文 + 英文混合
+        let result = wrap_text("这是一个test", 8);
+        assert_eq!(result, vec!["这是一个", "test"]);
+    }
+
+    #[test]
+    fn test_wrap_text_newline_paragraphs() {
+        // 显式换行符
+        let result = wrap_text("hello\nworld", 10);
+        assert_eq!(result, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn test_wrap_text_empty() {
+        // 空字符串返回一个空行（split('\n') 行为）
+        let result = wrap_text("", 10);
+        assert_eq!(result, vec![""]);
+    }
+
+    #[test]
+    fn test_wrap_text_empty_line() {
+        let result = wrap_text("\n", 10);
+        assert_eq!(result, vec!["", ""]);
+    }
+
+    #[test]
+    fn test_wrap_text_zero_width() {
+        let result = wrap_text("hello", 0);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_wrap_text_word_not_truncated_at_exact_fill() {
+        // 核心场景：单词紧贴右边界时不截断
+        // "abcde fghij" width=5
+        // "abcde" 占满5，后面有空格，应在空格处折行
+        let result = wrap_text("abcde fghij", 5);
+        assert_eq!(result, vec!["abcde", "fghij"]);
+    }
 
     #[test]
     fn test_stale_done_expected_default() {
