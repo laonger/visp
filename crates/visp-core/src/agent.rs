@@ -395,6 +395,8 @@ pub async fn run_agent_loop(
                         Some(Ok(ChatEvent::ToolCall { id, name, arguments })) => {
                             tool_calls.push(ToolCallRequest { id, name, arguments });
                         }
+                        // Done 表示 stream 正常结束，byte_stream_to_chat_events
+                        // 始终在 stream 结束前发射 Done，后续 None 不会到达此分支
                         Some(Ok(ChatEvent::Done)) => break,
                         Some(Err(e)) => {
                             let (code, msg) = llm_error_to_code(&e);
@@ -402,7 +404,15 @@ pub async fn run_agent_loop(
                             let _ = session_mgr.finish_loop(&ctx.session_id, SessionStatus::Error);
                             return;
                         }
-                        None => break,
+                        // None 代表 stream 意外中断（API 超时断连等），未收到 Done 标记
+                        None => {
+                            try_send!(AgentEvent::Error {
+                                code: AgentErrorCode::Internal,
+                                message: "LLM stream ended unexpectedly — the response may be incomplete, check API connection".into(),
+                            });
+                            let _ = session_mgr.finish_loop(&ctx.session_id, SessionStatus::Error);
+                            return;
+                        }
                     }
                 }
             }
@@ -1645,12 +1655,16 @@ mod tests {
     #[tokio::test]
     async fn test_user_query_marker_in_response() {
         // Provider returns text with [USER_QUERY] marker
-        let provider: StdArc<dyn LlmProvider> = StdArc::new(TestProvider::new(vec![vec![
-            ChatEvent::TextDelta(
-                "What color?\n[USER_QUERY]\nChoose:\n- Red\n- Blue\n[/USER_QUERY]".into(),
-            ),
-            ChatEvent::Done,
-        ]]));
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(TestProvider::new(vec![
+            vec![
+                ChatEvent::TextDelta(
+                    "What color?\n[USER_QUERY]\nChoose:\n- Red\n- Blue\n[/USER_QUERY]"
+                        .into(),
+                ),
+                ChatEvent::Done,
+            ],
+            vec![ChatEvent::Done],
+        ]));
 
         let (tx, mut rx) = mpsc::channel(64);
         let registry = ToolRegistry::new();
