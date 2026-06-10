@@ -3767,6 +3767,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "visp-context"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "visp-core",
+]
+
+[[package]]
 name = "visp-core"
 version = "0.1.0"
 dependencies = [
@@ -3801,6 +3809,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "visp-codegraph",
+ "visp-context",
  "visp-core",
  "visp-llm",
  "visp-proto",
