@@ -1,5 +1,5 @@
 pub mod anthropic;
 pub mod mock;
 pub mod openai;
-pub mod streaming;
-pub mod util;
+pub(crate) mod streaming;
+pub(crate) mod util;
