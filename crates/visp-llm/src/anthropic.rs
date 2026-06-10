@@ -768,6 +768,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".into(),
             temperature: 0.7,
             max_tokens: 4096,
+            max_context_tokens: 128_000,
             extra: Default::default(),
         };
         let req = build_anthropic_request(&msgs, &[], &config);
