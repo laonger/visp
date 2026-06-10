@@ -7,6 +7,18 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use std::io::{self, Write};
 use visp_proto::visp::{LlmConfig, server_message};
 
+/// 将一段文本插入到 textarea 中（模拟逐字输入）
+fn paste_text(textarea: &mut ratatui_textarea::TextArea<'static>, text: &str) {
+    for c in text.chars() {
+        textarea.input(ratatui_textarea::Input {
+            key: ratatui_textarea::Key::Char(c),
+            ctrl: false,
+            alt: false,
+            shift: false,
+        });
+    }
+}
+
 /// Drop guard: 离开作用域时保证恢复终端状态
 struct TerminalGuard;
 
@@ -346,6 +358,12 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
             }
             _ => {}
         },
+        // 处理终端粘贴事件（bracketed paste）
+        Event::Paste(text) => {
+            if app.confirm.as_ref().map_or(true, |c| c.other_active) {
+                paste_text(&mut app.textarea, &text);
+            }
+        }
         _ => {}
     }
     false

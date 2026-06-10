@@ -313,19 +313,48 @@ pub(crate) fn wrap_text(text: &str, screen_width: u16) -> Vec<String> {
         let chars: Vec<char> = paragraph.chars().collect();
         let mut start = 0;
         while start < chars.len() {
+            // 寻找可折行位置：优先按单词边界（空白字符）断行
             let mut w: usize = 0;
             let mut end = start;
+            let mut break_at = None; // 最后一个空白符位置
+
             for (i, &c) in chars[start..].iter().enumerate() {
                 let cw = c.width().unwrap_or(0) as usize;
-                if w + cw > sw && w > 0 {
-                    end = start + i;
-                    break;
+
+                // 记录空白符位置作为可选断点
+                if c.is_whitespace() && w > 0 {
+                    break_at = Some((start + i, w));
                 }
+
+                if w + cw > sw {
+                    if let Some((bp, _)) = break_at {
+                        // 有空白符可断：在空白符处折行
+                        end = bp;
+                        break;
+                    }
+                    // 整个单词超过一行宽度，允许字符断行
+                    if w > 0 {
+                        end = start + i;
+                        break;
+                    }
+                }
+
                 w += cw;
                 end = start + i + 1;
+
+                // 刚好填满一行时直接结束
+                if w == sw && i + 1 < chars[start..].len() {
+                    break;
+                }
             }
+
             result.push(chars[start..end].iter().collect());
             start = end;
+
+            // 如果断点在空白符，跳过后续空白避免空行
+            while start < chars.len() && chars[start].is_whitespace() {
+                start += 1;
+            }
         }
     }
     result
