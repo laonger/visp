@@ -44,18 +44,19 @@ jobs:
         env:
           CARGO_TERM_COLOR: always
 
-      - name: Archive binaries
+      - name: Package binaries
         run: |
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/visp        dist/visp-${{ matrix.target }}
-          cp target/${{ matrix.target }}/release/visp-daemon dist/visp-daemon-${{ matrix.target }}
-          cp target/${{ matrix.target }}/release/visp-cli    dist/visp-cli-${{ matrix.target }}
+          mkdir -p visp-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/visp        visp-${{ matrix.target }}/
+          cp target/${{ matrix.target }}/release/visp-daemon visp-${{ matrix.target }}/
+          cp target/${{ matrix.target }}/release/visp-cli    visp-${{ matrix.target }}/
+          tar czf visp-${{ matrix.target }}.tar.gz visp-${{ matrix.target }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v5
         with:
           name: visp-${{ matrix.target }}
-          path: dist/*
+          path: visp-${{ matrix.target }}.tar.gz
 
   release:
     needs: build
