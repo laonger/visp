@@ -343,7 +343,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                             None
                         };
                         if let Some(cmd) = completion {
-                            app.textarea = ratatui_textarea::TextArea::default();
+                            app.textarea = AppState::new_textarea();
                             app.textarea.insert_str(&cmd);
                         }
                     }
@@ -357,7 +357,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                                 i.saturating_sub(1)
                             });
                         app.history_index = Some(idx);
-                        app.textarea = ratatui_textarea::TextArea::default();
+                        app.textarea = AppState::new_textarea();
                         app.textarea.insert_str(&app.input_history[idx]);
                     }
                 }
@@ -366,11 +366,10 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                         let ni = idx + 1;
                         if ni >= app.input_history.len() {
                             app.history_index = None;
-                            app.textarea = ratatui_textarea::TextArea::default();
-                            app.textarea.set_placeholder_text("Type your message...");
+                            app.textarea = AppState::new_textarea();
                         } else {
                             app.history_index = Some(ni);
-                            app.textarea = ratatui_textarea::TextArea::default();
+                            app.textarea = AppState::new_textarea();
                             app.textarea.insert_str(&app.input_history[ni]);
                         }
                     }
