@@ -145,7 +145,8 @@ impl Tool for WriteFile {
             None => return ToolResult::error("Missing required argument: path"),
         };
         let content = match arguments.get("content").and_then(|v| v.as_str()) {
-            Some(s) => s,
+            Some(s) if !s.is_empty() => s,
+            Some(_) => return ToolResult::error("Content is empty"),
             None => return ToolResult::error("Missing required argument: content"),
         };
 
@@ -228,7 +229,8 @@ impl Tool for EditFile {
             None => return ToolResult::error("Missing required argument: path"),
         };
         let old_string = match arguments.get("old_string").and_then(|v| v.as_str()) {
-            Some(s) => s,
+            Some(s) if !s.is_empty() => s,
+            Some(_) => return ToolResult::error("old_string is empty"),
             None => return ToolResult::error("Missing required argument: old_string"),
         };
         let new_string = match arguments.get("new_string").and_then(|v| v.as_str()) {

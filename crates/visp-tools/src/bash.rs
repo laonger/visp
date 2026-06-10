@@ -102,7 +102,8 @@ impl Tool for Bash {
 
     async fn execute(&self, arguments: serde_json::Value, context: &ToolContext) -> ToolResult {
         let command = match arguments.get("command").and_then(|v| v.as_str()) {
-            Some(cmd) => cmd,
+            Some(cmd) if !cmd.trim().is_empty() => cmd,
+            Some(_) => return ToolResult::error("Command is empty"),
             None => return ToolResult::error("Missing required parameter: command"),
         };
 
