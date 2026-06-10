@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use crate::message::Message;
+use crate::message::Role;
 
 pub struct PromptBuilder;
 
@@ -70,6 +71,44 @@ impl PromptBuilder {
 
 pub fn user_query_instruction() -> &'static str {
     USER_QUERY_INSTRUCTION
+}
+
+pub const TOOL_OUTPUT_MAX_CHARS: usize = 2_000;
+
+/// 估算消息列表中每条消息在 prompt 中的实际 token 数
+/// - 非 Tool 消息：直接返回 msg.estimated_tokens
+/// - Tool 消息超过 TOOL_OUTPUT_MAX_CHARS：按截断后长度估算
+pub fn estimate_message_tokens_for_prompt(msg: &Message) -> u32 {
+    if msg.role == Role::Tool && msg.content.chars().count() > TOOL_OUTPUT_MAX_CHARS {
+        ((TOOL_OUTPUT_MAX_CHARS as f64 / 4.0).ceil() as u32) + 1
+    } else {
+        msg.estimated_tokens
+    }
+}
+
+/// 批量版本
+pub fn estimate_messages_tokens_for_prompt(messages: &[Message]) -> u32 {
+    messages
+        .iter()
+        .map(estimate_message_tokens_for_prompt)
+        .sum()
+}
+
+/// max_context_tokens 是 effective limit（含预留）
+/// 只减去 max(output_tokens, 4000) 作为输出保留空间
+pub fn calculate_available(max_context_tokens: u32, output_tokens: u32) -> u32 {
+    max_context_tokens.saturating_sub(output_tokens.max(4_000))
+}
+
+/// 截断工具输出到 TOOL_OUTPUT_MAX_CHARS 字符（按字符计数，不是字节）
+/// 使用 chars().take() 保证 Unicode 安全
+pub fn truncate_tool_output(content: &str) -> String {
+    if content.chars().count() <= TOOL_OUTPUT_MAX_CHARS {
+        content.to_string()
+    } else {
+        let truncated: String = content.chars().take(TOOL_OUTPUT_MAX_CHARS).collect();
+        format!("{}... (truncated)", truncated)
+    }
 }
 
 #[cfg(test)]
@@ -181,5 +220,71 @@ mod tests {
         // 语气必须强硬，不能是 suggestion
         assert!(instruction.contains("MUST"));
         assert!(!instruction.contains("you can"));
+    }
+
+    // ---- 3a: Token 估算 + 预算 + 截断 ----
+
+    #[test]
+    fn test_estimate_msg_tokens_for_prompt_user() {
+        let msg = Message::user("hello world");
+        assert_eq!(
+            estimate_message_tokens_for_prompt(&msg),
+            msg.estimated_tokens
+        );
+    }
+
+    #[test]
+    fn test_estimate_msg_tokens_for_prompt_short_tool() {
+        let msg = Message::tool("short output", "call_1");
+        assert_eq!(
+            estimate_message_tokens_for_prompt(&msg),
+            msg.estimated_tokens
+        );
+    }
+
+    #[test]
+    fn test_estimate_msg_tokens_for_prompt_long_tool() {
+        let long = "a".repeat(2500);
+        let msg = Message::tool(&long, "id");
+        assert_eq!(estimate_message_tokens_for_prompt(&msg), 501);
+    }
+
+    #[test]
+    fn test_estimate_messages_tokens_for_prompt_empty() {
+        assert_eq!(estimate_messages_tokens_for_prompt(&[]), 0);
+    }
+
+    #[test]
+    fn test_calculate_available_standard() {
+        assert_eq!(calculate_available(128_000, 4_000), 124_000);
+    }
+
+    #[test]
+    fn test_calculate_available_high_output() {
+        assert_eq!(calculate_available(128_000, 8_000), 120_000);
+    }
+
+    #[test]
+    fn test_truncate_tool_output_short() {
+        assert_eq!(truncate_tool_output("short"), "short");
+    }
+
+    #[test]
+    fn test_truncate_tool_output_long() {
+        let long = "x".repeat(3000);
+        let result = truncate_tool_output(&long);
+        let expected_prefix: String = "x".repeat(2000);
+        assert!(result.starts_with(&expected_prefix));
+        assert!(result.len() > 2000);
+        assert!(result.contains("truncated"));
+    }
+
+    #[test]
+    fn test_truncate_tool_output_unicode() {
+        let chinese = "你好".repeat(1500); // 3000 chars
+        let result = truncate_tool_output(&chinese);
+        let expected_prefix: String = "你好".repeat(1000); // 2000 chars
+        assert!(result.starts_with(&expected_prefix));
+        assert!(result.contains("truncated"));
     }
 }
