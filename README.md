@@ -81,14 +81,7 @@
 独立会话生命周期（Idle → Running → Completed/Error），每个会话维护独立的对话历史和 LLM 配置。当前为内存存储，可通过 `SessionStore` trait 替换为持久化实现。
 
 ### 上下文裁剪
-长对话自动管理 context window，防止超出 LLM token 限制：
-
-- **Token 估算**：消息构造时自动计算 `chars/4` 近似 token 数
-- **三段式剪枝**：对话历史分为 HEAD（前 5 轮，保护）+ MIDDLE（可裁剪）+ TAIL（后 10 轮，保护），裁剪 MIDDLE 中最旧的完整轮次
-- **极端保底**：HEAD+TAIL 仍超预算时，保留首条 User（任务锚点）+ 尾部最近消息
-- **工具输出压缩**：Tool 消息截断到 2000 字符，仅影响 prompt 副本，存储保留完整原始内容
-- **预算公式**：`available = max_context_tokens − max(output_tokens, 4000)`，通过 `LlmConfig.max_context_tokens` 配置（默认 128K）
-- **架构**：独立 `visp-context` crate，core 通过 `ContextTrimmer` trait 调用，daemon 依赖注入，可替换裁剪策略
+长对话自动管理 context window，通过三段式剪枝（HEAD/MIDDLE/TAIL）和工具输出压缩控制 token 用量。详见 [visp-context](crates/visp-context/README.md)。
 
 ### Skills 技能系统
 从 `.visp/skills/` 加载技能定义，用于注入领域知识或工作流指令。每个技能是一个子目录，包含 `SKILL.md`（YAML frontmatter + Markdown 内容），自动合并到 system prompt 中：
