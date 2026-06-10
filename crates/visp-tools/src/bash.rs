@@ -254,7 +254,8 @@ mod tests {
         let ctx = test_context(dir.path());
         let result = Bash
             .execute(
-                serde_json::json!({"command": "printf '\\xff\\xfe\\x00\\x01'"}),
+                // Use octal escapes (POSIX compatible) instead of \xNN (bash extension)
+                serde_json::json!({"command": "printf '\\377\\376\\000\\001'"}),
                 &ctx,
             )
             .await;
