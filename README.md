@@ -116,9 +116,15 @@ cargo build --release
 
 ### 配置（可选）
 
-配置文件位于 `~/.config/visp/daemon.toml`，所有字段均有默认值，只需填写需要覆盖的项。完整的注解模板见 [`docs/daemon.toml`](docs/daemon.toml)。
+配置文件位于 `~/.config/visp/daemon.toml`，所有字段均有默认值，只需填写需要覆盖的项：
 
-不创建配置文件也能运行，所有缺省项使用内置默认值。完整的配置结构见 [`config.rs`](crates/visp-daemon/src/config.rs)。
+```toml
+[llm]
+model = "claude-sonnet-4-20250514"
+api_key = "sk-ant-..."          # 或设置 ANTHROPIC_API_KEY 环境变量
+```
+
+不创建也能运行，仅配 `api_key` 和 `model` 即可。完整的注解模板见 [`docs/daemon.toml`](docs/daemon.toml)，完整结构见 [`config.rs`](crates/visp-daemon/src/config.rs)。
 
 ### 运行
 
