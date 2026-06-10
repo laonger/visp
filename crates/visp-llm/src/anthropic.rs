@@ -5,6 +5,8 @@ use visp_core::error::LlmError;
 use visp_core::message::{Message, Role, ToolDefinition};
 use visp_core::provider::{ChatEvent, LlmConfig, LlmProvider};
 
+use crate::util::parse_retry_after;
+
 /// 构建 Anthropic API 请求体
 pub fn build_anthropic_request(
     messages: &[Message],
@@ -94,9 +96,13 @@ fn build_anthropic_messages(messages: &[&Message]) -> Vec<serde_json::Value> {
 
     for msg in messages {
         if msg.role == Role::Tool {
+            let tool_use_id = msg.tool_call_id.as_deref().unwrap_or_else(|| {
+                tracing::warn!("Tool message without tool_call_id");
+                ""
+            });
             let tool_result = serde_json::json!({
                 "type": "tool_result",
-                "tool_use_id": msg.tool_call_id.as_deref().unwrap_or(""),
+                "tool_use_id": tool_use_id,
                 "content": msg.content,
             });
             // 如果上一条消息已经是 user(tool_result)，追加到同一消息
@@ -117,11 +123,11 @@ fn build_anthropic_messages(messages: &[&Message]) -> Vec<serde_json::Value> {
             continue;
         }
 
-        // User / Assistant 消息
+        // User / Assistant 消息（System 和 Tool 已在上面过滤掉）
         let role_str = match msg.role {
             Role::User => "user",
             Role::Assistant => "assistant",
-            _ => unreachable!(),
+            _ => panic!("unexpected role in anthropic message: {:?}", msg.role),
         };
 
         // 构建 content blocks：extra_blocks + text + tool_use
@@ -143,8 +149,16 @@ fn build_anthropic_messages(messages: &[&Message]) -> Vec<serde_json::Value> {
         // tool_use blocks（仅 assistant 消息有 tool_calls）
         if let Some(ref calls) = msg.tool_calls {
             for call in calls {
-                let input: serde_json::Value =
-                    serde_json::from_str(&call.arguments).unwrap_or_default();
+                let input: serde_json::Value = match serde_json::from_str(&call.arguments) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            "failed to parse tool call arguments for '{}': {e}",
+                            call.name
+                        );
+                        serde_json::Value::Object(serde_json::Map::new())
+                    }
+                };
                 content_blocks.push(serde_json::json!({
                     "type": "tool_use",
                     "id": call.id,
@@ -256,7 +270,10 @@ pub(crate) fn parse_anthropic_event(event_name: &str, data: &str) -> Result<Pars
         "content_block_delta" => {
             let v: serde_json::Value = serde_json::from_str(data)
                 .map_err(|e| LlmError::Stream(format!("parse content_block_delta: {e}")))?;
-            let delta_type = v["delta"]["type"].as_str().unwrap_or("");
+            let delta_type = v["delta"]["type"].as_str().unwrap_or_else(|| {
+                tracing::warn!("anthropic SSE content_block_delta without type");
+                ""
+            });
             let index = v["index"].as_u64().unwrap_or(0);
             match delta_type {
                 "text_delta" => {
@@ -290,13 +307,22 @@ pub(crate) fn parse_anthropic_event(event_name: &str, data: &str) -> Result<Pars
             let v: serde_json::Value = serde_json::from_str(data)
                 .map_err(|e| LlmError::Stream(format!("parse content_block_start: {e}")))?;
             let index = v["index"].as_u64().unwrap_or(0);
-            let block_type = v["content_block"]["type"].as_str().unwrap_or("");
+            let block_type = v["content_block"]["type"].as_str().unwrap_or_else(|| {
+                tracing::warn!("anthropic SSE content_block_start without type");
+                ""
+            });
             match block_type {
                 "tool_use" => {
-                    let id = v["content_block"]["id"].as_str().unwrap_or("").to_string();
+                    let id = v["content_block"]["id"].as_str().unwrap_or_else(|| {
+                        tracing::warn!("anthropic SSE tool_use block without id");
+                        ""
+                    }).to_string();
                     let name = v["content_block"]["name"]
                         .as_str()
-                        .unwrap_or("")
+                        .unwrap_or_else(|| {
+                            tracing::warn!("anthropic SSE tool_use block without name");
+                            ""
+                        })
                         .to_string();
                     // 流式下 content_block_start 的 input 通常为 {}，真正的参数通过 input_json_delta 发送
                     // 舍弃初始 input，从空字符串开始累积
@@ -334,14 +360,6 @@ pub(crate) fn parse_anthropic_event(event_name: &str, data: &str) -> Result<Pars
         }
         _ => Ok(ParsedEvent::Skip),
     }
-}
-
-/// 从 HTTP 响应头解析 `Retry-After` 秒数
-pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    headers
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok())
 }
 
 /// Anthropic API 提供器
@@ -429,10 +447,16 @@ fn byte_stream_to_chat_events(
         input: String,
     }
 
+    struct ThinkingAcc {
+        signature: String,
+        thinking: String,
+    }
+
     struct StreamState {
         stream: Pin<Box<dyn Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send>>,
         buf: String,
         tools: HashMap<String, ToolAcc>,
+        thinking_acc: HashMap<String, ThinkingAcc>,
         input_tokens: u32,
         output_tokens: u32,
         /// 设为 true 后，下次 unfold 迭代发射 UsageInfo，再下次发射 Done
@@ -445,6 +469,7 @@ fn byte_stream_to_chat_events(
         stream: Box::pin(byte_stream),
         buf: String::new(),
         tools: HashMap::new(),
+        thinking_acc: HashMap::new(),
         input_tokens: 0,
         output_tokens: 0,
         done_pending: false,
@@ -500,7 +525,6 @@ fn byte_stream_to_chat_events(
                             input_tokens,
                             output_tokens,
                         }) => {
-                            // ×tracing not available in this crate
                             if input_tokens > 0 {
                                 state.input_tokens = input_tokens;
                             }
@@ -514,15 +538,14 @@ fn byte_stream_to_chat_events(
                             signature,
                         }) => {
                             let key = format!("thinking_{}", index);
-                            let entry = state.tools.entry(key).or_insert_with(|| ToolAcc {
-                                id: String::new(),
-                                name: String::new(),
-                                input: String::new(),
+                            let entry = state.thinking_acc.entry(key).or_insert_with(|| ThinkingAcc {
+                                signature: String::new(),
+                                thinking: String::new(),
                             });
                             if !signature.is_empty() {
-                                entry.name = signature;
+                                entry.signature = signature;
                             }
-                            entry.input.push_str(&partial);
+                            entry.thinking.push_str(&partial);
                         }
                         Ok(ParsedEvent::ToolInputDelta {
                             index,
@@ -545,12 +568,12 @@ fn byte_stream_to_chat_events(
                             }
                         }
                         Ok(ParsedEvent::BlockStop { index }) => {
-                            let tkey = format!("thinking_{}", index);
-                            if let Some(acc) = state.tools.remove(&tkey) {
+                            let tkey = index.to_string();
+                            if let Some(acc) = state.thinking_acc.remove(&tkey) {
                                 let block = serde_json::json!({
                                     "type": "thinking",
-                                    "thinking": acc.input,
-                                    "signature": acc.name,
+                                    "thinking": acc.thinking,
+                                    "signature": acc.signature,
                                 });
                                 return Some((Ok(ChatEvent::ThinkingBlock(block)), state));
                             }

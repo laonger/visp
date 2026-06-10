@@ -6,6 +6,8 @@ use visp_core::error::LlmError;
 use visp_core::message::{Message, Role, ToolDefinition};
 use visp_core::provider::{ChatEvent, LlmConfig, LlmProvider};
 
+use crate::util::parse_retry_after;
+
 /// 构建 OpenAI API 请求体
 pub fn build_openai_request(
     messages: &[Message],
@@ -111,7 +113,8 @@ pub fn build_openai_headers(api_key: &str) -> reqwest::header::HeaderMap {
 /// - System 角色使用 `role: "system"`
 /// - Tool 角色使用 `role: "tool"` + `tool_call_id`
 /// - User 消息 content 为字符串
-/// - Assistant 消息可包含 content 和 tool_calls
+/// - Assistant 消息可包含 content、tool_calls 和 extra_blocks 中的扩展字段
+///   （如 thinking，部分 OpenAI 兼容模型支持）
 pub fn build_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
     let mut result: Vec<serde_json::Value> = Vec::new();
 
@@ -153,12 +156,30 @@ pub fn build_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                     assistant_msg["tool_calls"] = serde_json::Value::Array(tool_calls);
                 }
 
+                // 合并 extra_blocks（如 thinking）到 assistant message 顶层字段
+                // 部分 OpenAI 兼容模型支持这些扩展字段
+                if let Some(ref blocks) = msg.extra_blocks {
+                    for block in blocks {
+                        if let Some(obj) = block.as_object() {
+                            for (key, val) in obj {
+                                if key != "type" {
+                                    assistant_msg[key] = val.clone();
+                                }
+                            }
+                        }
+                    }
+                }
+
                 result.push(assistant_msg);
             }
             Role::Tool => {
+                let tool_call_id = msg.tool_call_id.as_deref().unwrap_or_else(|| {
+                    tracing::warn!("Tool message without tool_call_id");
+                    ""
+                });
                 result.push(serde_json::json!({
                     "role": "tool",
-                    "tool_call_id": msg.tool_call_id.as_deref().unwrap_or(""),
+                    "tool_call_id": tool_call_id,
                     "content": msg.content,
                 }));
             }
@@ -184,10 +205,12 @@ pub(crate) enum OpenAiStreamEvent {
         index: usize,
         arguments: String,
     },
-    /// 内容块结束（index, finish_reason）
-    Stop {
-        _index: usize,
-        _finish_reason: Option<String>,
+    /// 内容块结束，携带 finish_reason
+    /// fields 保留用于调试，match 时用 `..` 忽略
+    #[allow(dead_code)]
+    Finish {
+        index: usize,
+        reason: Option<String>,
     },
     /// token 用量
     Usage {
@@ -278,9 +301,9 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<OpenAiStreamEvent, Llm
 
     // 检查 finish_reason
     if let Some(reason) = finish_reason {
-        return Ok(OpenAiStreamEvent::Stop {
-            _index: index,
-            _finish_reason: Some(reason),
+        return Ok(OpenAiStreamEvent::Finish {
+            index,
+            reason: Some(reason),
         });
     }
 
@@ -358,7 +381,7 @@ fn byte_stream_to_chat_events(
                                     entry.2.push_str(&arguments);
                                 }
                             }
-                            Ok(OpenAiStreamEvent::Stop { .. }) => {
+                            Ok(OpenAiStreamEvent::Finish { .. }) => {
                                 if !state.tool_acc.is_empty() {
                                     let calls: Vec<(String, String, String)> = state
                                         .tool_acc
@@ -368,6 +391,8 @@ fn byte_stream_to_chat_events(
                                     state.pending_tool_calls =
                                         calls.into_iter().rev().collect();
                                 }
+                                // 收到 finish_reason 即标记流结束，无需等待底层流关闭
+                                state.stream_ended = true;
                             }
                             Ok(OpenAiStreamEvent::Usage {
                                 input_tokens,
@@ -544,14 +569,6 @@ impl LlmProvider for OpenAiProvider {
     }
 }
 
-/// 从 HTTP headers 中解析 Retry-After 值
-fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    headers
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,6 +649,37 @@ mod tests {
         assert_eq!(result[2]["role"], "tool");
         assert_eq!(result[2]["tool_call_id"], "call_1");
         assert_eq!(result[2]["content"], "file content");
+    }
+
+    #[test]
+    fn test_build_messages_with_extra_blocks() {
+        let msgs = vec![
+            Message::user("Think step by step"),
+            Message {
+                role: Role::Assistant,
+                content: "Let me think".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                extra_blocks: Some(vec![
+                    serde_json::json!({
+                        "type": "thinking",
+                        "thinking": "I need to reason about this",
+                        "signature": "sig_123",
+                    }),
+                ]),
+                skip_context: false,
+                estimated_tokens: 0,
+            },
+        ];
+        let result = build_openai_messages(&msgs);
+        assert_eq!(result.len(), 2);
+        let assistant = &result[1];
+        assert_eq!(assistant["role"], "assistant");
+        assert_eq!(assistant["content"], "Let me think");
+        assert_eq!(assistant["thinking"], "I need to reason about this");
+        assert_eq!(assistant["signature"], "sig_123");
+        // "type" 字段应被跳过，不出现在消息中
+        assert!(assistant.get("type").is_none());
     }
 
     // --- build_openai_request 测试 ---
@@ -765,11 +813,10 @@ mod tests {
         let data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
         let result = parse_openai_sse_data(data).unwrap();
         match result {
-            OpenAiStreamEvent::Stop {
-                _finish_reason: Some(r),
-                ..
+            OpenAiStreamEvent::Finish {
+                reason: Some(r), ..
             } => assert_eq!(r, "stop"),
-            _ => panic!("expected Stop, got {:?}", result),
+            _ => panic!("expected Finish, got {:?}", result),
         }
     }
 
@@ -778,11 +825,10 @@ mod tests {
         let data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#;
         let result = parse_openai_sse_data(data).unwrap();
         match result {
-            OpenAiStreamEvent::Stop {
-                _finish_reason: Some(r),
-                ..
+            OpenAiStreamEvent::Finish {
+                reason: Some(r), ..
             } => assert_eq!(r, "tool_calls"),
-            _ => panic!("expected Stop, got {:?}", result),
+            _ => panic!("expected Finish, got {:?}", result),
         }
     }
 
@@ -817,13 +863,13 @@ mod tests {
             reqwest::header::RETRY_AFTER,
             "30".parse().unwrap(),
         );
-        assert_eq!(parse_retry_after(&headers), Some(30));
+        assert_eq!(crate::util::parse_retry_after(&headers), Some(30));
     }
 
     #[test]
     fn test_parse_retry_after_missing() {
         let headers = reqwest::header::HeaderMap::new();
-        assert_eq!(parse_retry_after(&headers), None);
+        assert_eq!(crate::util::parse_retry_after(&headers), None);
     }
 
     // --- byte_stream_to_chat_events 测试 ---
