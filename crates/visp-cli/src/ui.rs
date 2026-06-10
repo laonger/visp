@@ -11,7 +11,7 @@ use ratatui::{
 use crate::app::{AppState, MessageCache, pad_to_width};
 use crate::debug_log;
 use crate::theme;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// 分隔线颜色
 const SEP_FG: Color = Color::DarkGray;
@@ -335,7 +335,7 @@ fn render_confirm_bar(app: &AppState, f: &mut Frame, area: Rect) {
         let avail_w = area.width as usize;
         let has_other = confirm.allow_other;
         let other_label = "[X] Other";
-        let other_full_w = if has_other { other_label.len() } else { 0 };
+        let other_full_w = if has_other { UnicodeWidthStr::width(other_label) } else { 0 };
         let num_opts = options.len();
         let sep_w = 2; // "  " between options
         let prefix_w = 4; // "[X] "
@@ -360,15 +360,32 @@ fn render_confirm_bar(app: &AppState, f: &mut Frame, area: Rect) {
             0
         };
 
-        // 截断工具函数（用 chars().count() 确保中文字符正确处理）
+        // 截断工具函数（用 UnicodeWidthStr 确保 CJK 显示宽度正确）
         let truncate = |s: &str, max: usize| -> String {
-            let char_count = s.chars().count();
-            if char_count <= max || max == 0 {
+            let w = UnicodeWidthStr::width(s);
+            if w <= max || max == 0 {
                 s.to_string()
-            } else if max <= 1 {
-                s.chars().take(1).collect()
+            } else if max <= 2 {
+                // 空间太小，最多放一个字符
+                let first = s.chars().next().map(|c| c.to_string()).unwrap_or_default();
+                if UnicodeWidthStr::width(first.as_str()) <= max {
+                    first
+                } else {
+                    String::new()
+                }
             } else {
-                let result: String = s.chars().take(max - 1).collect();
+                // 按列宽逐字符构建，预留 1 列给 "…"
+                let mut result = String::new();
+                let mut current_w = 0;
+                for c in s.chars() {
+                    let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+                    if current_w + cw + 1 <= max {
+                        result.push(c);
+                        current_w += cw;
+                    } else {
+                        break;
+                    }
+                }
                 format!("{}…", result)
             }
         };

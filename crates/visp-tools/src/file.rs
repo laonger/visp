@@ -24,6 +24,8 @@ impl Tool for ReadFile {
     fn description(&self) -> &str {
         "Read the contents of a file from the local filesystem. \
          Use this to view source code, configuration files, logs, or any text file. \
+         You can optionally specify a line range (start_line and/or end_line) to read \
+         only a portion of the file, which is useful for large files. \
          File size is limited to 1MB (detected early to avoid large reads). \
          Binary files are detected and rejected automatically. \
          Paths are validated to prevent directory traversal attacks. \
@@ -37,6 +39,16 @@ impl Tool for ReadFile {
                 "path": {
                     "type": "string",
                     "description": "Path to the file to read, relative to the project root."
+                },
+                "start_line": {
+                    "type": "integer",
+                    "description": "Optional 1-based line number to start reading from (inclusive).",
+                    "minimum": 1
+                },
+                "end_line": {
+                    "type": "integer",
+                    "description": "Optional 1-based line number to stop reading at (inclusive). If start_line is set but end_line is not, reads from start_line to end of file.",
+                    "minimum": 1
                 }
             },
             "required": ["path"]
@@ -74,7 +86,7 @@ impl Tool for ReadFile {
             Err(e) => return ToolResult::error(format!("Failed to read file: {}", e)),
         };
 
-        // 二进制检测（前 8000 字节中 null 占比 > 10%）
+        // 二进制检测（前 8000 字节）
         let scan_end = BINARY_SCAN_BYTES.min(bytes.len());
         if scan_end > 0 {
             let null_count = bytes[..scan_end].iter().filter(|&&b| b == 0).count();
@@ -91,7 +103,58 @@ impl Tool for ReadFile {
             Err(_) => return ToolResult::error("File is not valid UTF-8"),
         };
 
-        ToolResult::success(truncate_output(&content, DEFAULT_MAX_OUTPUT_BYTES))
+        // 解析行范围参数
+        let start_line = arguments.get("start_line").and_then(|v| v.as_i64());
+        let end_line = arguments.get("end_line").and_then(|v| v.as_i64());
+
+        let result = if start_line.is_some() || end_line.is_some() {
+            let lines: Vec<&str> = content.lines().collect();
+            let total_lines = lines.len();
+
+            let start = start_line
+                .map(|n| (n as usize).saturating_sub(1))
+                .unwrap_or(0);
+            let end = end_line
+                .map(|n| (n as usize).saturating_sub(1))
+                .unwrap_or(total_lines.saturating_sub(1));
+
+            if start >= total_lines {
+                return ToolResult::error(format!(
+                    "start_line {} exceeds file length ({} lines)",
+                    start + 1,
+                    total_lines
+                ));
+            }
+            if end >= total_lines {
+                return ToolResult::error(format!(
+                    "end_line {} exceeds file length ({} lines)",
+                    end + 1,
+                    total_lines
+                ));
+            }
+            if start > end {
+                return ToolResult::error(format!(
+                    "start_line {} is after end_line {}",
+                    start + 1,
+                    end + 1
+                ));
+            }
+
+            let excerpt: String = lines[start..=end].join("\n");
+            let range_info = format!(
+                "{} (lines {}-{}, {} of {} lines):\n",
+                path.display(),
+                start + 1,
+                end + 1,
+                end - start + 1,
+                total_lines
+            );
+            format!("{}{}", range_info, excerpt)
+        } else {
+            content.to_string()
+        };
+
+        ToolResult::success(truncate_output(&result, DEFAULT_MAX_OUTPUT_BYTES))
     }
 }
 
@@ -429,6 +492,198 @@ mod tests {
             .block_on(tool.execute(args, &ctx));
         assert!(result.is_error);
         assert!(result.content.contains("binary"));
+    }
+
+    #[test]
+    fn test_read_file_line_range_start_only() {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("ranges.txt");
+        let lines: Vec<String> = (1..=20).map(|i| format!("line {}", i)).collect();
+        std::fs::write(&file_path, lines.join("\n")).unwrap();
+
+        let tool = ReadFile;
+        let ctx = ToolContext {
+            working_dir: tmp.path().to_path_buf(),
+            session_id: None,
+        };
+        let args = serde_json::json!({
+            "path": "ranges.txt",
+            "start_line": 5
+        });
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tool.execute(args, &ctx));
+        assert!(
+            !result.is_error,
+            "expected success, got error: {}",
+            result.content
+        );
+        assert!(result.content.contains("lines 5-20, 16 of 20 lines"));
+        assert!(result.content.contains("line 5"));
+        assert!(result.content.contains("line 20"));
+        assert!(!result.content.contains("line 4"));
+    }
+
+    #[test]
+    fn test_read_file_line_range_both() {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("ranges.txt");
+        let lines: Vec<String> = (1..=20).map(|i| format!("line {}", i)).collect();
+        std::fs::write(&file_path, lines.join("\n")).unwrap();
+
+        let tool = ReadFile;
+        let ctx = ToolContext {
+            working_dir: tmp.path().to_path_buf(),
+            session_id: None,
+        };
+        let args = serde_json::json!({
+            "path": "ranges.txt",
+            "start_line": 5,
+            "end_line": 8
+        });
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tool.execute(args, &ctx));
+        assert!(
+            !result.is_error,
+            "expected success, got error: {}",
+            result.content
+        );
+        assert!(result.content.contains("lines 5-8, 4 of 20 lines"));
+        assert!(result.content.contains("line 5"));
+        assert!(result.content.contains("line 6"));
+        assert!(result.content.contains("line 7"));
+        assert!(result.content.contains("line 8"));
+        assert!(!result.content.contains("line 4"));
+        assert!(!result.content.contains("line 9"));
+    }
+
+    #[test]
+    fn test_read_file_line_range_single_line() {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("single.txt");
+        let lines: Vec<String> = (1..=5).map(|i| format!("line {}", i)).collect();
+        std::fs::write(&file_path, lines.join("\n")).unwrap();
+
+        let tool = ReadFile;
+        let ctx = ToolContext {
+            working_dir: tmp.path().to_path_buf(),
+            session_id: None,
+        };
+        let args = serde_json::json!({
+            "path": "single.txt",
+            "start_line": 3,
+            "end_line": 3
+        });
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tool.execute(args, &ctx));
+        assert!(
+            !result.is_error,
+            "expected success, got error: {}",
+            result.content
+        );
+        assert!(result.content.contains("(lines 3-3, 1 of 5 lines)"));
+        assert!(result.content.contains("line 3"));
+    }
+
+    #[test]
+    fn test_read_file_line_range_start_exceeds() {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("small.txt");
+        std::fs::write(&file_path, "a\nb\nc\n").unwrap();
+
+        let tool = ReadFile;
+        let ctx = ToolContext {
+            working_dir: tmp.path().to_path_buf(),
+            session_id: None,
+        };
+        let args = serde_json::json!({
+            "path": "small.txt",
+            "start_line": 100
+        });
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tool.execute(args, &ctx));
+        assert!(result.is_error);
+        assert!(result.content.contains("exceeds file length"));
+    }
+
+    #[test]
+    fn test_read_file_line_range_end_exceeds() {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("small.txt");
+        std::fs::write(&file_path, "a\nb\nc\n").unwrap();
+
+        let tool = ReadFile;
+        let ctx = ToolContext {
+            working_dir: tmp.path().to_path_buf(),
+            session_id: None,
+        };
+        let args = serde_json::json!({
+            "path": "small.txt",
+            "start_line": 1,
+            "end_line": 100
+        });
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tool.execute(args, &ctx));
+        assert!(result.is_error);
+        assert!(result.content.contains("exceeds file length"));
+    }
+
+    #[test]
+    fn test_read_file_line_range_start_after_end() {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("small.txt");
+        std::fs::write(&file_path, "a\nb\nc\nd\ne\n").unwrap();
+
+        let tool = ReadFile;
+        let ctx = ToolContext {
+            working_dir: tmp.path().to_path_buf(),
+            session_id: None,
+        };
+        let args = serde_json::json!({
+            "path": "small.txt",
+            "start_line": 4,
+            "end_line": 2
+        });
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tool.execute(args, &ctx));
+        assert!(result.is_error);
+        assert!(result.content.contains("start_line"));
+        assert!(result.content.contains("after end_line"));
+    }
+
+    #[test]
+    fn test_read_file_whole_file_still_works() {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("whole.txt");
+        std::fs::write(&file_path, "hello world").unwrap();
+
+        let tool = ReadFile;
+        let ctx = ToolContext {
+            working_dir: tmp.path().to_path_buf(),
+            session_id: None,
+        };
+        let args = serde_json::json!({"path": "whole.txt"});
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tool.execute(args, &ctx));
+        assert!(
+            !result.is_error,
+            "expected success, got error: {}",
+            result.content
+        );
+        assert_eq!(result.content, "hello world");
     }
 
     // ---- WriteFile ----

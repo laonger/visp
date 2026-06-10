@@ -150,6 +150,8 @@ message Cancel {
 message ReadFileRequest {
     string path = 1;
     string session_id = 2;
+    optional int32 start_line = 3;
+    optional int32 end_line = 4;
 }
 
 message ReadFileResponse {

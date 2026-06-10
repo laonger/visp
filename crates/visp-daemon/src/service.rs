@@ -496,7 +496,14 @@ impl CoderDaemon for CoderDaemonService {
             session_id: Some(req.session_id),
         };
 
-        let args = serde_json::json!({ "path": path });
+        let mut args = serde_json::json!({ "path": path });
+        if let Some(start_line) = req.start_line {
+            args["start_line"] = serde_json::json!(start_line);
+        }
+        if let Some(end_line) = req.end_line {
+            args["end_line"] = serde_json::json!(end_line);
+        }
+
         let result = self
             .tool_registry
             .execute("read_file", args, &ctx)
