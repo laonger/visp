@@ -57,6 +57,7 @@ impl CoderDaemonService {
             model: llm_section.model,
             temperature: llm_section.temperature,
             max_tokens: llm_section.max_tokens,
+            max_context_tokens: llm_section.max_context_tokens,
             extra,
         };
         Self {

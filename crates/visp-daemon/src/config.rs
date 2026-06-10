@@ -32,6 +32,8 @@ pub struct LlmSection {
     pub temperature: f64,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    #[serde(default = "default_max_context_tokens")]
+    pub max_context_tokens: u32,
     #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default)]
@@ -80,6 +82,9 @@ fn default_temperature() -> f64 {
 }
 fn default_max_tokens() -> u32 {
     4096
+}
+fn default_max_context_tokens() -> u32 {
+    128_000
 }
 fn default_bash_timeout() -> u64 {
     120
@@ -135,6 +140,7 @@ fn default_config() -> DaemonConfig {
             model: default_model(),
             temperature: default_temperature(),
             max_tokens: default_max_tokens(),
+            max_context_tokens: default_max_context_tokens(),
             api_key: None,
             base_url: None,
             thinking_budget_tokens: None,
@@ -243,6 +249,54 @@ file_max_size_bytes = 256000
         assert_eq!(config.agent.llm_retry_base_delay_ms, 1000);
         assert!(config.agent.bash_confirm_mode);
         assert_eq!(config.agent.file_max_size_bytes, 1048576);
+    }
+
+    #[test]
+    fn test_default_max_context_tokens() {
+        assert_eq!(default_max_context_tokens(), 128_000);
+    }
+
+    #[test]
+    fn test_config_with_explicit_max_context_tokens() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+provider = "anthropic"
+model = "claude-3-7-sonnet-20250219"
+max_context_tokens = 64000
+
+[tools]
+
+[agent]
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.llm.max_context_tokens, 64_000);
+    }
+
+    #[test]
+    fn test_config_missing_max_context_tokens_defaults() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+provider = "anthropic"
+model = "claude-3-7-sonnet-20250219"
+
+[tools]
+
+[agent]
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.llm.max_context_tokens, 128_000);
+    }
+
+    #[test]
+    fn test_default_config_max_context_tokens() {
+        let config = default_config();
+        assert_eq!(config.llm.max_context_tokens, 128_000);
     }
 
     #[test]
