@@ -10,9 +10,29 @@ use ratatui::{
 
 use crate::app::{AppState, MessageCache, pad_to_width};
 use crate::theme;
+use unicode_width::UnicodeWidthStr;
 
 /// 分隔线颜色
 const SEP_FG: Color = Color::DarkGray;
+
+/// 计算输入框所需的行数（含文本折行），最小 3 行，最大 10 行
+fn calc_input_height(textarea: &ratatui_textarea::TextArea<'static>, width_approx: u16) -> u16 {
+    // TextArea 的 block 只有 Borders::TOP（无左右边框），折行宽度 = input_area.width = width_approx
+    let content_width = width_approx;
+    if content_width < 3 {
+        return 3;
+    }
+    let mut total: u16 = 0;
+    for line in textarea.lines() {
+        if line.is_empty() {
+            total += 1;
+        } else {
+            let w = UnicodeWidthStr::width(line.as_str()) as u16;
+            total += std::cmp::max(1, w.div_ceil(content_width));
+        }
+    }
+    total.clamp(3, 10)
+}
 
 /// 顶层渲染入口：将当前 AppState 绘制到终端
 pub fn render(app: &mut AppState, f: &mut Frame) {
@@ -22,7 +42,7 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
     let bg = Block::default().style(Style::default().bg(theme::BG));
     f.render_widget(Paragraph::new("").block(bg), f.area());
 
-    let input_area_height = 4;
+    let input_area_height = calc_input_height(&app.textarea, area.width);
     let bottom_chunks_height = input_area_height + (if app.confirm.is_some() { 5 } else { 4 });
 
     // 纵向分割：对话区 | 分隔线 | 底部区域
@@ -428,20 +448,25 @@ fn render_confirm_bar(app: &AppState, f: &mut Frame, area: Rect) {
 }
 
 /// 输入区：tui-textarea 封装
-fn render_input_area(app: &AppState, f: &mut Frame, area: Rect) {
-    let mut textarea = app.textarea.clone();
-    textarea.set_style(Style::default().fg(theme::INPUT_FG));
+fn render_input_area(app: &mut AppState, f: &mut Frame, area: Rect) {
+    let input_area = Rect::new(area.x, area.y, area.width, area.height);
 
+    // 直接在 app.textarea 上设 style/block，再通过 Widget::render 设置内部 area。
+    // 这样后续事件处理中 screen_map_load 使用正确宽度，使折行和上下键导航正常。
     let is_other_mode = app.confirm.as_ref().is_some_and(|c| c.other_active);
 
     if is_other_mode {
-        textarea.set_style(Style::default().fg(theme::INPUT_FG));
-        textarea.set_placeholder_text("Type your custom input...");
+        app.textarea.set_style(Style::default().fg(theme::INPUT_FG));
+        app.textarea
+            .set_placeholder_text("Type your custom input...");
     } else if app.generating {
-        textarea.set_style(Style::default().fg(theme::INPUT_NOTICE_FG));
-        textarea.set_placeholder_text("[Generating...]");
+        app.textarea
+            .set_style(Style::default().fg(theme::INPUT_NOTICE_FG));
+        app.textarea.set_placeholder_text("[Generating...]");
     } else {
-        // 如果输入以 / 开头，在输入区下方显示命令提示
+        app.textarea.set_style(Style::default().fg(theme::INPUT_FG));
+        app.textarea.set_placeholder_text("Type your message...");
+        // 命令提示
         let current = app
             .textarea
             .lines()
@@ -463,21 +488,23 @@ fn render_input_area(app: &AppState, f: &mut Frame, area: Rect) {
                 let hint_line = format!("  {}", hint.join("  "));
                 let hint_y = area.y + area.height.saturating_sub(1);
                 if hint_y > area.y {
-                    let p = Paragraph::new(hint_line)
-                        .style(Style::default().fg(theme::INPUT_NOTICE_FG));
-                    f.render_widget(p, Rect::new(area.x, hint_y, area.width, 1));
+                    f.render_widget(
+                        Paragraph::new(hint_line)
+                            .style(Style::default().fg(theme::INPUT_NOTICE_FG)),
+                        Rect::new(area.x, hint_y, area.width, 1),
+                    );
                 }
             }
         }
     }
-    textarea.set_block(
+    app.textarea.set_block(
         Block::default()
             .borders(Borders::TOP)
             .border_style(Style::default().fg(theme::INPUT_BORDER_FG))
             .style(Style::default().bg(theme::INPUT_BG)),
     );
-    let input_area = Rect::new(area.x, area.y, area.width, area.height);
-    f.render_widget(&textarea, input_area);
+    // 单次渲染：既设置内部 area（折行/导航所需的 screen map），也完成可视输出
+    f.render_widget(&app.textarea, input_area);
 }
 
 /// 底部状态栏：会话 ID / 模型 / 状态

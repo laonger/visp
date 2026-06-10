@@ -8,14 +8,31 @@ use std::io::{self, Write};
 use visp_proto::visp::{LlmConfig, server_message};
 
 /// 将一段文本插入到 textarea 中（模拟逐字输入）
+/// 注意：`\n` 必须映射为 `Key::Enter`，否则 ratatui_textarea 会丢弃换行符前的内容
 fn paste_text(textarea: &mut ratatui_textarea::TextArea<'static>, text: &str) {
+    // 统一换行符：\r\n → \n, \r → \n
+    // 终端粘贴可能携带 \r\n(Windows) 或 \r(旧 Mac)，不处理会导致多余空行或光标回行首覆盖
+    let text = if text.contains('\r') {
+        text.replace("\r\n", "\n").replace('\r', "\n")
+    } else {
+        text.to_string()
+    };
     for c in text.chars() {
-        textarea.input(ratatui_textarea::Input {
-            key: ratatui_textarea::Key::Char(c),
-            ctrl: false,
-            alt: false,
-            shift: false,
-        });
+        if c == '\n' {
+            textarea.input(ratatui_textarea::Input {
+                key: ratatui_textarea::Key::Enter,
+                ctrl: false,
+                alt: false,
+                shift: false,
+            });
+        } else {
+            textarea.input(ratatui_textarea::Input {
+                key: ratatui_textarea::Key::Char(c),
+                ctrl: false,
+                alt: false,
+                shift: false,
+            });
+        }
     }
 }
 
@@ -25,8 +42,8 @@ struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = crossterm::terminal::disable_raw_mode();
-        // 仅关闭 mouse mode 1000 + 1006（和启用时一致）
-        let _ = write!(io::stdout(), "\x1b[?1000l\x1b[?1006l");
+        // 关闭 mouse mode 1000 + 1006 和 bracketed paste mode 2004
+        let _ = write!(io::stdout(), "\x1b[?1000l\x1b[?1006l\x1b[?2004l");
         let _ = io::stdout().flush();
     }
 }
@@ -35,7 +52,7 @@ pub async fn run(session_id: String, mut chat_handle: ChatHandle, model: String)
     crossterm::terminal::enable_raw_mode()?;
     // 只启用 mouse mode 1000（按钮点击事件），保留拖拽给终端做原生选择复制
     // 不启用 1002/1003，这样 drag 不会拦截终端选择
-    write!(io::stdout(), "\x1b[?1000h\x1b[?1006h")?;
+    write!(io::stdout(), "\x1b[?1000h\x1b[?1006h\x1b[?2004h")?;
     io::stdout().flush()?;
     let _guard = TerminalGuard;
     let mut terminal = ratatui::init();
@@ -125,8 +142,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
             if (key.code == KeyCode::Char('m')
                 && (key.modifiers.contains(KeyModifiers::ALT)
                     || key.modifiers.contains(KeyModifiers::CONTROL)))
-                || (key.code == KeyCode::Enter
-                    && key.modifiers.contains(KeyModifiers::CONTROL))
+                || (key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL))
             {
                 toggle_mouse_mode(app);
                 return false;
@@ -189,8 +205,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                             if confirm.other_active {
                                 let q = app.confirm.take().unwrap();
                                 let text = app.textarea.lines().join("\n");
-                                app.textarea = ratatui_textarea::TextArea::default();
-                                app.textarea.set_placeholder_text("Type your message...");
+                                app.textarea = AppState::new_textarea();
                                 chat_handle.send_response(&q.query_id, -1, &text);
                             } else if confirm.allow_other {
                                 let opts_len = if confirm.options.is_empty() {
@@ -214,8 +229,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                         if let Some(ref mut confirm) = app.confirm {
                             if confirm.other_active {
                                 confirm.other_active = false;
-                                app.textarea = ratatui_textarea::TextArea::default();
-                                app.textarea.set_placeholder_text("Type your message...");
+                                app.textarea = AppState::new_textarea();
                             } else {
                                 let q = app.confirm.take().unwrap();
                                 chat_handle.send_response(&q.query_id, 1, "");
@@ -264,8 +278,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                     return false;
                 }
                 let text: String = app.textarea.lines().join("\n");
-                app.textarea = ratatui_textarea::TextArea::default();
-                app.textarea.set_placeholder_text("Type your message...");
+                app.textarea = AppState::new_textarea();
                 if text.trim().is_empty() {
                     return false;
                 }
@@ -349,22 +362,16 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
             }
         }
         // 状态栏左键点击切换鼠标模式（底部区域，右半侧）
-        Event::Mouse(m)
-            if m.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left) =>
-        {
+        Event::Mouse(m) if m.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
             if let Ok((term_cols, term_rows)) = crossterm::terminal::size() {
                 // 状态栏在最底部 (0-indexed: term_rows - 1)
                 // 放宽到最后 3 行 + 右侧 1/3，兼容各种布局偏移
                 let bottom_start = term_rows.saturating_sub(3);
                 let right_start = (term_cols * 2 / 3).max(term_cols.saturating_sub(20));
-                if m.row >= bottom_start as u16 && m.column >= right_start as u16 {
+                if m.row >= bottom_start && m.column >= right_start {
                     toggle_mouse_mode(app);
                     return false;
                 }
-            }
-            // 非状态栏区域的左键点击，走默认处理
-            match m.kind {
-                _ => {}
             }
         }
         Event::Mouse(m) => match m.kind {
@@ -569,6 +576,10 @@ fn toggle_mouse_mode(app: &mut AppState) {
         write!(io::stdout(), "\x1b[?1000l\x1b[?1006l")
     };
     let _ = io::stdout().flush();
-    let mode = if app.mouse_captured { "Mouse" } else { "Select" };
+    let mode = if app.mouse_captured {
+        "Mouse"
+    } else {
+        "Select"
+    };
     app.add_message(LineType::Status, format!("Mouse mode: {mode}"));
 }

@@ -5,6 +5,7 @@ use ratatui::{
     style::Style,
     text::{Line, Span},
 };
+use ratatui_textarea::WrapMode;
 use unicode_width::UnicodeWidthChar;
 
 use crate::theme;
@@ -400,7 +401,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(session_id: String, model: String) -> Self {
-        let mut textarea = ratatui_textarea::TextArea::default();
+        let mut textarea = Self::new_textarea();
         textarea.set_placeholder_text("Type your message...");
         Self {
             messages: Vec::new(),
@@ -426,6 +427,14 @@ impl AppState {
             pending_usage: None,
             mouse_captured: true,
         }
+    }
+
+    /// 创建配置了 word wrap 的新 TextArea
+    pub fn new_textarea() -> ratatui_textarea::TextArea<'static> {
+        let mut ta = ratatui_textarea::TextArea::default();
+        ta.set_wrap_mode(WrapMode::WordOrGlyph);
+        ta.set_placeholder_text("Type your message...");
+        ta
     }
 
     pub fn add_message(&mut self, line_type: LineType, content: String) {

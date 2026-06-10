@@ -125,10 +125,7 @@ pub fn build_openai_headers(api_key: &str) -> reqwest::header::HeaderMap {
         reqwest::header::AUTHORIZATION,
         format!("Bearer {}", api_key).parse().unwrap(),
     );
-    headers.insert(
-        reqwest::header::USER_AGENT,
-        "visp/0.1.0".parse().unwrap(),
-    );
+    headers.insert(reqwest::header::USER_AGENT, "visp/0.1.0".parse().unwrap());
     headers
 }
 
@@ -158,12 +155,13 @@ pub fn build_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                 }));
             }
             Role::Assistant => {
-                let content: serde_json::Value = if msg.content.is_empty() && msg.tool_calls.is_some() {
-                    // OpenAI 规范：纯 tool_calls 消息 content 应为 null
-                    serde_json::Value::Null
-                } else {
-                    serde_json::Value::String(msg.content.clone())
-                };
+                let content: serde_json::Value =
+                    if msg.content.is_empty() && msg.tool_calls.is_some() {
+                        // OpenAI 规范：纯 tool_calls 消息 content 应为 null
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::String(msg.content.clone())
+                    };
                 let mut assistant_msg = serde_json::json!({
                     "role": "assistant",
                     "content": content,
@@ -234,10 +232,7 @@ pub(crate) enum OpenAiStreamEvent {
         name: String,
     },
     /// 工具调用参数增量
-    ToolCallDelta {
-        index: usize,
-        arguments: String,
-    },
+    ToolCallDelta { index: usize, arguments: String },
     /// 内容块结束，携带 finish_reason
     /// fields 保留用于调试，match 时用 `..` 忽略
     #[allow(dead_code)]
@@ -400,24 +395,12 @@ fn byte_stream_to_chat_events(
                     if let Some(data) = line.strip_prefix("data: ") {
                         match parse_openai_sse_data(data) {
                             Ok(OpenAiStreamEvent::TextDelta(text)) => {
-                                return Some((
-                                    Ok(ChatEvent::TextDelta(text)),
-                                    state,
-                                ));
+                                return Some((Ok(ChatEvent::TextDelta(text)), state));
                             }
-                            Ok(OpenAiStreamEvent::ToolCallStart {
-                                index,
-                                id,
-                                name,
-                            }) => {
-                                state
-                                    .tool_acc
-                                    .insert(index, (id, name, String::new()));
+                            Ok(OpenAiStreamEvent::ToolCallStart { index, id, name }) => {
+                                state.tool_acc.insert(index, (id, name, String::new()));
                             }
-                            Ok(OpenAiStreamEvent::ToolCallDelta {
-                                index,
-                                arguments,
-                            }) => {
+                            Ok(OpenAiStreamEvent::ToolCallDelta { index, arguments }) => {
                                 if let Some(entry) = state.tool_acc.get_mut(&index) {
                                     entry.2.push_str(&arguments);
                                 }
@@ -430,8 +413,7 @@ fn byte_stream_to_chat_events(
                                         .drain()
                                         .map(|(_, (id, name, args))| (id, name, args))
                                         .collect();
-                                    state.pending_tool_calls =
-                                        calls.into_iter().rev().collect();
+                                    state.pending_tool_calls = calls.into_iter().rev().collect();
                                 }
                                 // 收到 finish_reason 即标记流结束，无需等待底层流关闭
                                 state.stream_ended = true;
@@ -458,8 +440,7 @@ fn byte_stream_to_chat_events(
                                         .drain()
                                         .map(|(_, (id, name, args))| (id, name, args))
                                         .collect();
-                                    state.pending_tool_calls =
-                                        calls.into_iter().rev().collect();
+                                    state.pending_tool_calls = calls.into_iter().rev().collect();
                                 }
                             }
                             Err(e) => {
@@ -514,10 +495,7 @@ fn byte_stream_to_chat_events(
                     // 下一轮循环会处理缓冲区
                 }
                 Some(Err(e)) => {
-                    return Some((
-                        Err(LlmError::Network(e.to_string())),
-                        state,
-                    ));
+                    return Some((Err(LlmError::Network(e.to_string())), state));
                 }
                 None => {
                     // 流自然结束
@@ -530,8 +508,7 @@ fn byte_stream_to_chat_events(
                             .drain()
                             .map(|(_, (id, name, args))| (id, name, args))
                             .collect();
-                        state.pending_tool_calls =
-                            calls.into_iter().rev().collect();
+                        state.pending_tool_calls = calls.into_iter().rev().collect();
                     }
                 }
             }
@@ -574,14 +551,12 @@ impl LlmProvider for OpenAiProvider {
         tools: &[ToolDefinition],
         config: &LlmConfig,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError> {
-        let url = format!(
-            "{}/v1/chat/completions",
-            self.api_url.trim_end_matches('/')
-        );
+        let url = format!("{}/v1/chat/completions", self.api_url.trim_end_matches('/'));
         let body = build_openai_request(messages, tools, config);
         let headers = build_openai_headers(&self.api_key);
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .headers(headers)
             .json(&body)
@@ -704,13 +679,11 @@ mod tests {
                 content: "Let me think".into(),
                 tool_calls: None,
                 tool_call_id: None,
-                extra_blocks: Some(vec![
-                    serde_json::json!({
-                        "type": "thinking",
-                        "thinking": "I need to reason about this",
-                        "signature": "sig_123",
-                    }),
-                ]),
+                extra_blocks: Some(vec![serde_json::json!({
+                    "type": "thinking",
+                    "thinking": "I need to reason about this",
+                    "signature": "sig_123",
+                })]),
                 skip_context: false,
                 estimated_tokens: 0,
             },
@@ -739,15 +712,13 @@ mod tests {
                     arguments: "{}".into(),
                 }]),
                 tool_call_id: None,
-                extra_blocks: Some(vec![
-                    serde_json::json!({
-                        "role": "user",
-                        "content": "malicious content",
-                        "tool_calls": "should not appear",
-                        "name": "should not appear",
-                        "thinking": "this is fine",
-                    }),
-                ]),
+                extra_blocks: Some(vec![serde_json::json!({
+                    "role": "user",
+                    "content": "malicious content",
+                    "tool_calls": "should not appear",
+                    "name": "should not appear",
+                    "thinking": "this is fine",
+                })]),
                 skip_context: false,
                 estimated_tokens: 0,
             },
@@ -812,9 +783,7 @@ mod tests {
             parameters: serde_json::json!({ "type": "object" }),
         }];
         let mut config = LlmConfig::default();
-        config
-            .extra
-            .insert("tool_choice".into(), "required".into());
+        config.extra.insert("tool_choice".into(), "required".into());
         let req = build_openai_request(&msgs, &tools, &config);
         assert_eq!(req["tool_choice"], "required");
     }
@@ -843,9 +812,7 @@ mod tests {
         let msgs = vec![Message::user("Hi")];
         let tools = vec![];
         let mut config = LlmConfig::default();
-        config
-            .extra
-            .insert("tool_choice".into(), "auto".into());
+        config.extra.insert("tool_choice".into(), "auto".into());
         let req = build_openai_request(&msgs, &tools, &config);
         // 即使没有 tools，tool_choice 也应透传
         assert_eq!(req["tool_choice"], "auto");
@@ -939,10 +906,7 @@ mod tests {
     #[test]
     fn test_parse_retry_after_valid() {
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::RETRY_AFTER,
-            "30".parse().unwrap(),
-        );
+        headers.insert(reqwest::header::RETRY_AFTER, "30".parse().unwrap());
         assert_eq!(crate::util::parse_retry_after(&headers), Some(30));
     }
 
@@ -991,12 +955,9 @@ mod tests {
     }
 
     /// 收集 ChatEvent 流到 Vec
-    async fn collect_events(
-        chunks: Vec<String>,
-    ) -> Vec<ChatEvent> {
-        let byte_stream = futures::stream::iter(
-            chunks.into_iter().map(|s| Ok(bytes::Bytes::from(s))),
-        );
+    async fn collect_events(chunks: Vec<String>) -> Vec<ChatEvent> {
+        let byte_stream =
+            futures::stream::iter(chunks.into_iter().map(|s| Ok(bytes::Bytes::from(s))));
         let event_stream = byte_stream_to_chat_events(byte_stream);
         event_stream
             .filter_map(|e| futures::future::ready(e.ok()))
@@ -1084,7 +1045,11 @@ mod tests {
 
         assert_eq!(events.len(), 3, "expect ToolCall + UsageInfo + Done");
         match &events[0] {
-            ChatEvent::ToolCall { id, name, arguments } => {
+            ChatEvent::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
                 assert_eq!(id, "call_abc");
                 assert_eq!(name, "read_file");
                 assert!(

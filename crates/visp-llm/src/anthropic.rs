@@ -83,10 +83,7 @@ pub fn build_anthropic_headers(api_key: &str) -> reqwest::header::HeaderMap {
     );
     headers.insert("x-api-key", api_key.parse().unwrap());
     headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
-    headers.insert(
-        reqwest::header::USER_AGENT,
-        "visp/0.1.0".parse().unwrap(),
-    );
+    headers.insert(reqwest::header::USER_AGENT, "visp/0.1.0".parse().unwrap());
     headers
 }
 
@@ -318,10 +315,13 @@ pub(crate) fn parse_anthropic_event(event_name: &str, data: &str) -> Result<Pars
             });
             match block_type {
                 "tool_use" => {
-                    let id = v["content_block"]["id"].as_str().unwrap_or_else(|| {
-                        tracing::warn!("anthropic SSE tool_use block without id");
-                        ""
-                    }).to_string();
+                    let id = v["content_block"]["id"]
+                        .as_str()
+                        .unwrap_or_else(|| {
+                            tracing::warn!("anthropic SSE tool_use block without id");
+                            ""
+                        })
+                        .to_string();
                     let name = v["content_block"]["name"]
                         .as_str()
                         .unwrap_or_else(|| {
@@ -543,10 +543,14 @@ fn byte_stream_to_chat_events(
                             signature,
                         }) => {
                             let key = format!("thinking_{}", index);
-                            let entry = state.thinking_acc.entry(key).or_insert_with(|| ThinkingAcc {
-                                signature: String::new(),
-                                thinking: String::new(),
-                            });
+                            let entry =
+                                state
+                                    .thinking_acc
+                                    .entry(key)
+                                    .or_insert_with(|| ThinkingAcc {
+                                        signature: String::new(),
+                                        thinking: String::new(),
+                                    });
                             if !signature.is_empty() {
                                 entry.signature = signature;
                             }

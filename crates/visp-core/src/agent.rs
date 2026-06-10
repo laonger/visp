@@ -1668,8 +1668,7 @@ mod tests {
         let provider: StdArc<dyn LlmProvider> = StdArc::new(TestProvider::new(vec![
             vec![
                 ChatEvent::TextDelta(
-                    "What color?\n[USER_QUERY]\nChoose:\n- Red\n- Blue\n[/USER_QUERY]"
-                        .into(),
+                    "What color?\n[USER_QUERY]\nChoose:\n- Red\n- Blue\n[/USER_QUERY]".into(),
                 ),
                 ChatEvent::Done,
             ],
