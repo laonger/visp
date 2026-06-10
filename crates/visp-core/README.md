@@ -2,6 +2,17 @@
 
 纯逻辑层，定义 Agent 编排、消息模型、Tool trait、规则引擎、Prompt 构建等核心抽象，不依赖任何 IO 操作。
 
+## Agent 编排循环
+
+用户输入 → LLM → 工具调用 → LLM → ... 的完整循环：
+
+- **流式输出**：实时推送 text delta 到客户端
+- **多工具并行**：LLM 一次返回多个 tool_use 时并行执行，结果排序后拼回上下文
+- **自动重试**：网络错误/速率限制时指数退避重试
+- **Thinking 模式**：整合 Claude thinking blocks，通过 `thinking_budget_tokens` 控制预算
+- **Token 统计**：每轮返回 input/output token 数
+- **迭代保护**：`max_iterations` 防止无限循环
+
 ## 关键文件
 
 - `agent.rs` — Agent 编排循环

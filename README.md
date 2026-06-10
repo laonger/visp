@@ -48,13 +48,7 @@
 ## 核心特性
 
 ### Agent 编排循环
-用户输入 → LLM → 工具调用 → LLM → ... 的完整循环，支持：
-- 流式输出（实时推送 text delta）
-- 多工具并行执行（LLM 一次返回多个 tool_use 时并行跑，结果排序拼回上下文）
-- 自动重试（网络错误/速率限制，指数退避）
-- Thinking 模式（整合 Claude thinking blocks，配置 `thinking_budget_tokens` 控制预算）
-- Token 用量统计（每轮对话返回 input/output token 数）
-- 最大迭代保护（防止无限循环）
+用户输入 → LLM → 工具调用 → LLM → ... 的完整循环，支持流式输出、多工具并行、自动重试、Thinking 模式、迭代保护。详见 [visp-core](crates/visp-core/README.md)。
 
 ### 工具系统
 9 个内置工具，详见 [visp-tools](crates/visp-tools/README.md)：
