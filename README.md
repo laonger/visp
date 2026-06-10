@@ -1,4 +1,4 @@
-# visp — 轻量级 AI 编程助手
+# vibe + wisp == VISP ==  轻量级 AI 编程助手
 
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![License: MPL-2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](LICENSE)
