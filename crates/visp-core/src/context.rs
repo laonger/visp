@@ -1,0 +1,70 @@
+use crate::message::Message;
+
+/// Context 裁剪器 trait
+///
+/// 定义对话历史裁剪的接口。实现此 trait 的类型负责根据 token 预算
+/// 从对话历史中选择合适的子集，并执行工具输出截断。
+///
+/// 预算计算由实现内部自主完成，调用方只需传入原始参数。
+///
+/// # Send + Sync
+///
+/// 裁剪器实例通过 `Arc` 在多个 async task 间共享，
+/// 因此要求 `Send + Sync`。
+pub trait ContextTrimmer: Send + Sync {
+    /// 将对话历史裁剪到上下文窗口内
+    ///
+    /// # 参数
+    ///
+    /// - `history`: 待裁剪的对话历史（不含 system message，已过滤 skip_context）
+    /// - `max_context_tokens`: LLM 上下文窗口总大小
+    /// - `system_overhead`: system prompt + rules + env context 等非历史的 token 开销
+    /// - `output_tokens`: 期望的输出 token 数
+    ///
+    /// # 返回
+    ///
+    /// 裁剪后的消息列表，总 token 数 ≤ 可用预算。Tool 消息输出已在内部截断。
+    fn trim(
+        &self,
+        history: &[Message],
+        max_context_tokens: u32,
+        system_overhead: u32,
+        output_tokens: u32,
+    ) -> Vec<Message>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::Message;
+
+    struct MockTrimmer;
+
+    impl ContextTrimmer for MockTrimmer {
+        fn trim(
+            &self,
+            history: &[Message],
+            _max_context_tokens: u32,
+            _system_overhead: u32,
+            _output_tokens: u32,
+        ) -> Vec<Message> {
+            history.to_vec()
+        }
+    }
+
+    #[test]
+    fn test_context_trimmer_trait_object() {
+        let trimmer: Box<dyn ContextTrimmer> = Box::new(MockTrimmer);
+        let result = trimmer.trim(&[], 1000, 0, 100);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_context_trimmer_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<MockTrimmer>();
+
+        let trimmer: Box<dyn ContextTrimmer + Send + Sync> = Box::new(MockTrimmer);
+        let _arc = std::sync::Arc::new(trimmer);
+    }
+}
