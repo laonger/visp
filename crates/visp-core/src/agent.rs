@@ -757,15 +757,18 @@ pub async fn run_agent_loop(
 /// 导致 tool_use 被发送给 Anthropic 但没来得及追加 tool_result，
 /// 后续请求会报 400 错误。
 fn cleanup_orphan_tool_uses(history: &mut [Message]) {
-    // 从后往前找最后一条 assistant 消息
-    if let Some(idx) = history
-        .iter()
-        .rposition(|m| m.role == Role::Assistant && m.tool_calls.is_some())
-    {
-        // 检查之后是否有 tool_result 消息，没有则清理
-        let has_results = history[idx + 1..].iter().any(|m| m.role == Role::Tool);
-        if !has_results && history.get_mut(idx).is_some() {
-            history[idx].tool_calls = None;
+    // 从后往前遍历所有 assistant 消息，清理所有没有对应 tool_result 的 tool_calls。
+    // 多次取消/中断可能产生多条孤儿 tool_use，只清理最后一条是不够的。
+    let len = history.len();
+    for i in (0..len).rev() {
+        if history[i].role == Role::Assistant && history[i].tool_calls.is_some() {
+            let has_results = history[i + 1..].iter().any(|m| m.role == Role::Tool);
+            if !has_results {
+                history[i].tool_calls = None;
+            } else {
+                // 找到了匹配的 tool_result，之前的 assistant 不需要再检查
+                break;
+            }
         }
     }
 }
