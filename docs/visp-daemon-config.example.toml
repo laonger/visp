@@ -143,3 +143,37 @@
 
 # 请求超时（秒，上限 120）
 # timeout_secs = 30
+
+# =============================================================================
+# [mcp] — MCP 服务器配置
+# =============================================================================
+# MCP（Model Context Protocol）服务器配置项。
+# Daemon 启动时会自动连接列出的服务器，将提供的工具集成到 Tool Registry 中，
+# Agent 循环即可一视同仁调用。
+#
+# 支持两种传输方式：
+#   stdio — 以子进程方式启动 MCP 服务器（如 npx、uvx 命令）
+#   sse   — HTTP SSE 方式连接已运行的 MCP 服务器
+#
+# 每项可选字段：
+#   enabled             — 是否自动连接（默认 true）
+#   tool_prefix         — 工具名前缀，防止不同服务器工具名冲突（默认无前缀）
+#   tool_timeout_secs   — 工具调用超时（秒，默认 60）
+# =============================================================================
+
+# ----- stdio 示例（npx 启动 Playwright MCP 服务器） -----
+# [[mcp.servers]]
+# name = "playwright"
+# transport = { type = "stdio", command = "npx", args = ["@anthropic-ai/mcp-playwright"] }
+# tool_timeout_secs = 120
+
+# ----- stdio 示例（uvx 启动 fetch MCP 服务器） -----
+# [[mcp.servers]]
+# name = "fetch"
+# transport = { type = "stdio", command = "uvx", args = ["mcp-server-fetch"] }
+
+# ----- SSE 示例（连接已运行的 MCP HTTP 服务器） -----
+# [[mcp.servers]]
+# name = "custom-api"
+# transport = { type = "sse", url = "http://localhost:8080/mcp" }
+# tool_prefix = "custom_"
