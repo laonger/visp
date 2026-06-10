@@ -11,6 +11,7 @@ visp-llm = { path = "../visp-llm" }
 visp-tools = { path = "../visp-tools" }
 visp-codegraph = { path = "../visp-codegraph" }
 visp-context = { path = "../visp-context" }
+visp-mcp = { path = "../visp-mcp" }
 serde.workspace = true
 serde_json.workspace = true
 tonic.workspace = true

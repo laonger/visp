@@ -1041,7 +1041,7 @@ mod tests {
     ) -> (Vec<AgentEvent>, StdArc<SessionManager>, String) {
         let (tx, mut rx) = mpsc::channel(64);
 
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         for tool in tools {
             registry.register(tool).unwrap();
         }
@@ -1380,7 +1380,7 @@ mod tests {
         ]));
 
         let (tx, mut rx) = mpsc::channel(64);
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         registry.register(tool).unwrap();
 
         let setup = test_setup();
@@ -1447,7 +1447,7 @@ mod tests {
         ]));
 
         let (tx, mut rx) = mpsc::channel(64);
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         registry.register(tool).unwrap();
 
         let setup = test_setup();
@@ -1516,7 +1516,7 @@ mod tests {
         ]));
 
         let (tx, mut rx) = mpsc::channel(64);
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         registry.register(tool).unwrap();
 
         let setup = test_setup();
@@ -1984,7 +1984,7 @@ mod tests {
             }
         }
 
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         registry
             .register(Box::new(CategorisedTool {
                 name: "bash",

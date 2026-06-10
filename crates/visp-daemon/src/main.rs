@@ -4,8 +4,10 @@ mod config;
 mod server;
 mod service;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use tokio::sync::Mutex;
 use visp_core::{
     agent::AgentConfig,
     context::ContextTrimmer,
@@ -15,6 +17,7 @@ use visp_core::{
 };
 use visp_llm::anthropic::AnthropicProvider;
 use visp_llm::openai::OpenAiProvider;
+use visp_mcp::manager::McpManager;
 use visp_tools::{
     bash::Bash,
     codegraph::{CodeGraphGetDetails, CodeGraphRebuild, CodeGraphSearch},
@@ -125,18 +128,65 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("register codegraph_rebuild: {e}"))?;
     let tool_registry = Arc::new(tool_registry);
 
-    // 5. Create rule engine
+    // ── 锁定核心工具（MCP 工具不能覆盖这些名称）──
+    tool_registry.seal_core_tools();
+
+    // 5. Initialize MCP Manager
+    let mcp_manager = Arc::new(McpManager::new(config.mcp.servers.clone()));
+    {
+        let tr = tool_registry.clone();
+        // 跟踪每个服务器已注册的工具名，用于重连时更新
+        let mcp_tool_names: Arc<Mutex<HashMap<String, Vec<String>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let on_ready: visp_mcp::manager::OnToolsReady = Arc::new(move |server_name, tools| {
+            let tool_names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
+
+            // 获取已有的该服务器工具名列表（insert 返回旧值）
+            let old_tool_names = {
+                let mut map = mcp_tool_names.blocking_lock();
+                map.insert(server_name.to_string(), tool_names.clone())
+                    .unwrap_or_default()
+            };
+
+            // 移除旧工具（第一次注册时 old_tool_names 为空列表，跳过）
+            for old_name in &old_tool_names {
+                if !tool_names.contains(old_name) {
+                    // 工具名已不存在于新列表中，移除
+                    let _ = tr.remove(old_name);
+                }
+            }
+
+            // 注册/更新新工具
+            for (i, tool) in tools.into_iter().enumerate() {
+                let tool_name = &tool_names[i];
+                if old_tool_names.contains(tool_name) {
+                    // 重连场景：更新现有工具
+                    if let Err(e) = tr.update(tool_name, tool) {
+                        tracing::warn!("failed to update MCP tool '{tool_name}': {e}");
+                    }
+                } else {
+                    // 首次注册场景
+                    if let Err(e) = tr.register_mcp(tool) {
+                        tracing::warn!("failed to register MCP tool '{tool_name}': {e}");
+                    }
+                }
+            }
+        });
+        mcp_manager.start_all(on_ready).await;
+    }
+
+    // 6. Create rule engine
     let cwd = std::env::current_dir()?;
     let rule_engine = Arc::new(RuleEngine::new(&cwd)?);
-
-    // 6. Create session manager
-    let session_mgr = Arc::new(SessionManager::new(InMemorySessionStore::new()));
 
     // 6.5. Create context trimmer
     let context_trimmer: Arc<dyn ContextTrimmer + Send + Sync> =
         Arc::new(visp_context::DefaultContextTrimmer::default());
 
-    // 7. Agent config
+    // 7. Create session manager
+    let session_mgr = Arc::new(SessionManager::new(InMemorySessionStore::new()));
+
+    // 8. Agent config
     let agent_config = AgentConfig {
         max_iterations: config.agent.max_iterations,
         llm_retry_attempts: config.agent.llm_retry_attempts,
@@ -145,7 +195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         file_max_size_bytes: config.agent.file_max_size_bytes,
     };
 
-    // 8. Assemble service
+    // 9. Assemble service
     let service = CoderDaemonService::new(
         provider,
         tool_registry,
@@ -154,9 +204,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent_config,
         config.llm,
         context_trimmer,
+        mcp_manager,
     );
 
-    // 9. Start gRPC server
+    // 10. Start gRPC server
     let addr = config.daemon.listen_addr.clone();
     let server_handle = tokio::spawn(async move {
         if let Err(e) = server::start_server(&addr, service).await {
@@ -164,7 +215,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // 10. Wait for Ctrl+C
+    // 11. Wait for Ctrl+C
     tokio::signal::ctrl_c().await?;
     tracing::info!("shutdown signal received, stopping server");
 

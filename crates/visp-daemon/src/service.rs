@@ -19,6 +19,7 @@ use visp_core::{
     tool::ToolContext,
     tool_registry::ToolRegistry,
 };
+use visp_mcp::manager::McpManager;
 use visp_proto::visp::{self as proto, coder_daemon_server::CoderDaemon};
 
 use crate::config::LlmSection;
@@ -40,6 +41,8 @@ pub struct CoderDaemonService {
     default_llm_config: LlmConfig,
     /// 上下文裁剪器
     context_trimmer: Arc<dyn ContextTrimmer + Send + Sync>,
+    /// MCP 服务器管理器
+    mcp_manager: Arc<McpManager>,
 }
 
 impl CoderDaemonService {
@@ -52,6 +55,7 @@ impl CoderDaemonService {
         agent_config: AgentConfig,
         llm_section: LlmSection,
         context_trimmer: Arc<dyn ContextTrimmer + Send + Sync>,
+        mcp_manager: Arc<McpManager>,
     ) -> Self {
         let mut extra = std::collections::HashMap::new();
         if let Some(budget) = llm_section.thinking_budget_tokens {
@@ -86,6 +90,7 @@ impl CoderDaemonService {
             codegraphs: Arc::new(RwLock::new(HashMap::new())),
             default_llm_config,
             context_trimmer,
+            mcp_manager,
         }
     }
 
@@ -597,6 +602,8 @@ impl CoderDaemon for CoderDaemonService {
         &self,
         _request: Request<proto::ShutdownRequest>,
     ) -> Result<Response<()>, Status> {
+        tracing::info!("shutdown requested, stopping MCP servers");
+        self.mcp_manager.shutdown_all().await;
         Ok(Response::new(()))
     }
 }

@@ -3,6 +3,7 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
+use visp_mcp::config::McpConfig;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DaemonConfig {
@@ -12,6 +13,8 @@ pub struct DaemonConfig {
     pub agent: AgentSection,
     #[serde(default)]
     pub tool: HashMap<String, toml::Value>,
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -161,6 +164,7 @@ fn default_config() -> DaemonConfig {
             file_max_size_bytes: default_file_max_size(),
         },
         tool: HashMap::new(),
+        mcp: McpConfig::default(),
     }
 }
 

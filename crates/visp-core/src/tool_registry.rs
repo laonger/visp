@@ -1,9 +1,13 @@
+use std::collections::HashSet;
+use std::sync::{Arc, RwLock};
+
 use crate::message::ToolDefinition;
 use crate::tool::{Tool, ToolContext, ToolResult};
 
 #[derive(Default)]
 pub struct ToolRegistry {
-    tools: Vec<Box<dyn Tool>>,
+    tools: RwLock<Vec<Arc<dyn Tool>>>,
+    core_tool_names: RwLock<HashSet<String>>,
 }
 
 impl ToolRegistry {
@@ -13,24 +17,79 @@ impl ToolRegistry {
 }
 
 impl ToolRegistry {
-    pub fn register(&mut self, tool: Box<dyn Tool>) -> Result<(), String> {
+    pub fn register(&self, tool: Box<dyn Tool>) -> Result<(), String> {
         let name = tool.name().to_string();
-        if self.tools.iter().any(|t| t.name() == name) {
+        let mut tools = self.tools.write().unwrap();
+        if tools.iter().any(|t| t.name() == name) {
             return Err(format!("duplicate tool name: {name}"));
         }
-        self.tools.push(tool);
+        tools.push(Arc::from(tool));
         Ok(())
     }
 
-    pub fn get(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools
-            .iter()
-            .find(|t| t.name() == name)
-            .map(|t| t.as_ref())
+    /// 注册 MCP 工具，跳过与核心工具名称冲突的工具
+    pub fn register_mcp(&self, tool: Box<dyn Tool>) -> Result<(), String> {
+        let name = tool.name().to_string();
+        let core_names = self.core_tool_names.read().unwrap();
+        if core_names.contains(&name) {
+            tracing::warn!("MCP tool '{name}' conflicts with built-in tool, skipping");
+            return Ok(());
+        }
+        drop(core_names); // release read lock before taking write lock
+
+        let mut tools = self.tools.write().unwrap();
+        if tools.iter().any(|t| t.name() == name) {
+            tracing::warn!("MCP tool '{name}' conflicts with another registered tool, skipping");
+            return Ok(());
+        }
+        tools.push(Arc::from(tool));
+        Ok(())
+    }
+
+    /// 锁定当前已注册的所有工具名为核心工具
+    /// 之后通过 register_mcp 注册的工具不能覆盖这些名称
+    pub fn seal_core_tools(&self) {
+        let tools = self.tools.read().unwrap();
+        let mut core_names = self.core_tool_names.write().unwrap();
+        for t in tools.iter() {
+            core_names.insert(t.name().to_string());
+        }
+    }
+
+    /// 移除已注册的工具
+    pub fn remove(&self, name: &str) -> Result<(), String> {
+        let mut tools = self.tools.write().unwrap();
+        let pos = tools.iter().position(|t| t.name() == name);
+        match pos {
+            Some(i) => {
+                tools.remove(i);
+                Ok(())
+            }
+            None => Err(format!("tool '{name}' not found")),
+        }
+    }
+
+    /// 更新/替换同名工具
+    pub fn update(&self, name: &str, tool: Box<dyn Tool>) -> Result<(), String> {
+        let mut tools = self.tools.write().unwrap();
+        let pos = tools.iter().position(|t| t.name() == name);
+        match pos {
+            Some(i) => {
+                tools[i] = Arc::from(tool);
+                Ok(())
+            }
+            None => Err(format!("tool '{name}' not found")),
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        let tools = self.tools.read().unwrap();
+        tools.iter().find(|t| t.name() == name).cloned()
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
+        let tools = self.tools.read().unwrap();
+        tools
             .iter()
             .map(|t| ToolDefinition {
                 name: t.name().to_string(),
@@ -42,7 +101,8 @@ impl ToolRegistry {
     }
 
     pub fn names(&self) -> Vec<String> {
-        self.tools.iter().map(|t| t.name().to_string()).collect()
+        let tools = self.tools.read().unwrap();
+        tools.iter().map(|t| t.name().to_string()).collect()
     }
 
     pub async fn execute(
@@ -104,7 +164,7 @@ mod tests {
 
     #[test]
     fn test_register_and_get() {
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         registry.register(mock_tool("echo", "Echo tool")).unwrap();
         let tool = registry.get("echo");
         assert!(tool.is_some());
@@ -113,7 +173,7 @@ mod tests {
 
     #[test]
     fn test_definitions() {
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         registry.register(mock_tool("tool_a", "Tool A")).unwrap();
         registry.register(mock_tool("tool_b", "Tool B")).unwrap();
 
@@ -127,7 +187,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute() {
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         registry
             .register(mock_tool("greet", "Greeting tool"))
             .unwrap();
@@ -144,7 +204,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_name() {
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         registry.register(mock_tool("echo", "Echo tool")).unwrap();
         let err = registry.register(mock_tool("echo", "Another echo"));
         assert!(err.is_err());
@@ -156,5 +216,101 @@ mod tests {
         let registry = ToolRegistry::new();
         let tool = registry.get("nonexistent");
         assert!(tool.is_none());
+    }
+
+    // ── remove tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_remove_existing() {
+        let registry = ToolRegistry::new();
+        registry.register(mock_tool("echo", "Echo tool")).unwrap();
+        assert!(registry.get("echo").is_some());
+
+        registry.remove("echo").unwrap();
+        assert!(registry.get("echo").is_none());
+    }
+
+    #[test]
+    fn test_remove_not_found() {
+        let registry = ToolRegistry::new();
+        let err = registry.remove("nonexistent");
+        assert!(err.is_err());
+    }
+
+    // ── update tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_update_existing() {
+        let registry = ToolRegistry::new();
+        registry.register(mock_tool("echo", "Echo tool")).unwrap();
+
+        let updated = mock_tool("echo", "Updated echo");
+        registry.update("echo", updated).unwrap();
+
+        let tool = registry.get("echo").unwrap();
+        assert_eq!(tool.description(), "Updated echo");
+    }
+
+    #[test]
+    fn test_update_not_found() {
+        let registry = ToolRegistry::new();
+        let err = registry.update("nonexistent", mock_tool("x", "X"));
+        assert!(err.is_err());
+    }
+
+    // ── seal + register_mcp tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_seal_core_tools() {
+        let registry = ToolRegistry::new();
+        registry.register(mock_tool("core_a", "Core A")).unwrap();
+        registry.register(mock_tool("core_b", "Core B")).unwrap();
+
+        registry.seal_core_tools();
+
+        // MCP tools with same names as core tools should be skipped
+        registry
+            .register_mcp(mock_tool("core_a", "MCP Core A"))
+            .unwrap();
+        // The tool should still be the original one
+        let tool = registry.get("core_a").unwrap();
+        assert_eq!(tool.description(), "Core A");
+    }
+
+    #[test]
+    fn test_register_mcp_no_conflict() {
+        let registry = ToolRegistry::new();
+        registry.register(mock_tool("core_a", "Core A")).unwrap();
+        registry.seal_core_tools();
+
+        // MCP tool with non-core name should be registered
+        registry
+            .register_mcp(mock_tool("mcp_tool", "MCP Tool"))
+            .unwrap();
+        let tool = registry.get("mcp_tool").unwrap();
+        assert_eq!(tool.description(), "MCP Tool");
+    }
+
+    #[test]
+    fn test_register_mcp_after_seal_without_core_conflict() {
+        let registry = ToolRegistry::new();
+        registry.seal_core_tools(); // no core tools
+
+        registry
+            .register_mcp(mock_tool("any_tool", "Any tool"))
+            .unwrap();
+        assert!(registry.get("any_tool").is_some());
+    }
+
+    #[test]
+    fn test_register_mcp_concurrent_reads() {
+        let registry = ToolRegistry::new();
+        registry.register(mock_tool("tool", "Tool")).unwrap();
+
+        // definitions and names should work concurrently
+        let defs = registry.definitions();
+        let names = registry.names();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(names, vec!["tool"]);
     }
 }
