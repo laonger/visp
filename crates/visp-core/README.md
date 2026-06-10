@@ -16,10 +16,22 @@
 ## 关键文件
 
 - `agent.rs` — Agent 编排循环
-- `session.rs` — 会话管理
+- `session.rs` — 会话管理（含 Skills 加载）
 - `message.rs` — 消息模型
 - `tool.rs` — Tool trait 定义
 - `provider.rs` — LlmProvider trait 定义
+
+## Skills 技能系统
+
+从 `.visp/skills/` 加载技能定义，自动合并到 system prompt 中。每个技能是一个子目录，包含 `SKILL.md`：
+
+```
+.visp/skills/
+├── my-workflow/
+│   └── SKILL.md     # ---\nname: my-workflow\ndescription: ...\n---\n具体指令内容
+└── another-skill/
+    └── SKILL.md
+```
 
 ## 依赖
 

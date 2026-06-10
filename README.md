@@ -51,15 +51,7 @@
 用户输入 → LLM → 工具调用 → LLM → ... 的完整循环，支持流式输出、多工具并行、自动重试、Thinking 模式、迭代保护。详见 [visp-core](crates/visp-core/README.md)。
 
 ### 工具系统
-9 个内置工具，详见 [visp-tools](crates/visp-tools/README.md)：
-
-| 工具 | 功能 |
-|------|------|
-| `ReadFile` / `WriteFile` / `EditFile` | 文件读写与精确替换 |
-| `Bash` | Shell 命令执行（安全黑名单 + 超时控制） |
-| `Grep` / `Glob` | 正则搜索 / 文件名搜索 |
-| `WebFetch` | 网页内容获取与提取 |
-| `CodeGraphSearch` / `CodeGraphGetDetails` | AST 符号搜索与调用链查询 |
+9 个内置工具（文件读写、bash 执行、搜索、网页获取、代码图谱），详见 [visp-tools](crates/visp-tools/README.md)。
 
 ### 权限系统
 工具执行前经过多级审批检查，用户通过弹窗审批，支持"允许/拒绝/始终允许"：
@@ -78,15 +70,7 @@
 长对话自动管理 context window，通过三段式剪枝（HEAD/MIDDLE/TAIL）和工具输出压缩控制 token 用量。详见 [visp-context](crates/visp-context/README.md)。
 
 ### Skills 技能系统
-从 `.visp/skills/` 加载技能定义，用于注入领域知识或工作流指令。每个技能是一个子目录，包含 `SKILL.md`（YAML frontmatter + Markdown 内容），自动合并到 system prompt 中：
-
-```
-.visp/skills/
-├── my-workflow/
-│   └── SKILL.md     # ---\nname: my-workflow\ndescription: ...\n---\n具体指令内容
-└── another-skill/
-    └── SKILL.md
-```
+从 `.visp/skills/` 加载技能定义（YAML frontmatter + Markdown），自动合并到 system prompt 中，用于注入领域知识或工作流指令。详见 [visp-core](crates/visp-core/README.md)。
 
 ### 规则引擎
 从 `.visp/rules/`（项目级）和 `~/.config/visp/rules/`（全局）加载 Markdown 规则，通过 `alwaysApply: true/false` 控制注入时机。同时支持 AGENTS.md 从项目目录向上查找。
@@ -95,15 +79,7 @@
 tree-sitter 解析 + SQLite 索引，支持符号搜索、调用者/被调用者查询、调用路径追踪。支持 TS/TSX、Rust、Python、C/C++、Go。文件监听器自动触发增量索引更新。
 
 ### gRPC 通信
-`CoderDaemon` 服务，基于 tonic：
-
-| RPC | 类型 | 说明 |
-|-----|------|------|
-| `Chat` | 双向流 | 核心对话通道 |
-| `CreateSession` / `ListSessions` / `DeleteSession` | 一元 | 会话管理 |
-| `ReadFile` | 一元 | 快速文件读取（跳过 LLM） |
-| `SearchSymbols` / `GetSymbolDetails` | 一元 | 代码符号查询 |
-| `HealthCheck` / `Shutdown` | 一元 | 健康检查 / 优雅关闭 |
+`CoderDaemon` 服务基于 tonic，提供 Chat（双向流）、会话管理、文件读取、符号查询、健康检查等 RPC。详见 [visp-proto](crates/visp-proto/README.md)。
 
 ## 快速开始
 
