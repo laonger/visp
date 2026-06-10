@@ -76,6 +76,10 @@ pub fn build_anthropic_headers(api_key: &str) -> reqwest::header::HeaderMap {
     );
     headers.insert("x-api-key", api_key.parse().unwrap());
     headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
+    headers.insert(
+        reqwest::header::USER_AGENT,
+        "visp/0.1.0".parse().unwrap(),
+    );
     headers
 }
 
@@ -374,7 +378,10 @@ impl LlmProvider for AnthropicProvider {
         let body = build_anthropic_request(messages, tools, config);
         let headers = build_anthropic_headers(&self.api_key);
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .map_err(|e| LlmError::Network(e.to_string()))?;
         let response = client
             .post(&url)
             .headers(headers)

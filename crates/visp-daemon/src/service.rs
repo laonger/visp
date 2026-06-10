@@ -57,6 +57,10 @@ impl CoderDaemonService {
         if let Some(budget) = llm_section.thinking_budget_tokens {
             extra.insert("thinking_budget_tokens".into(), budget.to_string());
         }
+        // 合并 [llm.extra] 中的自定义参数
+        for (k, v) in llm_section.extra.iter() {
+            extra.insert(k.clone(), v.clone());
+        }
         let default_llm_config = LlmConfig {
             model: llm_section.model,
             temperature: llm_section.temperature,

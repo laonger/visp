@@ -14,6 +14,7 @@ use visp_core::{
     tool_registry::ToolRegistry,
 };
 use visp_llm::anthropic::AnthropicProvider;
+use visp_llm::openai::OpenAiProvider;
 use visp_tools::{
     bash::Bash,
     codegraph::{CodeGraphGetDetails, CodeGraphSearch},
@@ -42,20 +43,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(listen_addr = %config.daemon.listen_addr, "starting visp-daemon");
 
     // 3. Create LLM provider
-    let api_key = config
-        .llm
-        .api_key
-        .clone()
-        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-        .ok_or_else(|| {
-            "ANTHROPIC_API_KEY not set (configure llm.api_key or set env)".to_string()
-        })?;
-    let provider: Arc<dyn visp_core::provider::LlmProvider> =
-        if let Some(ref base_url) = config.llm.base_url {
-            Arc::new(AnthropicProvider::with_base_url(api_key, base_url.clone()))
-        } else {
-            Arc::new(AnthropicProvider::new(api_key))
-        };
+    let provider: Arc<dyn visp_core::provider::LlmProvider> = match config.llm.provider.as_str() {
+        "openai" => {
+            let api_key = config
+                .llm
+                .api_key
+                .clone()
+                .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+                .ok_or_else(|| {
+                    "OPENAI_API_KEY not set (configure llm.api_key or set env)".to_string()
+                })?;
+            if let Some(ref base_url) = config.llm.base_url {
+                Arc::new(OpenAiProvider::with_base_url(api_key, base_url.clone()))
+            } else {
+                Arc::new(OpenAiProvider::new(api_key))
+            }
+        }
+        // default to anthropic
+        _ => {
+            let api_key = config
+                .llm
+                .api_key
+                .clone()
+                .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+                .ok_or_else(|| {
+                    "ANTHROPIC_API_KEY not set (configure llm.api_key or set env)".to_string()
+                })?;
+            if let Some(ref base_url) = config.llm.base_url {
+                Arc::new(AnthropicProvider::with_base_url(api_key, base_url.clone()))
+            } else {
+                Arc::new(AnthropicProvider::new(api_key))
+            }
+        }
+    };
+    tracing::info!(provider = %config.llm.provider, "LLM provider created");
 
     // 4. Create tool registry
     let mut tool_registry = ToolRegistry::new();

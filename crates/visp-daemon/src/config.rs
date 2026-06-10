@@ -41,6 +41,9 @@ pub struct LlmSection {
     /// Claude thinking 模式预算 token 数（如 2048）
     #[serde(default)]
     pub thinking_budget_tokens: Option<u32>,
+    /// 额外的 provider 特定参数（如 OpenAI 的 seed, response_format 等）
+    #[serde(default)]
+    pub extra: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -144,6 +147,7 @@ fn default_config() -> DaemonConfig {
             api_key: None,
             base_url: None,
             thinking_budget_tokens: None,
+            extra: HashMap::new(),
         },
         tools: ToolsSection {
             bash_timeout_secs: default_bash_timeout(),
