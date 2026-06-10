@@ -116,37 +116,7 @@ cargo build --release
 
 ### 配置（可选）
 
-配置文件位于 `~/.config/visp/daemon.toml`，所有字段均有默认值，只需填写需要覆盖的项：
-
-```toml
-[daemon]
-listen_addr = "[::1]:50051"
-log_level = "info"                 # 日志级别：trace/debug/info/warn/error
-
-[llm]
-provider = "anthropic"             # 当前仅 anthropic
-model = "claude-sonnet-4-20250514"
-api_key = "sk-ant-..."             # 或设置 ANTHROPIC_API_KEY 环境变量
-base_url = ""                      # 可选：自定义 API 地址
-temperature = 0.7
-max_tokens = 4096
-max_context_tokens = 128000        # 上下文窗口大小
-thinking_budget_tokens = 2048      # 可选：Claude thinking 模式
-
-[tools]
-bash_timeout_secs = 120
-file_max_size_bytes = 1048576
-
-[agent]
-max_iterations = 50
-llm_retry_attempts = 3             # LLM 调用重试次数
-llm_retry_base_delay_ms = 1000    # 重试基础延迟（毫秒）
-bash_confirm_mode = true
-file_max_size_bytes = 1048576
-
-[tool.webfetch]
-allow_domains = ["github.com", "docs.rs"]
-```
+配置文件位于 `~/.config/visp/daemon.toml`，所有字段均有默认值，只需填写需要覆盖的项。完整的注解模板见 [`docs/daemon.toml`](docs/daemon.toml)。
 
 不创建配置文件也能运行，所有缺省项使用内置默认值。完整的配置结构见 [`config.rs`](crates/visp-daemon/src/config.rs)。
 
