@@ -521,11 +521,35 @@ pub async fn run_agent_loop(
 
             // No [USER_QUERY] marker: done
             if text_buffer.is_empty() && tool_calls.is_empty() && thinking_blocks.is_empty() {
+                if output_tokens > 0 {
+                    // LLM consumed output tokens but produced nothing useful.
+                    // This can happen when thinking mode is enabled and the thinking
+                    // is redacted by the API (exceeds budget), or the output budget
+                    // is entirely exhausted without producing usable content.
+                    tracing::error!(
+                        session_id = %ctx.session_id,
+                        input_tokens,
+                        output_tokens,
+                        "LLM returned empty response after consuming output tokens"
+                    );
+                    try_send!(AgentEvent::Error {
+                        code: AgentErrorCode::Internal,
+                        message: format!(
+                            "LLM returned empty response after consuming {output_tokens} output tokens. \
+                             If thinking mode is enabled, the thinking may have been redacted or \
+                             the output budget exhausted. Try increasing budget_tokens or max_tokens."
+                        ),
+                    });
+                    let _ = session_mgr.finish_loop(&ctx.session_id, SessionStatus::Error);
+                    return;
+                }
+                // output_tokens == 0: no tokens consumed — likely a provider
+                // returned an empty stream, just warn and return normally
                 tracing::warn!(
                     session_id = %ctx.session_id,
                     input_tokens,
                     output_tokens,
-                    "LLM returned empty response (no text, no tool calls, no thinking)"
+                    "LLM returned empty stream (no text, no tool calls, no thinking)"
                 );
             } else if text_buffer.is_empty() {
                 tracing::info!(
@@ -1944,6 +1968,60 @@ mod tests {
         }
 
         assert!(found, "Expected UserQuery with allow_other");
+    }
+
+    // ── Empty response handling ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_empty_response_returns_error() {
+        // LLM returns Done immediately with no text, no tool calls, no thinking
+        // but with tokens consumed (simulates the redacted_thinking bug scenario)
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(TestProvider::new(vec![vec![
+            ChatEvent::UsageInfo {
+                input_tokens: 100,
+                output_tokens: 4096,
+                tool_calls: 0,
+            },
+            ChatEvent::Done,
+        ]]));
+
+        let (events, _sm, _sid) =
+            run_collect(provider, vec![], test_setup(), 10, Message::user("Hi")).await;
+
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
+            "Expected Error event for empty LLM response"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Done)),
+            "Should NOT emit Done when LLM returns empty response"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_thinking_only_response_ok() {
+        // LLM returns a thinking block but no text — this is valid after
+        // the redacted_thinking fix and should NOT produce an error
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(TestProvider::new(vec![vec![
+            ChatEvent::ThinkingBlock(serde_json::json!({
+                "type": "thinking",
+                "thinking": "[REDACTED]",
+                "signature": "base64sig",
+            })),
+            ChatEvent::Done,
+        ]]));
+
+        let (events, _sm, _sid) =
+            run_collect(provider, vec![], test_setup(), 10, Message::user("Hi")).await;
+
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
+            "Should NOT error when LLM returns thinking-only response"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Done)),
+            "Expected Done for thinking-only response"
+        );
     }
 
     // ── render_tool_guide tests ─────────────────────────────────────────────

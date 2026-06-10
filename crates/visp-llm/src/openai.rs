@@ -225,6 +225,8 @@ pub fn build_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
 pub(crate) enum OpenAiStreamEvent {
     /// 文本增量
     TextDelta(String),
+    /// 推理/思考内容增量（部分 OpenAI 兼容模型如 DeepSeek 支持）
+    ReasoningDelta(String),
     /// 工具调用开始（包含 id 和 name）
     ToolCallStart {
         index: usize,
@@ -300,6 +302,19 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<OpenAiStreamEvent, Llm
         return Ok(OpenAiStreamEvent::TextDelta(content.to_string()));
     }
 
+    // 检查 reasoning_content（DeepSeek 等模型发送推理内容）
+    if let Some(reasoning) = delta.get("reasoning_content").and_then(|c| c.as_str())
+        && !reasoning.is_empty()
+    {
+        return Ok(OpenAiStreamEvent::ReasoningDelta(reasoning.to_string()));
+    }
+    // 部分提供商使用 "reasoning" 字段
+    if let Some(reasoning) = delta.get("reasoning").and_then(|c| c.as_str())
+        && !reasoning.is_empty()
+    {
+        return Ok(OpenAiStreamEvent::ReasoningDelta(reasoning.to_string()));
+    }
+
     // 检查 tool_calls delta
     if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
         for tc in tool_calls {
@@ -361,6 +376,10 @@ fn byte_stream_to_chat_events(
         pending_tool_calls: Vec<(String, String, String)>,
         /// 已完成的工具调用数量（用于 UsageInfo）
         tool_call_count: u32,
+        /// 累积的推理/思考内容（来自 reasoning_content / reasoning 字段）
+        reasoning_text: String,
+        /// 延迟发射的文本 delta（在推理内容刷新后才能发射）
+        pending_text: Option<String>,
         input_tokens: u32,
         output_tokens: u32,
         /// 标记流是否已结束
@@ -377,6 +396,8 @@ fn byte_stream_to_chat_events(
         tool_acc: HashMap::new(),
         pending_tool_calls: Vec::new(),
         tool_call_count: 0,
+        reasoning_text: String::new(),
+        pending_text: None,
         input_tokens: 0,
         output_tokens: 0,
         stream_ended: false,
@@ -386,6 +407,11 @@ fn byte_stream_to_chat_events(
 
     let event_stream = stream::unfold(state, |mut state| async move {
         loop {
+            // [A0] 发射延迟的文本 delta（在推理内容刷新后）
+            if let Some(text) = state.pending_text.take() {
+                return Some((Ok(ChatEvent::TextDelta(text)), state));
+            }
+
             // [A] 优先处理缓冲区中完整的 SSE 消息（一次一条）
             if let Some(pos) = state.buf.find("\n\n") {
                 let raw = state.buf[..pos].to_string();
@@ -395,7 +421,20 @@ fn byte_stream_to_chat_events(
                     if let Some(data) = line.strip_prefix("data: ") {
                         match parse_openai_sse_data(data) {
                             Ok(OpenAiStreamEvent::TextDelta(text)) => {
+                                // 如果还有未发射的推理内容，先刷新推理块再发射文本
+                                if !state.reasoning_text.is_empty() {
+                                    let reasoning = std::mem::take(&mut state.reasoning_text);
+                                    state.pending_text = Some(text);
+                                    let block = serde_json::json!({
+                                        "type": "thinking",
+                                        "thinking": reasoning,
+                                    });
+                                    return Some((Ok(ChatEvent::ThinkingBlock(block)), state));
+                                }
                                 return Some((Ok(ChatEvent::TextDelta(text)), state));
+                            }
+                            Ok(OpenAiStreamEvent::ReasoningDelta(text)) => {
+                                state.reasoning_text.push_str(&text);
                             }
                             Ok(OpenAiStreamEvent::ToolCallStart { index, id, name }) => {
                                 state.tool_acc.insert(index, (id, name, String::new()));
@@ -475,6 +514,15 @@ fn byte_stream_to_chat_events(
 
             // [C] 处理流结束标记
             if state.stream_ended {
+                // 在发射 UsageInfo 前，先刷新累积的推理内容
+                if !state.reasoning_text.is_empty() {
+                    let reasoning = std::mem::take(&mut state.reasoning_text);
+                    let block = serde_json::json!({
+                        "type": "thinking",
+                        "thinking": reasoning,
+                    });
+                    return Some((Ok(ChatEvent::ThinkingBlock(block)), state));
+                }
                 if !state.usage_emitted {
                     state.usage_emitted = true;
                     return Some((
@@ -921,6 +969,27 @@ mod tests {
         assert_eq!(crate::util::parse_retry_after(&headers), None);
     }
 
+    #[test]
+    fn test_parse_reasoning_content_delta() {
+        let data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"Step 1: think"},"finish_reason":null}]}"#;
+        let result = parse_openai_sse_data(data).unwrap();
+        match result {
+            OpenAiStreamEvent::ReasoningDelta(t) => assert_eq!(t, "Step 1: think"),
+            _ => panic!("expected ReasoningDelta, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_parse_reasoning_field_delta() {
+        // Some providers use "reasoning" instead of "reasoning_content"
+        let data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning":"deep thinking..."},"finish_reason":null}]}"#;
+        let result = parse_openai_sse_data(data).unwrap();
+        match result {
+            OpenAiStreamEvent::ReasoningDelta(t) => assert_eq!(t, "deep thinking..."),
+            _ => panic!("expected ReasoningDelta, got {:?}", result),
+        }
+    }
+
     // --- byte_stream_to_chat_events 测试 ---
 
     /// 构建单条 SSE data 行（自动追加 \n\n）
@@ -1100,5 +1169,97 @@ mod tests {
         assert_eq!(events.len(), 2, "expect UsageInfo + Done");
         assert!(matches!(&events[0], ChatEvent::UsageInfo { .. }));
         assert!(matches!(&events[1], ChatEvent::Done));
+    }
+
+    #[tokio::test]
+    async fn test_byte_stream_reasoning_then_text() {
+        // reasoning_content chunks come first, then text, then stop
+        let reasoning1 = serde_json::json!({
+            "id": "chatcmpl",
+            "object": "chat.completion.chunk",
+            "choices": [{
+                "index": 0,
+                "delta": { "reasoning_content": "Step 1... " },
+                "finish_reason": null
+            }]
+        });
+        let reasoning2 = serde_json::json!({
+            "id": "chatcmpl",
+            "object": "chat.completion.chunk",
+            "choices": [{
+                "index": 0,
+                "delta": { "reasoning_content": "Step 2..." },
+                "finish_reason": null
+            }]
+        });
+        let sse = format!(
+            "{}{}{}{}",
+            make_sse(&reasoning1),
+            make_sse(&reasoning2),
+            make_sse(&make_text_chunk("The answer is 42.")),
+            sse_line("[DONE]"),
+        );
+        let events = collect_events(vec![sse]).await;
+
+        // Expect: ThinkingBlock (with accumulated reasoning) + TextDelta + UsageInfo + Done
+        assert_eq!(
+            events.len(),
+            4,
+            "expect ThinkingBlock + TextDelta + UsageInfo + Done"
+        );
+        match &events[0] {
+            ChatEvent::ThinkingBlock(block) => {
+                assert_eq!(block["type"], "thinking");
+                assert_eq!(block["thinking"], "Step 1... Step 2...");
+            }
+            _ => panic!("expected ThinkingBlock first, got {:?}", events[0]),
+        }
+        assert!(matches!(&events[1], ChatEvent::TextDelta(t) if t == "The answer is 42."));
+        assert!(matches!(&events[2], ChatEvent::UsageInfo { .. }));
+        assert!(matches!(&events[3], ChatEvent::Done));
+    }
+
+    #[tokio::test]
+    async fn test_byte_stream_reasoning_only() {
+        // Model outputs ONLY reasoning content, no text (the reported bug scenario)
+        let reasoning = serde_json::json!({
+            "id": "chatcmpl",
+            "object": "chat.completion.chunk",
+            "choices": [{
+                "index": 0,
+                "delta": { "reasoning_content": "All tokens spent on reasoning..." },
+                "finish_reason": null
+            }]
+        });
+        // Include usage to simulate real API behavior with token counts
+        let usage_chunk = serde_json::json!({
+            "id": "chatcmpl",
+            "object": "chat.completion.chunk",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 4096,
+                "total_tokens": 4196
+            }
+        });
+        let sse = format!(
+            "{}{}{}",
+            make_sse(&reasoning),
+            make_sse(&usage_chunk),
+            sse_line("[DONE]"),
+        );
+        let events = collect_events(vec![sse]).await;
+
+        // Expect: ThinkingBlock + UsageInfo + Done (no TextDelta)
+        assert_eq!(events.len(), 3, "expect ThinkingBlock + UsageInfo + Done");
+        match &events[0] {
+            ChatEvent::ThinkingBlock(block) => {
+                assert_eq!(block["type"], "thinking");
+                assert_eq!(block["thinking"], "All tokens spent on reasoning...");
+            }
+            _ => panic!("expected ThinkingBlock, got {:?}", events[0]),
+        }
+        assert!(matches!(&events[1], ChatEvent::UsageInfo { .. }));
+        assert!(matches!(&events[2], ChatEvent::Done));
     }
 }

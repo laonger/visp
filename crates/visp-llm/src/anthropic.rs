@@ -353,6 +353,17 @@ pub(crate) fn parse_anthropic_event(event_name: &str, data: &str) -> Result<Pars
                         signature,
                     })
                 }
+                "redacted_thinking" => {
+                    let signature = v["content_block"]["signature"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+                    Ok(ParsedEvent::ThinkingDelta {
+                        index,
+                        partial: "[REDACTED]".to_string(),
+                        signature,
+                    })
+                }
                 _ => Ok(ParsedEvent::Skip),
             }
         }
@@ -773,6 +784,24 @@ mod tests {
             r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
         let result = parse_anthropic_event("content_block_start", data).unwrap();
         assert!(matches!(result, ParsedEvent::Skip));
+    }
+
+    #[test]
+    fn test_parse_redacted_thinking_block_start() {
+        let data = r#"{"type":"content_block_start","index":2,"content_block":{"type":"redacted_thinking","signature":"base64sig123"}}"#;
+        let result = parse_anthropic_event("content_block_start", data).unwrap();
+        match result {
+            ParsedEvent::ThinkingDelta {
+                index,
+                partial,
+                signature,
+            } => {
+                assert_eq!(index, 2);
+                assert_eq!(partial, "[REDACTED]");
+                assert_eq!(signature, "base64sig123");
+            }
+            _ => panic!("expected ThinkingDelta, got {:?}", result),
+        }
     }
 
     // --- parse_retry_after 测试 ---
