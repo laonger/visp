@@ -417,6 +417,7 @@ fn byte_stream_to_chat_events(
     use std::collections::HashMap;
 
     struct ToolAcc {
+        id: String,
         name: String,
         input: String,
     }
@@ -507,6 +508,7 @@ fn byte_stream_to_chat_events(
                         }) => {
                             let key = format!("thinking_{}", index);
                             let entry = state.tools.entry(key).or_insert_with(|| ToolAcc {
+                                id: String::new(),
                                 name: String::new(),
                                 input: String::new(),
                             });
@@ -517,7 +519,7 @@ fn byte_stream_to_chat_events(
                         }
                         Ok(ParsedEvent::ToolInputDelta {
                             index,
-                            id: _,
+                            id,
                             name,
                             partial,
                         }) => {
@@ -526,6 +528,7 @@ fn byte_stream_to_chat_events(
                                 state.tools.insert(
                                     key,
                                     ToolAcc {
+                                        id,
                                         name,
                                         input: partial,
                                     },
@@ -547,7 +550,7 @@ fn byte_stream_to_chat_events(
                             let key = index.to_string();
                             if let Some(acc) = state.tools.remove(&key) {
                                 let evt = ChatEvent::ToolCall {
-                                    id: format!("tool_call_{}", index),
+                                    id: acc.id,
                                     name: acc.name,
                                     arguments: acc.input,
                                 };
