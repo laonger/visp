@@ -884,6 +884,7 @@ mod tests {
             codegraphs: Arc::new(RwLock::new(HashMap::new())),
             default_llm_config,
             context_trimmer: Arc::new(visp_core::context::NoopTrimmer),
+            mcp_manager: Arc::new(McpManager::new(vec![])),
         };
 
         let request = tonic::Request::new(proto::CreateSessionRequest {
@@ -920,6 +921,7 @@ mod tests {
             codegraphs: Arc::new(RwLock::new(HashMap::new())),
             default_llm_config,
             context_trimmer: Arc::new(visp_core::context::NoopTrimmer),
+            mcp_manager: Arc::new(McpManager::new(vec![])),
         };
 
         let request = tonic::Request::new(proto::CreateSessionRequest {

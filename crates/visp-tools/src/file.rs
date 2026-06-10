@@ -601,7 +601,7 @@ mod tests {
         let lines: Vec<String> = (1..=20).map(|i| format!("line {}", i)).collect();
         std::fs::write(&file_path, lines.join("\n")).unwrap();
 
-        let tool = ReadFile;
+        let tool = ReadFile::default();
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
@@ -632,7 +632,7 @@ mod tests {
         let lines: Vec<String> = (1..=20).map(|i| format!("line {}", i)).collect();
         std::fs::write(&file_path, lines.join("\n")).unwrap();
 
-        let tool = ReadFile;
+        let tool = ReadFile::default();
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
@@ -667,7 +667,7 @@ mod tests {
         let lines: Vec<String> = (1..=5).map(|i| format!("line {}", i)).collect();
         std::fs::write(&file_path, lines.join("\n")).unwrap();
 
-        let tool = ReadFile;
+        let tool = ReadFile::default();
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
@@ -696,7 +696,7 @@ mod tests {
         let file_path = tmp.path().join("small.txt");
         std::fs::write(&file_path, "a\nb\nc\n").unwrap();
 
-        let tool = ReadFile;
+        let tool = ReadFile::default();
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
@@ -719,7 +719,7 @@ mod tests {
         let file_path = tmp.path().join("small.txt");
         std::fs::write(&file_path, "a\nb\nc\n").unwrap();
 
-        let tool = ReadFile;
+        let tool = ReadFile::default();
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
@@ -743,7 +743,7 @@ mod tests {
         let file_path = tmp.path().join("small.txt");
         std::fs::write(&file_path, "a\nb\nc\nd\ne\n").unwrap();
 
-        let tool = ReadFile;
+        let tool = ReadFile::default();
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
@@ -768,7 +768,7 @@ mod tests {
         let file_path = tmp.path().join("whole.txt");
         std::fs::write(&file_path, "hello world").unwrap();
 
-        let tool = ReadFile;
+        let tool = ReadFile::default();
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
