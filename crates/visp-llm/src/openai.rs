@@ -405,7 +405,12 @@ fn byte_stream_to_chat_events(
                                     entry.2.push_str(&arguments);
                                 }
                             }
-                            Ok(OpenAiStreamEvent::Finish { .. }) => {
+                            Ok(OpenAiStreamEvent::Finish { reason, .. }) => {
+                                if let Some(ref r) = reason
+                                    && r == "content_filter"
+                                {
+                                    tracing::warn!("OpenAI response blocked by content filter");
+                                }
                                 if !state.tool_acc.is_empty() {
                                     state.tool_call_count = state.tool_acc.len() as u32;
                                     let calls: Vec<(String, String, String)> = state
