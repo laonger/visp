@@ -73,6 +73,7 @@ impl Tool for Bash {
             "properties": {
                 "command": {
                     "type": "string",
+                    "minLength": 1,
                     "description": "Shell command string to execute. Can include pipes, redirects, and multiple commands separated by && or ;."
                 },
                 "description": {

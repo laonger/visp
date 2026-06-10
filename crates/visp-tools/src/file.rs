@@ -128,10 +128,12 @@ impl Tool for WriteFile {
             "properties": {
                 "path": {
                     "type": "string",
+                    "minLength": 1,
                     "description": "Target file path, relative to the project root."
                 },
                 "content": {
                     "type": "string",
+                    "minLength": 1,
                     "description": "Content to write to the file."
                 }
             },
@@ -208,10 +210,12 @@ impl Tool for EditFile {
             "properties": {
                 "path": {
                     "type": "string",
+                    "minLength": 1,
                     "description": "Path to the file to edit, relative to the project root."
                 },
                 "old_string": {
                     "type": "string",
+                    "minLength": 1,
                     "description": "Exact string to search for in the file."
                 },
                 "new_string": {
