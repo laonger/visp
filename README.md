@@ -126,6 +126,37 @@ api_key = "sk-ant-..."          # 或设置 ANTHROPIC_API_KEY 环境变量
 
 不创建也能运行，仅配 `api_key` 和 `model` 即可。完整的注解模板见 [`docs/daemon.toml`](docs/daemon.toml)，完整结构见 [`config.rs`](crates/visp-daemon/src/config.rs)。
 
+### 规则文件
+
+项目级规则放在 `.visp/rules/`，全局规则放在 `~/.config/visp/rules/`，Markdown 格式：
+
+```markdown
+---
+alwaysApply: true
+---
+
+## 代码规范
+
+- 使用 4 空格缩进
+- 函数名使用 snake_case
+```
+
+`alwaysApply: true` 表示无条件注入 prompt，`false` 则按需注入。也支持 `AGENTS.md` 从项目目录向上查找。
+
+### 技能文件
+
+领域知识或工作流指令放在 `.visp/skills/` 下，每个技能一个子目录，包含 `SKILL.md`：
+
+```
+.visp/skills/
+├── my-workflow/
+│   └── SKILL.md     # YAML frontmatter + Markdown
+└── another-skill/
+    └── SKILL.md
+```
+
+内容格式：`---` 分隔的 YAML frontmatter（`name`、`description`）后接 Markdown 正文，自动合并到 system prompt。详见 [visp-core](crates/visp-core/README.md)。
+
 ### 运行
 
 ```bash
@@ -173,22 +204,6 @@ cargo build --release
 | `/clear` | 清屏 |
 | `/help` | 显示帮助 |
 | `/quit` | 退出 |
-
-### 规则文件
-
-创建 `.visp/rules/` 目录，放入 Markdown 文件即可定义 AI 行为规则：
-
-```markdown
----
-alwaysApply: true
----
-
-## 代码规范
-
-- 使用 4 空格缩进
-- 函数名使用 snake_case
-- 结构体使用 CamelCase
-```
 
 ## 质量门禁
 
