@@ -319,6 +319,8 @@ pub async fn run_agent_loop(
             &ctx.history,
             &ctx.working_dir,
             &date_str,
+            Some(ctx.config.max_context_tokens),
+            ctx.config.max_tokens,
         );
 
         // c. Get tool definitions
