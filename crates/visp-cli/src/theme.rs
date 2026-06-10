@@ -96,7 +96,7 @@ pub struct BlockStyle {
 impl BlockStyle {
     /// 计算该 block 占用的总行数
     pub const fn total_height(self, line_count: u16) -> u16 {
-        1 + self.margin_horizontal + line_count + self.bottom_pad
+        1 + self.margin_vertical + line_count + self.bottom_pad
     }
 }
 

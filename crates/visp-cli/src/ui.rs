@@ -194,7 +194,10 @@ fn ensure_all_caches(app: &mut AppState, width: u16) {
 /// 渲染对话消息列表 + 流式文本。使用统一的 BlockStyle 驱动。
 fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     let content_w = area.width.saturating_sub(1);
-    ensure_all_caches(app, content_w);
+    // render_block 中 content_w_adj = content_w - margin_horizontal*2
+    // 所有 style 的 margin_horizontal 均为 1，按渲染实际宽度折行
+    let render_w = content_w.saturating_sub(2);
+    ensure_all_caches(app, render_w);
 
     const CHAT_PAD: u16 = 1;
 

@@ -5,6 +5,7 @@ use ratatui::{
     style::Style,
     text::{Line, Span},
 };
+use unicode_width::UnicodeWidthChar;
 
 use crate::theme;
 
@@ -112,7 +113,7 @@ fn wrap_styled_line(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
     let mut chars: VecDeque<StyledChar> = VecDeque::new();
     for span in &line.spans {
         for ch in span.content.chars() {
-            let cw = if ch > '\u{2000}' { 2 } else { 1 };
+            let cw = ch.width().unwrap_or(0) as usize;
             chars.push_back(StyledChar {
                 ch,
                 style: span.style,
@@ -315,7 +316,7 @@ pub(crate) fn wrap_text(text: &str, screen_width: u16) -> Vec<String> {
             let mut w: usize = 0;
             let mut end = start;
             for (i, &c) in chars[start..].iter().enumerate() {
-                let cw: usize = if c > '\u{2000}' { 2 } else { 1 };
+                let cw = c.width().unwrap_or(0) as usize;
                 if w + cw > sw && w > 0 {
                     end = start + i;
                     break;
@@ -331,7 +332,7 @@ pub(crate) fn wrap_text(text: &str, screen_width: u16) -> Vec<String> {
 }
 
 pub(crate) fn pad_to_width(s: &str, width: usize) -> String {
-    let len: usize = s.chars().map(|c| if c > '\u{2000}' { 2 } else { 1 }).sum();
+    let len: usize = s.chars().map(|c| c.width().unwrap_or(0) as usize).sum();
     if len < width {
         format!("{}{}", s, " ".repeat(width - len))
     } else {

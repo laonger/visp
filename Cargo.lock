@@ -3743,6 +3743,7 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tui-scrollview",
+ "unicode-width 0.2.0",
  "visp-proto",
 ]
 
