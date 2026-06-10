@@ -41,6 +41,7 @@
 | [visp-llm](crates/visp-llm/) | LLM 提供器 — Anthropic API 集成 | [README](crates/visp-llm/README.md) |
 | [visp-tools](crates/visp-tools/) | 内置工具 — 文件/Bash/搜索/WebFetch/CodeGraph | [README](crates/visp-tools/README.md) |
 | [visp-codegraph](crates/visp-codegraph/) | 代码图谱引擎 — tree-sitter + SQLite | [README](crates/visp-codegraph/README.md) |
+| [visp-context](crates/visp-context/) | 上下文裁剪器 — token 预算 + 轮次剪枝 + 工具输出压缩 | [README](crates/visp-context/README.md) |
 | [visp-daemon](crates/visp-daemon/) | gRPC 服务端 — 组装所有模块 | [README](crates/visp-daemon/README.md) |
 | [visp-cli](crates/visp-cli/) | TUI 客户端 — ratatui 终端界面 | [README](crates/visp-cli/README.md) |
 
@@ -74,6 +75,16 @@
 
 ### 会话管理
 独立会话生命周期（Idle → Running → Completed/Error），每个会话维护独立的对话历史和 LLM 配置。当前为内存存储，可通过 `SessionStore` trait 替换为持久化实现。
+
+### 上下文裁剪
+长对话自动管理 context window，防止超出 LLM token 限制：
+
+- **Token 估算**：消息构造时自动计算 `chars/4` 近似 token 数
+- **三段式剪枝**：对话历史分为 HEAD（前 5 轮，保护）+ MIDDLE（可裁剪）+ TAIL（后 10 轮，保护），裁剪 MIDDLE 中最旧的完整轮次
+- **极端保底**：HEAD+TAIL 仍超预算时，保留首条 User（任务锚点）+ 尾部最近消息
+- **工具输出压缩**：Tool 消息截断到 2000 字符，仅影响 prompt 副本，存储保留完整原始内容
+- **预算公式**：`available = max_context_tokens − max(output_tokens, 4000)`，通过 `LlmConfig.max_context_tokens` 配置（默认 128K）
+- **架构**：独立 `visp-context` crate，core 通过 `ContextTrimmer` trait 调用，daemon 依赖注入，可替换裁剪策略
 
 ### Skills 技能系统
 从 `.visp/skills/` 加载技能定义，用于注入领域知识或工作流指令。每个技能是一个子目录，包含 `SKILL.md`（YAML frontmatter + Markdown 内容），自动合并到 system prompt 中：
@@ -131,6 +142,7 @@ api_key = "sk-ant-..."          # 或设置 ANTHROPIC_API_KEY 环境变量
 base_url = ""                    # 可选：自定义 API 地址
 temperature = 0.7
 max_tokens = 4096
+max_context_tokens = 128000       # 可选：上下文窗口大小，默认 128K
 thinking_budget_tokens = 2048    # 可选：Claude thinking 模式
 
 [tools]
@@ -202,7 +214,6 @@ Rust (edition 2024) · tokio · tonic + prost · serde · ratatui + crossterm ·
 ## 已知限制
 
 - 当前仅支持 Anthropic Claude API（可通过 `base_url` 兼容 OpenAI 接口）
-- 对话历史无 token 计数和裁剪
 - Session 存储为内存实现（重启丢失）
 
 详见 [docs/TODO.md](docs/TODO.md).
