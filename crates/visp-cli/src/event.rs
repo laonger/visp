@@ -120,6 +120,12 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
     app.needs_render = true;
     match event {
         Event::Key(key) => {
+            // Alt+M: 切换鼠标捕获模式，任何时候都生效
+            if key.code == KeyCode::Char('m') && key.modifiers.contains(KeyModifiers::ALT) {
+                toggle_mouse_mode(app);
+                return false;
+            }
+
             if app.confirm.is_some() {
                 // Ctrl+C 在确认模式下也能取消
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -477,21 +483,7 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
             chat_handle.send_input(text);
         }
         "/mouse" => {
-            app.mouse_captured = !app.mouse_captured;
-            let _ = if app.mouse_captured {
-                use std::io::Write;
-                write!(io::stdout(), "\x1b[?1000h\x1b[?1006h")
-            } else {
-                use std::io::Write;
-                write!(io::stdout(), "\x1b[?1000l\x1b[?1006l")
-            };
-            let _ = io::stdout().flush();
-            let mode = if app.mouse_captured {
-                "Mouse"
-            } else {
-                "Select"
-            };
-            app.add_message(LineType::Status, format!("Mouse mode: {mode}"));
+            toggle_mouse_mode(app);
         }
         "/temp" if parts.len() >= 2 => {
             if let Ok(temp) = parts[1].parse::<f64>() {
@@ -540,4 +532,18 @@ fn build_input_from_key(key: KeyEvent) -> ratatui_textarea::Input {
         alt: key.modifiers.contains(KeyModifiers::ALT),
         shift: key.modifiers.contains(KeyModifiers::SHIFT),
     }
+}
+
+fn toggle_mouse_mode(app: &mut AppState) {
+    app.mouse_captured = !app.mouse_captured;
+    let _ = if app.mouse_captured {
+        use std::io::Write;
+        write!(io::stdout(), "\x1b[?1000h\x1b[?1006h")
+    } else {
+        use std::io::Write;
+        write!(io::stdout(), "\x1b[?1000l\x1b[?1006l")
+    };
+    let _ = io::stdout().flush();
+    let mode = if app.mouse_captured { "Mouse" } else { "Select" };
+    app.add_message(LineType::Status, format!("Mouse mode: {mode}"));
 }
