@@ -14,6 +14,8 @@ pub struct LlmConfig {
     pub temperature: f64,
     /// 最大 token 数
     pub max_tokens: u32,
+    /// 最大上下文 token 数（默认 128_000）
+    pub max_context_tokens: u32,
     /// 扩展参数（provider 特定参数）
     pub extra: std::collections::HashMap<String, String>,
 }
@@ -24,6 +26,7 @@ impl Default for LlmConfig {
             model: "claude-3-7-sonnet-20250219".to_string(),
             temperature: 0.7,
             max_tokens: 4096,
+            max_context_tokens: 128_000,
             extra: std::collections::HashMap::new(),
         }
     }
@@ -47,6 +50,21 @@ mod tests_llmconfig {
         let mut config = LlmConfig::default();
         config.extra.insert("key".to_string(), "value".to_string());
         assert_eq!(config.extra.get("key").unwrap(), "value");
+    }
+
+    #[test]
+    fn test_llmconfig_default_max_context_tokens() {
+        let config = LlmConfig::default();
+        assert_eq!(config.max_context_tokens, 128_000);
+    }
+
+    #[test]
+    fn test_llmconfig_custom_max_context_tokens() {
+        let config = LlmConfig {
+            max_context_tokens: 64_000,
+            ..Default::default()
+        };
+        assert_eq!(config.max_context_tokens, 64_000);
     }
 }
 
