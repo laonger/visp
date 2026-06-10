@@ -139,6 +139,9 @@ impl CoderDaemon for CoderDaemonService {
         if config.max_tokens == LlmConfig::default().max_tokens {
             config.max_tokens = self.default_llm_config.max_tokens;
         }
+        if config.max_context_tokens == LlmConfig::default().max_context_tokens {
+            config.max_context_tokens = self.default_llm_config.max_context_tokens;
+        }
         let session = self
             .session_mgr
             .create(Path::new(&req.project_path), config)
@@ -608,6 +611,9 @@ fn map_llm_config(proto: &proto::LlmConfig) -> LlmConfig {
     if let Some(max_tokens) = proto.max_tokens {
         config.max_tokens = max_tokens;
     }
+    if let Some(max_context_tokens) = proto.max_context_tokens {
+        config.max_context_tokens = max_context_tokens;
+    }
     config.extra = proto.extra.clone();
     config
 }
@@ -726,6 +732,7 @@ mod tests {
     use visp_core::session::InMemorySessionStore;
     use visp_core::session::Session;
     use visp_core::session::SessionStatus as CoreStatus;
+    use visp_llm::mock::MockProvider;
 
     // ── Cancel tests ────────────────────────────────────────────────────────
 
@@ -777,6 +784,7 @@ mod tests {
             model: None,
             temperature: None,
             max_tokens: None,
+            max_context_tokens: None,
             extra: HashMap::new(),
         };
         let llm = map_llm_config(&config);
@@ -793,6 +801,7 @@ mod tests {
             model: Some("gpt-4".into()),
             temperature: Some(0.5),
             max_tokens: Some(2048),
+            max_context_tokens: Some(64000),
             extra,
         };
 
@@ -800,6 +809,7 @@ mod tests {
         assert_eq!(llm.model, "gpt-4");
         assert!((llm.temperature - 0.5).abs() < f64::EPSILON);
         assert_eq!(llm.max_tokens, 2048);
+        assert_eq!(llm.max_context_tokens, 64_000);
         assert_eq!(llm.extra.get("custom_key").unwrap(), "custom_val");
     }
 
@@ -809,6 +819,7 @@ mod tests {
             model: Some("gpt-4".into()),
             temperature: None,
             max_tokens: None,
+            max_context_tokens: None,
             extra: HashMap::new(),
         };
 
@@ -816,6 +827,76 @@ mod tests {
         assert_eq!(llm.model, "gpt-4");
         assert!((llm.temperature - 0.7).abs() < f64::EPSILON);
         assert_eq!(llm.max_tokens, 4096);
+    }
+
+    #[tokio::test]
+    async fn test_create_session_max_context_tokens_default() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let default_llm_config = LlmConfig {
+            max_context_tokens: 200_000,
+            ..LlmConfig::default()
+        };
+        let service = CoderDaemonService {
+            provider: Arc::new(MockProvider::new(vec![])),
+            tool_registry: Arc::new(ToolRegistry::new()),
+            rule_engine: Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap()),
+            session_mgr: mgr.clone(),
+            agent_config: AgentConfig::default(),
+            start_time: Instant::now(),
+            codegraphs: Arc::new(RwLock::new(HashMap::new())),
+            default_llm_config,
+        };
+
+        let request = tonic::Request::new(proto::CreateSessionRequest {
+            project_path: "/tmp".into(),
+            config: Some(proto::LlmConfig {
+                model: None,
+                temperature: None,
+                max_tokens: None,
+                max_context_tokens: None,
+                extra: HashMap::new(),
+            }),
+        });
+
+        let response = service.create_session(request).await.unwrap();
+        let session = response.into_inner();
+        let stored = mgr.get(&session.session_id).unwrap();
+        assert_eq!(stored.config.max_context_tokens, 200_000);
+    }
+
+    #[tokio::test]
+    async fn test_create_session_max_context_tokens_override() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let default_llm_config = LlmConfig {
+            max_context_tokens: 200_000,
+            ..LlmConfig::default()
+        };
+        let service = CoderDaemonService {
+            provider: Arc::new(MockProvider::new(vec![])),
+            tool_registry: Arc::new(ToolRegistry::new()),
+            rule_engine: Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap()),
+            session_mgr: mgr.clone(),
+            agent_config: AgentConfig::default(),
+            start_time: Instant::now(),
+            codegraphs: Arc::new(RwLock::new(HashMap::new())),
+            default_llm_config,
+        };
+
+        let request = tonic::Request::new(proto::CreateSessionRequest {
+            project_path: "/tmp".into(),
+            config: Some(proto::LlmConfig {
+                model: None,
+                temperature: None,
+                max_tokens: None,
+                max_context_tokens: Some(32000),
+                extra: HashMap::new(),
+            }),
+        });
+
+        let response = service.create_session(request).await.unwrap();
+        let session = response.into_inner();
+        let stored = mgr.get(&session.session_id).unwrap();
+        assert_eq!(stored.config.max_context_tokens, 32_000);
     }
 
     #[test]

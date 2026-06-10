@@ -57,6 +57,7 @@ async fn main() {
             model: cli.model.clone(),
             temperature: cli.temperature,
             max_tokens: None,
+            max_context_tokens: None,
             extra,
         })
     } else {

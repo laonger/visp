@@ -24,6 +24,7 @@ message LlmConfig {
     optional double temperature = 2;
     optional uint32 max_tokens = 3;
     map<string, string> extra = 4;
+    optional uint32 max_context_tokens = 5;
 }
 
 message CreateSessionRequest {

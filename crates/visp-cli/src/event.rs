@@ -501,6 +501,7 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
                     model: None,
                     temperature: Some(temp),
                     max_tokens: None,
+                    max_context_tokens: None,
                     extra: Default::default(),
                 });
                 app.add_message(LineType::Status, format!("Temperature set to {}", temp));
@@ -511,6 +512,7 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
                 model: Some(parts[1].to_string()),
                 temperature: None,
                 max_tokens: None,
+                max_context_tokens: None,
                 extra: Default::default(),
             });
             app.add_message(LineType::Status, format!("Model set to {}", parts[1]));
