@@ -111,6 +111,39 @@ pub fn truncate_tool_output(content: &str) -> String {
     }
 }
 
+/// 返回第 n+1 轮起点索引（轮次由 User 消息位置识别）
+/// 如果不足 n 轮 User 消息，返回 history.len()
+pub fn find_head_end(history: &[Message], n: usize) -> usize {
+    let user_positions: Vec<usize> = history
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == Role::User)
+        .map(|(i, _)| i)
+        .collect();
+
+    if user_positions.len() <= n {
+        return history.len();
+    }
+    user_positions[n]
+}
+
+/// 返回倒数第 n 轮起点索引（轮次由 User 消息位置识别）
+/// 如果不足 n 轮，返回 0
+pub fn find_tail_start(history: &[Message], n: usize) -> usize {
+    let user_positions: Vec<usize> = history
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == Role::User)
+        .map(|(i, _)| i)
+        .collect();
+
+    let len = user_positions.len();
+    if len < n {
+        return 0;
+    }
+    user_positions[len - n]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,5 +319,48 @@ mod tests {
         let expected_prefix: String = "你好".repeat(1000); // 2000 chars
         assert!(result.starts_with(&expected_prefix));
         assert!(result.contains("truncated"));
+    }
+
+    // ---- 3b: 边界函数 ----
+
+    #[test]
+    fn test_find_head_end_two_turns_n1() {
+        let history = vec![
+            Message::user("q1"),
+            Message::assistant("a1"),
+            Message::user("q2"),
+            Message::assistant("a2"),
+        ];
+        assert_eq!(find_head_end(&history, 1), 2);
+    }
+
+    #[test]
+    fn test_find_head_end_not_enough_turns() {
+        let history = vec![Message::user("q1"), Message::assistant("a1")];
+        assert_eq!(find_head_end(&history, 5), 2);
+    }
+
+    #[test]
+    fn test_find_head_end_empty() {
+        let history: Vec<Message> = vec![];
+        assert_eq!(find_head_end(&history, 2), 0);
+    }
+
+    #[test]
+    fn test_find_tail_start_two_turns_n2() {
+        let history = vec![
+            Message::user("q1"),
+            Message::assistant("a1"),
+            Message::user("q2"),
+            Message::assistant("a2"),
+        ];
+        // 总共 2 轮，倒数第 2 轮即第 1 轮起点
+        assert_eq!(find_tail_start(&history, 2), 0);
+    }
+
+    #[test]
+    fn test_find_tail_start_empty() {
+        let history: Vec<Message> = vec![];
+        assert_eq!(find_tail_start(&history, 2), 0);
     }
 }
