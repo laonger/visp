@@ -85,7 +85,7 @@ async fn main() {
     };
 
     let model = cli.model.clone().unwrap_or(session.model);
-    if let Err(e) = event::run(session.session_id, chat_handle, model).await {
+    if let Err(e) = event::run(session.session_id, chat_handle, model, &mut client, &project_str).await {
         eprintln!("Event loop error: {}", e);
     }
 }

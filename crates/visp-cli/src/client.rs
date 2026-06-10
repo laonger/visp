@@ -19,7 +19,7 @@ pub struct ChatHandle {
     pub(crate) request_tx: mpsc::Sender<ClientMessage>,
     pub response_stream:
         Pin<Box<dyn futures::Stream<Item = Result<ServerMessage, tonic::Status>> + Send>>,
-    pub(crate) session_id: String,
+    pub session_id: String,
     next_request_id: u64,
 }
 

@@ -397,6 +397,8 @@ pub struct AppState {
     pub should_quit: bool,
     pub pending_usage: Option<(u32, u32, u32)>,
     pub mouse_captured: bool,
+    /// 用户输入了 /new 命令，主循环需要创建新 session
+    pub pending_new_session: bool,
 }
 
 impl AppState {
@@ -426,6 +428,7 @@ impl AppState {
             should_quit: false,
             pending_usage: None,
             mouse_captured: true,
+            pending_new_session: false,
         }
     }
 
@@ -528,6 +531,22 @@ impl AppState {
     pub fn clear_messages(&mut self) {
         self.messages.clear();
         self.message_caches.clear();
+    }
+
+    /// 重置为新 session 的状态（保留 mouse 设置和 textarea 内容）
+    pub fn reset_for_new_session(&mut self, session_id: String, model: String) {
+        self.messages.clear();
+        self.message_caches.clear();
+        self.streaming_text.clear();
+        self.generating = false;
+        self.stale_done_expected = false;
+        self.current_request_id = None;
+        self.next_message_id = 0;
+        self.confirm = None;
+        self.pending_usage = None;
+        self.pending_new_session = false;
+        self.session_id = session_id;
+        self.model = model;
     }
 }
 

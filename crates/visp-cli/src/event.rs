@@ -21,7 +21,7 @@ macro_rules! debug_log {
 }
 
 use crate::app::{AppState, ConfirmState, LineType};
-use crate::client::ChatHandle;
+use crate::client::{ChatHandle, VbwClient};
 use crate::ui::render;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use std::io::{self, Write};
@@ -75,7 +75,13 @@ impl Drop for TerminalGuard {
     }
 }
 
-pub async fn run(session_id: String, mut chat_handle: ChatHandle, model: String) -> io::Result<()> {
+pub async fn run(
+    session_id: String,
+    mut chat_handle: ChatHandle,
+    model: String,
+    client: &mut VbwClient,
+    project_path: &str,
+) -> io::Result<()> {
     if let Ok((w, h)) = crossterm::terminal::size() {
         debug_log!("session start: {w}x{h}, model={model}");
     }
@@ -147,6 +153,27 @@ pub async fn run(session_id: String, mut chat_handle: ChatHandle, model: String)
         if app.should_quit {
             break;
         }
+
+        // 处理 /new 命令：创建新 session 并替换 chat_handle 的 session_id
+        if app.pending_new_session {
+            match client.create_session(project_path, None).await {
+                Ok(session) => {
+                    chat_handle.send_cancel();
+                    chat_handle.session_id = session.session_id.clone();
+                    let model = session.model.clone();
+                    app.reset_for_new_session(session.session_id, model);
+                    app.add_message(
+                        LineType::Status,
+                        "New session started. Use /help for available commands.".into(),
+                    );
+                }
+                Err(e) => {
+                    app.add_message(LineType::Error, format!("Failed to create new session: {e}"));
+                    app.pending_new_session = false;
+                }
+            }
+        }
+
         if app.needs_render {
             // 确认状态始终需要渲染，不受流节流影响
             if app.generating && app.confirm.is_none() && !app.try_begin_stream_render() {
@@ -541,8 +568,18 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
         "/help" => {
             app.add_message(
                 LineType::Status,
-                "/clear /temp <val> /model <name> /mouse /init /help".into(),
+                "/clear /new /temp <val> /model <name> /mouse /init /help".into(),
             );
+        }
+        "/new" => {
+            // 标记需要创建新 session，主循环中处理（需要 async 调用 client.create_session）
+            app.streaming_text.clear();
+            app.generating = false;
+            app.stale_done_expected = false;
+            app.current_request_id = None;
+            app.confirm = None;
+            app.pending_new_session = true;
+            app.add_message(LineType::Status, "Creating new session...".into());
         }
         "/init" => {
             app.add_message(LineType::User, text.to_string());
