@@ -520,6 +520,7 @@ mod tests {
             tool_calls: None,
             extra_blocks: None,
             skip_context: false,
+            estimated_tokens: 0,
         };
         manager.append_message(&session.id, msg.clone()).unwrap();
 

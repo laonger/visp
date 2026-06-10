@@ -7,6 +7,7 @@ use crate::error::LlmError;
 use crate::message::Message;
 use crate::message::Role;
 use crate::message::ToolCallRequest;
+use crate::message::estimate_message_tokens;
 use crate::prompt::PromptBuilder;
 use crate::provider::ChatEvent;
 use crate::provider::LlmConfig;
@@ -407,7 +408,7 @@ pub async fn run_agent_loop(
             // Check [USER_QUERY] marker
             if let Some(marker) = parse_user_query_marker(&text_buffer) {
                 let clean_text = strip_user_query_marker(&text_buffer);
-                let assistant_msg = Message {
+                let mut assistant_msg = Message {
                     role: Role::Assistant,
                     content: clean_text,
                     tool_call_id: None,
@@ -418,7 +419,9 @@ pub async fn run_agent_loop(
                     } else {
                         Some(thinking_blocks.clone())
                     },
+                    estimated_tokens: 0,
                 };
+                assistant_msg.estimated_tokens = estimate_message_tokens(&assistant_msg);
                 ctx.history.push(assistant_msg.clone());
                 if let Err(e) = session_mgr.append_message(&ctx.session_id, assistant_msg) {
                     try_send!(AgentEvent::Error {
@@ -465,7 +468,7 @@ pub async fn run_agent_loop(
             }
 
             // No [USER_QUERY] marker: done
-            let assistant_msg = Message {
+            let mut assistant_msg = Message {
                 role: Role::Assistant,
                 content: text_buffer,
                 tool_call_id: None,
@@ -476,7 +479,9 @@ pub async fn run_agent_loop(
                 } else {
                     Some(thinking_blocks.clone())
                 },
+                estimated_tokens: 0,
             };
+            assistant_msg.estimated_tokens = estimate_message_tokens(&assistant_msg);
             ctx.history.push(assistant_msg.clone());
             if let Err(e) = session_mgr.append_message(&ctx.session_id, assistant_msg) {
                 try_send!(AgentEvent::Error {
@@ -499,7 +504,7 @@ pub async fn run_agent_loop(
 
         // Has tool calls: append assistant message with tool_calls
         total_tool_calls += tool_calls.len() as u32;
-        let assistant_msg = Message {
+        let mut assistant_msg = Message {
             role: Role::Assistant,
             content: text_buffer,
             tool_call_id: None,
@@ -510,7 +515,9 @@ pub async fn run_agent_loop(
             } else {
                 Some(thinking_blocks.clone())
             },
+            estimated_tokens: 0,
         };
+        assistant_msg.estimated_tokens = estimate_message_tokens(&assistant_msg);
         ctx.history.push(assistant_msg.clone());
         if let Err(e) = session_mgr.append_message(&ctx.session_id, assistant_msg) {
             try_send!(AgentEvent::Error {
