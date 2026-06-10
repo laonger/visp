@@ -140,19 +140,53 @@ fn load_system_prompt_template(project_path: &Path) -> String {
     DEFAULT_SYSTEM_PROMPT.to_string()
 }
 
-/// 从 `.visp/skills/` 加载技能定义，格式化为 prompt 附加内容。
+/// 从 `.visp/skills/` 和全局 `~/.config/visp/skills/` 加载技能定义，格式化为 prompt 附加内容。
 /// 每个技能目录下需有 `SKILL.md` 文件。
-fn load_skills(project_path: &Path) -> String {
-    let skills_dir = project_path.join(".visp").join("skills");
-    if !skills_dir.is_dir() {
+/// 项目级技能优先级高于全局级（同名时项目技能覆盖全局技能）。
+pub fn load_skills(project_path: &Path) -> String {
+    load_skills_inner(project_path, home_dir())
+}
+
+/// 与 `load_skills` 相同，但允许指定 home 目录（用于测试隔离）。
+fn load_skills_inner(project_path: &Path, home: Option<PathBuf>) -> String {
+    let mut seen_names = HashSet::new();
+    let mut sections = Vec::new();
+
+    // 1. Project skills (higher priority)
+    let project_dir = project_path.join(".visp").join("skills");
+    load_skills_from_dir(&project_dir, &mut seen_names, &mut sections);
+
+    // 2. Global skills (lower priority, skipped if project already has same name)
+    if let Some(home) = home {
+        let global_dir = home.join(".config").join("visp").join("skills");
+        load_skills_from_dir(&global_dir, &mut seen_names, &mut sections);
+    }
+
+    if sections.is_empty() {
         return String::new();
     }
 
-    let mut sections = Vec::new();
+    format!(
+        "\n\n## Available Skills\n\n{}",
+        sections.join("\n\n---\n\n")
+    )
+}
 
-    let mut entries: Vec<_> = match std::fs::read_dir(&skills_dir) {
+/// 从单个技能目录加载技能。
+/// `seen_names` 跟踪已加载的技能名，同名跳过（用于项目优先级覆盖全局）。
+/// `sections` 追加加载到的技能格式化片段。
+fn load_skills_from_dir(
+    dir: &Path,
+    seen_names: &mut HashSet<String>,
+    sections: &mut Vec<String>,
+) {
+    if !dir.is_dir() {
+        return;
+    }
+
+    let mut entries: Vec<_> = match std::fs::read_dir(dir) {
         Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
-        Err(_) => return String::new(),
+        Err(_) => return,
     };
     entries.sort_by_key(|e| e.file_name());
 
@@ -165,6 +199,10 @@ fn load_skills(project_path: &Path) -> String {
             Some(n) => n.to_string_lossy().to_string(),
             None => continue,
         };
+        // 同名跳过（项目级已加载的优先）
+        if !seen_names.insert(skill_name.clone()) {
+            continue;
+        }
         let skill_file = path.join("SKILL.md");
         if !skill_file.is_file() {
             continue;
@@ -182,15 +220,10 @@ fn load_skills(project_path: &Path) -> String {
         }
         sections.push(section);
     }
+}
 
-    if sections.is_empty() {
-        return String::new();
-    }
-
-    format!(
-        "\n\n## Available Skills\n\n{}",
-        sections.join("\n\n---\n\n")
-    )
+fn home_dir() -> Option<PathBuf> {
+    std::env::var("HOME").ok().map(PathBuf::from)
 }
 
 /// 从 YAML frontmatter 中提取指定字段值
@@ -451,6 +484,10 @@ mod tests {
     #[test]
     fn test_session_manager_create() {
         let manager = SessionManager::new(InMemorySessionStore::new());
+        // Isolate from real global skills
+        let home = tempfile::TempDir::new().unwrap();
+        // SAFETY: test-only, no other test uses set_var for HOME
+        unsafe { std::env::set_var("HOME", home.path()) };
         let session = manager
             .create(Path::new("/tmp"), LlmConfig::default())
             .unwrap();
@@ -646,8 +683,9 @@ mod tests {
     #[test]
     fn test_load_skills_empty_dir() {
         let tmp = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
         // No skills dir → empty
-        let result = load_skills(tmp.path());
+        let result = load_skills_inner(tmp.path(), Some(home.path().to_path_buf()));
         assert!(result.is_empty());
     }
 
@@ -655,6 +693,7 @@ mod tests {
     fn test_load_skills_with_skill_file() {
         use std::io::Write;
         let tmp = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
         let skills_dir = tmp.path().join(".visp").join("skills").join("my-skill");
         std::fs::create_dir_all(&skills_dir).unwrap();
         let mut f = std::fs::File::create(skills_dir.join("SKILL.md")).unwrap();
@@ -663,7 +702,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = load_skills(tmp.path());
+        let result = load_skills_inner(tmp.path(), Some(home.path().to_path_buf()));
         assert!(result.contains("my-skill"));
         assert!(result.contains("A custom skill"));
         assert!(!result.contains("Do something useful.")); // body 不应包含在提示词中
@@ -705,6 +744,7 @@ mod tests {
     fn test_load_skills_ignores_non_skill_dirs() {
         use std::io::Write;
         let tmp = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
         let skills_dir = tmp.path().join(".visp").join("skills").join("my-skill");
         std::fs::create_dir_all(&skills_dir).unwrap();
         let mut f = std::fs::File::create(skills_dir.join("SKILL.md")).unwrap();
@@ -713,7 +753,106 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join(".visp").join("skills").join("not-a-skill"))
             .unwrap();
 
-        let result = load_skills(tmp.path());
+        let result = load_skills_inner(tmp.path(), Some(home.path().to_path_buf()));
         assert!(result.contains("my-skill"));
+    }
+
+    #[test]
+    fn test_load_skills_global_skills_loaded() {
+        use std::io::Write;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+
+        // Create global skill at ~/.config/visp/skills/global-tool/
+        let global_skill_dir = home
+            .path()
+            .join(".config")
+            .join("visp")
+            .join("skills")
+            .join("global-tool");
+        std::fs::create_dir_all(&global_skill_dir).unwrap();
+        let mut f = std::fs::File::create(global_skill_dir.join("SKILL.md")).unwrap();
+        f.write_all(b"---\ndescription: A global skill\n---\n\nDo stuff.\n")
+            .unwrap();
+
+        let result = load_skills_inner(tmp.path(), Some(home.path().to_path_buf()));
+        assert!(result.contains("global-tool"), "should contain global skill");
+        assert!(
+            result.contains("A global skill"),
+            "should contain global skill description"
+        );
+        assert!(result.contains("Available Skills"));
+    }
+
+    #[test]
+    fn test_load_skills_project_overrides_global() {
+        use std::io::Write;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+
+        // Create project skill
+        let project_skill = tmp.path().join(".visp").join("skills").join("my-tool");
+        std::fs::create_dir_all(&project_skill).unwrap();
+        let mut f = std::fs::File::create(project_skill.join("SKILL.md")).unwrap();
+        f.write_all(b"---\ndescription: Project version\n---\n\nProject content.\n")
+            .unwrap();
+
+        // Create global skill with same name (should be overridden)
+        let global_skill = home
+            .path()
+            .join(".config")
+            .join("visp")
+            .join("skills")
+            .join("my-tool");
+        std::fs::create_dir_all(&global_skill).unwrap();
+        let mut f = std::fs::File::create(global_skill.join("SKILL.md")).unwrap();
+        f.write_all(b"---\ndescription: Global version\n---\n\nGlobal content.\n")
+            .unwrap();
+
+        let result = load_skills_inner(tmp.path(), Some(home.path().to_path_buf()));
+        assert!(
+            result.contains("Project version"),
+            "should use project version description"
+        );
+        assert!(
+            !result.contains("Global version"),
+            "should NOT contain global version description"
+        );
+        assert!(
+            result.contains("my-tool"),
+            "should contain the skill name"
+        );
+    }
+
+    #[test]
+    fn test_load_skills_both_project_and_global() {
+        use std::io::Write;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+
+        // Create project skill (unique name)
+        let project_skill = tmp.path().join(".visp").join("skills").join("proj-skill");
+        std::fs::create_dir_all(&project_skill).unwrap();
+        let mut f = std::fs::File::create(project_skill.join("SKILL.md")).unwrap();
+        f.write_all(b"---\ndescription: Project only\n---\n\nContent.\n")
+            .unwrap();
+
+        // Create global skill (unique name)
+        let global_skill = home
+            .path()
+            .join(".config")
+            .join("visp")
+            .join("skills")
+            .join("glob-skill");
+        std::fs::create_dir_all(&global_skill).unwrap();
+        let mut f = std::fs::File::create(global_skill.join("SKILL.md")).unwrap();
+        f.write_all(b"---\ndescription: Global only\n---\n\nContent.\n")
+            .unwrap();
+
+        let result = load_skills_inner(tmp.path(), Some(home.path().to_path_buf()));
+        assert!(result.contains("proj-skill"), "should contain project skill");
+        assert!(result.contains("glob-skill"), "should contain global skill");
+        assert!(result.contains("Project only"));
+        assert!(result.contains("Global only"));
     }
 }
