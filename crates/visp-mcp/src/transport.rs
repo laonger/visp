@@ -49,14 +49,11 @@ pub async fn create_sse_transport(
         let mut client_builder = reqwest::Client::builder();
         let mut default_headers = reqwest::header::HeaderMap::new();
         for (key, value) in headers {
-            if let (Ok(name), Ok(val)) = (
-                reqwest::header::HeaderName::from_bytes(key.as_bytes()),
-                reqwest::header::HeaderValue::from_str(value),
-            ) {
-                default_headers.insert(name, val);
-            } else {
-                tracing::warn!("invalid header: '{key}' with value '{value}', skipping");
-            }
+            let name = reqwest::header::HeaderName::from_bytes(key.as_bytes())
+                .map_err(|e| McpError::Transport(format!("invalid header name '{key}': {e}")))?;
+            let val = reqwest::header::HeaderValue::from_str(value)
+                .map_err(|e| McpError::Transport(format!("invalid header value for '{key}': {e}")))?;
+            default_headers.insert(name, val);
         }
         client_builder = client_builder.default_headers(default_headers);
         let client = client_builder

@@ -5,9 +5,7 @@ mod server;
 mod service;
 
 use std::collections::HashMap;
-use std::sync::Arc;
-
-use tokio::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use visp_core::{
     agent::AgentConfig,
     context::ContextTrimmer,
@@ -143,7 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // 获取已有的该服务器工具名列表（insert 返回旧值）
             let old_tool_names = {
-                let mut map = mcp_tool_names.blocking_lock();
+                let mut map = mcp_tool_names.lock().unwrap();
                 map.insert(server_name.to_string(), tool_names.clone())
                     .unwrap_or_default()
             };

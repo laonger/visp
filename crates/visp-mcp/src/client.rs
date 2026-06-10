@@ -34,9 +34,8 @@ pub struct McpSession {
     /// 配置（保留用于重连）
     config: McpServerConfig,
     /// rmcp 运行服务（连接建立后才有值）
+    /// Drop 时会自动关闭 transport（包括 kill stdio 子进程）。
     running_service: Option<RunningService<RoleClient, ()>>,
-    /// 子进程句柄（stdio 模式，用于进程管理）
-    child: Option<tokio::process::Child>,
     /// 传输是否已连接
     connected: bool,
 }
@@ -58,7 +57,6 @@ impl McpSession {
             name: config.name.clone(),
             config: config.clone(),
             running_service: None,
-            child: None,
             connected: false,
         }
     }
@@ -70,8 +68,6 @@ impl McpSession {
         match &self.config.transport {
             McpTransport::Stdio { .. } => {
                 let transport = create_stdio_transport(&self.config.transport)?;
-                // 提取 child 进程（用于后续进程管理）
-                self.child = None; // TokioChildProcess 内部管理进程，无法直接取出 Child
                 let service = ().serve(transport).await.map_err(|e: std::io::Error| {
                     McpError::Transport(format!("failed to serve stdio transport: {}", e))
                 })?;
@@ -159,7 +155,6 @@ impl McpSession {
             let _ = service.cancel().await;
         }
         self.connected = false;
-        self.child = None;
     }
 
     /// 检查是否已连接
@@ -170,15 +165,6 @@ impl McpSession {
     /// 获取服务器名称
     pub fn name(&self) -> &str {
         &self.name
-    }
-}
-
-impl Drop for McpSession {
-    fn drop(&mut self) {
-        if self.connected {
-            // 无法在 Drop 中执行 async 操作，但 RunningService 被 drop 时会自动关闭连接
-            tracing::debug!("McpSession '{}' dropped while connected", self.name);
-        }
     }
 }
 
@@ -196,7 +182,7 @@ fn mcp_tool_to_definition(tool: McpToolModel) -> McpToolDefinition {
 }
 
 /// 将 MCP CallToolResult 转为纯文本（用于 ToolResult）
-pub fn call_tool_result_to_text(result: &CallToolResult) -> String {
+pub(crate) fn call_tool_result_to_text(result: &CallToolResult) -> String {
     let mut texts: Vec<String> = Vec::new();
     for content in &result.content {
         match &content.raw {
