@@ -120,11 +120,13 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
     app.needs_render = true;
     match event {
         Event::Key(key) => {
-            // Alt+M 或 Ctrl+Shift+M: 切换鼠标捕获模式，任何时候都生效
+            // Alt+M 或 Ctrl+M: 切换鼠标捕获模式，任何时候都生效
+            // Ctrl+M 在许多终端等价于 Enter，同时检查两种可能
             if (key.code == KeyCode::Char('m')
-                && key.modifiers.contains(KeyModifiers::ALT))
-                || (key.code == KeyCode::Char('M')
-                    && key.modifiers == KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+                && (key.modifiers.contains(KeyModifiers::ALT)
+                    || key.modifiers.contains(KeyModifiers::CONTROL)))
+                || (key.code == KeyCode::Enter
+                    && key.modifiers.contains(KeyModifiers::CONTROL))
             {
                 toggle_mouse_mode(app);
                 return false;
@@ -346,17 +348,16 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 }
             }
         }
-        // 状态栏点击切换鼠标模式
+        // 状态栏左键点击切换鼠标模式（底部区域，右半侧）
         Event::Mouse(m)
-            if m.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left)
-                && m.column >= 2 =>
+            if m.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left) =>
         {
             if let Ok((term_cols, term_rows)) = crossterm::terminal::size() {
-                // 状态栏在去掉上下左右边距后的最底部，[Mouse] / [Select] 在状态栏最右侧
-                let status_row = (term_rows.saturating_sub(2)) as u16;
-                // 从右侧起算 [Mouse] 的大致起始列
-                let text_start = (term_cols.saturating_sub(14)) as u16;
-                if m.row == status_row && m.column >= text_start {
+                // 状态栏在最底部 (0-indexed: term_rows - 1)
+                // 放宽到最后 3 行 + 右侧 1/3，兼容各种布局偏移
+                let bottom_start = term_rows.saturating_sub(3);
+                let right_start = (term_cols * 2 / 3).max(term_cols.saturating_sub(20));
+                if m.row >= bottom_start as u16 && m.column >= right_start as u16 {
                     toggle_mouse_mode(app);
                     return false;
                 }
