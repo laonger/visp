@@ -113,7 +113,7 @@ fn wrap_styled_line(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
     let mut chars: VecDeque<StyledChar> = VecDeque::new();
     for span in &line.spans {
         for ch in span.content.chars() {
-            let cw = ch.width().unwrap_or(0) as usize;
+            let cw = ch.width().unwrap_or(0);
             chars.push_back(StyledChar {
                 ch,
                 style: span.style,
@@ -319,7 +319,7 @@ pub(crate) fn wrap_text(text: &str, screen_width: u16) -> Vec<String> {
             let mut break_at = None; // 最后一个空白符位置
 
             for (i, &c) in chars[start..].iter().enumerate() {
-                let cw = c.width().unwrap_or(0) as usize;
+                let cw = c.width().unwrap_or(0);
 
                 // 记录空白符位置作为可选断点
                 if c.is_whitespace() && w > 0 {
@@ -359,7 +359,7 @@ pub(crate) fn wrap_text(text: &str, screen_width: u16) -> Vec<String> {
 }
 
 pub(crate) fn pad_to_width(s: &str, width: usize) -> String {
-    let len: usize = s.chars().map(|c| c.width().unwrap_or(0) as usize).sum();
+    let len: usize = s.chars().map(|c| c.width().unwrap_or(0)).sum();
     if len < width {
         format!("{}{}", s, " ".repeat(width - len))
     } else {

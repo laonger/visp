@@ -359,10 +359,8 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
             _ => {}
         },
         // 处理终端粘贴事件（bracketed paste）
-        Event::Paste(text) => {
-            if app.confirm.as_ref().map_or(true, |c| c.other_active) {
-                paste_text(&mut app.textarea, &text);
-            }
+        Event::Paste(text) if app.confirm.as_ref().is_none_or(|c| c.other_active) => {
+            paste_text(&mut app.textarea, &text);
         }
         _ => {}
     }
