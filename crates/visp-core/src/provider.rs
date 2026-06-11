@@ -86,6 +86,8 @@ pub enum ChatEvent {
         input_tokens: u32,
         output_tokens: u32,
         tool_calls: u32,
+        cache_creation_input_tokens: u32,
+        cache_read_input_tokens: u32,
     },
     /// 流结束
     Done,

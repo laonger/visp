@@ -395,7 +395,12 @@ pub struct AppState {
     pub model: String,
     pub session_id: String,
     pub should_quit: bool,
-    pub pending_usage: Option<(u32, u32, u32)>,
+    pub pending_usage: Option<(u32, u32, u32, u32, u32)>,
+    /// 当前 session 累计 token 数（input + output），用于状态栏显示
+    pub total_input_tokens: u32,
+    pub total_output_tokens: u32,
+    pub total_cache_creation_input_tokens: u32,
+    pub total_cache_read_input_tokens: u32,
     pub mouse_captured: bool,
     /// 用户输入了 /new 命令，主循环需要创建新 session
     pub pending_new_session: bool,
@@ -427,6 +432,10 @@ impl AppState {
             session_id,
             should_quit: false,
             pending_usage: None,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cache_creation_input_tokens: 0,
+            total_cache_read_input_tokens: 0,
             mouse_captured: true,
             pending_new_session: false,
         }
@@ -544,6 +553,10 @@ impl AppState {
         self.next_message_id = 0;
         self.confirm = None;
         self.pending_usage = None;
+        self.total_input_tokens = 0;
+        self.total_output_tokens = 0;
+        self.total_cache_creation_input_tokens = 0;
+        self.total_cache_read_input_tokens = 0;
         self.pending_new_session = false;
         self.session_id = session_id;
         self.model = model;

@@ -705,12 +705,16 @@ fn agent_event_to_server_message(event: AgentEvent, session_id: &str) -> proto::
             input_tokens,
             output_tokens,
             tool_calls,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
         } => proto::ServerMessage {
             payload: Some(proto::server_message::Payload::UsageInfo(
                 proto::UsageInfo {
                     input_tokens,
                     output_tokens,
                     tool_calls,
+                    cache_creation_input_tokens,
+                    cache_read_input_tokens,
                     session_id: sid,
                 },
             )),

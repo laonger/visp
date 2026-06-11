@@ -498,7 +498,17 @@ fn handle_grpc_message(
             app.add_message(LineType::Thinking, text)
         }
         Some(server_message::Payload::UsageInfo(ui)) => {
-            app.pending_usage = Some((ui.input_tokens, ui.output_tokens, ui.tool_calls));
+            app.pending_usage = Some((
+                ui.input_tokens,
+                ui.output_tokens,
+                ui.tool_calls,
+                ui.cache_creation_input_tokens,
+                ui.cache_read_input_tokens,
+            ));
+            app.total_input_tokens += ui.input_tokens;
+            app.total_output_tokens += ui.output_tokens;
+            app.total_cache_creation_input_tokens += ui.cache_creation_input_tokens;
+            app.total_cache_read_input_tokens += ui.cache_read_input_tokens;
         }
         Some(server_message::Payload::StatusUpdate(su)) => {
             app.add_message(LineType::Status, su.message)
@@ -528,12 +538,19 @@ fn handle_grpc_message(
                 app.stale_done_expected = false;
                 return;
             }
-            if let Some((it, ot, tc)) = app.pending_usage.take() {
+            if let Some((it, ot, tc, ccit, crit)) = app.pending_usage.take() {
                 let time = chrono::Local::now().format("%H:%M:%S");
-                let usage = format!(
-                    "\n\n[{} | Tokens: {} in / {} out | Tools: {}]",
-                    time, it, ot, tc
-                );
+                let usage = if ccit > 0 || crit > 0 {
+                    format!(
+                        "\n\n[{} | Tokens: {} in / {} out | Cache: {} create / {} read | Tools: {}]",
+                        time, it, ot, ccit, crit, tc
+                    )
+                } else {
+                    format!(
+                        "\n\n[{} | Tokens: {} in / {} out | Tools: {}]",
+                        time, it, ot, tc
+                    )
+                };
                 app.streaming_text.push_str(&usage);
             }
             app.flush_streaming();

@@ -2,7 +2,7 @@
 
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph},
@@ -539,7 +539,7 @@ fn render_input_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     f.render_widget(&app.textarea, input_area);
 }
 
-/// 底部状态栏：会话 ID / 模型 / 状态
+/// 底部状态栏：左对齐显示会话 ID / 模型 / 状态 / 鼠标模式，token 统计靠右对齐
 fn render_status_bar(app: &AppState, f: &mut Frame, area: Rect) {
     let sid = app.session_id.chars().take(8).collect::<String>();
     let status = if app.generating { "Generating" } else { "Idle" };
@@ -548,9 +548,52 @@ fn render_status_bar(app: &AppState, f: &mut Frame, area: Rect) {
     } else {
         "Select"
     };
-    let text = format!("{sid} | {model} | {status} | [{mouse}]", model = app.model);
-    let p = Paragraph::new(text)
-        .style(Style::default().fg(theme::STATUS_FG).bg(theme::STATUS_BG))
-        .block(Block::default());
-    f.render_widget(p, area);
+
+    let left_text = format!("{sid} | {model} | {status} | [{mouse}]", model = app.model);
+
+    // 有 token 时左右分割显示，否则整行给左侧
+    if app.total_input_tokens > 0 || app.total_output_tokens > 0 {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(36)])
+            .split(area);
+
+        // 左侧常规信息
+        let left = Paragraph::new(left_text)
+            .style(Style::default().fg(theme::STATUS_FG).bg(theme::STATUS_BG))
+            .block(Block::default());
+        f.render_widget(left, chunks[0]);
+
+        // 右侧 token 统计（靠右显示）
+        let token_text =
+            if app.total_cache_creation_input_tokens > 0 || app.total_cache_read_input_tokens > 0 {
+                format!(
+                    "T:{}i/{}o C:{}r/{}c ",
+                    app.total_input_tokens,
+                    app.total_output_tokens,
+                    app.total_cache_read_input_tokens,
+                    app.total_cache_creation_input_tokens,
+                )
+            } else {
+                format!(
+                    "T:{}i/{}o ",
+                    app.total_input_tokens, app.total_output_tokens,
+                )
+            };
+        let right = Paragraph::new(token_text)
+            .style(
+                Style::default()
+                    .fg(theme::TOOL_RESULT_FG)
+                    .bg(theme::STATUS_BG),
+            )
+            .alignment(Alignment::Right)
+            .block(Block::default());
+        f.render_widget(right, chunks[1]);
+    } else {
+        // 无 token 时直接用整行
+        let left = Paragraph::new(left_text)
+            .style(Style::default().fg(theme::STATUS_FG).bg(theme::STATUS_BG))
+            .block(Block::default());
+        f.render_widget(left, area);
+    }
 }

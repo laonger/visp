@@ -246,6 +246,8 @@ pub(crate) enum OpenAiStreamEvent {
     Usage {
         input_tokens: u32,
         output_tokens: u32,
+        cache_creation_input_tokens: u32,
+        cache_read_input_tokens: u32,
     },
     /// 流结束标记 `[DONE]`
     StreamEnd,
@@ -276,10 +278,21 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<OpenAiStreamEvent, Llm
     if let Some(usage) = v.get("usage") {
         let input_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
         let output_tokens = usage["completion_tokens"].as_u64().unwrap_or(0) as u32;
+        // Try Anthropic-style cache fields first
+        let cache_creation = usage
+            .get("cache_creation_input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        let cache_read = usage
+            .get("cache_read_input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
         if input_tokens > 0 || output_tokens > 0 {
             return Ok(OpenAiStreamEvent::Usage {
                 input_tokens,
                 output_tokens,
+                cache_creation_input_tokens: cache_creation,
+                cache_read_input_tokens: cache_read,
             });
         }
     }
@@ -382,6 +395,8 @@ fn byte_stream_to_chat_events(
         pending_text: Option<String>,
         input_tokens: u32,
         output_tokens: u32,
+        cache_creation_input_tokens: u32,
+        cache_read_input_tokens: u32,
         /// 标记流是否已结束
         stream_ended: bool,
         /// 是否已发射 UsageInfo
@@ -400,6 +415,8 @@ fn byte_stream_to_chat_events(
         pending_text: None,
         input_tokens: 0,
         output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
         stream_ended: false,
         usage_emitted: false,
         done_emitted: false,
@@ -465,12 +482,20 @@ fn byte_stream_to_chat_events(
                             Ok(OpenAiStreamEvent::Usage {
                                 input_tokens,
                                 output_tokens,
+                                cache_creation_input_tokens,
+                                cache_read_input_tokens,
                             }) => {
                                 if input_tokens > 0 {
                                     state.input_tokens = input_tokens;
                                 }
                                 if output_tokens > 0 {
                                     state.output_tokens = output_tokens;
+                                }
+                                if cache_creation_input_tokens > 0 {
+                                    state.cache_creation_input_tokens = cache_creation_input_tokens;
+                                }
+                                if cache_read_input_tokens > 0 {
+                                    state.cache_read_input_tokens = cache_read_input_tokens;
                                 }
                             }
                             Ok(OpenAiStreamEvent::Skip) => {}
@@ -530,6 +555,8 @@ fn byte_stream_to_chat_events(
                             input_tokens: state.input_tokens,
                             output_tokens: state.output_tokens,
                             tool_calls: state.tool_call_count,
+                            cache_creation_input_tokens: state.cache_creation_input_tokens,
+                            cache_read_input_tokens: state.cache_read_input_tokens,
                         }),
                         state,
                     ));
@@ -946,6 +973,7 @@ mod tests {
             OpenAiStreamEvent::Usage {
                 input_tokens,
                 output_tokens,
+                ..
             } => {
                 assert_eq!(input_tokens, 10);
                 assert_eq!(output_tokens, 20);

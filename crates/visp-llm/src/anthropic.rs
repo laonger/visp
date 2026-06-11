@@ -234,6 +234,8 @@ pub(crate) enum ParsedEvent {
     Usage {
         input_tokens: u32,
         output_tokens: u32,
+        cache_creation_input_tokens: u32,
+        cache_read_input_tokens: u32,
     },
     Skip,
 }
@@ -254,9 +256,17 @@ pub(crate) fn parse_anthropic_event(event_name: &str, data: &str) -> Result<Pars
                 .map_err(|e| LlmError::Stream(format!("parse message_start: {e}")))?;
             let input_tokens = v["message"]["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32;
             let output_tokens = v["message"]["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
+            let cache_creation = v["message"]["usage"]["cache_creation_input_tokens"]
+                .as_u64()
+                .unwrap_or(0) as u32;
+            let cache_read = v["message"]["usage"]["cache_read_input_tokens"]
+                .as_u64()
+                .unwrap_or(0) as u32;
             Ok(ParsedEvent::Usage {
                 input_tokens,
                 output_tokens,
+                cache_creation_input_tokens: cache_creation,
+                cache_read_input_tokens: cache_read,
             })
         }
         "message_delta" => {
@@ -266,6 +276,8 @@ pub(crate) fn parse_anthropic_event(event_name: &str, data: &str) -> Result<Pars
             Ok(ParsedEvent::Usage {
                 input_tokens: 0,
                 output_tokens,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
             })
         }
         "message_stop" => Ok(ParsedEvent::Emit(ChatEvent::Done)),
@@ -475,6 +487,8 @@ fn byte_stream_to_chat_events(
         thinking_acc: HashMap<String, ThinkingAcc>,
         input_tokens: u32,
         output_tokens: u32,
+        cache_creation_input_tokens: u32,
+        cache_read_input_tokens: u32,
         /// 设为 true 后，下次 unfold 迭代发射 UsageInfo，再下次发射 Done
         done_pending: bool,
         /// UsageInfo 已发射，下次返回 Done
@@ -488,6 +502,8 @@ fn byte_stream_to_chat_events(
         thinking_acc: HashMap::new(),
         input_tokens: 0,
         output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
         done_pending: false,
         usage_emitted: false,
     };
@@ -501,6 +517,8 @@ fn byte_stream_to_chat_events(
                     input_tokens: state.input_tokens,
                     output_tokens: state.output_tokens,
                     tool_calls: 0,
+                    cache_creation_input_tokens: state.cache_creation_input_tokens,
+                    cache_read_input_tokens: state.cache_read_input_tokens,
                 }),
                 state,
             ));
@@ -531,6 +549,9 @@ fn byte_stream_to_chat_events(
                                         input_tokens: state.input_tokens,
                                         output_tokens: state.output_tokens,
                                         tool_calls: 0,
+                                        cache_creation_input_tokens: state
+                                            .cache_creation_input_tokens,
+                                        cache_read_input_tokens: state.cache_read_input_tokens,
                                     }),
                                     state,
                                 ));
@@ -540,12 +561,20 @@ fn byte_stream_to_chat_events(
                         Ok(ParsedEvent::Usage {
                             input_tokens,
                             output_tokens,
+                            cache_creation_input_tokens,
+                            cache_read_input_tokens,
                         }) => {
                             if input_tokens > 0 {
                                 state.input_tokens = input_tokens;
                             }
                             if output_tokens > 0 {
                                 state.output_tokens = output_tokens;
+                            }
+                            if cache_creation_input_tokens > 0 {
+                                state.cache_creation_input_tokens = cache_creation_input_tokens;
+                            }
+                            if cache_read_input_tokens > 0 {
+                                state.cache_read_input_tokens = cache_read_input_tokens;
                             }
                         }
                         Ok(ParsedEvent::ThinkingDelta {
@@ -643,6 +672,10 @@ fn byte_stream_to_chat_events(
                                                 input_tokens: state.input_tokens,
                                                 output_tokens: state.output_tokens,
                                                 tool_calls: 0,
+                                                cache_creation_input_tokens: state
+                                                    .cache_creation_input_tokens,
+                                                cache_read_input_tokens: state
+                                                    .cache_read_input_tokens,
                                             }),
                                             state,
                                         ));
@@ -652,12 +685,21 @@ fn byte_stream_to_chat_events(
                                 Ok(ParsedEvent::Usage {
                                     input_tokens,
                                     output_tokens,
+                                    cache_creation_input_tokens,
+                                    cache_read_input_tokens,
                                 }) => {
                                     if input_tokens > 0 {
                                         state.input_tokens = input_tokens;
                                     }
                                     if output_tokens > 0 {
                                         state.output_tokens = output_tokens;
+                                    }
+                                    if cache_creation_input_tokens > 0 {
+                                        state.cache_creation_input_tokens =
+                                            cache_creation_input_tokens;
+                                    }
+                                    if cache_read_input_tokens > 0 {
+                                        state.cache_read_input_tokens = cache_read_input_tokens;
                                     }
                                     continue;
                                 }
@@ -748,6 +790,7 @@ mod tests {
             ParsedEvent::Usage {
                 input_tokens,
                 output_tokens,
+                ..
             } => {
                 assert_eq!(input_tokens, 105);
                 assert_eq!(output_tokens, 0);
@@ -764,6 +807,7 @@ mod tests {
             ParsedEvent::Usage {
                 input_tokens,
                 output_tokens,
+                ..
             } => {
                 assert_eq!(input_tokens, 0);
                 assert_eq!(output_tokens, 125);

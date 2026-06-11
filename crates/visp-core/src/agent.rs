@@ -41,6 +41,8 @@ pub enum AgentEvent {
         input_tokens: u32,
         output_tokens: u32,
         tool_calls: u32,
+        cache_creation_input_tokens: u32,
+        cache_read_input_tokens: u32,
     },
     /// 工具调用请求
     ToolCallRequest {
@@ -392,6 +394,8 @@ pub async fn run_agent_loop(
         let mut thinking_blocks: Vec<serde_json::Value> = Vec::new();
         let mut input_tokens: u32 = 0;
         let mut output_tokens: u32 = 0;
+        let mut cache_creation_input_tokens: u32 = 0;
+        let mut cache_read_input_tokens: u32 = 0;
 
         let mut pin_stream = Box::pin(stream);
         loop {
@@ -415,9 +419,11 @@ pub async fn run_agent_loop(
                             thinking_blocks.push(block.clone());
                             try_send!(AgentEvent::ThinkingBlock(block));
                         }
-                        Some(Ok(ChatEvent::UsageInfo { input_tokens: it, output_tokens: ot, .. })) => {
+                        Some(Ok(ChatEvent::UsageInfo { input_tokens: it, output_tokens: ot, cache_creation_input_tokens: ccit, cache_read_input_tokens: crit, .. })) => {
                             input_tokens = it;
                             output_tokens = ot;
+                            cache_creation_input_tokens = ccit;
+                            cache_read_input_tokens = crit;
                         }
                         Some(Ok(ChatEvent::ToolCall { id, name, arguments })) => {
                             tool_calls.push(ToolCallRequest { id, name, arguments });
@@ -587,6 +593,8 @@ pub async fn run_agent_loop(
                 input_tokens,
                 output_tokens,
                 tool_calls: total_tool_calls,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
             });
             try_send!(AgentEvent::Done);
             let _ = session_mgr.finish_loop(&ctx.session_id, SessionStatus::Completed);
@@ -2002,6 +2010,8 @@ mod tests {
                 input_tokens: 100,
                 output_tokens: 4096,
                 tool_calls: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
             },
             ChatEvent::Done,
         ]]));
