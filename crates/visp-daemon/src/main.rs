@@ -204,7 +204,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 8. Agent config
     let agent_config = AgentConfig {
-        max_iterations: config.agent.max_iterations,
+        soft_limit: config.agent.soft_limit,
+        hard_limit: 200,
+        doom_loop_threshold: config.agent.doom_loop_threshold,
         llm_retry_attempts: config.agent.llm_retry_attempts,
         llm_retry_base_delay_ms: config.agent.llm_retry_base_delay_ms,
         bash_confirm_mode: config.agent.bash_confirm_mode,

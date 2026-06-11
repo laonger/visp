@@ -59,8 +59,10 @@ pub struct ToolsSection {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentSection {
-    #[serde(default = "default_max_iterations")]
-    pub max_iterations: u32,
+    #[serde(default = "default_soft_limit", alias = "max_iterations")]
+    pub soft_limit: u32,
+    #[serde(default = "default_doom_loop_threshold")]
+    pub doom_loop_threshold: u32,
     #[serde(default = "default_retry_attempts")]
     pub llm_retry_attempts: u32,
     #[serde(default = "default_retry_delay")]
@@ -98,8 +100,11 @@ fn default_bash_timeout() -> u64 {
 fn default_file_max_size() -> u64 {
     1048576
 }
-fn default_max_iterations() -> u32 {
+fn default_soft_limit() -> u32 {
     50
+}
+fn default_doom_loop_threshold() -> u32 {
+    5
 }
 fn default_retry_attempts() -> u32 {
     3
@@ -157,7 +162,8 @@ fn default_config() -> DaemonConfig {
             file_max_size_bytes: default_file_max_size(),
         },
         agent: AgentSection {
-            max_iterations: default_max_iterations(),
+            soft_limit: default_soft_limit(),
+            doom_loop_threshold: default_doom_loop_threshold(),
             llm_retry_attempts: default_retry_attempts(),
             llm_retry_base_delay_ms: default_retry_delay(),
             bash_confirm_mode: default_bash_confirm(),
@@ -216,7 +222,7 @@ bash_timeout_secs = 60
 file_max_size_bytes = 512000
 
 [agent]
-max_iterations = 10
+soft_limit = 10
 llm_retry_attempts = 5
 llm_retry_base_delay_ms = 500
 bash_confirm_mode = false
@@ -234,7 +240,7 @@ file_max_size_bytes = 256000
         assert_eq!(config.llm.max_tokens, 2048);
         assert_eq!(config.tools.bash_timeout_secs, 60);
         assert_eq!(config.tools.file_max_size_bytes, 512000);
-        assert_eq!(config.agent.max_iterations, 10);
+        assert_eq!(config.agent.soft_limit, 10);
         assert_eq!(config.agent.llm_retry_attempts, 5);
         assert_eq!(config.agent.llm_retry_base_delay_ms, 500);
         assert!(!config.agent.bash_confirm_mode);
@@ -252,7 +258,7 @@ file_max_size_bytes = 256000
         assert_eq!(config.llm.max_tokens, 4096);
         assert_eq!(config.tools.bash_timeout_secs, 120);
         assert_eq!(config.tools.file_max_size_bytes, 1048576);
-        assert_eq!(config.agent.max_iterations, 50);
+        assert_eq!(config.agent.soft_limit, 50);
         assert_eq!(config.agent.llm_retry_attempts, 3);
         assert_eq!(config.agent.llm_retry_base_delay_ms, 1000);
         assert!(config.agent.bash_confirm_mode);
@@ -336,7 +342,7 @@ bash_timeout_secs = 30
 file_max_size_bytes = 512000
 
 [agent]
-max_iterations = 5
+soft_limit = 5
 llm_retry_attempts = 1
 llm_retry_base_delay_ms = 100
 bash_confirm_mode = false
@@ -371,6 +377,63 @@ file_max_size_bytes = 256000
             Some("http://localhost:11434")
         );
         assert_eq!(config.tools.bash_timeout_secs, 30);
-        assert_eq!(config.agent.max_iterations, 5);
+        assert_eq!(config.agent.soft_limit, 5);
+    }
+
+    #[test]
+    fn soft_limit_config() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+
+[tools]
+
+[agent]
+soft_limit = 30
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.agent.soft_limit, 30);
+    }
+
+    #[test]
+    fn doom_loop_threshold_config() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+
+[tools]
+
+[agent]
+doom_loop_threshold = 3
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.agent.doom_loop_threshold, 3);
+    }
+
+    #[test]
+    fn backward_compat_max_iterations() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+
+[tools]
+
+[agent]
+max_iterations = 50
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.agent.soft_limit, 50);
+    }
+
+    #[test]
+    fn default_doom_loop_threshold() {
+        let config = default_config();
+        assert_eq!(config.agent.doom_loop_threshold, 5);
     }
 }
