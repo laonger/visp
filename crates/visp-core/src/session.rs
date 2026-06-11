@@ -175,11 +175,7 @@ fn load_skills_inner(project_path: &Path, home: Option<PathBuf>) -> String {
 /// 从单个技能目录加载技能。
 /// `seen_names` 跟踪已加载的技能名，同名跳过（用于项目优先级覆盖全局）。
 /// `sections` 追加加载到的技能格式化片段。
-fn load_skills_from_dir(
-    dir: &Path,
-    seen_names: &mut HashSet<String>,
-    sections: &mut Vec<String>,
-) {
+fn load_skills_from_dir(dir: &Path, seen_names: &mut HashSet<String>, sections: &mut Vec<String>) {
     if !dir.is_dir() {
         return;
     }
@@ -776,7 +772,10 @@ mod tests {
             .unwrap();
 
         let result = load_skills_inner(tmp.path(), Some(home.path().to_path_buf()));
-        assert!(result.contains("global-tool"), "should contain global skill");
+        assert!(
+            result.contains("global-tool"),
+            "should contain global skill"
+        );
         assert!(
             result.contains("A global skill"),
             "should contain global skill description"
@@ -818,10 +817,7 @@ mod tests {
             !result.contains("Global version"),
             "should NOT contain global version description"
         );
-        assert!(
-            result.contains("my-tool"),
-            "should contain the skill name"
-        );
+        assert!(result.contains("my-tool"), "should contain the skill name");
     }
 
     #[test]
@@ -850,7 +846,10 @@ mod tests {
             .unwrap();
 
         let result = load_skills_inner(tmp.path(), Some(home.path().to_path_buf()));
-        assert!(result.contains("proj-skill"), "should contain project skill");
+        assert!(
+            result.contains("proj-skill"),
+            "should contain project skill"
+        );
         assert!(result.contains("glob-skill"), "should contain global skill");
         assert!(result.contains("Project only"));
         assert!(result.contains("Global only"));

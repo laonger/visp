@@ -51,8 +51,9 @@ pub async fn create_sse_transport(
         for (key, value) in headers {
             let name = reqwest::header::HeaderName::from_bytes(key.as_bytes())
                 .map_err(|e| McpError::Transport(format!("invalid header name '{key}': {e}")))?;
-            let val = reqwest::header::HeaderValue::from_str(value)
-                .map_err(|e| McpError::Transport(format!("invalid header value for '{key}': {e}")))?;
+            let val = reqwest::header::HeaderValue::from_str(value).map_err(|e| {
+                McpError::Transport(format!("invalid header value for '{key}': {e}"))
+            })?;
             default_headers.insert(name, val);
         }
         client_builder = client_builder.default_headers(default_headers);
