@@ -73,6 +73,10 @@ fn build_grep_args(
             args.push("-C".into());
             args.push(context_lines.to_string());
         }
+        if max_matches > 0 {
+            args.push("-m".into());
+            args.push(max_matches.to_string());
+        }
         args.push(pattern.into());
         args.push(path.into());
         ("grep", args)

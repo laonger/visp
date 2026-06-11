@@ -31,11 +31,11 @@ use visp_proto::visp::{LlmConfig, server_message};
 /// 注意：`\n` 必须映射为 `Key::Enter`，否则 ratatui_textarea 会丢弃换行符前的内容
 fn paste_text(textarea: &mut ratatui_textarea::TextArea<'static>, text: &str) {
     let has_cr = text.contains('\r');
-    let newline_count = text.chars().filter(|&c| c == '\n' || c == '\r').count();
+    let _newline_count = text.chars().filter(|&c| c == '\n' || c == '\r').count();
     debug_log!(
         "paste: len={}, newlines={}, contains_cr={has_cr}",
         text.len(),
-        newline_count
+        _newline_count
     );
     // 统一换行符：\r\n → \n, \r → \n
     // 终端粘贴可能携带 \r\n(Windows) 或 \r(旧 Mac)，不处理会导致多余空行或光标回行首覆盖
@@ -82,8 +82,8 @@ pub async fn run(
     client: &mut VbwClient,
     project_path: &str,
 ) -> io::Result<()> {
-    if let Ok((w, h)) = crossterm::terminal::size() {
-        debug_log!("session start: {w}x{h}, model={model}");
+    if let Ok((_w, _h)) = crossterm::terminal::size() {
+        debug_log!("session start: {_w}x{_h}, model={model}");
     }
     crossterm::terminal::enable_raw_mode()?;
     // 只启用 mouse mode 1000（按钮点击事件），保留拖拽给终端做原生选择复制
