@@ -3942,7 +3942,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "visp"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "clap",
@@ -3953,7 +3953,7 @@ dependencies = [
 
 [[package]]
 name = "visp-cli"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "clap",
@@ -3976,7 +3976,7 @@ dependencies = [
 
 [[package]]
 name = "visp-codegraph"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "notify",
  "rusqlite",
@@ -3995,7 +3995,7 @@ dependencies = [
 
 [[package]]
 name = "visp-context"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "tempfile",
  "visp-core",
@@ -4003,7 +4003,7 @@ dependencies = [
 
 [[package]]
 name = "visp-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4021,7 +4021,7 @@ dependencies = [
 
 [[package]]
 name = "visp-daemon"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "futures",
  "prost",
@@ -4046,7 +4046,7 @@ dependencies = [
 
 [[package]]
 name = "visp-llm"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4061,7 +4061,7 @@ dependencies = [
 
 [[package]]
 name = "visp-mcp"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -4077,7 +4077,7 @@ dependencies = [
 
 [[package]]
 name = "visp-proto"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "prost",
  "prost-types",
@@ -4087,7 +4087,7 @@ dependencies = [
 
 [[package]]
 name = "visp-tools"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "html-to-markdown-rs",
