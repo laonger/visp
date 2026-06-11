@@ -46,11 +46,26 @@ pub fn build_anthropic_request(
     });
 
     if !system_text.is_empty() {
-        request["system"] = serde_json::Value::String(system_text);
+        // 使用数组格式 + cache_control 启用 prompt caching
+        request["system"] = serde_json::json!([{
+            "type": "text",
+            "text": system_text,
+            "cache_control": { "type": "ephemeral" }
+        }]);
     }
 
     if !anthropic_tools.is_empty() {
-        request["tools"] = serde_json::Value::Array(anthropic_tools);
+        // 给 tools 定义也加上 cache_control，缓存工具描述
+        let mut tools_with_cache = anthropic_tools;
+        if let Some(last) = tools_with_cache.last_mut()
+            && let Some(obj) = last.as_object_mut()
+        {
+            obj.insert(
+                "cache_control".to_string(),
+                serde_json::json!({ "type": "ephemeral" }),
+            );
+        }
+        request["tools"] = serde_json::Value::Array(tools_with_cache);
     }
 
     // 从 extra 配置读取 thinking_budget_tokens 启用 thinking 模式
@@ -74,7 +89,7 @@ pub fn build_anthropic_request(
     request
 }
 
-/// 构建请求头: Content-Type, x-api-key, anthropic-version
+/// 构建请求头: Content-Type, x-api-key, anthropic-version, anthropic-beta (prompt caching)
 pub fn build_anthropic_headers(api_key: &str) -> reqwest::header::HeaderMap {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
@@ -83,6 +98,10 @@ pub fn build_anthropic_headers(api_key: &str) -> reqwest::header::HeaderMap {
     );
     headers.insert("x-api-key", api_key.parse().unwrap());
     headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
+    headers.insert(
+        "anthropic-beta",
+        "prompt-caching-2024-07-31".parse().unwrap(),
+    );
     headers.insert(reqwest::header::USER_AGENT, "visp/0.1.0".parse().unwrap());
     headers
 }
@@ -784,16 +803,19 @@ mod tests {
 
     #[test]
     fn test_parse_message_start_returns_usage() {
-        let data = r#"{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":105,"output_tokens":0}}}"#;
+        let data = r#"{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":105,"output_tokens":0,"cache_creation_input_tokens":52,"cache_read_input_tokens":200}}}"#;
         let result = parse_anthropic_event("message_start", data).unwrap();
         match result {
             ParsedEvent::Usage {
                 input_tokens,
                 output_tokens,
-                ..
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
             } => {
                 assert_eq!(input_tokens, 105);
                 assert_eq!(output_tokens, 0);
+                assert_eq!(cache_creation_input_tokens, 52);
+                assert_eq!(cache_read_input_tokens, 200);
             }
             _ => panic!("expected Usage, got {:?}", result),
         }
@@ -909,7 +931,14 @@ mod tests {
         ];
         let config = LlmConfig::default();
         let req = build_anthropic_request(&msgs, &[], &config);
-        assert_eq!(req["system"], "You are a helpful assistant.");
+        assert_eq!(
+            req["system"],
+            serde_json::json!([{
+                "type": "text",
+                "text": "You are a helpful assistant.",
+                "cache_control": { "type": "ephemeral" }
+            }])
+        );
         let msgs_arr = req["messages"].as_array().unwrap();
         assert_eq!(msgs_arr.len(), 1);
         assert_eq!(msgs_arr[0]["role"], "user");

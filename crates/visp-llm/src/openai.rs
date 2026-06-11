@@ -278,15 +278,26 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<OpenAiStreamEvent, Llm
     if let Some(usage) = v.get("usage") {
         let input_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
         let output_tokens = usage["completion_tokens"].as_u64().unwrap_or(0) as u32;
-        // Try Anthropic-style cache fields first
+        // Try Anthropic-style cache fields first (some OpenAI-compatible providers use them)
         let cache_creation = usage
             .get("cache_creation_input_tokens")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32;
+        // OpenAI standard: usage.prompt_tokens_details.cached_tokens
         let cache_read = usage
-            .get("cache_read_input_tokens")
+            .get("prompt_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32;
+        // Also try Anthropic-style field as fallback
+        let cache_read = if cache_read == 0 {
+            usage
+                .get("cache_read_input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32
+        } else {
+            cache_read
+        };
         if input_tokens > 0 || output_tokens > 0 {
             return Ok(OpenAiStreamEvent::Usage {
                 input_tokens,
@@ -973,10 +984,35 @@ mod tests {
             OpenAiStreamEvent::Usage {
                 input_tokens,
                 output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
                 ..
             } => {
                 assert_eq!(input_tokens, 10);
                 assert_eq!(output_tokens, 20);
+                assert_eq!(cache_creation_input_tokens, 0);
+                assert_eq!(cache_read_input_tokens, 0);
+            }
+            _ => panic!("expected Usage, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_parse_usage_with_cache() {
+        // OpenAI 标准格式：prompt_tokens_details.cached_tokens
+        let data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"prompt_tokens_details":{"cached_tokens":40}}}"#;
+        let result = parse_openai_sse_data(data).unwrap();
+        match result {
+            OpenAiStreamEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+            } => {
+                assert_eq!(input_tokens, 100);
+                assert_eq!(output_tokens, 50);
+                assert_eq!(cache_creation_input_tokens, 0);
+                assert_eq!(cache_read_input_tokens, 40);
             }
             _ => panic!("expected Usage, got {:?}", result),
         }
