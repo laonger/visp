@@ -855,9 +855,20 @@ pub(crate) fn render_tool_guide(registry: &ToolRegistry) -> String {
         return String::new();
     }
 
-    use std::collections::HashMap;
+    /// 3 个高层次 Code Understanding 工具，放在独立分组中，且从 Analyze 分组中排除
+    const CODE_UNDERSTANDING_TOOLS: &[&str] =
+        &["codegraph_context", "codegraph_trace", "codegraph_impact"];
+
+    use std::collections::{HashMap, HashSet};
+    let cu_set: HashSet<&str> = HashSet::from_iter(CODE_UNDERSTANDING_TOOLS.iter().copied());
+    let mut cu_descs: HashMap<&str, &str> = HashMap::new();
     let mut grouped: HashMap<&str, Vec<&str>> = HashMap::new();
     for def in &defs {
+        // 将 Code Understanding 工具从常规 category 分组中排除
+        if cu_set.contains(def.name.as_str()) {
+            cu_descs.insert(def.name.as_str(), def.description.as_str());
+            continue;
+        }
         let cat = if def.category.is_empty() {
             "other"
         } else {
@@ -869,12 +880,22 @@ pub(crate) fn render_tool_guide(registry: &ToolRegistry) -> String {
     let mut parts = vec![
         "\n\n## Available Tools".to_string(),
         "\n**IMPORTANT**: Prefer specialized tools over `bash` when possible: \
-        use `read_file` to read files, `edit_file`/`write_file` to modify them, \
-        `grep`/`glob` to search files, and `codegraph_search`/`codegraph_context` \
-        for code understanding. Only use `bash` when no other tool fits \
-        (e.g. running build commands, git operations, or multi-step shell scripts)."
+         use `read_file` to read files, `edit_file`/`write_file` to modify them, \
+         `grep`/`glob` to search files, and `codegraph_context`/`codegraph_trace`/`codegraph_impact` \
+         for code understanding. Only use `bash` when no other tool fits \
+         (e.g. running build commands, git operations, or multi-step shell scripts)."
             .to_string(),
     ];
+
+    // Code Understanding 独立分组（在 category 分组之前）
+    if !cu_descs.is_empty() {
+        parts.push("\n## Code Understanding (prefer these first)".to_string());
+        for name in CODE_UNDERSTANDING_TOOLS {
+            if let Some(desc) = cu_descs.get(name) {
+                parts.push(format!("  {name}  — {desc}"));
+            }
+        }
+    }
 
     // 按固定顺序输出 category
     let categories = [

@@ -32,6 +32,97 @@ impl ReadFile {
         }
         Self { max_file_size }
     }
+
+    /// 读取单个文件，返回格式化后的内容
+    fn read_single_file(
+        &self,
+        path_str: &str,
+        working_dir: &Path,
+        start_line: Option<i64>,
+        end_line: Option<i64>,
+    ) -> Result<String, String> {
+        let path = validate_path(Path::new(path_str), working_dir)?;
+
+        // 检查文件大小
+        let metadata =
+            fs::metadata(&path).map_err(|e| format!("Failed to read file metadata: {}", e))?;
+
+        if metadata.len() > self.max_file_size {
+            return Err(format!(
+                "File too large: {} bytes (max {} bytes)",
+                metadata.len(),
+                self.max_file_size
+            ));
+        }
+
+        // 读取内容
+        let bytes = fs::read(&path).map_err(|e| format!("Failed to read file: {}", e))?;
+
+        // 二进制检测（前 8000 字节）
+        let scan_end = BINARY_SCAN_BYTES.min(bytes.len());
+        if scan_end > 0 {
+            let null_count = bytes[..scan_end].iter().filter(|&&b| b == 0).count();
+            if null_count > scan_end / 10 {
+                return Err(format!(
+                    "File appears to be binary ({} null bytes in first {} bytes)",
+                    null_count, scan_end
+                ));
+            }
+        }
+
+        let content =
+            String::from_utf8(bytes).map_err(|_| "File is not valid UTF-8".to_string())?;
+
+        // 应用行范围
+        let result = if start_line.is_some() || end_line.is_some() {
+            let lines: Vec<&str> = content.lines().collect();
+            let total_lines = lines.len();
+
+            let start = start_line
+                .map(|n| (n as usize).saturating_sub(1))
+                .unwrap_or(0);
+            let end = end_line
+                .map(|n| (n as usize).saturating_sub(1))
+                .unwrap_or(total_lines.saturating_sub(1));
+
+            if start >= total_lines {
+                return Err(format!(
+                    "start_line {} exceeds file length ({} lines)",
+                    start + 1,
+                    total_lines
+                ));
+            }
+            if end >= total_lines {
+                return Err(format!(
+                    "end_line {} exceeds file length ({} lines)",
+                    end + 1,
+                    total_lines
+                ));
+            }
+            if start > end {
+                return Err(format!(
+                    "start_line {} is after end_line {}",
+                    start + 1,
+                    end + 1
+                ));
+            }
+
+            let excerpt: String = lines[start..=end].join("\n");
+            let range_info = format!(
+                "{} (lines {}-{}, {} of {} lines):\n",
+                path.display(),
+                start + 1,
+                end + 1,
+                end - start + 1,
+                total_lines
+            );
+            format!("{}{}", range_info, excerpt)
+        } else {
+            content.to_string()
+        };
+
+        Ok(result)
+    }
 }
 
 #[async_trait]
@@ -63,6 +154,11 @@ impl Tool for ReadFile {
                     "type": "string",
                     "description": "Path to the file to read, relative to the project root."
                 },
+                "paths": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Multiple files to read. Each is relative to the project root. Mutually exclusive with 'path'; if both are provided, 'path' takes priority."
+                },
                 "start_line": {
                     "type": "integer",
                     "description": "Optional 1-based line number to start reading from (inclusive).",
@@ -79,105 +175,54 @@ impl Tool for ReadFile {
     }
 
     async fn execute(&self, arguments: serde_json::Value, context: &ToolContext) -> ToolResult {
-        let path_str = match arguments.get("path").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => return ToolResult::error("Missing required argument: path"),
-        };
-
-        let path = match validate_path(Path::new(path_str), &context.working_dir) {
-            Ok(p) => p,
-            Err(e) => return ToolResult::error(e),
-        };
-
-        // 检查文件大小
-        let metadata = match fs::metadata(&path) {
-            Ok(m) => m,
-            Err(e) => return ToolResult::error(format!("Failed to read file metadata: {}", e)),
-        };
-
-        if metadata.len() > self.max_file_size {
-            return ToolResult::error(format!(
-                "File too large: {} bytes (max {} bytes)",
-                metadata.len(),
-                self.max_file_size
-            ));
-        }
-
-        // 读取内容
-        let bytes = match fs::read(&path) {
-            Ok(b) => b,
-            Err(e) => return ToolResult::error(format!("Failed to read file: {}", e)),
-        };
-
-        // 二进制检测（前 8000 字节）
-        let scan_end = BINARY_SCAN_BYTES.min(bytes.len());
-        if scan_end > 0 {
-            let null_count = bytes[..scan_end].iter().filter(|&&b| b == 0).count();
-            if null_count > scan_end / 10 {
-                return ToolResult::error(format!(
-                    "File appears to be binary ({} null bytes in first {} bytes)",
-                    null_count, scan_end
-                ));
-            }
-        }
-
-        let content = match String::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(_) => return ToolResult::error("File is not valid UTF-8"),
-        };
-
-        // 解析行范围参数
         let start_line = arguments.get("start_line").and_then(|v| v.as_i64());
         let end_line = arguments.get("end_line").and_then(|v| v.as_i64());
 
-        let result = if start_line.is_some() || end_line.is_some() {
-            let lines: Vec<&str> = content.lines().collect();
-            let total_lines = lines.len();
+        // path 优先（向后兼容）
+        if let Some(path_str) = arguments.get("path").and_then(|v| v.as_str()) {
+            return match self.read_single_file(path_str, &context.working_dir, start_line, end_line)
+            {
+                Ok(content) => {
+                    ToolResult::success(truncate_output(&content, DEFAULT_MAX_OUTPUT_BYTES))
+                }
+                Err(e) => ToolResult::error(e),
+            };
+        }
 
-            let start = start_line
-                .map(|n| (n as usize).saturating_sub(1))
-                .unwrap_or(0);
-            let end = end_line
-                .map(|n| (n as usize).saturating_sub(1))
-                .unwrap_or(total_lines.saturating_sub(1));
-
-            if start >= total_lines {
-                return ToolResult::error(format!(
-                    "start_line {} exceeds file length ({} lines)",
-                    start + 1,
-                    total_lines
-                ));
-            }
-            if end >= total_lines {
-                return ToolResult::error(format!(
-                    "end_line {} exceeds file length ({} lines)",
-                    end + 1,
-                    total_lines
-                ));
-            }
-            if start > end {
-                return ToolResult::error(format!(
-                    "start_line {} is after end_line {}",
-                    start + 1,
-                    end + 1
-                ));
+        // 尝试 paths（多文件模式）
+        if let Some(paths) = arguments.get("paths").and_then(|v| v.as_array()) {
+            if paths.is_empty() {
+                return ToolResult::error("paths is empty");
             }
 
-            let excerpt: String = lines[start..=end].join("\n");
-            let range_info = format!(
-                "{} (lines {}-{}, {} of {} lines):\n",
-                path.display(),
-                start + 1,
-                end + 1,
-                end - start + 1,
-                total_lines
-            );
-            format!("{}{}", range_info, excerpt)
+            let mut results: Vec<String> = Vec::new();
+            let mut any_success = false;
+
+            for path_val in paths {
+                let entry = match path_val.as_str() {
+                    Some(s) => {
+                        match self.read_single_file(s, &context.working_dir, start_line, end_line) {
+                            Ok(content) => {
+                                any_success = true;
+                                format!("=== {} ===\n{}", s, content)
+                            }
+                            Err(e) => format!("=== {} ===\nError: {}", s, e),
+                        }
+                    }
+                    None => continue,
+                };
+                results.push(entry);
+            }
+
+            let output = results.join("\n\n");
+            if any_success {
+                ToolResult::success(truncate_output(&output, DEFAULT_MAX_OUTPUT_BYTES))
+            } else {
+                ToolResult::error(output)
+            }
         } else {
-            content.to_string()
-        };
-
-        ToolResult::success(truncate_output(&result, DEFAULT_MAX_OUTPUT_BYTES))
+            ToolResult::error("Missing required argument: path")
+        }
     }
 }
 
@@ -784,6 +829,88 @@ mod tests {
             result.content
         );
         assert_eq!(result.content, "hello world");
+    }
+
+    #[test]
+    fn test_read_file_paths() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn a() {}").unwrap();
+        std::fs::write(tmp.path().join("b.rs"), "fn b() {}").unwrap();
+
+        let tool = ReadFile::default();
+        let ctx = ToolContext {
+            working_dir: tmp.path().to_path_buf(),
+            session_id: None,
+        };
+        let args = serde_json::json!({"paths": ["a.rs", "b.rs"]});
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tool.execute(args, &ctx));
+        assert!(
+            !result.is_error,
+            "expected success, got error: {}",
+            result.content
+        );
+        assert!(result.content.contains("=== a.rs ==="));
+        assert!(result.content.contains("=== b.rs ==="));
+        assert!(result.content.contains("fn a() {}"));
+        assert!(result.content.contains("fn b() {}"));
+    }
+
+    #[test]
+    fn test_read_file_paths_partial_fail() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn a() {}").unwrap();
+
+        let tool = ReadFile::default();
+        let ctx = ToolContext {
+            working_dir: tmp.path().to_path_buf(),
+            session_id: None,
+        };
+        let args = serde_json::json!({"paths": ["a.rs", "nonexistent.rs"]});
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tool.execute(args, &ctx));
+        // 至少一个成功 => 整体成功
+        assert!(
+            !result.is_error,
+            "expected success (best effort), got error: {}",
+            result.content
+        );
+        assert!(result.content.contains("=== a.rs ==="));
+        assert!(result.content.contains("fn a() {}"));
+        assert!(result.content.contains("=== nonexistent.rs ==="));
+        assert!(result.content.contains("Error:"));
+    }
+
+    #[test]
+    fn test_read_file_path_and_paths_conflict() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("primary.txt"), "primary").unwrap();
+        std::fs::write(tmp.path().join("secondary.txt"), "secondary").unwrap();
+
+        let tool = ReadFile::default();
+        let ctx = ToolContext {
+            working_dir: tmp.path().to_path_buf(),
+            session_id: None,
+        };
+        // 同时传 path 和 paths，path 优先
+        let args = serde_json::json!({
+            "path": "primary.txt",
+            "paths": ["secondary.txt"]
+        });
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(tool.execute(args, &ctx));
+        assert!(
+            !result.is_error,
+            "expected success, got error: {}",
+            result.content
+        );
+        assert_eq!(result.content, "primary");
     }
 
     // ---- WriteFile ----

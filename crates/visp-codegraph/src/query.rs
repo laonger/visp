@@ -1,3 +1,4 @@
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -26,6 +27,28 @@ pub struct SymbolDetails {
     pub source: String,
     pub callers: Vec<String>,
     pub callees: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceHop {
+    pub name: String,
+    pub file_path: String,
+    pub line: u32,
+    pub signature: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImpactResult {
+    pub symbol_name: String,
+    pub callers: Vec<ImpactSymbol>,
+    pub callees: Vec<ImpactSymbol>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImpactSymbol {
+    pub name: String,
+    pub file_path: String,
+    pub depth: usize,
 }
 
 pub struct QueryEngine {
@@ -89,6 +112,203 @@ impl QueryEngine {
         }
         Ok(result)
     }
+
+    pub fn trace(&self, from: &str, to: &str) -> Result<Vec<TraceHop>, String> {
+        if self.is_building.load(Ordering::Relaxed) {
+            return Err("codegraph: index is building, please retry later".into());
+        }
+
+        let from_symbols = self
+            .store
+            .get_symbols_by_name(from)
+            .map_err(|e| e.to_string())?;
+        if from_symbols.is_empty() {
+            return Ok(vec![]);
+        }
+        if from_symbols.len() > 1 {
+            let matches: Vec<String> = from_symbols
+                .iter()
+                .map(|s| format!("{} ({}:{})", s.name, s.file_path, s.line))
+                .collect();
+            return Err(format!(
+                "ambiguous symbol '{}': found {} matches: {}",
+                from,
+                from_symbols.len(),
+                matches.join(", ")
+            ));
+        }
+
+        let from_sym = &from_symbols[0];
+        let to_symbols = self
+            .store
+            .get_symbols_by_name(to)
+            .map_err(|e| e.to_string())?;
+        if to_symbols.is_empty() {
+            return Ok(vec![]);
+        }
+        if to_symbols.len() > 1 {
+            let matches: Vec<String> = to_symbols
+                .iter()
+                .map(|s| format!("{} ({}:{})", s.name, s.file_path, s.line))
+                .collect();
+            return Err(format!(
+                "ambiguous symbol '{}': found {} matches: {}",
+                to,
+                to_symbols.len(),
+                matches.join(", ")
+            ));
+        }
+
+        let to_name = &to_symbols[0].name;
+        let start_hop = TraceHop {
+            name: from_sym.name.clone(),
+            file_path: from_sym.file_path.clone(),
+            line: from_sym.line,
+            signature: from_sym.signature.clone(),
+        };
+
+        // Self-reference
+        if from_sym.name == *to_name {
+            return Ok(vec![start_hop]);
+        }
+
+        let mut visited = HashSet::new();
+        visited.insert(from_sym.id);
+
+        let mut queue = VecDeque::new();
+        queue.push_back((from_sym.id, vec![start_hop]));
+
+        while let Some((current_id, path)) = queue.pop_front() {
+            let callees = self
+                .store
+                .get_callees(current_id)
+                .map_err(|e| e.to_string())?;
+            for (callee_name, callee_file) in callees {
+                let callee_sym =
+                    match find_symbol_by_name_and_file(&self.store, &callee_name, &callee_file) {
+                        Ok(Some(s)) => s,
+                        _ => continue,
+                    };
+
+                if !visited.insert(callee_sym.id) {
+                    continue;
+                }
+
+                let hop = TraceHop {
+                    name: callee_sym.name.clone(),
+                    file_path: callee_sym.file_path.clone(),
+                    line: callee_sym.line,
+                    signature: callee_sym.signature.clone(),
+                };
+
+                let mut new_path = path.clone();
+                new_path.push(hop);
+
+                if callee_name == *to_name {
+                    return Ok(new_path);
+                }
+
+                queue.push_back((callee_sym.id, new_path));
+            }
+        }
+
+        Ok(vec![])
+    }
+
+    pub fn impact(&self, symbol: &str, depth: usize) -> Result<ImpactResult, String> {
+        if self.is_building.load(Ordering::Relaxed) {
+            return Err("codegraph: index is building, please retry later".into());
+        }
+
+        let symbols = self
+            .store
+            .get_symbols_by_name(symbol)
+            .map_err(|e| e.to_string())?;
+        if symbols.is_empty() {
+            return Err(format!("symbol '{}' not found", symbol));
+        }
+        if symbols.len() > 1 {
+            let matches: Vec<String> = symbols
+                .iter()
+                .map(|s| format!("{} ({}:{})", s.name, s.file_path, s.line))
+                .collect();
+            return Err(format!(
+                "ambiguous symbol '{}': found {} matches: {}",
+                symbol,
+                symbols.len(),
+                matches.join(", ")
+            ));
+        }
+
+        let target = &symbols[0];
+        let mut visited = HashSet::new();
+        visited.insert(target.id);
+
+        let callers = self.expand_impact_dir(target.id, true, 1, depth, &mut visited)?;
+        let callees = self.expand_impact_dir(target.id, false, 1, depth, &mut visited)?;
+
+        Ok(ImpactResult {
+            symbol_name: target.name.clone(),
+            callers,
+            callees,
+        })
+    }
+
+    fn expand_impact_dir(
+        &self,
+        sym_id: u64,
+        is_caller: bool,
+        current_depth: usize,
+        max_depth: usize,
+        visited: &mut HashSet<u64>,
+    ) -> Result<Vec<ImpactSymbol>, String> {
+        if current_depth > max_depth {
+            return Ok(vec![]);
+        }
+
+        let neighbors = if is_caller {
+            self.store.get_callers(sym_id).map_err(|e| e.to_string())?
+        } else {
+            self.store.get_callees(sym_id).map_err(|e| e.to_string())?
+        };
+
+        let mut result = Vec::new();
+        for (name, file_path) in neighbors {
+            let symbols = self
+                .store
+                .get_symbols_by_name(&name)
+                .map_err(|e| e.to_string())?;
+            let sym = match symbols.into_iter().find(|s| s.file_path == file_path) {
+                Some(s) => s,
+                None => continue,
+            };
+
+            if !visited.insert(sym.id) {
+                continue;
+            }
+
+            result.push(ImpactSymbol {
+                name,
+                file_path: file_path.clone(),
+                depth: current_depth,
+            });
+
+            let sub =
+                self.expand_impact_dir(sym.id, is_caller, current_depth + 1, max_depth, visited)?;
+            result.extend(sub);
+        }
+
+        Ok(result)
+    }
+}
+
+fn find_symbol_by_name_and_file(
+    store: &Store,
+    name: &str,
+    file_path: &str,
+) -> Result<Option<Symbol>, String> {
+    let symbols = store.get_symbols_by_name(name).map_err(|e| e.to_string())?;
+    Ok(symbols.into_iter().find(|s| s.file_path == file_path))
 }
 
 fn sym_to_info(sym: Symbol) -> SymbolInfo {
@@ -412,5 +632,271 @@ mod tests {
 
         let err = engine.get_details("foo").unwrap_err();
         assert_eq!(err, "codegraph: index is building, please retry later");
+    }
+
+    // --- trace tests ---
+
+    #[test]
+    fn test_trace_direct_call() {
+        let (store_raw, _db_dir) = create_store();
+        let store = Arc::new(store_raw);
+
+        let a_id = insert_symbol(
+            &store,
+            "A",
+            SymbolKind::Function,
+            "src/a.ts",
+            1,
+            1,
+            None,
+            None,
+        );
+        let b_id = insert_symbol(
+            &store,
+            "B",
+            SymbolKind::Function,
+            "src/b.ts",
+            1,
+            1,
+            Some("fn B()"),
+            None,
+        );
+        store
+            .insert_edges(&[Edge {
+                source_id: a_id,
+                target_id: Some(b_id),
+                target_name: None,
+                kind: EdgeKind::Call,
+            }])
+            .unwrap();
+
+        let engine = QueryEngine::new(store, Arc::new(AtomicBool::new(false)));
+        let path = engine.trace("A", "B").unwrap();
+
+        assert_eq!(path.len(), 2);
+        assert_eq!(path[0].name, "A");
+        assert_eq!(path[1].name, "B");
+        assert_eq!(path[1].signature, Some("fn B()".into()));
+    }
+
+    #[test]
+    fn test_trace_multi_hop() {
+        let (store_raw, _db_dir) = create_store();
+        let store = Arc::new(store_raw);
+
+        let a_id = insert_symbol(&store, "A", SymbolKind::Function, "a.rs", 1, 1, None, None);
+        let b_id = insert_symbol(&store, "B", SymbolKind::Function, "b.rs", 1, 1, None, None);
+        let c_id = insert_symbol(&store, "C", SymbolKind::Function, "c.rs", 1, 1, None, None);
+        store
+            .insert_edges(&[
+                Edge {
+                    source_id: a_id,
+                    target_id: Some(b_id),
+                    target_name: None,
+                    kind: EdgeKind::Call,
+                },
+                Edge {
+                    source_id: b_id,
+                    target_id: Some(c_id),
+                    target_name: None,
+                    kind: EdgeKind::Call,
+                },
+            ])
+            .unwrap();
+
+        let engine = QueryEngine::new(store, Arc::new(AtomicBool::new(false)));
+        let path = engine.trace("A", "C").unwrap();
+
+        assert_eq!(path.len(), 3);
+        assert_eq!(path[0].name, "A");
+        assert_eq!(path[1].name, "B");
+        assert_eq!(path[2].name, "C");
+    }
+
+    #[test]
+    fn test_trace_no_path() {
+        let (store_raw, _db_dir) = create_store();
+        let store = Arc::new(store_raw);
+
+        let a_id = insert_symbol(&store, "A", SymbolKind::Function, "a.rs", 1, 1, None, None);
+        let b_id = insert_symbol(&store, "B", SymbolKind::Function, "b.rs", 1, 1, None, None);
+        let _c_id = insert_symbol(&store, "C", SymbolKind::Function, "c.rs", 1, 1, None, None);
+        let _d_id = insert_symbol(&store, "D", SymbolKind::Function, "d.rs", 1, 1, None, None);
+
+        store
+            .insert_edges(&[Edge {
+                source_id: a_id,
+                target_id: Some(b_id),
+                target_name: None,
+                kind: EdgeKind::Call,
+            }])
+            .unwrap();
+        // C and D exist but are disconnected from A/B
+
+        let engine = QueryEngine::new(store, Arc::new(AtomicBool::new(false)));
+        let path = engine.trace("C", "D").unwrap();
+        assert!(path.is_empty());
+    }
+
+    #[test]
+    fn test_trace_with_cycle() {
+        let (store_raw, _db_dir) = create_store();
+        let store = Arc::new(store_raw);
+
+        let a_id = insert_symbol(&store, "A", SymbolKind::Function, "a.rs", 1, 1, None, None);
+        let b_id = insert_symbol(&store, "B", SymbolKind::Function, "b.rs", 1, 1, None, None);
+        let c_id = insert_symbol(&store, "C", SymbolKind::Function, "c.rs", 1, 1, None, None);
+
+        // A → B → C → A (cycle)
+        store
+            .insert_edges(&[
+                Edge {
+                    source_id: a_id,
+                    target_id: Some(b_id),
+                    target_name: None,
+                    kind: EdgeKind::Call,
+                },
+                Edge {
+                    source_id: b_id,
+                    target_id: Some(c_id),
+                    target_name: None,
+                    kind: EdgeKind::Call,
+                },
+                Edge {
+                    source_id: c_id,
+                    target_id: Some(a_id),
+                    target_name: None,
+                    kind: EdgeKind::Call,
+                },
+            ])
+            .unwrap();
+
+        let engine = QueryEngine::new(store, Arc::new(AtomicBool::new(false)));
+        let path = engine.trace("A", "B").unwrap();
+
+        // Should find A→B directly, not go through the cycle
+        assert_eq!(path.len(), 2);
+        assert_eq!(path[0].name, "A");
+        assert_eq!(path[1].name, "B");
+    }
+
+    #[test]
+    fn test_trace_not_found() {
+        let (store_raw, _db_dir) = create_store();
+        let store = Arc::new(store_raw);
+
+        insert_symbol(&store, "A", SymbolKind::Function, "a.rs", 1, 1, None, None);
+
+        let engine = QueryEngine::new(store, Arc::new(AtomicBool::new(false)));
+
+        // from not found
+        let path = engine.trace("X", "A").unwrap();
+        assert!(path.is_empty());
+
+        // to not found
+        let path = engine.trace("A", "Y").unwrap();
+        assert!(path.is_empty());
+    }
+
+    // --- impact tests ---
+
+    #[test]
+    fn test_impact_depth_1() {
+        let (store_raw, _db_dir) = create_store();
+        let store = Arc::new(store_raw);
+
+        let a_id = insert_symbol(&store, "A", SymbolKind::Function, "a.rs", 1, 1, None, None);
+        let u_id = insert_symbol(&store, "U", SymbolKind::Function, "u.rs", 1, 1, None, None);
+        let v_id = insert_symbol(&store, "V", SymbolKind::Function, "v.rs", 1, 1, None, None);
+        let x_id = insert_symbol(&store, "X", SymbolKind::Function, "x.rs", 1, 1, None, None);
+
+        // U → A, V → A, A → X
+        store
+            .insert_edges(&[
+                Edge {
+                    source_id: u_id,
+                    target_id: Some(a_id),
+                    target_name: None,
+                    kind: EdgeKind::Call,
+                },
+                Edge {
+                    source_id: v_id,
+                    target_id: Some(a_id),
+                    target_name: None,
+                    kind: EdgeKind::Call,
+                },
+                Edge {
+                    source_id: a_id,
+                    target_id: Some(x_id),
+                    target_name: None,
+                    kind: EdgeKind::Call,
+                },
+            ])
+            .unwrap();
+
+        let engine = QueryEngine::new(store, Arc::new(AtomicBool::new(false)));
+        let impact = engine.impact("A", 1).unwrap();
+
+        assert_eq!(impact.symbol_name, "A");
+
+        let caller_names: Vec<&str> = impact.callers.iter().map(|s| s.name.as_str()).collect();
+        assert!(caller_names.contains(&"U"));
+        assert!(caller_names.contains(&"V"));
+        assert_eq!(impact.callers.len(), 2);
+        for c in &impact.callers {
+            assert_eq!(c.depth, 1);
+        }
+
+        assert_eq!(impact.callees.len(), 1);
+        assert_eq!(impact.callees[0].name, "X");
+        assert_eq!(impact.callees[0].depth, 1);
+    }
+
+    #[test]
+    fn test_impact_depth_2() {
+        let (store_raw, _db_dir) = create_store();
+        let store = Arc::new(store_raw);
+
+        let a_id = insert_symbol(&store, "A", SymbolKind::Function, "a.rs", 1, 1, None, None);
+        let b_id = insert_symbol(&store, "B", SymbolKind::Function, "b.rs", 1, 1, None, None);
+        let c_id = insert_symbol(&store, "C", SymbolKind::Function, "c.rs", 1, 1, None, None);
+
+        // A → B → C
+        store
+            .insert_edges(&[
+                Edge {
+                    source_id: a_id,
+                    target_id: Some(b_id),
+                    target_name: None,
+                    kind: EdgeKind::Call,
+                },
+                Edge {
+                    source_id: b_id,
+                    target_id: Some(c_id),
+                    target_name: None,
+                    kind: EdgeKind::Call,
+                },
+            ])
+            .unwrap();
+
+        let engine = QueryEngine::new(store, Arc::new(AtomicBool::new(false)));
+        let impact = engine.impact("A", 2).unwrap();
+
+        assert_eq!(impact.symbol_name, "A");
+        assert!(impact.callers.is_empty());
+
+        assert_eq!(impact.callees.len(), 2);
+        let b = impact.callees.iter().find(|s| s.name == "B").unwrap();
+        assert_eq!(b.depth, 1);
+        let c = impact.callees.iter().find(|s| s.name == "C").unwrap();
+        assert_eq!(c.depth, 2);
+    }
+
+    #[test]
+    fn test_impact_not_found() {
+        let (store_raw, _db_dir) = create_store();
+        let engine = QueryEngine::new(Arc::new(store_raw), Arc::new(AtomicBool::new(false)));
+        let err = engine.impact("Nonexistent", 1).unwrap_err();
+        assert!(err.contains("not found"));
     }
 }

@@ -34,6 +34,9 @@ fn build_grep_args(
     path: &str,
     use_rg: bool,
     exclude_dirs: &[String],
+    include: Option<&str>,
+    context_lines: usize,
+    max_matches: usize,
 ) -> (&'static str, Vec<String>) {
     if use_rg {
         let mut args: Vec<String> = vec!["-n".into()];
@@ -45,6 +48,18 @@ fn build_grep_args(
             args.push("-g".into());
             args.push(format!("!{}", dir));
         }
+        if let Some(inc) = include {
+            args.push("-g".into());
+            args.push(inc.into());
+        }
+        if context_lines > 0 {
+            args.push("-C".into());
+            args.push(context_lines.to_string());
+        }
+        if max_matches > 0 {
+            args.push("-m".into());
+            args.push(max_matches.to_string());
+        }
         args.push("--".into());
         args.push(pattern.into());
         args.push(path.into());
@@ -53,6 +68,10 @@ fn build_grep_args(
         let mut args: Vec<String> = vec!["-rnI".into()];
         if cfg!(target_os = "linux") {
             args.push("-P".into());
+        }
+        if context_lines > 0 {
+            args.push("-C".into());
+            args.push(context_lines.to_string());
         }
         args.push(pattern.into());
         args.push(path.into());
@@ -176,6 +195,18 @@ impl Tool for Grep {
                 "path": {
                     "type": "string",
                     "description": "Optional search path (directory), relative to project root. Defaults to the working directory."
+                },
+                "include": {
+                    "type": "string",
+                    "description": "Optional glob pattern to filter files (e.g., '*.rs'). Passed to rg's -g option."
+                },
+                "context": {
+                    "type": "integer",
+                    "description": "Number of context lines to show around each match (0-50, clamped if exceeded). Default: 0."
+                },
+                "max_matches": {
+                    "type": "integer",
+                    "description": "Maximum number of matches to return (1-500, clamped if exceeded). Default: 50."
                 }
             },
             "required": ["pattern"]
@@ -208,8 +239,34 @@ impl Tool for Grep {
             None => return ToolResult::error("Path is not valid UTF-8"),
         };
 
+        let include = arguments
+            .get("include")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+
+        let context_lines = match arguments.get("context").and_then(|v| v.as_i64()) {
+            Some(c) if c > 50 => 50_usize,
+            Some(c) if c > 0 => c as usize,
+            _ => 0,
+        };
+
+        let max_matches = match arguments.get("max_matches").and_then(|v| v.as_i64()) {
+            Some(m) if m > 500 => 500_usize,
+            Some(m) if m <= 0 => 1_usize,
+            Some(m) => m as usize,
+            None => 50_usize,
+        };
+
         let use_rg = has_rg();
-        let (program, args) = build_grep_args(pattern, path_str, use_rg, &self.exclude_dirs);
+        let (program, args) = build_grep_args(
+            pattern,
+            path_str,
+            use_rg,
+            &self.exclude_dirs,
+            include,
+            context_lines,
+            max_matches,
+        );
 
         let (stdout, stderr) = match run_command(program, &args, self.timeout_secs).await {
             Ok(v) => v,
@@ -550,5 +607,181 @@ timeout_secs = 0
         .unwrap();
         let glob = Glob::from_toml(Some(&value));
         assert_eq!(glob.timeout_secs, GREP_TIMEOUT_SECS);
+    }
+
+    // ── grep 新参数测试 ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_grep_with_context() {
+        let dir = tempdir().unwrap();
+        // Create a file with context around the match
+        fs::write(
+            dir.path().join("main.rs"),
+            "line1\nline2\nline3\nMATCH\nline4\nline5\nline6\n",
+        )
+        .unwrap();
+
+        let grep = Grep::default();
+        let ctx = ToolContext {
+            working_dir: dir.path().to_path_buf(),
+            session_id: None,
+        };
+        let result = grep
+            .execute(serde_json::json!({"pattern": "MATCH", "context": 2}), &ctx)
+            .await;
+
+        assert!(!result.is_error, "unexpected error: {}", result.content);
+        // With context=2, we should see 2 lines before and 2 lines after
+        // File layout: line1(3-before), line2(2-before), line3(1-before), MATCH, line4(1-after), line5(2-after), line6(3-after)
+        assert!(
+            result.content.contains("line2"),
+            "should contain line2 (2 lines before MATCH):\n{}",
+            result.content
+        );
+        assert!(
+            result.content.contains("line3"),
+            "should contain line3 (1 line before MATCH):\n{}",
+            result.content
+        );
+        assert!(
+            result.content.contains("line4"),
+            "should contain line4 (1 line after MATCH):\n{}",
+            result.content
+        );
+        assert!(
+            result.content.contains("line5"),
+            "should contain line5 (2 lines after MATCH):\n{}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_grep_with_include() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "hello\n").unwrap();
+        fs::write(dir.path().join("b.txt"), "hello\n").unwrap();
+
+        let grep = Grep::default();
+        let ctx = ToolContext {
+            working_dir: dir.path().to_path_buf(),
+            session_id: None,
+        };
+        let result = grep
+            .execute(
+                serde_json::json!({"pattern": "hello", "include": "*.rs"}),
+                &ctx,
+            )
+            .await;
+
+        assert!(!result.is_error, "unexpected error: {}", result.content);
+        if has_rg() {
+            // With rg, include restricts to *.rs files
+            assert!(
+                result.content.contains("a.rs"),
+                "should find a.rs:\n{}",
+                result.content
+            );
+            assert!(
+                !result.content.contains("b.txt"),
+                "should NOT find b.txt:\n{}",
+                result.content
+            );
+        } else {
+            // Without rg, include is ignored; grep finds both
+            assert!(
+                result.content.contains("hello"),
+                "should find matches:\n{}",
+                result.content
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_grep_with_max_matches() {
+        let dir = tempdir().unwrap();
+        // Create a file with 10 matching lines
+        let content: String = (0..10).map(|i| format!("match line {}\n", i)).collect();
+        fs::write(dir.path().join("data.txt"), content).unwrap();
+
+        let grep = Grep::default();
+        let ctx = ToolContext {
+            working_dir: dir.path().to_path_buf(),
+            session_id: None,
+        };
+        let result = grep
+            .execute(
+                serde_json::json!({"pattern": "match", "max_matches": 3}),
+                &ctx,
+            )
+            .await;
+
+        assert!(!result.is_error, "unexpected error: {}", result.content);
+        // Should find at most 3 matches
+        let match_count = result.content.matches("match line").count();
+        assert!(
+            match_count <= 3,
+            "expected ≤3 matches, got {}:\n{}",
+            match_count,
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_grep_context_clamped() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("main.rs"),
+            "a\nb\nc\nd\ne\nMATCH\nf\ng\nh\ni\nj\n",
+        )
+        .unwrap();
+
+        let grep = Grep::default();
+        let ctx = ToolContext {
+            working_dir: dir.path().to_path_buf(),
+            session_id: None,
+        };
+        // context=100 should be clamped to 50; at minimum no crash
+        let result = grep
+            .execute(
+                serde_json::json!({"pattern": "MATCH", "context": 100}),
+                &ctx,
+            )
+            .await;
+
+        assert!(!result.is_error, "unexpected error: {}", result.content);
+        // Should still find the match
+        assert!(
+            result.content.contains("MATCH"),
+            "should find MATCH:\n{}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_grep_max_matches_clamped() {
+        let dir = tempdir().unwrap();
+        let content: String = (0..5).map(|i| format!("match line {}\n", i)).collect();
+        fs::write(dir.path().join("data.txt"), content).unwrap();
+
+        let grep = Grep::default();
+        let ctx = ToolContext {
+            working_dir: dir.path().to_path_buf(),
+            session_id: None,
+        };
+        // max_matches=0 should be clamped to 1
+        let result = grep
+            .execute(
+                serde_json::json!({"pattern": "match", "max_matches": 0}),
+                &ctx,
+            )
+            .await;
+
+        assert!(!result.is_error, "unexpected error: {}", result.content);
+        // Should find at least 1 match
+        assert!(
+            result.content.contains("match line"),
+            "should find at least one match:\n{}",
+            result.content
+        );
     }
 }

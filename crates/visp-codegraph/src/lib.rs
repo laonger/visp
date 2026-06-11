@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use crate::index::Indexer;
-use crate::query::{QueryEngine, SymbolDetails, SymbolInfo};
+use crate::query::{ImpactResult, QueryEngine, SymbolDetails, SymbolInfo, TraceHop};
 use crate::store::Store;
 use crate::watcher::Watcher;
 
@@ -80,6 +80,16 @@ impl CodeGraph {
     /// 符号详情
     pub fn get_details(&self, name: &str) -> Result<Vec<SymbolDetails>, String> {
         self.query_engine.get_details(name)
+    }
+
+    /// 调用路径追踪：查找从 from 到 to 的最短调用路径
+    pub fn trace(&self, from: &str, to: &str) -> Result<Vec<TraceHop>, String> {
+        self.query_engine.trace(from, to)
+    }
+
+    /// 影响分析：获取符号的调用者和被调用者（支持指定深度）
+    pub fn impact(&self, symbol: &str, depth: usize) -> Result<ImpactResult, String> {
+        self.query_engine.impact(symbol, depth)
     }
 
     /// 关闭

@@ -18,7 +18,10 @@ use visp_llm::openai::OpenAiProvider;
 use visp_mcp::manager::McpManager;
 use visp_tools::{
     bash::Bash,
-    codegraph::{CodeGraphGetDetails, CodeGraphRebuild, CodeGraphSearch},
+    codegraph::{
+        CodeGraphContext, CodeGraphGetDetails, CodeGraphImpact, CodeGraphRebuild, CodeGraphSearch,
+        CodeGraphTrace,
+    },
     fetch::WebFetch,
     file::{EditFile, ReadFile, WriteFile},
     search::{Glob, Grep},
@@ -124,6 +127,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tool_registry
         .register(Box::new(CodeGraphRebuild))
         .map_err(|e| format!("register codegraph_rebuild: {e}"))?;
+    tool_registry
+        .register(Box::new(CodeGraphContext::from_toml(
+            config.tool.get("codegraph_context"),
+        )))
+        .map_err(|e| format!("register codegraph_context: {e}"))?;
+    tool_registry
+        .register(Box::new(CodeGraphTrace::from_toml(
+            config.tool.get("codegraph_trace"),
+        )))
+        .map_err(|e| format!("register codegraph_trace: {e}"))?;
+    tool_registry
+        .register(Box::new(CodeGraphImpact::from_toml(
+            config.tool.get("codegraph_impact"),
+        )))
+        .map_err(|e| format!("register codegraph_impact: {e}"))?;
     let tool_registry = Arc::new(tool_registry);
 
     // ── 锁定核心工具（MCP 工具不能覆盖这些名称）──
