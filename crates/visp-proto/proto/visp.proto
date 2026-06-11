@@ -118,6 +118,7 @@ message ToolResult {
     string content = 2;
     bool is_error = 3;
     string session_id = 4;
+    string tool_name = 5;
 }
 
 message StatusUpdate {

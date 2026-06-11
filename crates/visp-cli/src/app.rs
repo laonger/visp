@@ -190,11 +190,56 @@ pub enum LineType {
     User,
     Assistant,
     Thinking,
-    ToolCall,
-    ToolResult,
+    ToolCall { name: String },
+    ToolResult { name: String },
+    ToolError { name: String },
     Error,
     Status,
     Usage,
+}
+
+/// 工具名称 → emoji 图标映射
+pub fn tool_icon(name: &str) -> &'static str {
+    match name {
+        "read_file" | "read_files" => "📖",
+        "write_file" => "📝",
+        "edit_file" => "✏️",
+        "grep" => "🔍",
+        "glob" => "📂",
+        "bash" | "cmd" | "powershell" => "💻",
+        "fetch_web" | "fetch" => "🌐",
+        n if n.starts_with("codegraph_") => "🔎",
+        _ => "🔧",
+    }
+}
+
+/// 根据工具名获取结果最大行数
+/// - None = 不截断
+/// - Some(0) = 不显示内容
+/// - Some(N) = 最多 N 行
+pub fn max_lines_for_tool(name: &str) -> Option<usize> {
+    match name {
+        "read_file" | "read_files" => Some(0),
+        "edit_file" | "write_file" => None,
+        "bash" | "cmd" | "powershell" => Some(30),
+        "grep" => Some(20),
+        "glob" => Some(15),
+        "fetch_web" | "fetch" => Some(20),
+        n if n.starts_with("codegraph_") => Some(20),
+        _ => Some(20),
+    }
+}
+
+/// read_file 类工具的摘要行
+pub fn result_summary(name: &str, content: &str) -> String {
+    match name {
+        "read_file" | "read_files" => {
+            let lines = content.lines().count();
+            let bytes = content.len();
+            format!("Read {} bytes ({} lines)", bytes, lines)
+        }
+        _ => String::new(),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -256,10 +301,11 @@ impl MessageCache {
                     })
                     .collect()
             }
-            _ => {
+            LineType::ToolCall { ref name } => {
+                let icon = tool_icon(name);
                 let mut lines = Vec::new();
                 let wrapped = wrap_text(&msg.content, width);
-                let display_lines = if msg.line_type == LineType::ToolCall && wrapped.len() > 5 {
+                let display_lines = if wrapped.len() > 5 {
                     let mut truncated: Vec<String> = wrapped.into_iter().take(5).collect();
                     truncated.push(format!("... [truncated, {}B]", msg.content.len()));
                     truncated
@@ -273,15 +319,114 @@ impl MessageCache {
                     } else {
                         pad_to_width(dl, width as usize)
                     };
-                    // tool call 中首行（call）用黄色，后续行（result）用灰色
-                    let line_style = if msg.line_type == LineType::ToolCall && i > 0 {
-                        Style::default().fg(theme::TOOL_RESULT_FG)
+                    // 首行加图标，后续行（结果部分）灰色
+                    let line_style = if i == 0 {
+                        Style::default().fg(theme::TOOL_CALL_FG)
                     } else {
-                        base_style
+                        Style::default().fg(theme::TOOL_RESULT_FG)
                     };
-                    lines.push(Line::styled(content, line_style));
+                    let display = if i == 0 {
+                        format!("{} {}", icon, content)
+                    } else {
+                        content
+                    };
+                    lines.push(Line::styled(display, line_style));
                 }
-                lines
+                let line_count = lines.len() as u16;
+                return Self {
+                    msg_id: msg.id,
+                    msg_version: msg.version,
+                    width,
+                    lines,
+                    line_count,
+                };
+            }
+            LineType::ToolResult { ref name } => {
+                let max_lines = max_lines_for_tool(name);
+                let icon = tool_icon(name);
+                let mut lines = Vec::new();
+                if max_lines == Some(0) {
+                    // 不显示内容，只显示摘要
+                    let summary = result_summary(name, &msg.content);
+                    let status_line = format!("  ✓ {} {}", icon, summary);
+                    lines.push(Line::styled(
+                        pad_to_width(&status_line, width as usize),
+                        Style::default().fg(theme::TOOL_RESULT_FG),
+                    ));
+                } else {
+                    // 显示内容（带截断）
+                    let wrapped = wrap_text(&msg.content, width);
+                    let display_lines = if let Some(max) = max_lines {
+                        let total_len = wrapped.len();
+                        if total_len > max {
+                            let mut truncated: Vec<String> =
+                                wrapped.into_iter().take(max).collect();
+                            let remaining = total_len.saturating_sub(max);
+                            truncated.push(format!("... [truncated, {} more lines]", remaining));
+                            truncated
+                        } else {
+                            wrapped
+                        }
+                    } else {
+                        wrapped // 不截断
+                    };
+                    for dl in &display_lines {
+                        let content = if dl.is_empty() {
+                            " ".repeat(width as usize)
+                        } else {
+                            pad_to_width(dl, width as usize)
+                        };
+                        lines.push(Line::styled(
+                            content,
+                            Style::default().fg(theme::TOOL_RESULT_FG),
+                        ));
+                    }
+                }
+                let line_count = lines.len() as u16;
+                return Self {
+                    msg_id: msg.id,
+                    msg_version: msg.version,
+                    width,
+                    lines,
+                    line_count,
+                };
+            }
+            LineType::ToolError { ref name } => {
+                let icon = tool_icon(name);
+                let mut lines = Vec::new();
+                let error_line = format!("❌ {} {}", icon, msg.content);
+                lines.push(Line::styled(
+                    pad_to_width(&error_line, width as usize),
+                    Style::default().fg(theme::ERROR_FG),
+                ));
+                let line_count = lines.len() as u16;
+                return Self {
+                    msg_id: msg.id,
+                    msg_version: msg.version,
+                    width,
+                    lines,
+                    line_count,
+                };
+            }
+            _ => {
+                let mut lines = Vec::new();
+                let wrapped = wrap_text(&msg.content, width);
+                for dl in wrapped.iter() {
+                    let content = if dl.is_empty() {
+                        " ".repeat(width as usize)
+                    } else {
+                        pad_to_width(dl, width as usize)
+                    };
+                    lines.push(Line::styled(content, base_style));
+                }
+                let line_count = lines.len() as u16;
+                return Self {
+                    msg_id: msg.id,
+                    msg_version: msg.version,
+                    width,
+                    lines,
+                    line_count,
+                };
             }
         };
 
@@ -474,11 +619,10 @@ impl AppState {
     }
 
     pub fn insert_tool_result(&mut self, call_id: &str, content: String) {
-        if let Some(msg) = self
-            .messages
-            .iter_mut()
-            .find(|m| m.line_type == LineType::ToolCall && m.call_id.as_deref() == Some(call_id))
-        {
+        if let Some(msg) = self.messages.iter_mut().find(|m| {
+            matches!(m.line_type, LineType::ToolCall { .. })
+                && m.call_id.as_deref() == Some(call_id)
+        }) {
             msg.content.push('\n');
             msg.content.push_str(&content);
             msg.version += 1;
@@ -488,7 +632,9 @@ impl AppState {
             self.messages.push(ChatLine {
                 id,
                 version: 0,
-                line_type: LineType::ToolCall,
+                line_type: LineType::ToolCall {
+                    name: String::new(),
+                },
                 content,
                 call_id: Some(call_id.to_string()),
             });
@@ -805,12 +951,14 @@ mod tests {
         let msg = ChatLine {
             id: 0,
             version: 0,
-            line_type: LineType::ToolCall,
+            line_type: LineType::ToolCall {
+                name: "bash".into(),
+            },
             content: "line1\nline2\nline3\nline4\nline5\nline6\nline7".into(),
             call_id: None,
         };
         let cache = MessageCache::from_message(&msg, 80);
-        // 截断为 6 行内容（5 行 + 1 行 [...]）
+        // 首行是图标+第一行内容，后续 4 行 + 1 行 [...] = 共 6 行
         assert_eq!(cache.line_count, 6);
     }
 
@@ -830,26 +978,53 @@ mod tests {
     #[test]
     fn test_add_tool_line_stores_call_id() {
         let mut app = AppState::new("s".into(), "m".into());
-        app.add_tool_line(LineType::ToolCall, "cmd".into(), "tc_1");
+        app.add_tool_line(
+            LineType::ToolCall {
+                name: "test".into(),
+            },
+            "cmd".into(),
+            "tc_1",
+        );
         assert_eq!(app.messages[0].call_id.as_deref(), Some("tc_1"));
     }
 
     #[test]
     fn test_insert_tool_result_appends_to_matching_call() {
         let mut app = AppState::new("s".into(), "m".into());
-        app.add_tool_line(LineType::ToolCall, "cmd1".into(), "id1");
-        app.add_tool_line(LineType::ToolCall, "cmd2".into(), "id2");
+        app.add_tool_line(
+            LineType::ToolCall {
+                name: "test".into(),
+            },
+            "cmd1".into(),
+            "id1",
+        );
+        app.add_tool_line(
+            LineType::ToolCall {
+                name: "test".into(),
+            },
+            "cmd2".into(),
+            "id2",
+        );
         app.insert_tool_result("id1", "result1".into());
         // result 追加到匹配的 cmd1 后面
         assert_eq!(app.messages[0].content, "cmd1\nresult1");
         assert_eq!(app.messages[1].content, "cmd2");
-        assert_eq!(app.messages[1].line_type, LineType::ToolCall);
+        assert!(matches!(
+            app.messages[1].line_type,
+            LineType::ToolCall { .. }
+        ));
     }
 
     #[test]
     fn test_insert_tool_result_without_matching_call_appends() {
         let mut app = AppState::new("s".into(), "m".into());
-        app.add_tool_line(LineType::ToolCall, "cmd".into(), "id1");
+        app.add_tool_line(
+            LineType::ToolCall {
+                name: "test".into(),
+            },
+            "cmd".into(),
+            "id1",
+        );
         app.insert_tool_result("nonexistent", "result".into());
         // 没有匹配的 call_id，作为新的 ToolCall 追加到末尾
         assert_eq!(app.messages.len(), 2);
@@ -859,8 +1034,20 @@ mod tests {
     #[test]
     fn test_multiple_tool_calls_grouped() {
         let mut app = AppState::new("s".into(), "m".into());
-        app.add_tool_line(LineType::ToolCall, "cmd1".into(), "a");
-        app.add_tool_line(LineType::ToolCall, "cmd2".into(), "b");
+        app.add_tool_line(
+            LineType::ToolCall {
+                name: "test".into(),
+            },
+            "cmd1".into(),
+            "a",
+        );
+        app.add_tool_line(
+            LineType::ToolCall {
+                name: "test".into(),
+            },
+            "cmd2".into(),
+            "b",
+        );
         app.insert_tool_result("b", "result2".into());
         app.insert_tool_result("a", "result1".into());
         // result 追加到各自的 call 后面

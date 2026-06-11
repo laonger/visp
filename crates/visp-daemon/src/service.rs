@@ -689,6 +689,7 @@ fn agent_event_to_server_message(event: AgentEvent, session_id: &str) -> proto::
         },
         AgentEvent::ToolCallResult {
             call_id,
+            tool_name,
             content,
             is_error,
         } => proto::ServerMessage {
@@ -697,6 +698,7 @@ fn agent_event_to_server_message(event: AgentEvent, session_id: &str) -> proto::
                     call_id,
                     content,
                     is_error,
+                    tool_name,
                     session_id: sid,
                 },
             )),

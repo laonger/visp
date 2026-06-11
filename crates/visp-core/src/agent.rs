@@ -53,6 +53,7 @@ pub enum AgentEvent {
     /// 工具调用结果
     ToolCallResult {
         call_id: String,
+        tool_name: String,
         content: String,
         is_error: bool,
     },
@@ -648,6 +649,7 @@ pub async fn run_agent_loop(
                     let _ = tx
                         .send(AgentEvent::ToolCallResult {
                             call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
                             content: "Cancelled".into(),
                             is_error: true,
                         })
@@ -706,6 +708,7 @@ pub async fn run_agent_loop(
                             let _ = tx
                                 .send(AgentEvent::ToolCallResult {
                                     call_id: tc.id.clone(),
+                                    tool_name: tc.name.clone(),
                                     content: result.content.clone(),
                                     is_error: result.is_error,
                                 })
@@ -743,6 +746,7 @@ pub async fn run_agent_loop(
                 let _ = tx
                     .send(AgentEvent::ToolCallResult {
                         call_id: tc.id.clone(),
+                        tool_name: tc.name.clone(),
                         content: result.content.clone(),
                         is_error: result.is_error,
                     })

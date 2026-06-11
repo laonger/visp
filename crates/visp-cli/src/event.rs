@@ -482,16 +482,45 @@ fn handle_grpc_message(
         Some(server_message::Payload::ToolCall(tc)) => {
             app.flush_streaming();
             let args_display = tc_display(&tc);
-            app.add_tool_line(LineType::ToolCall, args_display, &tc.call_id);
+            app.add_tool_line(
+                LineType::ToolCall {
+                    name: tc.tool_name.clone(),
+                },
+                args_display,
+                &tc.call_id,
+            );
         }
-        Some(server_message::Payload::ToolResult(tr)) => app.insert_tool_result(
-            &tr.call_id,
-            format!(
-                "{}: {}",
-                if tr.is_error { "Error" } else { "Output" },
-                tr.content
-            ),
-        ),
+        Some(server_message::Payload::ToolResult(tr)) => {
+            app.flush_streaming();
+            // 查找 tool_name：优先从 proto 取，fallback 找匹配的 ToolCall
+            let tool_name = if !tr.tool_name.is_empty() {
+                tr.tool_name.clone()
+            } else {
+                app.messages
+                    .iter()
+                    .find(|m| {
+                        matches!(&m.line_type, LineType::ToolCall { .. })
+                            && m.call_id.as_deref() == Some(&tr.call_id)
+                    })
+                    .and_then(|m| {
+                        if let LineType::ToolCall { name } = &m.line_type {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default()
+            };
+            app.add_tool_line(
+                if tr.is_error {
+                    LineType::ToolError { name: tool_name }
+                } else {
+                    LineType::ToolResult { name: tool_name }
+                },
+                tr.content,
+                &tr.call_id,
+            );
+        }
         Some(server_message::Payload::ThinkingBlock(tb)) => {
             app.flush_streaming();
             let text = format!("[Thinking] {}", tb.thinking);

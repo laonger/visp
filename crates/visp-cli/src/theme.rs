@@ -133,13 +133,31 @@ pub const TOOL_STYLE: BlockStyle = BlockStyle {
     bottom_pad: 0,
 };
 
-/// 工具结果样式（深色底色）
-pub const TOOL_RESULT_STYLE: BlockStyle = BlockStyle {
+/// 工具调用样式（完整框 + 阴影）
+pub const TOOL_CALL_STYLE: BlockStyle = BlockStyle {
     margin_vertical: 1,
     margin_horizontal: 1,
     bg_fill: Some(TOOL_BG),
     shadow: true,
     bottom_pad: 0,
+};
+
+/// 工具结果样式（缩进 2 格，无阴影，从属于调用）
+pub const TOOL_RESULT_STYLE: BlockStyle = BlockStyle {
+    margin_vertical: 0,
+    margin_horizontal: 3,
+    bg_fill: Some(TOOL_BG),
+    shadow: false,
+    bottom_pad: 1,
+};
+
+/// 工具错误样式（缩进 2 格，红色底色强调）
+pub const TOOL_ERROR_STYLE: BlockStyle = BlockStyle {
+    margin_vertical: 0,
+    margin_horizontal: 3,
+    bg_fill: Some(TOOL_BG),
+    shadow: false,
+    bottom_pad: 1,
 };
 
 /// Usage 统计行（已废弃，保留兼容）
@@ -156,13 +174,14 @@ pub const USAGE_STYLE: BlockStyle = BlockStyle {
 // ════════════════════════════════════════════════════════════════
 
 /// 获取消息类型对应的前景色
-pub const fn fg_for(line_type: LineType) -> Color {
+pub fn fg_for(line_type: LineType) -> Color {
     match line_type {
         LineType::User => USER_FG,
         LineType::Assistant => ASSISTANT_FG,
         LineType::Thinking => THINKING_FG,
-        LineType::ToolCall => TOOL_CALL_FG,
-        LineType::ToolResult => TOOL_RESULT_FG,
+        LineType::ToolCall { .. } => TOOL_CALL_FG,
+        LineType::ToolResult { .. } => TOOL_RESULT_FG,
+        LineType::ToolError { .. } => ERROR_FG,
         LineType::Error => ERROR_FG,
         LineType::Status => STATUS_FG,
         LineType::Usage => TOOL_RESULT_FG,
@@ -170,14 +189,15 @@ pub const fn fg_for(line_type: LineType) -> Color {
 }
 
 /// 获取消息类型对应的 BlockStyle
-pub const fn style_for(line_type: LineType) -> BlockStyle {
+pub fn style_for(line_type: LineType) -> BlockStyle {
     match line_type {
         LineType::User => USER_STYLE,
         LineType::Assistant => ASSISTANT_STYLE,
         LineType::Thinking => THINKING_STYLE,
-        LineType::ToolCall | LineType::ToolResult => TOOL_RESULT_STYLE,
+        LineType::ToolCall { .. } => TOOL_CALL_STYLE,
+        LineType::ToolResult { .. } => TOOL_RESULT_STYLE,
+        LineType::ToolError { .. } => TOOL_ERROR_STYLE,
         LineType::Usage => USAGE_STYLE,
-        // Error / Status 无显式匹配 → TOOL_STYLE
         LineType::Error | LineType::Status => TOOL_STYLE,
     }
 }
