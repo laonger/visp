@@ -173,7 +173,7 @@ model = "claude-sonnet-4-20250514"
 api_key = "sk-ant-..."          # 或设置 ANTHROPIC_API_KEY 环境变量
 ```
 
-不创建也能运行，仅配 `api_key` 和 `model` 即可。完整的注解模板见 [`docs/daemon.toml`](docs/daemon.toml)，完整结构见 [`config.rs`](crates/visp-daemon/src/config.rs)。
+不创建也能运行，仅配 `api_key` 和 `model` 即可。完整的注解模板见 [`docs/daemon.example.toml`](docs/daemon.example.toml)，完整结构见 [`config.rs`](crates/visp-daemon/src/config.rs)。
 
 ### 规则文件（rules）
 
