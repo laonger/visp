@@ -164,7 +164,10 @@ mod tests_session {
             (AgentErrorCode::MaxIterations, "Maximum iterations reached"),
             (AgentErrorCode::Cancelled, "Operation cancelled"),
             (AgentErrorCode::Internal, "Internal error"),
-            (AgentErrorCode::StuckInLoop, "Agent stuck in repeated tool call loop"),
+            (
+                AgentErrorCode::StuckInLoop,
+                "Agent stuck in repeated tool call loop",
+            ),
         ];
         for (code, expected) in cases {
             assert_eq!(code.to_string(), expected);

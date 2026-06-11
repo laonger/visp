@@ -95,8 +95,12 @@ pub struct AgentLoopContext {
 /// Agent 执行配置
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
-    /// 最大迭代轮数
-    pub max_iterations: u32,
+    /// 软上限：达到此轮次后在 LLM 调用前注入"请收尾"提示（0 = 关闭）
+    pub soft_limit: u32,
+    /// 硬上限兜底：达到此轮次后强制终止（防止死循环）
+    pub hard_limit: u32,
+    /// Doom loop 检测窗口：连续 N 轮相同工具调用则触发警告
+    pub doom_loop_threshold: u32,
     /// LLM 调用重试次数
     pub llm_retry_attempts: u32,
     /// LLM 重试基础延迟（毫秒）
@@ -110,7 +114,9 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            max_iterations: 10,
+            soft_limit: 50,
+            hard_limit: 200,
+            doom_loop_threshold: 5,
             llm_retry_attempts: 3,
             llm_retry_base_delay_ms: 1000,
             bash_confirm_mode: true,
@@ -284,7 +290,7 @@ pub async fn run_agent_loop(
     ctx.history.push(user_message);
 
     let mut total_tool_calls: u32 = 0;
-    for _ in 0..agent_config.max_iterations {
+    for _ in 0..agent_config.soft_limit {
         // a. Cancellation check
         if ctx.cancel_token.is_cancelled() {
             try_send!(AgentEvent::Error {
@@ -817,7 +823,7 @@ pub async fn run_agent_loop(
         code: AgentErrorCode::MaxIterations,
         message: format!(
             "Agent loop reached maximum iterations ({})",
-            agent_config.max_iterations
+            agent_config.soft_limit
         ),
     });
     let _ = session_mgr.finish_loop(&ctx.session_id, SessionStatus::Error);
@@ -1093,7 +1099,7 @@ mod tests {
         provider: StdArc<dyn LlmProvider>,
         tools: Vec<Box<dyn Tool>>,
         setup: TestSetup,
-        max_iterations: u32,
+        soft_limit: u32,
         user_msg: Message,
     ) -> (Vec<AgentEvent>, StdArc<SessionManager>, String) {
         let (tx, mut rx) = mpsc::channel(64);
@@ -1104,7 +1110,7 @@ mod tests {
         }
         let tool_registry = StdArc::new(registry);
         let config = AgentConfig {
-            max_iterations,
+            soft_limit,
             ..Default::default()
         };
 
@@ -1138,11 +1144,22 @@ mod tests {
     #[test]
     fn test_agent_config_default() {
         let cfg = AgentConfig::default();
-        assert_eq!(cfg.max_iterations, 10);
+        assert_eq!(cfg.soft_limit, 50);
+        assert_eq!(cfg.hard_limit, 200);
+        assert_eq!(cfg.doom_loop_threshold, 5);
         assert_eq!(cfg.llm_retry_attempts, 3);
         assert_eq!(cfg.llm_retry_base_delay_ms, 1000);
         assert!(cfg.bash_confirm_mode);
         assert_eq!(cfg.file_max_size_bytes, 1048576);
+    }
+
+    #[test]
+    fn test_soft_limit_zero_disabled() {
+        let cfg = AgentConfig {
+            soft_limit: 0,
+            ..Default::default()
+        };
+        assert_eq!(cfg.soft_limit, 0);
     }
 
     #[test]
@@ -1364,7 +1381,7 @@ mod tests {
         );
     }
 
-    /// 4. 最大迭代次数：max_iterations=1，一直返回 ToolCall → Error(MaxIterations)
+    /// 4. 硬上限：soft_limit=1，一直返回 ToolCall → Error(MaxIterations)
     #[tokio::test]
     async fn test_max_iterations() {
         let (tool, _executed) = mock_tool("finder", false);
@@ -1382,7 +1399,7 @@ mod tests {
             provider,
             vec![tool],
             test_setup(),
-            1, // max_iterations = 1
+            1, // soft_limit = 1
             Message::user("Find"),
         )
         .await;
@@ -1442,7 +1459,7 @@ mod tests {
 
         let setup = test_setup();
         let config = AgentConfig {
-            max_iterations: 10,
+            soft_limit: 50,
             ..Default::default()
         };
 
@@ -1509,7 +1526,7 @@ mod tests {
 
         let setup = test_setup();
         let config = AgentConfig {
-            max_iterations: 10,
+            soft_limit: 50,
             ..Default::default()
         };
 
@@ -1578,7 +1595,7 @@ mod tests {
 
         let setup = test_setup();
         let config = AgentConfig {
-            max_iterations: 10,
+            soft_limit: 50,
             ..Default::default()
         };
 
@@ -1814,7 +1831,7 @@ mod tests {
 
         let setup = test_setup();
         let config = AgentConfig {
-            max_iterations: 10,
+            soft_limit: 50,
             ..Default::default()
         };
 
@@ -1885,7 +1902,7 @@ mod tests {
 
         let setup = test_setup();
         let config = AgentConfig {
-            max_iterations: 10,
+            soft_limit: 50,
             ..Default::default()
         };
 
@@ -1954,7 +1971,7 @@ mod tests {
 
         let setup = test_setup();
         let config = AgentConfig {
-            max_iterations: 10,
+            soft_limit: 50,
             ..Default::default()
         };
 
