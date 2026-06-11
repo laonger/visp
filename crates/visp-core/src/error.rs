@@ -112,6 +112,7 @@ pub enum AgentErrorCode {
     LlmNetwork,
     LlmStream,
     MaxIterations,
+    StuckInLoop,
     Cancelled,
     Internal,
 }
@@ -125,6 +126,7 @@ impl std::fmt::Display for AgentErrorCode {
             AgentErrorCode::LlmNetwork => write!(f, "LLM network error"),
             AgentErrorCode::LlmStream => write!(f, "LLM stream error"),
             AgentErrorCode::MaxIterations => write!(f, "Maximum iterations reached"),
+            AgentErrorCode::StuckInLoop => write!(f, "Agent stuck in repeated tool call loop"),
             AgentErrorCode::Cancelled => write!(f, "Operation cancelled"),
             AgentErrorCode::Internal => write!(f, "Internal error"),
         }
@@ -162,9 +164,19 @@ mod tests_session {
             (AgentErrorCode::MaxIterations, "Maximum iterations reached"),
             (AgentErrorCode::Cancelled, "Operation cancelled"),
             (AgentErrorCode::Internal, "Internal error"),
+            (AgentErrorCode::StuckInLoop, "Agent stuck in repeated tool call loop"),
         ];
         for (code, expected) in cases {
             assert_eq!(code.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn test_stuck_in_loop_match() {
+        let err = AgentErrorCode::StuckInLoop;
+        match err {
+            AgentErrorCode::StuckInLoop => {} // ok
+            _ => panic!("StuckInLoop should match StuckInLoop"),
         }
     }
 }

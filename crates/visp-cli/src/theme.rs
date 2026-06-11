@@ -142,13 +142,13 @@ pub const TOOL_CALL_STYLE: BlockStyle = BlockStyle {
     bottom_pad: 0,
 };
 
-/// 工具结果样式（缩进 2 格，无阴影，从属于调用）
+/// 工具结果样式（纯文本缩进，无底色，从属于调用）
 pub const TOOL_RESULT_STYLE: BlockStyle = BlockStyle {
     margin_vertical: 0,
     margin_horizontal: 3,
-    bg_fill: Some(TOOL_BG),
+    bg_fill: None,
     shadow: false,
-    bottom_pad: 1,
+    bottom_pad: 0,
 };
 
 /// 工具错误样式（缩进 2 格，红色底色强调）
