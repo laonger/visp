@@ -290,7 +290,10 @@ pub async fn run_agent_loop(
     ctx.history.push(user_message);
 
     let mut total_tool_calls: u32 = 0;
-    for _ in 0..agent_config.soft_limit {
+    let mut iteration: u32 = 1;
+    let mut doom_loop_window: Vec<Vec<(String, serde_json::Value)>> = Vec::new();
+    let mut doom_loop_warned = false;
+    loop {
         // a. Cancellation check
         if ctx.cancel_token.is_cancelled() {
             try_send!(AgentEvent::Error {
@@ -301,7 +304,20 @@ pub async fn run_agent_loop(
             return;
         }
 
-        // b. Build prompt
+        // b. Limits check（在 LLM 调用之前）
+        if iteration >= agent_config.hard_limit {
+            try_send!(AgentEvent::Error {
+                code: AgentErrorCode::MaxIterations,
+                message: format!(
+                    "Agent loop reached hard limit ({})",
+                    agent_config.hard_limit
+                ),
+            });
+            let _ = session_mgr.finish_loop(&ctx.session_id, SessionStatus::Error);
+            return;
+        }
+        // c. Build prompt
+
         let session = match session_mgr.get(&ctx.session_id) {
             Ok(s) => s,
             Err(e) => {
@@ -318,12 +334,20 @@ pub async fn run_agent_loop(
 
         // 渲染动态工具指南并追加到 system prompt
         let tool_guide = render_tool_guide(&tool_registry);
-        let enriched_template = if tool_guide.is_empty() {
+        let mut enriched_template = if tool_guide.is_empty() {
             session.system_prompt_template.clone()
         } else {
             format!("{}{}", session.system_prompt_template, tool_guide)
         };
 
+        // Soft limit check: 注入收尾提示
+        if agent_config.soft_limit > 0 && iteration >= agent_config.soft_limit {
+            enriched_template.push_str(
+                "\n\n[System: You have reached the maximum number of iterations. \
+                 Please immediately complete all remaining work in your next response. \
+                 If all work is done, respond without making any tool calls.]",
+            );
+        }
         let messages = PromptBuilder::build(
             &enriched_template,
             &rule_engine.get_active_rules(),
@@ -634,7 +658,47 @@ pub async fn run_agent_loop(
             return;
         }
 
-        // g. Execute tools in parallel
+        // g. Doom loop detection
+        if agent_config.doom_loop_threshold > 0 {
+            let round_sig: Vec<(String, serde_json::Value)> = tool_calls
+                .iter()
+                .map(|tc| {
+                    let args: serde_json::Value =
+                        serde_json::from_str(&tc.arguments).unwrap_or_default();
+                    (tc.name.clone(), args)
+                })
+                .collect();
+            doom_loop_window.push(round_sig);
+            let threshold = agent_config.doom_loop_threshold as usize;
+            if doom_loop_window.len() > threshold {
+                doom_loop_window.remove(0);
+            }
+            if doom_loop_window.len() == threshold {
+                let first = &doom_loop_window[0];
+                let all_same = doom_loop_window.iter().all(|sig| sig == first);
+                if all_same {
+                    if doom_loop_warned {
+                        try_send!(AgentEvent::Error {
+                            code: AgentErrorCode::StuckInLoop,
+                            message: "Agent stuck in repeated tool call loop after warning".into(),
+                        });
+                        let _ = session_mgr.finish_loop(&ctx.session_id, SessionStatus::Error);
+                        return;
+                    }
+                    doom_loop_warned = true;
+                    doom_loop_window.clear();
+                    try_send!(AgentEvent::StatusUpdate(
+                        "Agent appears stuck in a loop of repeated tool calls".into()
+                    ));
+                    ctx.history.push(Message::system(
+                        "You appear to be repeating the same tool calls. \
+                         Please change your approach or summarize the current progress.",
+                    ));
+                }
+            }
+        }
+
+        // h. Execute tools in parallel
         let num_tools = tool_calls.len();
         let mut exec_tasks = Vec::with_capacity(num_tools);
         // Store tool IDs indexed by spawn order, for error recovery when a task panics.
@@ -815,18 +879,9 @@ pub async fn run_agent_loop(
                 return;
             }
         }
-        // i. Continue loop
+        // i. Increment iteration
+        iteration += 1;
     }
-
-    // Max iterations reached without completion
-    try_send!(AgentEvent::Error {
-        code: AgentErrorCode::MaxIterations,
-        message: format!(
-            "Agent loop reached maximum iterations ({})",
-            agent_config.soft_limit
-        ),
-    });
-    let _ = session_mgr.finish_loop(&ctx.session_id, SessionStatus::Error);
 }
 
 /// 清理历史中残留的 orphan tool_uses。
@@ -1100,6 +1155,7 @@ mod tests {
         tools: Vec<Box<dyn Tool>>,
         setup: TestSetup,
         soft_limit: u32,
+        hard_limit: u32,
         user_msg: Message,
     ) -> (Vec<AgentEvent>, StdArc<SessionManager>, String) {
         let (tx, mut rx) = mpsc::channel(64);
@@ -1111,6 +1167,7 @@ mod tests {
         let tool_registry = StdArc::new(registry);
         let config = AgentConfig {
             soft_limit,
+            hard_limit,
             ..Default::default()
         };
 
@@ -1256,7 +1313,7 @@ mod tests {
         ]]));
 
         let (events, _sm, _sid) =
-            run_collect(provider, vec![], test_setup(), 10, Message::user("Hi")).await;
+            run_collect(provider, vec![], test_setup(), 10, 200, Message::user("Hi")).await;
 
         let deltas: Vec<&str> = events
             .iter()
@@ -1296,6 +1353,7 @@ mod tests {
             vec![tool],
             test_setup(),
             10,
+            200,
             Message::user("Find files"),
         )
         .await;
@@ -1343,6 +1401,7 @@ mod tests {
             vec![tool_a, tool_b],
             test_setup(),
             10,
+            200,
             Message::user("Find and grep"),
         )
         .await;
@@ -1381,7 +1440,7 @@ mod tests {
         );
     }
 
-    /// 4. 硬上限：soft_limit=1，一直返回 ToolCall → Error(MaxIterations)
+    /// 4. 硬上限：hard_limit=2，一直返回 ToolCall → Error(MaxIterations)
     #[tokio::test]
     async fn test_max_iterations() {
         let (tool, _executed) = mock_tool("finder", false);
@@ -1400,6 +1459,7 @@ mod tests {
             vec![tool],
             test_setup(),
             1, // soft_limit = 1
+            2, // hard_limit = 2
             Message::user("Find"),
         )
         .await;
@@ -1425,7 +1485,7 @@ mod tests {
         ]]));
 
         let (events, _sm, _sid) =
-            run_collect(provider, vec![], setup, 10, Message::user("Hi")).await;
+            run_collect(provider, vec![], setup, 10, 200, Message::user("Hi")).await;
 
         assert!(events.iter().any(|e| matches!(
             e,
@@ -2038,7 +2098,7 @@ mod tests {
         ]]));
 
         let (events, _sm, _sid) =
-            run_collect(provider, vec![], test_setup(), 10, Message::user("Hi")).await;
+            run_collect(provider, vec![], test_setup(), 10, 200, Message::user("Hi")).await;
 
         assert!(
             events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
@@ -2064,7 +2124,7 @@ mod tests {
         ]]));
 
         let (events, _sm, _sid) =
-            run_collect(provider, vec![], test_setup(), 10, Message::user("Hi")).await;
+            run_collect(provider, vec![], test_setup(), 10, 200, Message::user("Hi")).await;
 
         assert!(
             !events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
