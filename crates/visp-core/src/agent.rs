@@ -798,11 +798,29 @@ pub async fn run_agent_loop(
                     Err(e) => {
                         tracing::warn!(
                             tool = %tc.name,
-                            arguments = %tc.arguments,
+                            args_len = tc.arguments.len(),
                             error = %e,
-                            "failed to parse tool call arguments as JSON, falling back to empty object"
+                            "tool call arguments truncated or malformed (likely max_output_tokens exceeded)"
                         );
-                        serde_json::json!({})
+                        let result = ToolResult::error(format!(
+                            "Tool call arguments are truncated/incomplete ({} bytes, parse error: {}). \
+                             The LLM response likely exceeded max_output_tokens. \
+                             Increase max_output_tokens in daemon config or reduce the tool output size.",
+                            tc.arguments.len(), e
+                        ));
+                        let _ = tx
+                            .send(AgentEvent::ToolCallResult {
+                                call_id: tc.id.clone(),
+                                tool_name: tc.name.clone(),
+                                content: result.content.clone(),
+                                is_error: result.is_error,
+                            })
+                            .await;
+                        return ToolExecResult {
+                            index: i,
+                            call_id: tc.id,
+                            result,
+                        };
                     }
                 };
                 let tool_ctx = ToolContext {

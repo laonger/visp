@@ -480,10 +480,18 @@ fn byte_stream_to_chat_events(
                                 }
                             }
                             Ok(OpenAiStreamEvent::Finish { reason, .. }) => {
-                                if let Some(ref r) = reason
-                                    && r == "content_filter"
-                                {
-                                    tracing::warn!("OpenAI response blocked by content filter");
+                                if let Some(ref r) = reason {
+                                    if r == "content_filter" {
+                                        tracing::warn!("OpenAI response blocked by content filter");
+                                    }
+                                    // finish_reason="length" 表示 token 上限截断，累积中的 tool call 必定不完整
+                                    if r == "length" && !state.tool_acc.is_empty() {
+                                        tracing::warn!(
+                                            tool_count = state.tool_acc.len(),
+                                            "finish_reason='length', discarding incomplete tool call(s) (max_output_tokens likely exceeded)"
+                                        );
+                                        state.tool_acc.clear();
+                                    }
                                 }
                                 if !state.tool_acc.is_empty() {
                                     state.tool_call_count = state.tool_acc.len() as u32;
