@@ -620,6 +620,13 @@ fn byte_stream_to_chat_events(
                                 entry.signature = signature;
                             }
                             entry.thinking.push_str(&partial);
+                            // 流式发射 partial ThinkingBlock
+                            let block = serde_json::json!({
+                                "type": "thinking",
+                                "thinking": entry.thinking.clone(),
+                                "signature": entry.signature.clone(),
+                            });
+                            return Some((Ok(ChatEvent::ThinkingBlock(block)), state));
                         }
                         Ok(ParsedEvent::ToolInputDelta {
                             index,
