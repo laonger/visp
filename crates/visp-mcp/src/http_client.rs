@@ -596,7 +596,8 @@ mod tests {
 
     #[test]
     fn test_extract_sse_data_basic() {
-        let body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}\n\n";
+        let body =
+            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}\n\n";
         assert_eq!(
             extract_sse_data(body).as_deref(),
             Some(r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#),
