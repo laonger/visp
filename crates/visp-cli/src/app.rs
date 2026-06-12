@@ -734,6 +734,19 @@ impl AppState {
         }
     }
 
+    /// 原地更新最后一条 thinking 消息，用于流式 reasoning 显示。
+    /// 如果最后一条不是 Thinking 则新增一行。
+    pub fn update_thinking(&mut self, content: String) {
+        if let Some(last) = self.messages.last_mut()
+            && matches!(last.line_type, LineType::Thinking)
+        {
+            last.content = content;
+            last.version += 1;
+        } else {
+            self.add_message(LineType::Thinking, content);
+        }
+    }
+
     pub fn clear_messages(&mut self) {
         self.messages.clear();
         self.message_caches.clear();

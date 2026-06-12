@@ -447,6 +447,8 @@ pub async fn run_agent_loop(
                             try_send!(AgentEvent::TextDelta(delta));
                         }
                         Some(Ok(ChatEvent::ThinkingBlock(block))) => {
+                            // 流式 thinking: 保留最新的完整 block（替换而非累积）
+                            thinking_blocks.clear();
                             thinking_blocks.push(block.clone());
                             try_send!(AgentEvent::ThinkingBlock(block));
                         }

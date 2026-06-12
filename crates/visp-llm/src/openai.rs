@@ -402,8 +402,6 @@ fn byte_stream_to_chat_events(
         tool_call_count: u32,
         /// 累积的推理/思考内容（来自 reasoning_content / reasoning 字段）
         reasoning_text: String,
-        /// 延迟发射的文本 delta（在推理内容刷新后才能发射）
-        pending_text: Option<String>,
         input_tokens: u32,
         output_tokens: u32,
         cache_creation_input_tokens: u32,
@@ -423,7 +421,6 @@ fn byte_stream_to_chat_events(
         pending_tool_calls: Vec::new(),
         tool_call_count: 0,
         reasoning_text: String::new(),
-        pending_text: None,
         input_tokens: 0,
         output_tokens: 0,
         cache_creation_input_tokens: 0,
@@ -435,11 +432,6 @@ fn byte_stream_to_chat_events(
 
     let event_stream = stream::unfold(state, |mut state| async move {
         loop {
-            // [A0] 发射延迟的文本 delta（在推理内容刷新后）
-            if let Some(text) = state.pending_text.take() {
-                return Some((Ok(ChatEvent::TextDelta(text)), state));
-            }
-
             // [A] 优先处理缓冲区中完整的 SSE 消息（一次一条）
             if let Some(pos) = state.buf.find("\n\n") {
                 let raw = state.buf[..pos].to_string();
@@ -449,20 +441,16 @@ fn byte_stream_to_chat_events(
                     if let Some(data) = line.strip_prefix("data: ") {
                         match parse_openai_sse_data(data) {
                             Ok(OpenAiStreamEvent::TextDelta(text)) => {
-                                // 如果还有未发射的推理内容，先刷新推理块再发射文本
-                                if !state.reasoning_text.is_empty() {
-                                    let reasoning = std::mem::take(&mut state.reasoning_text);
-                                    state.pending_text = Some(text);
-                                    let block = serde_json::json!({
-                                        "type": "thinking",
-                                        "thinking": reasoning,
-                                    });
-                                    return Some((Ok(ChatEvent::ThinkingBlock(block)), state));
-                                }
                                 return Some((Ok(ChatEvent::TextDelta(text)), state));
                             }
                             Ok(OpenAiStreamEvent::ReasoningDelta(text)) => {
                                 state.reasoning_text.push_str(&text);
+                                // 立即发射 ThinkingBlock 实现流式显示（不等待 text delta）
+                                let block = serde_json::json!({
+                                    "type": "thinking",
+                                    "thinking": state.reasoning_text.clone(),
+                                });
+                                return Some((Ok(ChatEvent::ThinkingBlock(block)), state));
                             }
                             Ok(OpenAiStreamEvent::ToolCallStart { index, id, name }) => {
                                 tracing::debug!(index, %id, %name, "ToolCallStart");
@@ -569,15 +557,6 @@ fn byte_stream_to_chat_events(
 
             // [C] 处理流结束标记
             if state.stream_ended {
-                // 在发射 UsageInfo 前，先刷新累积的推理内容
-                if !state.reasoning_text.is_empty() {
-                    let reasoning = std::mem::take(&mut state.reasoning_text);
-                    let block = serde_json::json!({
-                        "type": "thinking",
-                        "thinking": reasoning,
-                    });
-                    return Some((Ok(ChatEvent::ThinkingBlock(block)), state));
-                }
                 if !state.usage_emitted {
                     state.usage_emitted = true;
                     return Some((
@@ -1284,22 +1263,29 @@ mod tests {
         );
         let events = collect_events(vec![sse]).await;
 
-        // Expect: ThinkingBlock (with accumulated reasoning) + TextDelta + UsageInfo + Done
+        // Expect: ThinkingBlock (step1) + ThinkingBlock (step1+step2) + TextDelta + UsageInfo + Done
         assert_eq!(
             events.len(),
-            4,
-            "expect ThinkingBlock + TextDelta + UsageInfo + Done"
+            5,
+            "expect 2 ThinkingBlocks + TextDelta + UsageInfo + Done in streaming mode"
         );
         match &events[0] {
             ChatEvent::ThinkingBlock(block) => {
                 assert_eq!(block["type"], "thinking");
+                assert_eq!(block["thinking"], "Step 1... ");
+            }
+            _ => panic!("expected first ThinkingBlock, got {:?}", events[0]),
+        }
+        match &events[1] {
+            ChatEvent::ThinkingBlock(block) => {
+                assert_eq!(block["type"], "thinking");
                 assert_eq!(block["thinking"], "Step 1... Step 2...");
             }
-            _ => panic!("expected ThinkingBlock first, got {:?}", events[0]),
+            _ => panic!("expected second ThinkingBlock, got {:?}", events[1]),
         }
-        assert!(matches!(&events[1], ChatEvent::TextDelta(t) if t == "The answer is 42."));
-        assert!(matches!(&events[2], ChatEvent::UsageInfo { .. }));
-        assert!(matches!(&events[3], ChatEvent::Done));
+        assert!(matches!(&events[2], ChatEvent::TextDelta(t) if t == "The answer is 42."));
+        assert!(matches!(&events[3], ChatEvent::UsageInfo { .. }));
+        assert!(matches!(&events[4], ChatEvent::Done));
     }
 
     #[tokio::test]

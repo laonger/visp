@@ -542,9 +542,8 @@ fn handle_grpc_message(
             );
         }
         Some(server_message::Payload::ThinkingBlock(tb)) => {
-            app.flush_streaming();
             let text = format!("[Thinking] {}", tb.thinking);
-            app.add_message(LineType::Thinking, text)
+            app.update_thinking(text)
         }
         Some(server_message::Payload::UsageInfo(ui)) => {
             app.pending_usage = Some((
