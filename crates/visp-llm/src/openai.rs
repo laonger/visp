@@ -465,11 +465,18 @@ fn byte_stream_to_chat_events(
                                 state.reasoning_text.push_str(&text);
                             }
                             Ok(OpenAiStreamEvent::ToolCallStart { index, id, name }) => {
+                                tracing::debug!(index, %id, %name, "ToolCallStart");
                                 state.tool_acc.insert(index, (id, name, String::new()));
                             }
                             Ok(OpenAiStreamEvent::ToolCallDelta { index, arguments }) => {
                                 if let Some(entry) = state.tool_acc.get_mut(&index) {
                                     entry.2.push_str(&arguments);
+                                } else {
+                                    tracing::warn!(
+                                        index,
+                                        delta_len = arguments.len(),
+                                        "ToolCallDelta for unknown tool index (ToolCallStart not received?)"
+                                    );
                                 }
                             }
                             Ok(OpenAiStreamEvent::Finish { reason, .. }) => {
@@ -538,6 +545,12 @@ fn byte_stream_to_chat_events(
 
             // [B] 发射待处理的工具调用
             if let Some((id, name, args)) = state.pending_tool_calls.pop() {
+                tracing::debug!(
+                    %name,
+                    args_len = args.len(),
+                    args_preview = %&args[..args.len().min(200)],
+                    "emitting ToolCall"
+                );
                 return Some((
                     Ok(ChatEvent::ToolCall {
                         id,

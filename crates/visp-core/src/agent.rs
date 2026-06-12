@@ -793,7 +793,18 @@ pub async fn run_agent_loop(
                 }
 
                 // Parse arguments and execute
-                let args = serde_json::from_str(&tc.arguments).unwrap_or(serde_json::json!({}));
+                let args = match serde_json::from_str(&tc.arguments) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            tool = %tc.name,
+                            arguments = %tc.arguments,
+                            error = %e,
+                            "failed to parse tool call arguments as JSON, falling back to empty object"
+                        );
+                        serde_json::json!({})
+                    }
+                };
                 let tool_ctx = ToolContext {
                     working_dir: working_dir.clone(),
                     session_id: Some(session_id),
