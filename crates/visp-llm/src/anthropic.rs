@@ -360,13 +360,19 @@ pub(crate) fn parse_anthropic_event(event_name: &str, data: &str) -> Result<Pars
                             ""
                         })
                         .to_string();
-                    // 流式下 content_block_start 的 input 通常为 {}，真正的参数通过 input_json_delta 发送
-                    // 舍弃初始 input，从空字符串开始累积
+                    // 流式下 content_block_start 的 input 通常为 {}，真正的参数通过 input_json_delta 发送。
+                    // 但有时（如大内容场景）API 可能直接在 content_block_start 中返回完整参数。
+                    // 检查初始 input，非空时保存为起始 partial JSON，否则从空字符串开始累积。
+                    let partial = match v["content_block"]["input"].as_object() {
+                        Some(obj) if obj.is_empty() => String::new(),
+                        Some(obj) => serde_json::to_string(obj).unwrap_or_default(),
+                        None => String::new(),
+                    };
                     Ok(ParsedEvent::ToolInputDelta {
                         index,
                         id,
                         name,
-                        partial: String::new(),
+                        partial,
                     })
                 }
                 "thinking" => {
@@ -770,8 +776,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_tool_use_start() {
-        let data = r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_123","name":"get_weather","input":{"city":"Tokyo"}}}"#;
+    fn test_parse_tool_use_start_with_empty_input() {
+        // 流式模式：input 为 {}，后续由 input_json_delta 填充
+        let data = r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_123","name":"get_weather","input":{}}}"#;
         let result = parse_anthropic_event("content_block_start", data).unwrap();
         match result {
             ParsedEvent::ToolInputDelta {
@@ -785,8 +792,36 @@ mod tests {
                 assert_eq!(index, 0);
                 assert!(
                     partial.is_empty(),
-                    "content_block_start tool input should be discarded in streaming mode"
+                    "empty input should result in empty partial"
                 );
+            }
+            _ => panic!("expected ToolInputDelta, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_parse_tool_use_start_with_initial_input() {
+        // 非流式/大内容场景：input 直接包含完整参数
+        let data = r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_456","name":"write_file","input":{"path":"test.txt","content":"hello"}}}"#;
+        let result = parse_anthropic_event("content_block_start", data).unwrap();
+        match result {
+            ParsedEvent::ToolInputDelta {
+                index,
+                id,
+                name,
+                partial,
+            } => {
+                assert_eq!(id, "toolu_456");
+                assert_eq!(name, "write_file");
+                assert_eq!(index, 0);
+                assert!(
+                    !partial.is_empty(),
+                    "non-empty input should be preserved as partial"
+                );
+                // partial 应为 JSON 字符串
+                let parsed: serde_json::Value = serde_json::from_str(&partial).unwrap();
+                assert_eq!(parsed["path"], "test.txt");
+                assert_eq!(parsed["content"], "hello");
             }
             _ => panic!("expected ToolInputDelta, got {:?}", result),
         }
