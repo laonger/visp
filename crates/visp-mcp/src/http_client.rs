@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rmcp::model::{CallToolResult, Content};
@@ -38,6 +39,8 @@ pub struct HttpPostClient {
     initialized: bool,
     /// JSON-RPC 请求 ID 生成器
     request_id: Arc<AtomicU64>,
+    /// MCP session ID（由 initialize 响应提供，后续请求需要在 header 中回传）
+    mcp_session_id: Arc<Mutex<Option<String>>>,
 }
 
 /// JSON-RPC 请求
@@ -97,6 +100,36 @@ struct ClientInfoParam {
     version: String,
 }
 
+/// 从 SSE 响应体中提取第一条 `data:` 行的内容。
+///
+/// SSE 格式规范：
+/// ```text
+/// event: message
+/// data: {"jsonrpc":"2.0","id":1,"result":{...}}
+///
+/// ```
+/// 每个事件由空行分隔，`data:` 行包含实际数据负载。
+/// 此函数返回第一个非空事件的 data 行内容。
+fn extract_sse_data(body: &str) -> Option<String> {
+    // 按空行分割事件
+    for event in body.split("\n\n") {
+        let event = event.trim();
+        if event.is_empty() {
+            continue;
+        }
+        // 查找 data: 行
+        for line in event.lines() {
+            if let Some(value) = line.strip_prefix("data:") {
+                let value = value.trim();
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 impl HttpPostClient {
     /// 创建新的 HTTP POST 客户端
     pub fn new(
@@ -107,6 +140,7 @@ impl HttpPostClient {
         let mut client_builder = reqwest::Client::builder();
         let mut default_headers = reqwest::header::HeaderMap::new();
 
+        // 先设置用户自定义头
         for (key, value) in headers {
             let name = reqwest::header::HeaderName::from_bytes(key.as_bytes())
                 .map_err(|e| McpError::Transport(format!("invalid header name '{key}': {e}")))?;
@@ -114,6 +148,15 @@ impl HttpPostClient {
                 McpError::Transport(format!("invalid header value for '{key}': {e}"))
             })?;
             default_headers.insert(name, val);
+        }
+
+        // MCP Streamable HTTP 要求客户端声明接受两种响应类型
+        // 参见 https://spec.modelcontextprotocol.io/specification/2025-03-26/basic/transports/#streamable-http
+        if !default_headers.contains_key(reqwest::header::ACCEPT) {
+            default_headers.insert(
+                reqwest::header::ACCEPT,
+                reqwest::header::HeaderValue::from_static("application/json, text/event-stream"),
+            );
         }
 
         if !default_headers.is_empty() {
@@ -131,6 +174,7 @@ impl HttpPostClient {
             server_name: server_name.to_string(),
             initialized: false,
             request_id: Arc::new(AtomicU64::new(1)),
+            mcp_session_id: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -153,27 +197,66 @@ impl HttpPostClient {
             params,
         };
 
-        let response = self
-            .http_client
-            .post(&self.url)
-            .json(&body)
+        let mut request = self.http_client.post(&self.url).json(&body);
+
+        // MCP Streamable HTTP: 携带 session ID（如果已通过 initialize 获得）
+        if let Some(ref sid) = *self.mcp_session_id.lock().unwrap() {
+            request = request.header("mcp-session-id", sid.clone());
+        }
+
+        let response = request
             .send()
             .await
             .map_err(|e| McpError::Transport(format!("POST to '{}' failed: {}", self.url, e)))?;
 
+        // 从响应中提取 session ID（由 initialize 返回，后续请求复用）
+        if let Some(session_id) = response.headers().get("mcp-session-id")
+            && let Ok(sid) = session_id.to_str()
+        {
+            *self.mcp_session_id.lock().unwrap() = Some(sid.to_string());
+        }
+
         let status = response.status();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+
+        // 先读取响应体（避免被消费后丢失）
+        let body_bytes = response
+            .bytes()
+            .await
+            .map_err(|e| McpError::Transport(format!("read response body failed: {e}")))?;
+
         if !status.is_success() {
-            let body_text = response.text().await.unwrap_or_default();
+            let body_text = String::from_utf8_lossy(&body_bytes);
             return Err(McpError::Transport(format!(
-                "POST '{}' returned {status}: {body_text}",
+                "POST '{}' returned {status} (content-type: {content_type}): {body_text}",
                 self.url
             )));
         }
 
-        let response_body: JsonRpcResponse = response
-            .json()
-            .await
-            .map_err(|e| McpError::Protocol(format!("parse JSON-RPC response failed: {e}")))?;
+        // 根据 Content-Type 解析响应体
+        let json_str = if content_type.starts_with("text/event-stream") {
+            // SSE 格式：从 data: 行中提取 JSON 负载
+            let body_str = String::from_utf8_lossy(&body_bytes);
+            extract_sse_data(&body_str).ok_or_else(|| {
+                McpError::Protocol(format!(
+                    "no SSE event data found (content-type: {content_type}, body: {body_str})",
+                ))
+            })?
+        } else {
+            // 默认按 JSON 解析
+            String::from_utf8_lossy(&body_bytes).to_string()
+        };
+
+        let response_body: JsonRpcResponse = serde_json::from_str(&json_str).map_err(|e| {
+            McpError::Protocol(format!(
+                "parse JSON-RPC response failed: {e} (content-type: {content_type}, body: {json_str})",
+            ))
+        })?;
 
         if let Some(err) = response_body.error {
             return Err(McpError::Protocol(format!(
@@ -210,13 +293,13 @@ impl HttpPostClient {
             method: "notifications/initialized",
         };
 
+        let mut notif_req = self.http_client.post(&self.url).json(&notification);
+        if let Some(ref sid) = *self.mcp_session_id.lock().unwrap() {
+            notif_req = notif_req.header("mcp-session-id", sid.clone());
+        }
+
         // 通知不需要响应，忽略错误（服务器可能已关闭连接）
-        let _ = self
-            .http_client
-            .post(&self.url)
-            .json(&notification)
-            .send()
-            .await;
+        let _ = notif_req.send().await;
 
         self.initialized = true;
         Ok(())
@@ -507,5 +590,55 @@ mod tests {
         assert_eq!(json["clientInfo"]["name"], "visp");
         assert_eq!(json["clientInfo"]["version"], "0.2.0");
         assert!(json["capabilities"].is_object());
+    }
+
+    // ── SSE 解析 ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_sse_data_basic() {
+        let body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}\n\n";
+        assert_eq!(
+            extract_sse_data(body).as_deref(),
+            Some(r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#),
+        );
+    }
+
+    #[test]
+    fn test_extract_sse_data_with_prefix() {
+        let body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
+        assert!(extract_sse_data(body).is_some());
+    }
+
+    #[test]
+    fn test_extract_sse_data_multiple_events() {
+        // 两个 SSE 事件，返回第一个 data 行
+        let body = "event: ping\ndata: {\"event\":\"ping\"}\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"serverInfo\":{\"name\":\"test\"}}}\n\n";
+        let data = extract_sse_data(body);
+        assert!(data.is_some());
+        let parsed: Value = serde_json::from_str(&data.unwrap()).unwrap();
+        assert_eq!(parsed["event"], "ping");
+    }
+
+    #[test]
+    fn test_extract_sse_data_no_data_line() {
+        let body = "event: message\n\n";
+        assert!(extract_sse_data(body).is_none());
+    }
+
+    #[test]
+    fn test_extract_sse_data_empty() {
+        assert!(extract_sse_data("").is_none());
+    }
+
+    #[test]
+    fn test_extract_sse_data_only_comments() {
+        let body = ":comment\nevent: message\n\n";
+        assert!(extract_sse_data(body).is_none());
+    }
+
+    #[test]
+    fn test_extract_sse_data_empty_data() {
+        let body = "event: message\ndata:\n\n";
+        assert!(extract_sse_data(body).is_none());
     }
 }
