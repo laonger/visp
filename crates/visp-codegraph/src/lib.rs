@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use crate::index::Indexer;
-use crate::query::{ImpactResult, QueryEngine, SymbolDetails, SymbolInfo, TraceHop};
+use crate::query::{get_project_name_tokens, ImpactResult, QueryEngine, SymbolDetails, SymbolInfo, TraceHop};
 use crate::store::Store;
 use crate::watcher::Watcher;
 
@@ -30,8 +30,11 @@ impl CodeGraph {
     pub fn open(project_path: &Path) -> Result<Self, String> {
         let db_path = project_path.join(".visp").join("codegraph.db");
         let store = Arc::new(Store::open(&db_path).map_err(|e| e.to_string())?);
+        // Back-fill FTS5 for existing databases (safe no-op if already populated)
+        store.backfill_fts().map_err(|e| e.to_string())?;
         let is_building = Arc::new(AtomicBool::new(false));
-        let query_engine = QueryEngine::new(store.clone(), is_building.clone());
+        let project_name_tokens = get_project_name_tokens(project_path);
+        let query_engine = QueryEngine::new(store.clone(), is_building.clone(), project_name_tokens);
         let indexer = Arc::new(Indexer::new(store.clone()));
         Ok(Self {
             store,
