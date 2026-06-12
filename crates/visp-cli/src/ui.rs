@@ -186,7 +186,7 @@ fn render_block(
         // 底部阴影：1 行
         let row = bottom_y;
         if row < buf.area().bottom() {
-            for x in (area.x + 1)..shadow_col {
+            for x in (area.x + 1)..=shadow_col {
                 if x < right {
                     buf[(x, row)].set_bg(theme::SHADOW);
                 }
