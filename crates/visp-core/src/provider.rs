@@ -1,12 +1,13 @@
 use async_trait::async_trait;
 use futures::stream::Stream;
+use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
 use crate::error::LlmError;
 use crate::message::{Message, ToolDefinition};
 
 /// LLM 配置参数
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmConfig {
     /// 模型名称
     pub model: String,
