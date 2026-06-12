@@ -10,6 +10,20 @@ use ratatui::{
 
 use crate::app::{AppState, MessageCache, pad_to_width};
 use crate::debug_log;
+
+/// 将数字格式化为千位分隔符形式，如 `1234567` → `1,234,567`
+fn format_number(n: u32) -> String {
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result
+}
+
 use crate::theme;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -584,15 +598,16 @@ fn render_status_bar(app: &AppState, f: &mut Frame, area: Rect) {
             if app.total_cache_creation_input_tokens > 0 || app.total_cache_read_input_tokens > 0 {
                 format!(
                     "T:{}i/{}o C:{}r/{}c ",
-                    app.total_input_tokens,
-                    app.total_output_tokens,
-                    app.total_cache_read_input_tokens,
-                    app.total_cache_creation_input_tokens,
+                    format_number(app.total_input_tokens),
+                    format_number(app.total_output_tokens),
+                    format_number(app.total_cache_read_input_tokens),
+                    format_number(app.total_cache_creation_input_tokens),
                 )
             } else {
                 format!(
                     "T:{}i/{}o ",
-                    app.total_input_tokens, app.total_output_tokens,
+                    format_number(app.total_input_tokens),
+                    format_number(app.total_output_tokens),
                 )
             };
         let right = Paragraph::new(token_text)
