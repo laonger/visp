@@ -72,7 +72,7 @@ impl Parser {
         let mut edges: Vec<Edge> = Vec::new();
         let mut imports: Vec<(String, String)> = Vec::new();
         let mut exports: Vec<(String, Option<u64>, Option<String>)> = Vec::new();
-        let mut dedup: HashSet<String> = HashSet::new();
+        let mut dedup: HashSet<(String, String)> = HashSet::new();
         let mut next_id: u64 = 0;
 
         walk_children(
@@ -110,7 +110,7 @@ fn walk_children(
     edges: &mut Vec<Edge>,
     imports: &mut Vec<(String, String)>,
     exports: &mut Vec<(String, Option<u64>, Option<String>)>,
-    dedup: &mut HashSet<String>,
+    dedup: &mut HashSet<(String, String)>,
     next_id: &mut u64,
     current_sym_id: Option<u64>,
 ) {
@@ -141,7 +141,7 @@ fn walk_node(
     edges: &mut Vec<Edge>,
     imports: &mut Vec<(String, String)>,
     exports: &mut Vec<(String, Option<u64>, Option<String>)>,
-    dedup: &mut HashSet<String>,
+    dedup: &mut HashSet<(String, String)>,
     next_id: &mut u64,
     current_sym_id: Option<u64>,
 ) {
@@ -453,17 +453,18 @@ fn add_symbol(
     file_path: &str,
     node: Node,
     symbols: &mut Vec<Symbol>,
-    dedup: &mut HashSet<String>,
+    dedup: &mut HashSet<(String, String)>,
     next_id: &mut u64,
 ) -> u64 {
-    if dedup.contains(name) {
+    let key = (name.to_string(), file_path.to_string());
+    if dedup.contains(&key) {
         symbols
             .iter()
-            .find(|s| s.name == name)
+            .find(|s| s.name == name && s.file_path == file_path)
             .map(|s| s.id)
             .unwrap_or(*next_id)
     } else {
-        dedup.insert(name.to_string());
+        dedup.insert(key);
         let pos = node.start_position();
         let id = *next_id;
         *next_id += 1;
@@ -503,7 +504,7 @@ fn handle_variable_declaration(
     edges: &mut Vec<Edge>,
     imports: &mut Vec<(String, String)>,
     exports: &mut Vec<(String, Option<u64>, Option<String>)>,
-    dedup: &mut HashSet<String>,
+    dedup: &mut HashSet<(String, String)>,
     next_id: &mut u64,
     current_sym_id: Option<u64>,
 ) {
@@ -536,7 +537,7 @@ fn handle_variable_declaration(
                         next_id,
                     );
                     last_sym_id = Some(id);
-                } else if !dedup.contains(name) {
+                } else if !dedup.contains(&(name.to_string(), file_path.to_string())) {
                     let id = add_symbol(
                         name,
                         SymbolKind::Variable,
@@ -634,7 +635,7 @@ fn handle_export(
     edges: &mut Vec<Edge>,
     imports: &mut Vec<(String, String)>,
     exports: &mut Vec<(String, Option<u64>, Option<String>)>,
-    dedup: &mut HashSet<String>,
+    dedup: &mut HashSet<(String, String)>,
     next_id: &mut u64,
     current_sym_id: Option<u64>,
 ) {
@@ -713,7 +714,7 @@ fn walk_class_body(
     edges: &mut Vec<Edge>,
     imports: &mut Vec<(String, String)>,
     exports: &mut Vec<(String, Option<u64>, Option<String>)>,
-    dedup: &mut HashSet<String>,
+    dedup: &mut HashSet<(String, String)>,
     next_id: &mut u64,
     current_sym_id: Option<u64>,
 ) {

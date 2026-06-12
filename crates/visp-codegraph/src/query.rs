@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::graph::Symbol;
-use crate::store::{sanitize_fts_query, ScoredSymbol, Store};
+use crate::store::{ScoredSymbol, Store, sanitize_fts_query};
 
 #[derive(Debug, Clone)]
 pub struct SymbolInfo {
@@ -103,7 +103,10 @@ impl QueryEngine {
         score_and_sort(&mut results, query, &self.project_name_tokens);
         results.truncate(limit);
 
-        Ok(results.into_iter().map(|rs| sym_to_info(rs.symbol)).collect())
+        Ok(results
+            .into_iter()
+            .map(|rs| sym_to_info(rs.symbol))
+            .collect())
     }
 
     pub fn get_details(&self, name: &str) -> Result<Vec<SymbolDetails>, String> {
@@ -377,11 +380,7 @@ fn read_source(file_path: &str, line: u32) -> String {
 // ------------------------------------------------------------------
 
 /// Merge LIKE results into FTS5 results with dedup by (name, file_path).
-fn merge_dedup(
-    results: &mut Vec<ScoredSymbol>,
-    incoming: Vec<Symbol>,
-    max_fts_score: f64,
-) {
+fn merge_dedup(results: &mut Vec<ScoredSymbol>, incoming: Vec<Symbol>, max_fts_score: f64) {
     let existing: HashSet<(String, String)> = results
         .iter()
         .map(|r| (r.symbol.name.clone(), r.symbol.file_path.clone()))
@@ -398,12 +397,7 @@ fn merge_dedup(
 }
 
 /// Ensure exact name match is always included in results.
-fn inject_exact(
-    results: &mut Vec<ScoredSymbol>,
-    query: &str,
-    store: &Store,
-    max_fts_score: f64,
-) {
+fn inject_exact(results: &mut Vec<ScoredSymbol>, query: &str, store: &Store, max_fts_score: f64) {
     if query.is_empty() {
         return;
     }
@@ -424,7 +418,7 @@ fn inject_exact(
 
 /// Score and sort results by kind bonus + name_match_bonus + path_score.
 fn score_and_sort(
-    results: &mut Vec<ScoredSymbol>,
+    results: &mut [ScoredSymbol],
     query: &str,
     project_name_tokens: &HashSet<String>,
 ) {
@@ -490,11 +484,7 @@ fn name_match_bonus(name: &str, query: &str) -> f64 {
 }
 
 /// Path score: bonus when query term appears in file path (skip project name tokens).
-fn path_score(
-    file_path: &str,
-    query: &str,
-    project_name_tokens: &HashSet<String>,
-) -> f64 {
+fn path_score(file_path: &str, query: &str, project_name_tokens: &HashSet<String>) -> f64 {
     let path_lower = file_path.to_lowercase();
     let mut score = 0.0;
     for term in query.split_whitespace().filter(|t| t.len() >= 2) {
@@ -662,7 +652,11 @@ mod tests {
         let engine = QueryEngine::new(store, Arc::new(AtomicBool::new(false)), HashSet::new());
 
         let results = engine.search("Get", 10).unwrap();
-        assert_eq!(results.len(), 1, "search is case-insensitive, should find getUser");
+        assert_eq!(
+            results.len(),
+            1,
+            "search is case-insensitive, should find getUser"
+        );
         assert_eq!(results[0].name, "getUser");
     }
 
@@ -1084,7 +1078,11 @@ mod tests {
     #[test]
     fn test_impact_not_found() {
         let (store_raw, _db_dir) = create_store();
-        let engine = QueryEngine::new(Arc::new(store_raw), Arc::new(AtomicBool::new(false)), HashSet::new());
+        let engine = QueryEngine::new(
+            Arc::new(store_raw),
+            Arc::new(AtomicBool::new(false)),
+            HashSet::new(),
+        );
         let err = engine.impact("Nonexistent", 1).unwrap_err();
         assert!(err.contains("not found"));
     }
@@ -1107,20 +1105,50 @@ mod tests {
     fn test_search_empty_query() {
         let (store_raw, _db_dir) = create_store();
         let store = Arc::new(store_raw);
-        insert_symbol(&store, "foo", SymbolKind::Function, "a.rs", 1, 1, None, None);
+        insert_symbol(
+            &store,
+            "foo",
+            SymbolKind::Function,
+            "a.rs",
+            1,
+            1,
+            None,
+            None,
+        );
         let engine = QueryEngine::new(store, Arc::new(AtomicBool::new(false)), HashSet::new());
 
         let results = engine.search("", 10).unwrap();
         // Empty query returns LIKE % results (matches everything)
-        assert!(!results.is_empty(), "empty query should return results via LIKE");
+        assert!(
+            !results.is_empty(),
+            "empty query should return results via LIKE"
+        );
     }
 
     #[test]
     fn test_search_merge_dedup() {
         let (store_raw, _db_dir) = create_store();
         let store = Arc::new(store_raw);
-        insert_symbol(&store, "getUser", SymbolKind::Function, "a.rs", 1, 1, None, None);
-        insert_symbol(&store, "getConfig", SymbolKind::Function, "b.rs", 1, 1, None, None);
+        insert_symbol(
+            &store,
+            "getUser",
+            SymbolKind::Function,
+            "a.rs",
+            1,
+            1,
+            None,
+            None,
+        );
+        insert_symbol(
+            &store,
+            "getConfig",
+            SymbolKind::Function,
+            "b.rs",
+            1,
+            1,
+            None,
+            None,
+        );
         let engine = QueryEngine::new(store, Arc::new(AtomicBool::new(false)), HashSet::new());
 
         let results = engine.search("get", 10).unwrap();
@@ -1157,8 +1185,26 @@ mod tests {
     fn test_inject_exact_works() {
         let (store_raw, _db_dir) = create_store();
         let store = Arc::new(store_raw);
-        insert_symbol(&store, "getUser", SymbolKind::Function, "a.rs", 1, 1, None, None);
-        insert_symbol(&store, "getter", SymbolKind::Function, "b.rs", 2, 1, None, None);
+        insert_symbol(
+            &store,
+            "getUser",
+            SymbolKind::Function,
+            "a.rs",
+            1,
+            1,
+            None,
+            None,
+        );
+        insert_symbol(
+            &store,
+            "getter",
+            SymbolKind::Function,
+            "b.rs",
+            2,
+            1,
+            None,
+            None,
+        );
         let engine = QueryEngine::new(store, Arc::new(AtomicBool::new(false)), HashSet::new());
 
         // "getUser" as query: exact match should be included
@@ -1224,7 +1270,10 @@ mod tests {
         let score = name_match_bonus("getUser", "get");
         // "get" is 3 chars, "getUser" is 7 chars: ratio = 3/7 ≈ 0.4286
         // score = 10 + 30 * 3/7 ≈ 22.86
-        assert!((score - 22.857).abs() < 0.01, "expected ~22.86, got {score}");
+        assert!(
+            (score - 22.857).abs() < 0.01,
+            "expected ~22.86, got {score}"
+        );
     }
 
     #[test]
@@ -1278,11 +1327,29 @@ mod tests {
     fn test_score_and_sort_function_before_variable() {
         let mut results = vec![
             ScoredSymbol {
-                symbol: Symbol { id: 1, name: "var".into(), kind: SymbolKind::Variable, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+                symbol: Symbol {
+                    id: 1,
+                    name: "var".into(),
+                    kind: SymbolKind::Variable,
+                    file_path: "a.rs".into(),
+                    line: 1,
+                    column: 1,
+                    signature: None,
+                    docstring: None,
+                },
                 score: 0.0,
             },
             ScoredSymbol {
-                symbol: Symbol { id: 2, name: "func".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+                symbol: Symbol {
+                    id: 2,
+                    name: "func".into(),
+                    kind: SymbolKind::Function,
+                    file_path: "a.rs".into(),
+                    line: 1,
+                    column: 1,
+                    signature: None,
+                    docstring: None,
+                },
                 score: 0.0,
             },
         ];
@@ -1296,11 +1363,29 @@ mod tests {
     fn test_score_and_sort_exact_match_first() {
         let mut results = vec![
             ScoredSymbol {
-                symbol: Symbol { id: 1, name: "getter".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+                symbol: Symbol {
+                    id: 1,
+                    name: "getter".into(),
+                    kind: SymbolKind::Function,
+                    file_path: "a.rs".into(),
+                    line: 1,
+                    column: 1,
+                    signature: None,
+                    docstring: None,
+                },
                 score: 0.0,
             },
             ScoredSymbol {
-                symbol: Symbol { id: 2, name: "getConfig".into(), kind: SymbolKind::Function, file_path: "b.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+                symbol: Symbol {
+                    id: 2,
+                    name: "getConfig".into(),
+                    kind: SymbolKind::Function,
+                    file_path: "b.rs".into(),
+                    line: 1,
+                    column: 1,
+                    signature: None,
+                    docstring: None,
+                },
                 score: 0.0,
             },
         ];
@@ -1313,7 +1398,10 @@ mod tests {
     fn test_get_project_name_tokens_from_path() {
         use std::path::Path;
         let tokens = get_project_name_tokens(Path::new("/home/user/projects/visp-core"));
-        assert!(tokens.contains("vispcore"), "vispcore should be extracted as token");
+        assert!(
+            tokens.contains("vispcore"),
+            "vispcore should be extracted as token"
+        );
         assert_eq!(tokens.len(), 1, "only one token expected");
     }
 

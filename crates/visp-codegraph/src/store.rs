@@ -1177,9 +1177,36 @@ mod tests {
     fn test_fts_basic_search() {
         let store = create_store();
         let mut symbols = vec![
-            Symbol { id: 0, name: "getUser".into(), kind: SymbolKind::Function, file_path: "a.ts".into(), line: 1, column: 1, signature: Some("getUser(id: number)".into()), docstring: None },
-            Symbol { id: 0, name: "getConfig".into(), kind: SymbolKind::Function, file_path: "b.ts".into(), line: 1, column: 1, signature: None, docstring: None },
-            Symbol { id: 0, name: "setValue".into(), kind: SymbolKind::Function, file_path: "c.ts".into(), line: 1, column: 1, signature: None, docstring: None },
+            Symbol {
+                id: 0,
+                name: "getUser".into(),
+                kind: SymbolKind::Function,
+                file_path: "a.ts".into(),
+                line: 1,
+                column: 1,
+                signature: Some("getUser(id: number)".into()),
+                docstring: None,
+            },
+            Symbol {
+                id: 0,
+                name: "getConfig".into(),
+                kind: SymbolKind::Function,
+                file_path: "b.ts".into(),
+                line: 1,
+                column: 1,
+                signature: None,
+                docstring: None,
+            },
+            Symbol {
+                id: 0,
+                name: "setValue".into(),
+                kind: SymbolKind::Function,
+                file_path: "c.ts".into(),
+                line: 1,
+                column: 1,
+                signature: None,
+                docstring: None,
+            },
         ];
         store.insert_symbols(&mut symbols).unwrap();
 
@@ -1193,8 +1220,26 @@ mod tests {
     fn test_fts_has_reasonable_score() {
         let store = create_store();
         let mut symbols = vec![
-            Symbol { id: 0, name: "auth".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: Some("authenticate user".into()) },
-            Symbol { id: 0, name: "auth_user".into(), kind: SymbolKind::Function, file_path: "b.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+            Symbol {
+                id: 0,
+                name: "auth".into(),
+                kind: SymbolKind::Function,
+                file_path: "a.rs".into(),
+                line: 1,
+                column: 1,
+                signature: None,
+                docstring: Some("authenticate user".into()),
+            },
+            Symbol {
+                id: 0,
+                name: "auth_user".into(),
+                kind: SymbolKind::Function,
+                file_path: "b.rs".into(),
+                line: 1,
+                column: 1,
+                signature: None,
+                docstring: None,
+            },
         ];
         store.insert_symbols(&mut symbols).unwrap();
 
@@ -1207,9 +1252,16 @@ mod tests {
     #[test]
     fn test_fts_empty_query() {
         let store = create_store();
-        let mut symbols = vec![
-            Symbol { id: 0, name: "foo".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
-        ];
+        let mut symbols = vec![Symbol {
+            id: 0,
+            name: "foo".into(),
+            kind: SymbolKind::Function,
+            file_path: "a.rs".into(),
+            line: 1,
+            column: 1,
+            signature: None,
+            docstring: None,
+        }];
         store.insert_symbols(&mut symbols).unwrap();
 
         // Empty FTS query returns empty results via search_fts with empty string
@@ -1223,9 +1275,16 @@ mod tests {
     #[test]
     fn test_fts_sanitize_boolean_ops() {
         let store = create_store();
-        let mut symbols = vec![
-            Symbol { id: 0, name: "bar".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
-        ];
+        let mut symbols = vec![Symbol {
+            id: 0,
+            name: "bar".into(),
+            kind: SymbolKind::Function,
+            file_path: "a.rs".into(),
+            line: 1,
+            column: 1,
+            signature: None,
+            docstring: None,
+        }];
         store.insert_symbols(&mut symbols).unwrap();
 
         // "AND OR NOT" should be stripped; "bar" remains
@@ -1240,9 +1299,36 @@ mod tests {
     fn test_fts_query_limit() {
         let store = create_store();
         let mut symbols = vec![
-            Symbol { id: 0, name: "foo1".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
-            Symbol { id: 0, name: "foo2".into(), kind: SymbolKind::Function, file_path: "b.rs".into(), line: 1, column: 1, signature: None, docstring: None },
-            Symbol { id: 0, name: "foo3".into(), kind: SymbolKind::Function, file_path: "c.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+            Symbol {
+                id: 0,
+                name: "foo1".into(),
+                kind: SymbolKind::Function,
+                file_path: "a.rs".into(),
+                line: 1,
+                column: 1,
+                signature: None,
+                docstring: None,
+            },
+            Symbol {
+                id: 0,
+                name: "foo2".into(),
+                kind: SymbolKind::Function,
+                file_path: "b.rs".into(),
+                line: 1,
+                column: 1,
+                signature: None,
+                docstring: None,
+            },
+            Symbol {
+                id: 0,
+                name: "foo3".into(),
+                kind: SymbolKind::Function,
+                file_path: "c.rs".into(),
+                line: 1,
+                column: 1,
+                signature: None,
+                docstring: None,
+            },
         ];
         store.insert_symbols(&mut symbols).unwrap();
 
@@ -1256,10 +1342,46 @@ mod tests {
     fn test_like_substring() {
         let store = create_store();
         let mut symbols = vec![
-            Symbol { id: 0, name: "my_getter".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
-            Symbol { id: 0, name: "getter".into(), kind: SymbolKind::Function, file_path: "b.rs".into(), line: 1, column: 1, signature: None, docstring: None },
-            Symbol { id: 0, name: "getUser".into(), kind: SymbolKind::Function, file_path: "c.rs".into(), line: 1, column: 1, signature: None, docstring: None },
-            Symbol { id: 0, name: "setter".into(), kind: SymbolKind::Function, file_path: "d.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+            Symbol {
+                id: 0,
+                name: "my_getter".into(),
+                kind: SymbolKind::Function,
+                file_path: "a.rs".into(),
+                line: 1,
+                column: 1,
+                signature: None,
+                docstring: None,
+            },
+            Symbol {
+                id: 0,
+                name: "getter".into(),
+                kind: SymbolKind::Function,
+                file_path: "b.rs".into(),
+                line: 1,
+                column: 1,
+                signature: None,
+                docstring: None,
+            },
+            Symbol {
+                id: 0,
+                name: "getUser".into(),
+                kind: SymbolKind::Function,
+                file_path: "c.rs".into(),
+                line: 1,
+                column: 1,
+                signature: None,
+                docstring: None,
+            },
+            Symbol {
+                id: 0,
+                name: "setter".into(),
+                kind: SymbolKind::Function,
+                file_path: "d.rs".into(),
+                line: 1,
+                column: 1,
+                signature: None,
+                docstring: None,
+            },
         ];
         store.insert_symbols(&mut symbols).unwrap();
 
@@ -1274,13 +1396,24 @@ mod tests {
     #[test]
     fn test_like_case_insensitive() {
         let store = create_store();
-        let mut symbols = vec![
-            Symbol { id: 0, name: "getUser".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
-        ];
+        let mut symbols = vec![Symbol {
+            id: 0,
+            name: "getUser".into(),
+            kind: SymbolKind::Function,
+            file_path: "a.rs".into(),
+            line: 1,
+            column: 1,
+            signature: None,
+            docstring: None,
+        }];
         store.insert_symbols(&mut symbols).unwrap();
 
         let results = store.search_like("getuser", 10).unwrap();
-        assert_eq!(results.len(), 1, "case-insensitive search should match getUser");
+        assert_eq!(
+            results.len(),
+            1,
+            "case-insensitive search should match getUser"
+        );
         assert_eq!(results[0].name, "getUser");
     }
 
@@ -1288,8 +1421,26 @@ mod tests {
     fn test_like_search_signature() {
         let store = create_store();
         let mut symbols = vec![
-            Symbol { id: 0, name: "parse".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: Some("fn parse() -> i32".into()), docstring: None },
-            Symbol { id: 0, name: "run".into(), kind: SymbolKind::Function, file_path: "b.rs".into(), line: 1, column: 1, signature: Some("fn run()".into()), docstring: None },
+            Symbol {
+                id: 0,
+                name: "parse".into(),
+                kind: SymbolKind::Function,
+                file_path: "a.rs".into(),
+                line: 1,
+                column: 1,
+                signature: Some("fn parse() -> i32".into()),
+                docstring: None,
+            },
+            Symbol {
+                id: 0,
+                name: "run".into(),
+                kind: SymbolKind::Function,
+                file_path: "b.rs".into(),
+                line: 1,
+                column: 1,
+                signature: Some("fn run()".into()),
+                docstring: None,
+            },
         ];
         store.insert_symbols(&mut symbols).unwrap();
 
@@ -1301,9 +1452,16 @@ mod tests {
     #[test]
     fn test_like_escape_wildcard() {
         let store = create_store();
-        let mut symbols = vec![
-            Symbol { id: 0, name: "foo_bar".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
-        ];
+        let mut symbols = vec![Symbol {
+            id: 0,
+            name: "foo_bar".into(),
+            kind: SymbolKind::Function,
+            file_path: "a.rs".into(),
+            line: 1,
+            column: 1,
+            signature: None,
+            docstring: None,
+        }];
         store.insert_symbols(&mut symbols).unwrap();
 
         // _ should be literal, not single-char wildcard
@@ -1314,9 +1472,16 @@ mod tests {
     #[test]
     fn test_like_escape_percent() {
         let store = create_store();
-        let mut symbols = vec![
-            Symbol { id: 0, name: "100%".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
-        ];
+        let mut symbols = vec![Symbol {
+            id: 0,
+            name: "100%".into(),
+            kind: SymbolKind::Function,
+            file_path: "a.rs".into(),
+            line: 1,
+            column: 1,
+            signature: None,
+            docstring: None,
+        }];
         store.insert_symbols(&mut symbols).unwrap();
 
         // % should be literal
@@ -1327,9 +1492,16 @@ mod tests {
     #[test]
     fn test_like_empty_query() {
         let store = create_store();
-        let mut symbols = vec![
-            Symbol { id: 0, name: "foo".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
-        ];
+        let mut symbols = vec![Symbol {
+            id: 0,
+            name: "foo".into(),
+            kind: SymbolKind::Function,
+            file_path: "a.rs".into(),
+            line: 1,
+            column: 1,
+            signature: None,
+            docstring: None,
+        }];
         store.insert_symbols(&mut symbols).unwrap();
 
         // empty query -> pattern "%%" -> matches everything
@@ -1341,9 +1513,36 @@ mod tests {
     fn test_like_limit() {
         let store = create_store();
         let mut symbols = vec![
-            Symbol { id: 0, name: "foo1".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
-            Symbol { id: 0, name: "foo2".into(), kind: SymbolKind::Function, file_path: "b.rs".into(), line: 1, column: 1, signature: None, docstring: None },
-            Symbol { id: 0, name: "foo3".into(), kind: SymbolKind::Function, file_path: "c.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+            Symbol {
+                id: 0,
+                name: "foo1".into(),
+                kind: SymbolKind::Function,
+                file_path: "a.rs".into(),
+                line: 1,
+                column: 1,
+                signature: None,
+                docstring: None,
+            },
+            Symbol {
+                id: 0,
+                name: "foo2".into(),
+                kind: SymbolKind::Function,
+                file_path: "b.rs".into(),
+                line: 1,
+                column: 1,
+                signature: None,
+                docstring: None,
+            },
+            Symbol {
+                id: 0,
+                name: "foo3".into(),
+                kind: SymbolKind::Function,
+                file_path: "c.rs".into(),
+                line: 1,
+                column: 1,
+                signature: None,
+                docstring: None,
+            },
         ];
         store.insert_symbols(&mut symbols).unwrap();
 
@@ -1357,12 +1556,32 @@ mod tests {
     fn test_backfill_existing_data() {
         let conn = Connection::open_in_memory().unwrap();
         Store::init_schema(&conn).unwrap();
-        let store = Store { conn: Arc::new(Mutex::new(conn)) };
+        let store = Store {
+            conn: Arc::new(Mutex::new(conn)),
+        };
 
         // Insert symbols (triggers populate FTS5)
         let mut symbols = vec![
-            Symbol { id: 0, name: "foo".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
-            Symbol { id: 0, name: "bar".into(), kind: SymbolKind::Variable, file_path: "b.rs".into(), line: 2, column: 2, signature: None, docstring: None },
+            Symbol {
+                id: 0,
+                name: "foo".into(),
+                kind: SymbolKind::Function,
+                file_path: "a.rs".into(),
+                line: 1,
+                column: 1,
+                signature: None,
+                docstring: None,
+            },
+            Symbol {
+                id: 0,
+                name: "bar".into(),
+                kind: SymbolKind::Variable,
+                file_path: "b.rs".into(),
+                line: 2,
+                column: 2,
+                signature: None,
+                docstring: None,
+            },
         ];
         store.insert_symbols(&mut symbols).unwrap();
 
@@ -1372,7 +1591,9 @@ mod tests {
         // Verify FTS5 still has the expected rows (no duplicates)
         {
             let conn = store.conn.lock().unwrap();
-            let count: i64 = conn.query_row("SELECT count(*) FROM symbols_fts", [], |r| r.get(0)).unwrap();
+            let count: i64 = conn
+                .query_row("SELECT count(*) FROM symbols_fts", [], |r| r.get(0))
+                .unwrap();
             assert_eq!(count, 2, "FTS5 should have 2 rows after backfill");
         }
 
@@ -1386,9 +1607,16 @@ mod tests {
     fn test_backfill_idempotent() {
         let store = create_store();
 
-        let mut symbols = vec![
-            Symbol { id: 0, name: "foo".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
-        ];
+        let mut symbols = vec![Symbol {
+            id: 0,
+            name: "foo".into(),
+            kind: SymbolKind::Function,
+            file_path: "a.rs".into(),
+            line: 1,
+            column: 1,
+            signature: None,
+            docstring: None,
+        }];
         store.insert_symbols(&mut symbols).unwrap();
 
         // After trigger-based insert, FTS5 already has the row
@@ -1397,7 +1625,9 @@ mod tests {
         store.backfill_fts().unwrap();
 
         let conn = store.conn.lock().unwrap();
-        let count: i64 = conn.query_row("SELECT count(*) FROM symbols_fts", [], |r| r.get(0)).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM symbols_fts", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, 1, "backfill should be idempotent");
     }
 

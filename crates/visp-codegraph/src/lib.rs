@@ -12,7 +12,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use crate::index::Indexer;
-use crate::query::{get_project_name_tokens, ImpactResult, QueryEngine, SymbolDetails, SymbolInfo, TraceHop};
+use crate::query::{
+    ImpactResult, QueryEngine, SymbolDetails, SymbolInfo, TraceHop, get_project_name_tokens,
+};
 use crate::store::Store;
 use crate::watcher::Watcher;
 
@@ -34,7 +36,8 @@ impl CodeGraph {
         store.backfill_fts().map_err(|e| e.to_string())?;
         let is_building = Arc::new(AtomicBool::new(false));
         let project_name_tokens = get_project_name_tokens(project_path);
-        let query_engine = QueryEngine::new(store.clone(), is_building.clone(), project_name_tokens);
+        let query_engine =
+            QueryEngine::new(store.clone(), is_building.clone(), project_name_tokens);
         let indexer = Arc::new(Indexer::new(store.clone()));
         Ok(Self {
             store,
