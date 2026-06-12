@@ -60,6 +60,48 @@ pub enum McpTransport {
         #[serde(default)]
         headers: HashMap<String, String>,
     },
+    /// 简易 HTTP GET 方式：用于只接受 GET 请求的简易服务
+    ///
+    /// 不经过 MCP 协议握手，直接通过 GET 请求发现工具和调用工具。
+    /// - 工具发现：`GET {url}{tools_endpoint}`（默认 `/tools`）
+    /// - 工具调用：`GET {url}{call_endpoint}?name={tool_name}&{query_params}`
+    #[serde(rename = "get")]
+    Get {
+        /// 基础 URL
+        url: String,
+        /// HTTP 请求头（用于认证等）
+        #[serde(default)]
+        headers: HashMap<String, String>,
+        /// 工具列表端点，相对于 base_url（默认 "/tools"）
+        #[serde(default = "default_tools_endpoint")]
+        tools_endpoint: String,
+        /// 工具调用端点，相对于 base_url（默认 "/call"）
+        #[serde(default = "default_call_endpoint")]
+        call_endpoint: String,
+    },
+    /// HTTP Streamable 方式：通过单一 POST 端点完成 MCP 协议
+    ///
+    /// 遵循 MCP Streamable HTTP 规范，所有交互通过 POST 完成。
+    /// 适用于 context7 等只接受 POST 的 MCP 服务器。
+    /// - 初始化：`POST {url}` → initialize
+    /// - 工具发现：`POST {url}` → tools/list
+    /// - 工具调用：`POST {url}` → tools/call
+    #[serde(rename = "http")]
+    Http {
+        /// 端点 URL
+        url: String,
+        /// HTTP 请求头（用于认证等）
+        #[serde(default)]
+        headers: HashMap<String, String>,
+    },
+}
+
+fn default_tools_endpoint() -> String {
+    "/tools".to_string()
+}
+
+fn default_call_endpoint() -> String {
+    "/call".to_string()
 }
 
 #[cfg(test)]
@@ -181,6 +223,121 @@ transport = { type = "stdio", command = "echo" }
                 assert!(args.is_empty());
             }
             _ => panic!("expected Stdio"),
+        }
+    }
+
+    #[test]
+    fn test_mcp_server_get_deserialize() {
+        let toml_str = r#"
+[[servers]]
+name = "context7"
+transport = { type = "get", url = "https://api.context7.com/v1" }
+"#;
+        let config: McpConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.servers.len(), 1);
+        let server = &config.servers[0];
+        assert_eq!(server.name, "context7");
+        match &server.transport {
+            McpTransport::Get {
+                url,
+                headers,
+                tools_endpoint,
+                call_endpoint,
+            } => {
+                assert_eq!(url, "https://api.context7.com/v1");
+                assert!(headers.is_empty());
+                assert_eq!(tools_endpoint, "/tools");
+                assert_eq!(call_endpoint, "/call");
+            }
+            _ => panic!("expected Get"),
+        }
+    }
+
+    #[test]
+    fn test_mcp_server_get_custom_endpoints() {
+        let toml_str = r#"
+[[servers]]
+name = "custom-get"
+transport = { type = "get", url = "https://api.example.com", tools_endpoint = "/list-tools", call_endpoint = "/run" }
+"#;
+        let config: McpConfig = toml::from_str(toml_str).unwrap();
+        let server = &config.servers[0];
+        match &server.transport {
+            McpTransport::Get {
+                url,
+                tools_endpoint,
+                call_endpoint,
+                ..
+            } => {
+                assert_eq!(url, "https://api.example.com");
+                assert_eq!(tools_endpoint, "/list-tools");
+                assert_eq!(call_endpoint, "/run");
+            }
+            _ => panic!("expected Get"),
+        }
+    }
+
+    #[test]
+    fn test_mcp_server_get_with_headers() {
+        let toml_str = r#"
+[[servers]]
+name = "auth-get"
+transport = { type = "get", url = "https://api.example.com", headers = { Authorization = "Bearer sk-xxx", X-Custom = "value" } }
+"#;
+        let config: McpConfig = toml::from_str(toml_str).unwrap();
+        let server = &config.servers[0];
+        match &server.transport {
+            McpTransport::Get { url, headers, .. } => {
+                assert_eq!(url, "https://api.example.com");
+                assert_eq!(
+                    headers.get("Authorization"),
+                    Some(&"Bearer sk-xxx".to_string())
+                );
+                assert_eq!(headers.get("X-Custom"), Some(&"value".to_string()));
+            }
+            _ => panic!("expected Get"),
+        }
+    }
+
+    #[test]
+    fn test_mcp_server_http_deserialize() {
+        let toml_str = r#"
+[[servers]]
+name = "context7"
+transport = { type = "http", url = "https://mcp.context7.com/mcp" }
+"#;
+        let config: McpConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.servers.len(), 1);
+        let server = &config.servers[0];
+        assert_eq!(server.name, "context7");
+        match &server.transport {
+            McpTransport::Http { url, headers } => {
+                assert_eq!(url, "https://mcp.context7.com/mcp");
+                assert!(headers.is_empty());
+            }
+            _ => panic!("expected Http"),
+        }
+    }
+
+    #[test]
+    fn test_mcp_server_http_with_headers() {
+        let toml_str = r#"
+[[servers]]
+name = "context7"
+transport = { type = "http", url = "https://mcp.context7.com/mcp", headers = { CONTEXT7_API_KEY = "sk-xxx" } }
+enabled = true
+tool_prefix = "ctx_"
+"#;
+        let config: McpConfig = toml::from_str(toml_str).unwrap();
+        let server = &config.servers[0];
+        assert_eq!(server.name, "context7");
+        assert_eq!(server.tool_prefix, Some("ctx_".to_string()));
+        match &server.transport {
+            McpTransport::Http { url, headers } => {
+                assert_eq!(url, "https://mcp.context7.com/mcp");
+                assert_eq!(headers.get("CONTEXT7_API_KEY"), Some(&"sk-xxx".to_string()));
+            }
+            _ => panic!("expected Http"),
         }
     }
 }

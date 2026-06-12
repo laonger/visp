@@ -1,13 +1,16 @@
 //! MCP 客户端会话封装
 //!
 //! 管理单个 MCP 服务器的连接生命周期，提供工具发现、调用和关闭接口。
-//! 底层使用 rmcp crate 处理 MCP 协议握手和 JSON-RPC 通信。
+//! 底层使用 rmcp crate 处理 MCP 协议握手和 JSON-RPC 通信（stdio/sse），
+//! 或使用自定义 HTTP 客户端（get/http 传输）。
 
 use rmcp::model::{CallToolRequestParam, CallToolResult, RawContent, Tool as McpToolModel};
 use rmcp::service::{RoleClient, RunningService, ServiceExt};
 
 use crate::config::{McpServerConfig, McpTransport};
 use crate::error::McpError;
+use crate::get_client::GetClient;
+use crate::http_client::HttpPostClient;
 use crate::transport::{create_sse_transport, create_stdio_transport};
 
 /// MCP 服务器返回的工具定义
@@ -33,11 +36,20 @@ pub struct McpSession {
     name: String,
     /// 配置（保留用于重连）
     config: McpServerConfig,
-    /// rmcp 运行服务（连接建立后才有值）
-    /// Drop 时会自动关闭 transport（包括 kill stdio 子进程）。
-    running_service: Option<RunningService<RoleClient, ()>>,
+    /// 内部会话
+    session: Option<SessionInner>,
     /// 传输是否已连接
     connected: bool,
+}
+
+/// 内部会话变体
+enum SessionInner {
+    /// 标准 MCP 协议（stdio/sse），使用 rmcp
+    StdioSse(RunningService<RoleClient, ()>),
+    /// HTTP GET 简易 MCP，使用自定义 HTTP 客户端
+    Get(GetClient),
+    /// HTTP Streamable MCP（POST-only），使用自定义 HTTP 客户端
+    Http(HttpPostClient),
 }
 
 impl std::fmt::Debug for McpSession {
@@ -56,7 +68,7 @@ impl McpSession {
         Self {
             name: config.name.clone(),
             config: config.clone(),
-            running_service: None,
+            session: None,
             connected: false,
         }
     }
@@ -64,6 +76,9 @@ impl McpSession {
     /// 建立连接
     ///
     /// 根据配置创建 transport 并执行 MCP 握手（initialize + initialized）。
+    /// - Stdio/Sse：使用 rmcp 创建 transport 并 serve（自动完成 initialize 握手）
+    /// - Get：直接创建 HTTP GET 客户端，无需握手
+    /// - Http：创建 HTTP POST 客户端并执行 initialize 握手
     pub async fn connect(&mut self) -> Result<(), McpError> {
         match &self.config.transport {
             McpTransport::Stdio { .. } => {
@@ -71,7 +86,7 @@ impl McpSession {
                 let service = ().serve(transport).await.map_err(|e: std::io::Error| {
                     McpError::Transport(format!("failed to serve stdio transport: {}", e))
                 })?;
-                self.running_service = Some(service);
+                self.session = Some(SessionInner::StdioSse(service));
                 self.connected = true;
                 Ok(())
             }
@@ -81,7 +96,26 @@ impl McpSession {
                     .serve(transport)
                     .await
                     .map_err(|e| McpError::Transport(format!("SSE serve failed: {}", e)))?;
-                self.running_service = Some(service);
+                self.session = Some(SessionInner::StdioSse(service));
+                self.connected = true;
+                Ok(())
+            }
+            McpTransport::Get {
+                url,
+                headers,
+                tools_endpoint,
+                call_endpoint,
+            } => {
+                let client =
+                    GetClient::new(&self.name, url, headers, tools_endpoint, call_endpoint)?;
+                self.session = Some(SessionInner::Get(client));
+                self.connected = true;
+                Ok(())
+            }
+            McpTransport::Http { url, headers } => {
+                let mut client = HttpPostClient::new(&self.name, url, headers)?;
+                client.initialize().await?;
+                self.session = Some(SessionInner::Http(client));
                 self.connected = true;
                 Ok(())
             }
@@ -94,17 +128,21 @@ impl McpSession {
             return Err(McpError::NotConnected(self.name.clone()));
         }
 
-        let peer = self
-            .running_service
+        match self
+            .session
             .as_ref()
-            .ok_or_else(|| McpError::NotConnected(self.name.clone()))?;
-
-        let tools = peer
-            .list_all_tools()
-            .await
-            .map_err(|e| McpError::Protocol(format!("list_tools failed: {}", e)))?;
-
-        Ok(tools.into_iter().map(mcp_tool_to_definition).collect())
+            .ok_or_else(|| McpError::NotConnected(self.name.clone()))?
+        {
+            SessionInner::StdioSse(peer) => {
+                let tools = peer
+                    .list_all_tools()
+                    .await
+                    .map_err(|e| McpError::Protocol(format!("list_tools failed: {}", e)))?;
+                Ok(tools.into_iter().map(mcp_tool_to_definition).collect())
+            }
+            SessionInner::Get(client) => client.list_tools().await,
+            SessionInner::Http(client) => client.list_tools().await,
+        }
     }
 
     /// 调用指定的工具
@@ -117,42 +155,56 @@ impl McpSession {
             return Err(McpError::NotConnected(self.name.clone()));
         }
 
-        let peer = self
-            .running_service
+        match self
+            .session
             .as_ref()
-            .ok_or_else(|| McpError::NotConnected(self.name.clone()))?;
+            .ok_or_else(|| McpError::NotConnected(self.name.clone()))?
+        {
+            SessionInner::StdioSse(peer) => {
+                // 将 arguments 转为 JsonObject
+                let args_map = match arguments {
+                    serde_json::Value::Object(map) => Some(map),
+                    serde_json::Value::Null => None,
+                    _ => {
+                        let mut map = serde_json::Map::new();
+                        map.insert("value".into(), arguments);
+                        Some(map)
+                    }
+                };
 
-        // 将 arguments 转为 JsonObject
-        let args_map = match arguments {
-            serde_json::Value::Object(map) => Some(map),
-            serde_json::Value::Null => None,
-            _ => {
-                // 如果是非 Object 类型，尝试包装
-                let mut map = serde_json::Map::new();
-                map.insert("value".into(), arguments);
-                Some(map)
+                let params = CallToolRequestParam {
+                    name: std::borrow::Cow::Owned(name.to_owned()),
+                    arguments: args_map,
+                };
+
+                let result = peer
+                    .call_tool(params)
+                    .await
+                    .map_err(|e| McpError::Protocol(format!("call_tool failed: {}", e)))?;
+
+                Ok(result)
             }
-        };
-
-        let params = CallToolRequestParam {
-            name: std::borrow::Cow::Owned(name.to_owned()),
-            arguments: args_map,
-        };
-
-        let result = peer
-            .call_tool(params)
-            .await
-            .map_err(|e| McpError::Protocol(format!("call_tool failed: {}", e)))?;
-
-        Ok(result)
+            SessionInner::Get(client) => client.call_tool(name, arguments).await,
+            SessionInner::Http(client) => client.call_tool(name, arguments).await,
+        }
     }
 
     /// 关闭连接
     ///
-    /// 优雅关闭：cancel RunningService 后自动发送 shutdown。
+    /// - Stdio/Sse：cancel RunningService（自动发送 shutdown，kill 子进程）
+    /// - Get/Http：标记为断开
     pub async fn shutdown(&mut self) {
-        if let Some(service) = self.running_service.take() {
-            let _ = service.cancel().await;
+        match self.session.take() {
+            Some(SessionInner::StdioSse(service)) => {
+                let _ = service.cancel().await;
+            }
+            Some(SessionInner::Get(mut client)) => {
+                client.disconnect();
+            }
+            Some(SessionInner::Http(_)) => {
+                // HttpPostClient 无需主动关闭
+            }
+            None => {}
         }
         self.connected = false;
     }
@@ -222,11 +274,55 @@ mod tests {
         }
     }
 
+    fn test_get_config(name: &str) -> McpServerConfig {
+        McpServerConfig {
+            name: name.to_string(),
+            transport: McpTransport::Get {
+                url: "https://api.example.com".into(),
+                headers: std::collections::HashMap::new(),
+                tools_endpoint: "/tools".into(),
+                call_endpoint: "/call".into(),
+            },
+            enabled: true,
+            tool_prefix: None,
+            tool_timeout_secs: 60,
+        }
+    }
+
+    fn test_http_config(name: &str) -> McpServerConfig {
+        McpServerConfig {
+            name: name.to_string(),
+            transport: McpTransport::Http {
+                url: "https://api.example.com/mcp".into(),
+                headers: std::collections::HashMap::new(),
+            },
+            enabled: true,
+            tool_prefix: None,
+            tool_timeout_secs: 60,
+        }
+    }
+
     #[tokio::test]
     async fn test_session_new() {
         let config = test_stdio_config("test-server");
         let session = McpSession::new(&config);
         assert_eq!(session.name(), "test-server");
+        assert!(!session.is_connected());
+    }
+
+    #[tokio::test]
+    async fn test_session_new_get() {
+        let config = test_get_config("get-server");
+        let session = McpSession::new(&config);
+        assert_eq!(session.name(), "get-server");
+        assert!(!session.is_connected());
+    }
+
+    #[tokio::test]
+    async fn test_session_new_http() {
+        let config = test_http_config("http-server");
+        let session = McpSession::new(&config);
+        assert_eq!(session.name(), "http-server");
         assert!(!session.is_connected());
     }
 
@@ -263,6 +359,50 @@ mod tests {
             }
             _ => panic!("expected Transport error"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_session_connect_get_not_reachable() {
+        let mut session = McpSession::new(&test_get_config("get-test"));
+        // 连接一个不存在的服务器，list_tools 会失败
+        let result = session.connect().await;
+        assert!(
+            result.is_ok(),
+            "get client should connect instantly: {:?}",
+            result
+        );
+        assert!(session.is_connected());
+        // list_tools 会因连不上服务器而失败
+        let tools = session.list_tools().await;
+        assert!(tools.is_err());
+        session.shutdown().await;
+        assert!(!session.is_connected());
+    }
+
+    #[tokio::test]
+    async fn test_session_connect_http_not_reachable() {
+        let mut session = McpSession::new(&test_http_config("http-test"));
+        // 连接一个不存在的服务器，initialize 会失败
+        let result = session.connect().await;
+        assert!(result.is_err(), "http client should fail to initialize");
+        assert!(!session.is_connected());
+    }
+
+    #[tokio::test]
+    async fn test_session_shutdown_none() {
+        let mut session = McpSession::new(&test_stdio_config("test"));
+        // 未连接时 shutdown 不应 panic
+        session.shutdown().await;
+        assert!(!session.is_connected());
+    }
+
+    #[tokio::test]
+    async fn test_session_shutdown_get_after_connect() {
+        let mut session = McpSession::new(&test_get_config("get-test"));
+        session.connect().await.unwrap();
+        assert!(session.is_connected());
+        session.shutdown().await;
+        assert!(!session.is_connected());
     }
 
     #[test]
