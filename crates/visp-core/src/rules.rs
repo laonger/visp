@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+use crate::session::home_dir;
+
 #[derive(Debug, Clone)]
 pub struct RuleFile {
     pub path: PathBuf,
@@ -75,10 +77,6 @@ impl RuleEngine {
     pub fn get_active_rules(&self) -> String {
         self.rules.read().unwrap().content.clone()
     }
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(PathBuf::from)
 }
 
 /// 从 project_path 向上遍历到根目录，寻找所有 AGENTS.md 文件。

@@ -39,10 +39,17 @@ pub struct Session {
 /// 会话存储抽象 trait
 pub trait SessionStore: Send {
     fn create(&mut self, session: Session) -> Result<(), SessionError>;
-    fn get(&self, session_id: &str) -> Result<&Session, SessionError>;
-    fn list(&self) -> Result<Vec<&Session>, SessionError>;
+    fn get(&self, session_id: &str) -> Result<Session, SessionError>;
+    fn list(&self) -> Result<Vec<Session>, SessionError>;
     fn delete(&mut self, session_id: &str) -> Result<(), SessionError>;
     fn update(&mut self, session: Session) -> Result<(), SessionError>;
+
+    /// 获取会话的全部消息
+    fn get_messages(&self, session_id: &str) -> Result<Vec<Message>, SessionError>;
+    /// 追加一条消息到会话
+    fn append_message(&mut self, session_id: &str, message: Message) -> Result<(), SessionError>;
+    /// 按项目路径过滤会话列表
+    fn list_by_project(&self, project_path: &str) -> Result<Vec<Session>, SessionError>;
 }
 
 /// 内存会话存储
@@ -73,14 +80,15 @@ impl SessionStore for InMemorySessionStore {
         Ok(())
     }
 
-    fn get(&self, session_id: &str) -> Result<&Session, SessionError> {
+    fn get(&self, session_id: &str) -> Result<Session, SessionError> {
         self.sessions
             .get(session_id)
+            .cloned()
             .ok_or_else(|| SessionError::NotFound(session_id.to_string()))
     }
 
-    fn list(&self) -> Result<Vec<&Session>, SessionError> {
-        Ok(self.sessions.values().collect())
+    fn list(&self) -> Result<Vec<Session>, SessionError> {
+        Ok(self.sessions.values().cloned().collect())
     }
 
     fn delete(&mut self, session_id: &str) -> Result<(), SessionError> {
@@ -96,6 +104,30 @@ impl SessionStore for InMemorySessionStore {
         }
         self.sessions.insert(session.id.clone(), session);
         Ok(())
+    }
+
+    fn get_messages(&self, session_id: &str) -> Result<Vec<Message>, SessionError> {
+        self.sessions
+            .get(session_id)
+            .map(|s| s.history.clone())
+            .ok_or_else(|| SessionError::NotFound(session_id.to_string()))
+    }
+
+    fn append_message(&mut self, session_id: &str, message: Message) -> Result<(), SessionError> {
+        self.sessions
+            .get_mut(session_id)
+            .map(|s| s.history.push(message))
+            .ok_or_else(|| SessionError::NotFound(session_id.to_string()))
+    }
+
+    fn list_by_project(&self, project_path: &str) -> Result<Vec<Session>, SessionError> {
+        let target = PathBuf::from(project_path);
+        Ok(self
+            .sessions
+            .values()
+            .filter(|s| s.project_path == target)
+            .cloned()
+            .collect())
     }
 }
 
@@ -220,7 +252,8 @@ fn load_skills_from_dir(dir: &Path, seen_names: &mut HashSet<String>, sections: 
     }
 }
 
-fn home_dir() -> Option<PathBuf> {
+/// 返回用户的 home 目录路径
+pub fn home_dir() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
 }
 
@@ -321,7 +354,7 @@ impl SessionManager {
         let token = CancellationToken::new();
 
         let mut store = self.store.lock().unwrap();
-        let session = store.get(id)?.clone();
+        let session = store.get(id)?;
 
         if session.status != SessionStatus::Idle {
             return Err(SessionError::SessionBusy {
@@ -352,7 +385,7 @@ impl SessionManager {
     /// 结束 agent 循环，切换会话状态，清理 token
     pub fn finish_loop(&self, id: &str, _status: SessionStatus) -> Result<(), SessionError> {
         let mut store = self.store.lock().unwrap();
-        let mut session = store.get(id)?.clone();
+        let mut session = store.get(id)?;
         session.status = SessionStatus::Idle;
         store.update(session)?;
         drop(store);
@@ -364,7 +397,7 @@ impl SessionManager {
     /// 追加消息到会话历史
     pub fn append_message(&self, id: &str, msg: Message) -> Result<(), SessionError> {
         let mut store = self.store.lock().unwrap();
-        let mut session = store.get(id)?.clone();
+        let mut session = store.get(id)?;
         session.history.push(msg);
         store.update(session)
     }
@@ -372,7 +405,7 @@ impl SessionManager {
     /// 更新会话的 LLM 配置
     pub fn update_config(&self, id: &str, config: LlmConfig) -> Result<(), SessionError> {
         let mut store = self.store.lock().unwrap();
-        let mut session = store.get(id)?.clone();
+        let mut session = store.get(id)?;
         session.config = config;
         store.update(session)
     }
@@ -380,15 +413,13 @@ impl SessionManager {
     /// 列出所有会话
     pub fn list(&self) -> Result<Vec<Session>, SessionError> {
         let store = self.store.lock().unwrap();
-        let sessions = store.list()?;
-        Ok(sessions.into_iter().cloned().collect())
+        store.list()
     }
 
     /// 获取单个会话
     pub fn get(&self, id: &str) -> Result<Session, SessionError> {
         let store = self.store.lock().unwrap();
-        let session = store.get(id)?;
-        Ok(session.clone())
+        store.get(id)
     }
 
     /// 取消运行中的 agent（取消 CancellationToken）
@@ -411,7 +442,7 @@ impl SessionManager {
     /// 将工具加入已审批集合（Always Allow）
     pub fn add_approved_tool(&self, session_id: &str, tool_name: &str) -> Result<(), SessionError> {
         let mut store = self.store.lock().unwrap();
-        let mut session = store.get(session_id)?.clone();
+        let mut session = store.get(session_id)?;
         session.approved_tools.insert(tool_name.to_string());
         store.update(session)
     }
