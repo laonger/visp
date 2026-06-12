@@ -419,6 +419,7 @@ mod tests {
     use super::*;
     use crate::context::ContextTrimmer;
     use crate::message::Message;
+    use crate::message::MessageType;
     use crate::message::Role;
     use std::path::Path;
 
@@ -569,6 +570,7 @@ mod tests {
 
         let msg = Message {
             role: Role::User,
+            kind: MessageType::User,
             content: "hello".into(),
             tool_call_id: None,
             tool_calls: None,

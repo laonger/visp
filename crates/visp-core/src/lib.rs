@@ -11,6 +11,6 @@ pub mod tool_registry;
 
 // Re-export 常用类型
 pub use error::{CoreError, LlmError, SessionError};
-pub use message::{Message, Role, ToolCallRequest, ToolDefinition};
+pub use message::{Message, MessageType, Role, ToolCallRequest, ToolDefinition};
 pub use provider::{ChatEvent, LlmConfig, LlmProvider};
 pub use tool::{Tool, ToolContext, ToolResult};

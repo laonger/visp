@@ -5,6 +5,7 @@ use std::time::Duration;
 use crate::error::AgentErrorCode;
 use crate::error::LlmError;
 use crate::message::Message;
+use crate::message::MessageType;
 use crate::message::Role;
 use crate::message::ToolCallRequest;
 use crate::message::estimate_message_tokens;
@@ -501,6 +502,7 @@ pub async fn run_agent_loop(
                 let clean_text = strip_user_query_marker(&text_buffer);
                 let mut assistant_msg = Message {
                     role: Role::Assistant,
+                    kind: MessageType::Text,
                     content: clean_text,
                     tool_call_id: None,
                     tool_calls: None,
@@ -600,6 +602,7 @@ pub async fn run_agent_loop(
             }
             let mut assistant_msg = Message {
                 role: Role::Assistant,
+                kind: MessageType::Text,
                 content: text_buffer,
                 tool_call_id: None,
                 tool_calls: None,
@@ -638,6 +641,7 @@ pub async fn run_agent_loop(
         total_tool_calls += tool_calls.len() as u32;
         let mut assistant_msg = Message {
             role: Role::Assistant,
+            kind: MessageType::ToolCall,
             content: text_buffer,
             tool_call_id: None,
             tool_calls: Some(tool_calls.clone()),

@@ -1,5 +1,26 @@
 use serde::{Deserialize, Serialize};
 
+/// 消息子类型，与 role 正交
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum MessageType {
+    #[serde(rename = "text")]
+    Text,
+    #[serde(rename = "thinking")]
+    Thinking,
+    #[serde(rename = "tool_call")]
+    ToolCall,
+    #[serde(rename = "tool_result")]
+    ToolResult,
+    #[serde(rename = "error")]
+    Error,
+    #[serde(rename = "status")]
+    Status,
+    #[serde(rename = "system")]
+    System,
+    #[serde(rename = "user")]
+    User,
+}
+
 /// 对话角色
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Role {
@@ -25,6 +46,8 @@ pub struct ToolCallRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Message {
     pub role: Role,
+    /// 消息子类型（Text/Thinking/ToolCall/ToolResult/Error/Status/System/User）
+    pub kind: MessageType,
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
@@ -45,6 +68,7 @@ impl Message {
     pub fn system(content: impl Into<String>) -> Self {
         let mut msg = Self {
             role: Role::System,
+            kind: MessageType::System,
             content: content.into(),
             tool_call_id: None,
             tool_calls: None,
@@ -59,6 +83,7 @@ impl Message {
     pub fn user(content: impl Into<String>) -> Self {
         let mut msg = Self {
             role: Role::User,
+            kind: MessageType::User,
             content: content.into(),
             tool_call_id: None,
             tool_calls: None,
@@ -73,6 +98,7 @@ impl Message {
     pub fn assistant(content: impl Into<String>) -> Self {
         let mut msg = Self {
             role: Role::Assistant,
+            kind: MessageType::Text,
             content: content.into(),
             tool_call_id: None,
             tool_calls: None,
@@ -87,6 +113,7 @@ impl Message {
     pub fn tool(content: impl Into<String>, call_id: impl Into<String>) -> Self {
         let mut msg = Self {
             role: Role::Tool,
+            kind: MessageType::ToolResult,
             content: content.into(),
             tool_call_id: Some(call_id.into()),
             tool_calls: None,
@@ -96,6 +123,58 @@ impl Message {
         };
         msg.estimated_tokens = estimate_message_tokens(&msg);
         msg
+    }
+
+    pub fn tool_call(calls: Vec<ToolCallRequest>) -> Self {
+        Self {
+            role: Role::Assistant,
+            kind: MessageType::ToolCall,
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: Some(calls),
+            extra_blocks: None,
+            skip_context: false,
+            estimated_tokens: 0,
+        }
+    }
+
+    pub fn thinking(content: impl Into<String>) -> Self {
+        Self {
+            role: Role::Assistant,
+            kind: MessageType::Thinking,
+            content: content.into(),
+            tool_call_id: None,
+            tool_calls: None,
+            extra_blocks: None,
+            skip_context: false,
+            estimated_tokens: 0,
+        }
+    }
+
+    pub fn error(content: impl Into<String>) -> Self {
+        Self {
+            role: Role::System,
+            kind: MessageType::Error,
+            content: content.into(),
+            tool_call_id: None,
+            tool_calls: None,
+            extra_blocks: None,
+            skip_context: false,
+            estimated_tokens: 0,
+        }
+    }
+
+    pub fn status(content: impl Into<String>) -> Self {
+        Self {
+            role: Role::System,
+            kind: MessageType::Status,
+            content: content.into(),
+            tool_call_id: None,
+            tool_calls: None,
+            extra_blocks: None,
+            skip_context: false,
+            estimated_tokens: 0,
+        }
     }
 }
 
@@ -135,6 +214,91 @@ pub struct ToolDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Step 1: MessageType ──
+
+    #[test]
+    fn test_message_type_serde() {
+        let cases = vec![
+            (MessageType::Text, "\"text\""),
+            (MessageType::Thinking, "\"thinking\""),
+            (MessageType::ToolCall, "\"tool_call\""),
+            (MessageType::ToolResult, "\"tool_result\""),
+            (MessageType::Error, "\"error\""),
+            (MessageType::Status, "\"status\""),
+            (MessageType::System, "\"system\""),
+            (MessageType::User, "\"user\""),
+        ];
+        for (variant, expected) in cases {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected);
+            let deserialized: MessageType = serde_json::from_str(expected).unwrap();
+            assert_eq!(deserialized, variant);
+        }
+    }
+
+    #[test]
+    fn test_user_message_kind() {
+        let msg = Message::user("hi");
+        assert_eq!(msg.kind, MessageType::User);
+    }
+
+    #[test]
+    fn test_system_message_kind() {
+        let msg = Message::system("prompt");
+        assert_eq!(msg.kind, MessageType::System);
+    }
+
+    #[test]
+    fn test_tool_message_kind() {
+        let msg = Message::tool("out", "id");
+        assert_eq!(msg.kind, MessageType::ToolResult);
+    }
+
+    #[test]
+    fn test_assistant_message_kind() {
+        let msg = Message::assistant("text");
+        assert_eq!(msg.kind, MessageType::Text);
+    }
+
+    #[test]
+    fn test_tool_call_constructor() {
+        let calls = vec![ToolCallRequest {
+            id: "call_1".into(),
+            name: "read_file".into(),
+            arguments: r#"{"path":"test.txt"}"#.into(),
+        }];
+        let msg = Message::tool_call(calls.clone());
+        assert_eq!(msg.kind, MessageType::ToolCall);
+        assert_eq!(msg.role, Role::Assistant);
+        assert!(msg.tool_calls.is_some());
+        assert_eq!(msg.tool_calls.unwrap(), calls);
+    }
+
+    #[test]
+    fn test_thinking_constructor() {
+        let msg = Message::thinking("thinking content");
+        assert_eq!(msg.kind, MessageType::Thinking);
+        assert_eq!(msg.content, "thinking content");
+    }
+
+    #[test]
+    fn test_error_constructor() {
+        let msg = Message::error("something went wrong");
+        assert_eq!(msg.kind, MessageType::Error);
+        assert_eq!(msg.content, "something went wrong");
+        assert_eq!(msg.role, Role::System);
+    }
+
+    #[test]
+    fn test_status_constructor() {
+        let msg = Message::status("processing...");
+        assert_eq!(msg.kind, MessageType::Status);
+        assert_eq!(msg.content, "processing...");
+        assert_eq!(msg.role, Role::System);
+    }
+
+    // ── Existing token tests ──
 
     #[test]
     fn test_user_message_tokens() {
