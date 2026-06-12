@@ -565,15 +565,14 @@ fn validate_write_path(target: &Path, working_dir: &Path) -> Result<PathBuf, Str
 fn diff_text(path: &Path, old: &str, new: &str) -> String {
     use similar::TextDiff;
 
-    let diff = TextDiff::from_lines(old, new)
+    TextDiff::from_lines(old, new)
         .unified_diff()
         .context_radius(3)
         .header(
             &format!("a/{}", path.display()),
             &format!("b/{}", path.display()),
         )
-        .to_string();
-    diff
+        .to_string()
 }
 
 #[cfg(test)]
