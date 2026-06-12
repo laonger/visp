@@ -282,7 +282,9 @@ impl Tool for WriteFile {
 
     fn description(&self) -> &str {
         "Write content to a file, creating or overwriting it. \
-         Use this to create new files, update existing ones, or generate code/output. \
+         Use this to create new files or completely rewrite entire existing files. \
+         For targeted edits (changing a few lines in an existing file), \
+         prefer `edit_file` instead. \
          Automatically creates parent directories if they don't exist. \
          Paths are validated to prevent directory traversal. \
          File size is limited to 1MB."
@@ -399,6 +401,8 @@ impl Tool for EditFile {
     fn description(&self) -> &str {
         "Apply an exact string replacement in a file. \
          Use this for surgical edits to existing files (e.g., fix a bug, rename a variable). \
+         This is the preferred tool for targeted changes — \
+         for creating new files or full rewrites, use `write_file` instead. \
          Uses atomic write (temp file + rename) to prevent data loss on failure. \
          If the old string matches multiple times, the operation is rejected — \
          provide more surrounding context in the old string to make it unique."
