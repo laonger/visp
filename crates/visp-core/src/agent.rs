@@ -513,6 +513,15 @@ pub async fn run_agent_loop(
                         Some(thinking_blocks.clone())
                     },
                     estimated_tokens: 0,
+                    actual_tokens_input: None,
+                    actual_tokens_output: None,
+                    actual_cache_read: None,
+                    actual_cache_write: None,
+                    actual_cost: None,
+                    provider_metadata: None,
+                    tool_result_is_error: None,
+                    tool_result_duration_ms: None,
+                    created_at: None,
                 };
                 assistant_msg.estimated_tokens = estimate_message_tokens(&assistant_msg);
                 ctx.history.push(assistant_msg.clone());
@@ -613,6 +622,15 @@ pub async fn run_agent_loop(
                     Some(thinking_blocks.clone())
                 },
                 estimated_tokens: 0,
+                actual_tokens_input: None,
+                actual_tokens_output: None,
+                actual_cache_read: None,
+                actual_cache_write: None,
+                actual_cost: None,
+                provider_metadata: None,
+                tool_result_is_error: None,
+                tool_result_duration_ms: None,
+                created_at: None,
             };
             assistant_msg.estimated_tokens = estimate_message_tokens(&assistant_msg);
             ctx.history.push(assistant_msg.clone());
@@ -652,6 +670,15 @@ pub async fn run_agent_loop(
                 Some(thinking_blocks.clone())
             },
             estimated_tokens: 0,
+            actual_tokens_input: None,
+            actual_tokens_output: None,
+            actual_cache_read: None,
+            actual_cache_write: None,
+            actual_cost: None,
+            provider_metadata: None,
+            tool_result_is_error: None,
+            tool_result_duration_ms: None,
+            created_at: None,
         };
         assistant_msg.estimated_tokens = estimate_message_tokens(&assistant_msg);
         ctx.history.push(assistant_msg.clone());

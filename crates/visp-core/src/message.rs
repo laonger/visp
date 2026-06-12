@@ -62,6 +62,33 @@ pub struct Message {
     /// 估算的消息 token 数，用于 context window 管理
     #[serde(default)]
     pub estimated_tokens: u32,
+    /// 实际输入 token（来自 LLM provider）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_tokens_input: Option<u32>,
+    /// 实际输出 token（来自 LLM provider）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_tokens_output: Option<u32>,
+    /// 实际 cache read token
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_cache_read: Option<u32>,
+    /// 实际 cache write token
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_cache_write: Option<u32>,
+    /// 实际费用（美元）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_cost: Option<f64>,
+    /// LLM 提供商元数据 JSON
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<serde_json::Value>,
+    /// 工具执行是否出错（仅 tool 消息）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_result_is_error: Option<bool>,
+    /// 工具执行耗时（毫秒，仅 tool 消息）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_result_duration_ms: Option<u64>,
+    /// 创建时间（Unix 毫秒，用于 DB 持久化）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<i64>,
 }
 
 impl Message {
@@ -75,6 +102,15 @@ impl Message {
             extra_blocks: None,
             skip_context: false,
             estimated_tokens: 0,
+            actual_tokens_input: None,
+            actual_tokens_output: None,
+            actual_cache_read: None,
+            actual_cache_write: None,
+            actual_cost: None,
+            provider_metadata: None,
+            tool_result_is_error: None,
+            tool_result_duration_ms: None,
+            created_at: None,
         };
         msg.estimated_tokens = estimate_message_tokens(&msg);
         msg
@@ -90,6 +126,15 @@ impl Message {
             extra_blocks: None,
             skip_context: false,
             estimated_tokens: 0,
+            actual_tokens_input: None,
+            actual_tokens_output: None,
+            actual_cache_read: None,
+            actual_cache_write: None,
+            actual_cost: None,
+            provider_metadata: None,
+            tool_result_is_error: None,
+            tool_result_duration_ms: None,
+            created_at: None,
         };
         msg.estimated_tokens = estimate_message_tokens(&msg);
         msg
@@ -105,6 +150,15 @@ impl Message {
             extra_blocks: None,
             skip_context: false,
             estimated_tokens: 0,
+            actual_tokens_input: None,
+            actual_tokens_output: None,
+            actual_cache_read: None,
+            actual_cache_write: None,
+            actual_cost: None,
+            provider_metadata: None,
+            tool_result_is_error: None,
+            tool_result_duration_ms: None,
+            created_at: None,
         };
         msg.estimated_tokens = estimate_message_tokens(&msg);
         msg
@@ -120,6 +174,15 @@ impl Message {
             extra_blocks: None,
             skip_context: false,
             estimated_tokens: 0,
+            actual_tokens_input: None,
+            actual_tokens_output: None,
+            actual_cache_read: None,
+            actual_cache_write: None,
+            actual_cost: None,
+            provider_metadata: None,
+            tool_result_is_error: None,
+            tool_result_duration_ms: None,
+            created_at: None,
         };
         msg.estimated_tokens = estimate_message_tokens(&msg);
         msg
@@ -135,6 +198,15 @@ impl Message {
             extra_blocks: None,
             skip_context: false,
             estimated_tokens: 0,
+            actual_tokens_input: None,
+            actual_tokens_output: None,
+            actual_cache_read: None,
+            actual_cache_write: None,
+            actual_cost: None,
+            provider_metadata: None,
+            tool_result_is_error: None,
+            tool_result_duration_ms: None,
+            created_at: None,
         }
     }
 
@@ -148,6 +220,15 @@ impl Message {
             extra_blocks: None,
             skip_context: false,
             estimated_tokens: 0,
+            actual_tokens_input: None,
+            actual_tokens_output: None,
+            actual_cache_read: None,
+            actual_cache_write: None,
+            actual_cost: None,
+            provider_metadata: None,
+            tool_result_is_error: None,
+            tool_result_duration_ms: None,
+            created_at: None,
         }
     }
 
@@ -161,6 +242,15 @@ impl Message {
             extra_blocks: None,
             skip_context: false,
             estimated_tokens: 0,
+            actual_tokens_input: None,
+            actual_tokens_output: None,
+            actual_cache_read: None,
+            actual_cache_write: None,
+            actual_cost: None,
+            provider_metadata: None,
+            tool_result_is_error: None,
+            tool_result_duration_ms: None,
+            created_at: None,
         }
     }
 
@@ -174,6 +264,15 @@ impl Message {
             extra_blocks: None,
             skip_context: false,
             estimated_tokens: 0,
+            actual_tokens_input: None,
+            actual_tokens_output: None,
+            actual_cache_read: None,
+            actual_cache_write: None,
+            actual_cost: None,
+            provider_metadata: None,
+            tool_result_is_error: None,
+            tool_result_duration_ms: None,
+            created_at: None,
         }
     }
 }
@@ -296,6 +395,83 @@ mod tests {
         assert_eq!(msg.kind, MessageType::Status);
         assert_eq!(msg.content, "processing...");
         assert_eq!(msg.role, Role::System);
+    }
+
+    // ── Step 2: actual_* fields ──
+
+    #[test]
+    fn test_actual_fields_default_none() {
+        let msg = Message::user("hi");
+        assert_eq!(msg.actual_tokens_input, None);
+        assert_eq!(msg.actual_tokens_output, None);
+        assert_eq!(msg.actual_cache_read, None);
+        assert_eq!(msg.actual_cache_write, None);
+        assert_eq!(msg.actual_cost, None);
+        assert_eq!(msg.provider_metadata, None);
+        assert_eq!(msg.tool_result_is_error, None);
+        assert_eq!(msg.tool_result_duration_ms, None);
+        assert_eq!(msg.created_at, None);
+    }
+
+    #[test]
+    fn test_actual_fields_read_write() {
+        let mut msg = Message::user("test");
+        msg.actual_tokens_input = Some(100);
+        msg.actual_tokens_output = Some(200);
+        msg.actual_cache_read = Some(50);
+        msg.actual_cache_write = Some(30);
+        msg.actual_cost = Some(0.005);
+        msg.provider_metadata = Some(serde_json::json!({"model": "claude-3"}));
+        msg.tool_result_is_error = Some(true);
+        msg.tool_result_duration_ms = Some(1500);
+        msg.created_at = Some(1700000000000);
+
+        assert_eq!(msg.actual_tokens_input, Some(100));
+        assert_eq!(msg.actual_tokens_output, Some(200));
+        assert_eq!(msg.actual_cache_read, Some(50));
+        assert_eq!(msg.actual_cache_write, Some(30));
+        assert_eq!(msg.actual_cost, Some(0.005));
+        assert_eq!(
+            msg.provider_metadata,
+            Some(serde_json::json!({"model": "claude-3"}))
+        );
+        assert_eq!(msg.tool_result_is_error, Some(true));
+        assert_eq!(msg.tool_result_duration_ms, Some(1500));
+        assert_eq!(msg.created_at, Some(1700000000000));
+    }
+
+    #[test]
+    fn test_actual_fields_serde() {
+        let mut msg = Message::assistant("hello");
+        msg.actual_tokens_input = Some(50);
+        msg.actual_tokens_output = Some(100);
+        msg.actual_cost = Some(0.0015);
+        msg.provider_metadata = Some(serde_json::json!({"model": "gpt-4"}));
+
+        let json = serde_json::to_string(&msg).unwrap();
+        let deserialized: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.actual_tokens_input, Some(50));
+        assert_eq!(deserialized.actual_tokens_output, Some(100));
+        assert_eq!(deserialized.actual_cost, Some(0.0015));
+        assert_eq!(
+            deserialized.provider_metadata,
+            Some(serde_json::json!({"model": "gpt-4"}))
+        );
+    }
+
+    #[test]
+    fn test_actual_fields_backward_compat() {
+        // Old JSON without new fields should deserialize successfully
+        let old_json = r#"{
+            "role": "user",
+            "kind": "user",
+            "content": "hello"
+        }"#;
+        let msg: Message = serde_json::from_str(old_json).unwrap();
+        assert_eq!(msg.content, "hello");
+        assert_eq!(msg.actual_tokens_input, None);
+        assert_eq!(msg.actual_cost, None);
+        assert_eq!(msg.provider_metadata, None);
     }
 
     // ── Existing token tests ──

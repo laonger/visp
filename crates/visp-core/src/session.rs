@@ -577,6 +577,15 @@ mod tests {
             extra_blocks: None,
             skip_context: false,
             estimated_tokens: 0,
+            actual_tokens_input: None,
+            actual_tokens_output: None,
+            actual_cache_read: None,
+            actual_cache_write: None,
+            actual_cost: None,
+            provider_metadata: None,
+            tool_result_is_error: None,
+            tool_result_duration_ms: None,
+            created_at: None,
         };
         manager.append_message(&session.id, msg.clone()).unwrap();
 
