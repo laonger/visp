@@ -4,6 +4,25 @@ use std::sync::{Arc, Mutex};
 
 use crate::graph::{Edge, EdgeKind, Symbol, SymbolKind};
 
+#[derive(Debug, Clone)]
+pub struct ScoredSymbol {
+    pub symbol: Symbol,
+    pub score: f64,
+}
+
+/// Sanitize a user query string into a safe FTS5 query.
+/// Escapes special chars, removes boolean operators, and uses prefix matching.
+pub fn sanitize_fts_query(query: &str) -> String {
+    query
+        .replace("::", " ")
+        .replace(['\'', '"', '*', '(', ')', ':', '^'], "")
+        .split_whitespace()
+        .filter(|t| !["AND", "OR", "NOT", "NEAR"].contains(&t.to_uppercase().as_str()))
+        .map(|t| format!("\"{}\"*", t))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
 }
@@ -220,6 +239,62 @@ impl Store {
             symbols.push(row?);
         }
         Ok(symbols)
+    }
+
+    /// Search using FTS5 BM25 scoring. fts_query should already be sanitized.
+    pub fn search_fts(&self, fts_query: &str, limit: usize) -> rusqlite::Result<Vec<ScoredSymbol>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT symbols.*, bm25(symbols_fts, 0, 20, 0, 5, 1) as score
+             FROM symbols_fts
+             JOIN symbols ON symbols_fts.rowid = symbols.rowid
+             WHERE symbols_fts MATCH ?1
+             ORDER BY score DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![fts_query, limit as i64], |row| {
+            let sym = row_to_symbol(row)?;
+            let score: f64 = row.get(8)?;
+            Ok(ScoredSymbol { symbol: sym, score })
+        })?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    }
+
+    /// LIKE-based substring search (fallback when FTS5 returns too few results).
+    pub fn search_like(&self, query: &str, limit: usize) -> rusqlite::Result<Vec<Symbol>> {
+        let conn = self.conn.lock().unwrap();
+        let escaped = query
+            .replace('\\', "\\\\")
+            .replace('_', "\\_")
+            .replace('%', "\\%");
+        let pattern = format!("%{}%", escaped);
+        let mut stmt = conn.prepare(
+            "SELECT id, name, kind, file_path, line, column, signature, docstring
+             FROM symbols
+             WHERE LOWER(name) LIKE LOWER(?1) ESCAPE '\\'
+                OR LOWER(signature) LIKE LOWER(?1) ESCAPE '\\'
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], row_to_symbol)?;
+        let mut symbols = Vec::new();
+        for row in rows {
+            symbols.push(row?);
+        }
+        Ok(symbols)
+    }
+
+    /// Back-fill FTS5 index with data from the symbols table (for existing DBs).
+    pub fn backfill_fts(&self) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO symbols_fts(rowid, id, name, kind, signature, docstring)
+             SELECT rowid, id, name, kind, signature, docstring FROM symbols;",
+        )?;
+        Ok(())
     }
 
     pub fn get_callers(&self, symbol_id: u64) -> rusqlite::Result<Vec<(String, String)>> {
@@ -1084,6 +1159,246 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1, "idx_symbols_lower_name index should exist");
+    }
+
+    #[test]
+    fn test_schema_idempotent() {
+        // Already covered by test_init_idempotent, verify FTS5 is re-creatable
+        let conn = Connection::open_in_memory().unwrap();
+        Store::init_schema(&conn).unwrap();
+        // Second initialization should not error
+        let result = Store::init_schema(&conn);
+        assert!(result.is_ok(), "init_schema should be idempotent");
+    }
+
+    // --- Step 1b: search_fts tests ---
+
+    #[test]
+    fn test_fts_basic_search() {
+        let store = create_store();
+        let mut symbols = vec![
+            Symbol { id: 0, name: "getUser".into(), kind: SymbolKind::Function, file_path: "a.ts".into(), line: 1, column: 1, signature: Some("getUser(id: number)".into()), docstring: None },
+            Symbol { id: 0, name: "getConfig".into(), kind: SymbolKind::Function, file_path: "b.ts".into(), line: 1, column: 1, signature: None, docstring: None },
+            Symbol { id: 0, name: "setValue".into(), kind: SymbolKind::Function, file_path: "c.ts".into(), line: 1, column: 1, signature: None, docstring: None },
+        ];
+        store.insert_symbols(&mut symbols).unwrap();
+
+        let results = store.search_fts("\"get\"*", 10).unwrap();
+        assert!(results.len() >= 2, "should find getUser and getConfig");
+        assert!(results.iter().any(|r| r.symbol.name == "getUser"));
+        assert!(results.iter().any(|r| r.symbol.name == "getConfig"));
+    }
+
+    #[test]
+    fn test_fts_has_reasonable_score() {
+        let store = create_store();
+        let mut symbols = vec![
+            Symbol { id: 0, name: "auth".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: Some("authenticate user".into()) },
+            Symbol { id: 0, name: "auth_user".into(), kind: SymbolKind::Function, file_path: "b.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+        ];
+        store.insert_symbols(&mut symbols).unwrap();
+
+        let results = store.search_fts("\"auth\"*", 10).unwrap();
+        assert!(!results.is_empty(), "should find results");
+        // BM25 typically returns negative scores; any non-NaN value is fine
+        assert!(!results[0].score.is_nan(), "score should be valid");
+    }
+
+    #[test]
+    fn test_fts_empty_query() {
+        let store = create_store();
+        let mut symbols = vec![
+            Symbol { id: 0, name: "foo".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+        ];
+        store.insert_symbols(&mut symbols).unwrap();
+
+        // Empty FTS query returns empty results via search_fts with empty string
+        // The search_fts method delegates to FTS5 which errors on empty query,
+        // so our caller (search) should prevent this case.
+        // Here we just verify the raw method behavior:
+        let result = store.search_fts("", 10);
+        assert!(result.is_err() || result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_fts_sanitize_boolean_ops() {
+        let store = create_store();
+        let mut symbols = vec![
+            Symbol { id: 0, name: "bar".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+        ];
+        store.insert_symbols(&mut symbols).unwrap();
+
+        // "AND OR NOT" should be stripped; "bar" remains
+        let sanitized = sanitize_fts_query("NOT AND OR NEAR bar");
+        assert!(!sanitized.contains("NOT"), "boolean ops should be removed");
+        assert!(sanitized.contains("bar"), "bar should survive");
+        let results = store.search_fts(&sanitized, 10).unwrap();
+        assert!(!results.is_empty(), "should find bar");
+    }
+
+    #[test]
+    fn test_fts_query_limit() {
+        let store = create_store();
+        let mut symbols = vec![
+            Symbol { id: 0, name: "foo1".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+            Symbol { id: 0, name: "foo2".into(), kind: SymbolKind::Function, file_path: "b.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+            Symbol { id: 0, name: "foo3".into(), kind: SymbolKind::Function, file_path: "c.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+        ];
+        store.insert_symbols(&mut symbols).unwrap();
+
+        let results = store.search_fts("\"foo\"*", 2).unwrap();
+        assert!(results.len() <= 2, "limit should cap results");
+    }
+
+    // --- Step 1c: search_like tests ---
+
+    #[test]
+    fn test_like_substring() {
+        let store = create_store();
+        let mut symbols = vec![
+            Symbol { id: 0, name: "my_getter".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+            Symbol { id: 0, name: "getter".into(), kind: SymbolKind::Function, file_path: "b.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+            Symbol { id: 0, name: "getUser".into(), kind: SymbolKind::Function, file_path: "c.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+            Symbol { id: 0, name: "setter".into(), kind: SymbolKind::Function, file_path: "d.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+        ];
+        store.insert_symbols(&mut symbols).unwrap();
+
+        let results = store.search_like("get", 10).unwrap();
+        assert_eq!(results.len(), 3, "should find my_getter, getter, getUser");
+        let names: Vec<&str> = results.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"my_getter"));
+        assert!(names.contains(&"getter"));
+        assert!(names.contains(&"getUser"));
+    }
+
+    #[test]
+    fn test_like_case_insensitive() {
+        let store = create_store();
+        let mut symbols = vec![
+            Symbol { id: 0, name: "getUser".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+        ];
+        store.insert_symbols(&mut symbols).unwrap();
+
+        let results = store.search_like("getuser", 10).unwrap();
+        assert_eq!(results.len(), 1, "case-insensitive search should match getUser");
+        assert_eq!(results[0].name, "getUser");
+    }
+
+    #[test]
+    fn test_like_search_signature() {
+        let store = create_store();
+        let mut symbols = vec![
+            Symbol { id: 0, name: "parse".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: Some("fn parse() -> i32".into()), docstring: None },
+            Symbol { id: 0, name: "run".into(), kind: SymbolKind::Function, file_path: "b.rs".into(), line: 1, column: 1, signature: Some("fn run()".into()), docstring: None },
+        ];
+        store.insert_symbols(&mut symbols).unwrap();
+
+        let results = store.search_like("i32", 10).unwrap();
+        assert_eq!(results.len(), 1, "should find symbol with i32 in signature");
+        assert_eq!(results[0].name, "parse");
+    }
+
+    #[test]
+    fn test_like_escape_wildcard() {
+        let store = create_store();
+        let mut symbols = vec![
+            Symbol { id: 0, name: "foo_bar".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+        ];
+        store.insert_symbols(&mut symbols).unwrap();
+
+        // _ should be literal, not single-char wildcard
+        let results = store.search_like("foo_bar", 10).unwrap();
+        assert_eq!(results.len(), 1, "_ should be literal, so foo_bar matches");
+    }
+
+    #[test]
+    fn test_like_escape_percent() {
+        let store = create_store();
+        let mut symbols = vec![
+            Symbol { id: 0, name: "100%".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+        ];
+        store.insert_symbols(&mut symbols).unwrap();
+
+        // % should be literal
+        let results = store.search_like("100%", 10).unwrap();
+        assert_eq!(results.len(), 1, "% should be literal");
+    }
+
+    #[test]
+    fn test_like_empty_query() {
+        let store = create_store();
+        let mut symbols = vec![
+            Symbol { id: 0, name: "foo".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+        ];
+        store.insert_symbols(&mut symbols).unwrap();
+
+        // empty query -> pattern "%%" -> matches everything
+        let results = store.search_like("", 10).unwrap();
+        assert!(results.len() >= 1, "empty LIKE should match all");
+    }
+
+    #[test]
+    fn test_like_limit() {
+        let store = create_store();
+        let mut symbols = vec![
+            Symbol { id: 0, name: "foo1".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+            Symbol { id: 0, name: "foo2".into(), kind: SymbolKind::Function, file_path: "b.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+            Symbol { id: 0, name: "foo3".into(), kind: SymbolKind::Function, file_path: "c.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+        ];
+        store.insert_symbols(&mut symbols).unwrap();
+
+        let results = store.search_like("foo", 2).unwrap();
+        assert_eq!(results.len(), 2, "limit should cap results");
+    }
+
+    // --- Step 1d: backfill_fts tests ---
+
+    #[test]
+    fn test_backfill_existing_data() {
+        let conn = Connection::open_in_memory().unwrap();
+        Store::init_schema(&conn).unwrap();
+        let store = Store { conn: Arc::new(Mutex::new(conn)) };
+
+        // Insert symbols (triggers populate FTS5)
+        let mut symbols = vec![
+            Symbol { id: 0, name: "foo".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+            Symbol { id: 0, name: "bar".into(), kind: SymbolKind::Variable, file_path: "b.rs".into(), line: 2, column: 2, signature: None, docstring: None },
+        ];
+        store.insert_symbols(&mut symbols).unwrap();
+
+        // Backfill should be safe (INSERT OR IGNORE prevents duplicates)
+        store.backfill_fts().unwrap();
+
+        // Verify FTS5 still has the expected rows (no duplicates)
+        {
+            let conn = store.conn.lock().unwrap();
+            let count: i64 = conn.query_row("SELECT count(*) FROM symbols_fts", [], |r| r.get(0)).unwrap();
+            assert_eq!(count, 2, "FTS5 should have 2 rows after backfill");
+        }
+
+        // Verify FTS5 search works
+        let results = store.search_fts("\"foo\"*", 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].symbol.name, "foo");
+    }
+
+    #[test]
+    fn test_backfill_idempotent() {
+        let store = create_store();
+
+        let mut symbols = vec![
+            Symbol { id: 0, name: "foo".into(), kind: SymbolKind::Function, file_path: "a.rs".into(), line: 1, column: 1, signature: None, docstring: None },
+        ];
+        store.insert_symbols(&mut symbols).unwrap();
+
+        // After trigger-based insert, FTS5 already has the row
+        // Backfill uses INSERT OR IGNORE, so it should be idempotent
+        store.backfill_fts().unwrap();
+        store.backfill_fts().unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let count: i64 = conn.query_row("SELECT count(*) FROM symbols_fts", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1, "backfill should be idempotent");
     }
 
     // --- helpers ---
