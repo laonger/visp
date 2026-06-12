@@ -27,6 +27,8 @@ pub struct Session {
     pub project_path: PathBuf,
     pub status: SessionStatus,
     pub created_at: Instant,
+    /// Unix 毫秒时间戳，用于 DB 持久化（Option 以兼容运行时无法确定时间的场景）
+    pub created_at_unix: Option<i64>,
     pub history: Vec<Message>,
     pub config: LlmConfig,
     pub system_prompt_template: String,
@@ -285,6 +287,7 @@ impl SessionManager {
             project_path: project_path.to_path_buf(),
             status: SessionStatus::Idle,
             created_at: Instant::now(),
+            created_at_unix: None,
             history: Vec::new(),
             config,
             system_prompt_template: prompt_template,
@@ -430,6 +433,68 @@ mod tests {
         }
     }
 
+    // ── Step 3: Session.created_at_unix ──
+
+    #[test]
+    fn test_session_created_at_unix_default_none() {
+        let mut store = InMemorySessionStore::new();
+        let session = Session {
+            id: "test-u1".into(),
+            project_path: PathBuf::from("/tmp"),
+            status: SessionStatus::Idle,
+            created_at: Instant::now(),
+            created_at_unix: None,
+            history: vec![],
+            config: LlmConfig::default(),
+            system_prompt_template: "default".into(),
+            approved_tools: HashSet::new(),
+        };
+        let id = session.id.clone();
+        store.create(session).unwrap();
+        let got = store.get(&id).unwrap();
+        assert_eq!(got.created_at_unix, None);
+    }
+
+    #[test]
+    fn test_session_created_at_unix_read_write() {
+        let mut store = InMemorySessionStore::new();
+        let session = Session {
+            id: "test-u2".into(),
+            project_path: PathBuf::from("/tmp"),
+            status: SessionStatus::Idle,
+            created_at: Instant::now(),
+            created_at_unix: Some(1700000000000),
+            history: vec![],
+            config: LlmConfig::default(),
+            system_prompt_template: "default".into(),
+            approved_tools: HashSet::new(),
+        };
+        let id = session.id.clone();
+        store.create(session.clone()).unwrap();
+        // get() currently returns reference to internal Session
+        // We use get() via the trait to verify read
+        let got = store.get(&id).unwrap();
+        assert_eq!(got.created_at_unix, Some(1700000000000));
+
+        // update
+        let mut updated = session.clone();
+        updated.created_at_unix = Some(1700000000001);
+        store.update(updated).unwrap();
+        let got = store.get(&id).unwrap();
+        assert_eq!(got.created_at_unix, Some(1700000000001));
+    }
+
+    #[test]
+    fn test_session_created_at_unix_in_create() {
+        let manager = SessionManager::new(InMemorySessionStore::new());
+        let session = manager
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        // Rust Instant used for runtime; created_at_unix is None unless explicitly set
+        assert_eq!(session.created_at_unix, None);
+        assert!(session.created_at.elapsed().as_secs() < 5);
+    }
+
     // ── InMemorySessionStore CRUD ──────────────────────────────────────────
 
     #[test]
@@ -440,6 +505,7 @@ mod tests {
             project_path: PathBuf::from("/tmp"),
             status: SessionStatus::Idle,
             created_at: Instant::now(),
+            created_at_unix: None,
             history: vec![],
             config: LlmConfig::default(),
             system_prompt_template: "default".into(),
