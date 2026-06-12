@@ -208,6 +208,18 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 return false;
             }
 
+            // F1: 切换帮助弹窗
+            if key.code == KeyCode::F(1) {
+                app.show_help = !app.show_help;
+                return false;
+            }
+
+            // 帮助弹窗打开时，按任意键关闭（F1 在上面已经处理了切换）
+            if app.show_help {
+                app.show_help = false;
+                return false;
+            }
+
             if app.confirm.is_some() {
                 // Ctrl+C 在确认模式下也能取消
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -426,6 +438,11 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 }
             }
         }
+        // 帮助弹窗打开时，鼠标点击关闭
+        Event::Mouse(m) if m.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left) && app.show_help => {
+            app.show_help = false;
+            return false;
+        }
         // 状态栏左键点击切换鼠标模式（底部区域，右半侧）
         Event::Mouse(m) if m.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
             if let Ok((term_cols, term_rows)) = crossterm::terminal::size() {
@@ -615,10 +632,7 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
     match parts[0] {
         "/clear" => app.clear_messages(),
         "/help" => {
-            app.add_message(
-                LineType::Status,
-                "/clear /new /temp <val> /model <name> /mouse /init /help".into(),
-            );
+            app.show_help = !app.show_help;
         }
         "/new" => {
             // 标记需要创建新 session，主循环中处理（需要 async 调用 client.create_session）

@@ -93,6 +93,11 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
         render_input_area(app, f, bottom_chunks[0]);
         render_status_bar(app, f, bottom_chunks[2]);
     }
+
+    // 帮助弹窗（在最上层绘制）
+    if app.show_help {
+        render_help_popup(f, f.area());
+    }
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -164,21 +169,26 @@ fn render_block(
         );
     }
 
-    // 4) drop shadow
+    // 4) drop shadow（右侧 1 列 + 底部 1 行）
     if style.shadow && actual_lines > 0 && style.bg_fill.is_some() {
         let buf = f.buffer_mut();
-        let shadow_right_x = area.x + content_w;
         let right = area.right();
+        let shadow_col = area.x + content_w; // 阴影起始列
+        let bottom_y = shadow_y; // 阴影起始行
+
+        // 右侧阴影：1 列
         for row in content_y..(shadow_y).min(buf.area().bottom()) {
-            if shadow_right_x < right {
-                buf[(shadow_right_x, row)].set_bg(theme::SHADOW);
+            let x = shadow_col;
+            if x < right {
+                buf[(x, row)].set_bg(theme::SHADOW);
             }
         }
-        let bottom_y = shadow_y;
-        if bottom_y < buf.area().bottom() {
-            for x in (area.x + 1)..=shadow_right_x {
+        // 底部阴影：1 行
+        let row = bottom_y;
+        if row < buf.area().bottom() {
+            for x in (area.x + 1)..shadow_col {
                 if x < right {
-                    buf[(x, bottom_y)].set_bg(theme::SHADOW);
+                    buf[(x, row)].set_bg(theme::SHADOW);
                 }
             }
         }
@@ -506,7 +516,7 @@ fn render_input_area(app: &mut AppState, f: &mut Frame, area: Rect) {
             .map(|s| s.as_str())
             .unwrap_or("");
         if current.starts_with('/') {
-            let all_cmds = ["/clear", "/help", "/temp", "/model", "/init", "/mouse"];
+            let all_cmds = ["/clear", "/help", "/new", "/temp", "/model", "/init", "/mouse"];
             let hint: Vec<&str> = if current.len() > 1 {
                 all_cmds
                     .iter()
@@ -549,7 +559,7 @@ fn render_status_bar(app: &AppState, f: &mut Frame, area: Rect) {
         "Select"
     };
 
-    let left_text = format!("{sid} | {model} | {status} | [{mouse}]", model = app.model);
+    let left_text = format!("{sid} | {model} | {status} | [{mouse}] | /help = help", model = app.model);
 
     // 有 token 时左右分割显示，否则整行给左侧
     if app.total_input_tokens > 0 || app.total_output_tokens > 0 {
@@ -596,4 +606,94 @@ fn render_status_bar(app: &AppState, f: &mut Frame, area: Rect) {
             .block(Block::default());
         f.render_widget(left, area);
     }
+}
+
+// ════════════════════════════════════════════════════════════════
+// 帮助弹窗
+// ════════════════════════════════════════════════════════════════
+
+/// 渲染帮助弹窗覆盖层，居中显示，内容为所有命令和快捷键
+fn render_help_popup(f: &mut Frame, area: Rect) {
+    let cmd_items = [
+        ("/clear",      "Clear chat history"),
+        ("/help",       "Show this help popup"),
+        ("/new",        "Start a new session"),
+        ("/temp <n>",   "Set temperature (0.0–1.0)"),
+        ("/model <m>",  "Switch model"),
+        ("/init",       "Initialize session with system prompt"),
+        ("/mouse",      "Toggle mouse capture mode"),
+    ];
+    let key_items = [
+        ("F1 / /help",  "Toggle this help popup"),
+        ("Alt+M",       "Toggle mouse capture mode"),
+        ("Ctrl+C",      "Cancel generation / confirm"),
+        ("↑ / ↓",       "Input history navigation"),
+        ("Ctrl+D",      "Quit"),
+        ("Enter",       "Send message / confirm selection"),
+    ];
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // 命令小节
+    lines.push(Line::from(
+        Span::styled(" Commands:", Style::default().fg(theme::HELP_SECTION_FG)),
+    ));
+    lines.push(Line::from(""));
+    for (key, desc) in &cmd_items {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<14}", key), Style::default().fg(theme::HELP_KEY_FG)),
+            Span::styled(*desc, Style::default().fg(theme::HELP_DESC_FG)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(""));
+
+    // 快捷键小节
+    lines.push(Line::from(
+        Span::styled(" Shortcuts:", Style::default().fg(theme::HELP_SECTION_FG)),
+    ));
+    lines.push(Line::from(""));
+    for (key, desc) in &key_items {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<14}", key), Style::default().fg(theme::HELP_KEY_FG)),
+            Span::styled(*desc, Style::default().fg(theme::HELP_DESC_FG)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(
+        Span::styled(
+            " Press any key or click to close",
+            Style::default().fg(theme::HELP_HINT_FG),
+        ),
+    ));
+
+    // 计算弹窗尺寸
+    let popup_width = 46.min(area.width.saturating_sub(4));
+    let popup_height = (lines.len() + 2) as u16; // +2 for top/bottom border
+    let popup_height = popup_height.min(area.height.saturating_sub(4));
+
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    // 背景覆盖层
+    let overlay = Block::default()
+        .style(Style::default().bg(theme::HELP_BG));
+    f.render_widget(overlay, popup_area);
+
+    // 弹窗主体（带边框）
+    let popup = Paragraph::new(Text::from(lines))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::HELP_BORDER_FG))
+                .title(" Help ")
+                .title_style(Style::default().fg(theme::HELP_TITLE_FG))
+                .style(Style::default().bg(theme::HELP_BG)),
+        )
+        .style(Style::default().bg(theme::HELP_BG));
+    f.render_widget(popup, popup_area);
 }

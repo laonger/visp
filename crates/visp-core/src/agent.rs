@@ -792,14 +792,6 @@ pub async fn run_agent_loop(
                     }
                 }
 
-                // Status update
-                let _ = tx
-                    .send(AgentEvent::StatusUpdate(format!(
-                        "Executing tool: {}",
-                        tc.name
-                    )))
-                    .await;
-
                 // Parse arguments and execute
                 let args = serde_json::from_str(&tc.arguments).unwrap_or(serde_json::json!({}));
                 let tool_ctx = ToolContext {

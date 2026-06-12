@@ -75,6 +75,25 @@ pub const CONFIRM_OPTION_LABEL_FG: Color = Color::Cyan;
 pub const CONFIRM_OPTION_FG: Color = Color::White;
 
 // ════════════════════════════════════════════════════════════════
+// Help Popup
+// ════════════════════════════════════════════════════════════════
+
+/// 帮助弹窗背景
+pub const HELP_BG: Color = Color::from_u32(0x00222233);
+/// 帮助弹窗边框
+pub const HELP_BORDER_FG: Color = Color::Cyan;
+/// 帮助弹窗标题
+pub const HELP_TITLE_FG: Color = Color::Cyan;
+/// 帮助弹窗小节标题
+pub const HELP_SECTION_FG: Color = Color::Yellow;
+/// 帮助弹窗快捷键/命令
+pub const HELP_KEY_FG: Color = Color::White;
+/// 帮助弹窗说明文字
+pub const HELP_DESC_FG: Color = Color::DarkGray;
+/// 帮助弹窗底部提示
+pub const HELP_HINT_FG: Color = Color::DarkGray;
+
+// ════════════════════════════════════════════════════════════════
 // BlockStyle — 消息块布局参数
 // ════════════════════════════════════════════════════════════════
 
@@ -128,8 +147,8 @@ pub const THINKING_STYLE: BlockStyle = BlockStyle {
 pub const TOOL_STYLE: BlockStyle = BlockStyle {
     margin_vertical: 1,
     margin_horizontal: 1,
-    bg_fill: Some(TOOL_BG),
-    shadow: true,
+    bg_fill: None,
+    shadow: false,
     bottom_pad: 0,
 };
 
@@ -137,8 +156,8 @@ pub const TOOL_STYLE: BlockStyle = BlockStyle {
 pub const TOOL_CALL_STYLE: BlockStyle = BlockStyle {
     margin_vertical: 1,
     margin_horizontal: 1,
-    bg_fill: Some(TOOL_BG),
-    shadow: true,
+    bg_fill: None,
+    shadow: false,
     bottom_pad: 0,
 };
 
@@ -201,3 +220,5 @@ pub fn style_for(line_type: LineType) -> BlockStyle {
         LineType::Error | LineType::Status => TOOL_STYLE,
     }
 }
+
+// (help popup colors removed)

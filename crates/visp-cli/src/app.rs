@@ -10,6 +10,22 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::theme;
 
+/// 检测内容是否为 diff 格式（git diff, diff -u 等输出）
+fn detect_diff(content: &str) -> Option<()> {
+    let mut lines = content.lines();
+    // 检查是否以 diff --git 开头（git diff）
+    if lines.clone().any(|l| l.starts_with("diff --git")) {
+        return Some(());
+    }
+    // 或检查是否有 --- / +++ 配对（context/unified diff）
+    let has_three_dashes = lines.clone().any(|l| l.starts_with("--- "));
+    let has_plus_plus = lines.any(|l| l.starts_with("+++ "));
+    if has_three_dashes && has_plus_plus {
+        return Some(());
+    }
+    None
+}
+
 /// 用 syntect 高亮代码块，返回 ratatui 行
 fn highlight_code_block(lang: &str, code: &str) -> Vec<Line<'static>> {
     use syntect::easy::HighlightLines;
@@ -22,7 +38,14 @@ fn highlight_code_block(lang: &str, code: &str) -> Vec<Line<'static>> {
     let theme = &ts.themes["base16-ocean.dark"];
 
     let syntax = if lang.is_empty() {
-        ss.find_syntax_plain_text()
+        // 先检测 diff 格式（git diff / diff -u 等输出）
+        detect_diff(code)
+            .and_then(|_| ss.find_syntax_by_name("diff"))
+            .or_else(|| {
+                // 再尝试从 shebang（#!/usr/bin/env python 等）检测语言
+                ss.find_syntax_by_first_line(code)
+            })
+            .unwrap_or_else(|| ss.find_syntax_plain_text())
     } else {
         ss.find_syntax_by_token(lang)
             .or_else(|| ss.find_syntax_by_name(lang))
@@ -354,33 +377,57 @@ impl MessageCache {
                         Style::default().fg(theme::TOOL_RESULT_FG),
                     ));
                 } else {
-                    // 显示内容（带截断）
-                    let wrapped = wrap_text(&msg.content, width);
-                    let display_lines = if let Some(max) = max_lines {
-                        let total_len = wrapped.len();
-                        if total_len > max {
-                            let mut truncated: Vec<String> =
-                                wrapped.into_iter().take(max).collect();
-                            let remaining = total_len.saturating_sub(max);
-                            truncated.push(format!("... [truncated, {} more lines]", remaining));
-                            truncated
-                        } else {
-                            wrapped
-                        }
-                    } else {
-                        wrapped // 不截断
-                    };
-                    for dl in &display_lines {
-                        let content = if dl.is_empty() {
-                            " ".repeat(width as usize)
-                        } else {
-                            pad_to_width(dl, width as usize)
-                        };
+                    // bash/shell 输出：首行就是内容，不走"灰色状态头"模式
+                    let is_shell = matches!(name.as_str(), "bash" | "cmd" | "powershell");
+
+                    let content_body = if is_shell {
+                        // shell：全部内容传语法高亮，不加灰色头
+                        &msg.content
+                    } else if let Some((first, rest)) = msg.content.split_once('\n') {
+                        // 其他工具：第一行作为灰色状态头
+                        let status = format!("  ✓ {} {}", icon, first);
                         lines.push(Line::styled(
-                            content,
+                            pad_to_width(&status, width as usize),
+                            Style::default().fg(theme::TOOL_RESULT_FG),
+                        ));
+                        rest
+                    } else {
+                        let summary = msg.content.clone();
+                        let status = format!("  ✓ {} {}", icon, summary);
+                        lines.push(Line::styled(
+                            pad_to_width(&status, width as usize),
+                            Style::default().fg(theme::TOOL_RESULT_FG),
+                        ));
+                        return Self {
+                            msg_id: msg.id,
+                            msg_version: msg.version,
+                            width,
+                            lines,
+                            line_count: 1,
+                        };
+                    };
+
+                    let mut highlighted = highlight_code_block("", content_body);
+                    let total_len = highlighted.len();
+                    if let Some(max) = max_lines
+                        && total_len > max
+                    {
+                        highlighted.truncate(max);
+                        let remaining = total_len.saturating_sub(max);
+                        highlighted.push(Line::styled(
+                            format!("... [truncated, {} more lines]", remaining),
                             Style::default().fg(theme::TOOL_RESULT_FG),
                         ));
                     }
+                    // 填充每行到完整宽度
+                    for line in &mut highlighted {
+                        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                        let w = text.len();
+                        if (w as u16) < width {
+                            line.spans.push(Span::raw(" ".repeat((width - w as u16) as usize)));
+                        }
+                    }
+                    lines.extend(highlighted);
                 }
                 let line_count = lines.len() as u16;
                 return Self {
@@ -549,6 +596,8 @@ pub struct AppState {
     pub mouse_captured: bool,
     /// 用户输入了 /new 命令，主循环需要创建新 session
     pub pending_new_session: bool,
+    /// 是否显示帮助弹窗
+    pub show_help: bool,
 }
 
 impl AppState {
@@ -583,6 +632,7 @@ impl AppState {
             total_cache_read_input_tokens: 0,
             mouse_captured: true,
             pending_new_session: false,
+            show_help: false,
         }
     }
 

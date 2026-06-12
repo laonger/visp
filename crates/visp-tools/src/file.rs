@@ -334,9 +334,10 @@ impl Tool for WriteFile {
 
         match fs::write(&path, content) {
             Ok(_) => ToolResult::success(format!(
-                "Written {} bytes to {}",
+                "Written {} bytes to {}\n{}",
                 content.len(),
-                path.display()
+                path.display(),
+                content
             )),
             Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
         }
@@ -499,7 +500,15 @@ impl Tool for EditFile {
         }
 
         match fs::rename(&temp_path, &path) {
-            Ok(_) => ToolResult::success(format!("Replaced 1 occurrence in {}", path.display())),
+            Ok(_) => {
+                // 生成 unified diff：原内容 vs 新内容
+                let diff_output = diff_text(&path, &content, &new_content);
+                ToolResult::success(format!(
+                    "Replaced 1 occurrence in {}\n{}",
+                    path.display(),
+                    diff_output
+                ))
+            }
             Err(e) => {
                 let _ = fs::remove_file(&temp_path);
                 ToolResult::error(format!("Failed to rename temp file: {}", e))
@@ -547,6 +556,18 @@ fn validate_write_path(target: &Path, working_dir: &Path) -> Result<PathBuf, Str
 
 // ---------------------------------------------------------------------------
 // 测试
+
+/// 生成两个文本之间的 unified diff（仅显示有变化的 hunk + 上下文）
+fn diff_text(path: &Path, old: &str, new: &str) -> String {
+    use similar::TextDiff;
+
+    let diff = TextDiff::from_lines(old, new)
+        .unified_diff()
+        .context_radius(3)
+        .header(&format!("a/{}", path.display()), &format!("b/{}", path.display()))
+        .to_string();
+    diff
+}
 
 #[cfg(test)]
 mod tests {
