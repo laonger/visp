@@ -439,7 +439,10 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
             }
         }
         // 帮助弹窗打开时，鼠标点击关闭
-        Event::Mouse(m) if m.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left) && app.show_help => {
+        Event::Mouse(m)
+            if m.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left)
+                && app.show_help =>
+        {
             app.show_help = false;
             return false;
         }

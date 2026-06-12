@@ -424,7 +424,8 @@ impl MessageCache {
                         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
                         let w = text.len();
                         if (w as u16) < width {
-                            line.spans.push(Span::raw(" ".repeat((width - w as u16) as usize)));
+                            line.spans
+                                .push(Span::raw(" ".repeat((width - w as u16) as usize)));
                         }
                     }
                     lines.extend(highlighted);
