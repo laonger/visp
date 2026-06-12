@@ -7,6 +7,7 @@ members = [
     "crates/visp-context",
     "crates/visp-core",
     "crates/visp-daemon",
+    "crates/visp-db",
     "crates/visp-llm",
     "crates/visp-mcp",
     "crates/visp-proto",

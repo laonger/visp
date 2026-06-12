@@ -4051,6 +4051,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "visp-db"
+version = "0.3.0"
+dependencies = [
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "visp-core",
+]
+
+[[package]]
 name = "visp-llm"
 version = "0.3.0"
 dependencies = [
