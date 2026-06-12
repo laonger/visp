@@ -72,7 +72,37 @@ impl Store {
                 symbol_id INTEGER REFERENCES symbols(id) ON DELETE CASCADE,
                 re_export_source TEXT
             );
-            CREATE INDEX IF NOT EXISTS idx_exports_file ON exports(file_path, export_name);",
+            CREATE INDEX IF NOT EXISTS idx_exports_file ON exports(file_path, export_name);
+
+            CREATE INDEX IF NOT EXISTS idx_symbols_kind ON symbols(kind);
+            CREATE INDEX IF NOT EXISTS idx_symbols_lower_name ON symbols(LOWER(name));
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
+                id UNINDEXED,
+                name,
+                kind UNINDEXED,
+                signature,
+                docstring,
+                content='symbols',
+                content_rowid='rowid'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS symbols_ai AFTER INSERT ON symbols BEGIN
+                INSERT INTO symbols_fts(rowid, id, name, kind, signature, docstring)
+                VALUES (NEW.rowid, NEW.id, NEW.name, NEW.kind, NEW.signature, NEW.docstring);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS symbols_ad AFTER DELETE ON symbols BEGIN
+                INSERT INTO symbols_fts(symbols_fts, rowid, id, name, kind, signature, docstring)
+                VALUES ('delete', OLD.rowid, OLD.id, OLD.name, OLD.kind, OLD.signature, OLD.docstring);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS symbols_au AFTER UPDATE ON symbols BEGIN
+                INSERT INTO symbols_fts(symbols_fts, rowid, id, name, kind, signature, docstring)
+                VALUES ('delete', OLD.rowid, OLD.id, OLD.name, OLD.kind, OLD.signature, OLD.docstring);
+                INSERT INTO symbols_fts(rowid, id, name, kind, signature, docstring)
+                VALUES (NEW.rowid, NEW.id, NEW.name, NEW.kind, NEW.signature, NEW.docstring);
+            END;",
         )?;
         Ok(())
     }
@@ -884,6 +914,176 @@ mod tests {
         let files = store.list_indexed_files().unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0], "b.rs");
+    }
+
+    // --- Step 1a: FTS5 schema + auxiliary index tests ---
+
+    #[test]
+    fn test_fts_table_exists() {
+        let conn = Connection::open_in_memory().unwrap();
+        Store::init_schema(&conn).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='symbols_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "symbols_fts virtual table should exist");
+    }
+
+    #[test]
+    fn test_fts_triggers_exist() {
+        let conn = Connection::open_in_memory().unwrap();
+        Store::init_schema(&conn).unwrap();
+        for trigger_name in &["symbols_ai", "symbols_ad", "symbols_au"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name=?1",
+                    rusqlite::params![trigger_name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "trigger {trigger_name} should exist");
+        }
+    }
+
+    #[test]
+    fn test_fts_backfill_on_insert() {
+        let store = create_store();
+        let mut symbols = vec![Symbol {
+            id: 0,
+            name: "test_func".into(),
+            kind: SymbolKind::Function,
+            file_path: "lib.rs".into(),
+            line: 10,
+            column: 4,
+            signature: Some("fn test_func()".into()),
+            docstring: Some("A test function".into()),
+        }];
+        store.insert_symbols(&mut symbols).unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM symbols_fts WHERE name = 'test_func'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "FTS5 should have the inserted symbol");
+
+        let name: String = conn
+            .query_row(
+                "SELECT name FROM symbols_fts WHERE name = 'test_func'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(name, "test_func");
+    }
+
+    #[test]
+    fn test_fts_backfill_on_update() {
+        let store = create_store();
+        let mut symbols = vec![Symbol {
+            id: 0,
+            name: "old_name".into(),
+            kind: SymbolKind::Function,
+            file_path: "lib.rs".into(),
+            line: 10,
+            column: 4,
+            signature: None,
+            docstring: None,
+        }];
+        store.insert_symbols(&mut symbols).unwrap();
+        let sym_id = symbols[0].id;
+
+        // Direct SQL update to test the update trigger
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE symbols SET name = ?1 WHERE id = ?2",
+            rusqlite::params!["new_name", sym_id as i64],
+        )
+        .unwrap();
+        drop(conn);
+
+        // OLD name should be gone from FTS5
+        let conn = store.conn.lock().unwrap();
+        let count_old: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM symbols_fts WHERE name = 'old_name'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count_old, 0, "OLD name should be deleted from FTS5");
+
+        // NEW name should be in FTS5
+        let count_new: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM symbols_fts WHERE name = 'new_name'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count_new, 1, "NEW name should be in FTS5");
+    }
+
+    #[test]
+    fn test_fts_backfill_on_delete() {
+        let store = create_store();
+        let mut symbols = vec![Symbol {
+            id: 0,
+            name: "to_delete".into(),
+            kind: SymbolKind::Function,
+            file_path: "lib.rs".into(),
+            line: 10,
+            column: 4,
+            signature: None,
+            docstring: None,
+        }];
+        store.insert_symbols(&mut symbols).unwrap();
+
+        store.delete_by_file("lib.rs").unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM symbols_fts WHERE name = 'to_delete'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "FTS5 should have deleted the symbol");
+    }
+
+    #[test]
+    fn test_idx_kind_exists() {
+        let conn = Connection::open_in_memory().unwrap();
+        Store::init_schema(&conn).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_symbols_kind'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "idx_symbols_kind index should exist");
+    }
+
+    #[test]
+    fn test_idx_lower_name_exists() {
+        let conn = Connection::open_in_memory().unwrap();
+        Store::init_schema(&conn).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_symbols_lower_name'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "idx_symbols_lower_name index should exist");
     }
 
     // --- helpers ---
