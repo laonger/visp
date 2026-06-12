@@ -803,9 +803,12 @@ pub async fn run_agent_loop(
                             "tool call arguments truncated or malformed (likely max_output_tokens exceeded)"
                         );
                         let result = ToolResult::error(format!(
-                            "Tool call arguments are truncated/incomplete ({} bytes, parse error: {}). \
-                             The LLM response likely exceeded max_output_tokens. \
-                             Increase max_output_tokens in daemon config or reduce the tool output size.",
+                            "[TRUNCATED] Tool call arguments incomplete ({} bytes, parse: {}). \
+                             The content exceeded max_output_tokens.\n\
+                             To fix this, split the content into smaller parts:\n\
+                             - Use multiple smaller write_file or edit_file calls\n\
+                             - Or use edit_file to incrementally build the file\n\
+                             - Do NOT retry the same large write_file call — it will fail again.",
                             tc.arguments.len(), e
                         ));
                         let _ = tx
