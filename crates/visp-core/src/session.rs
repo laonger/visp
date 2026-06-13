@@ -424,9 +424,7 @@ impl SessionManager {
     /// 追加消息到会话历史
     pub fn append_message(&self, id: &str, msg: Message) -> Result<(), SessionError> {
         let mut store = self.store.lock().unwrap();
-        let mut session = store.get(id)?;
-        session.history.push(msg);
-        store.update(session)
+        store.append_message(id, msg)
     }
 
     /// 更新会话的 LLM 配置

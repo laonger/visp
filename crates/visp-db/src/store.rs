@@ -84,9 +84,13 @@ impl SessionStore for SqliteSessionStore {
             .conn
             .lock()
             .map_err(|e| SessionError::Other(format!("Lock error: {e}")))?;
-        SessionRepo::get(&conn, session_id)
+        let mut session = SessionRepo::get(&conn, session_id)
             .map_err(|e| SessionError::Other(format!("Get session failed: {e}")))?
-            .ok_or_else(|| SessionError::NotFound(session_id.to_string()))
+            .ok_or_else(|| SessionError::NotFound(session_id.to_string()))?;
+        // Load messages from the message table to populate history
+        session.history = MessageRepo::get_by_session(&conn, session_id)
+            .map_err(|e| SessionError::Other(format!("Get messages failed: {e}")))?;
+        Ok(session)
     }
 
     fn list(&self) -> Result<Vec<Session>, SessionError> {

@@ -228,7 +228,14 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                             chat_handle.send_response(&q.query_id, 1, "");
                         }
                         app.stale_done_expected = true;
-                        app.streaming_text.clear();
+                        // 保留 assistant 已输出的消息，移除末尾的 [USER_QUERY] 标记
+                        if let Some(close_pos) = app.streaming_text.rfind("[/USER_QUERY]")
+                            && let Some(open_pos) =
+                                app.streaming_text[..close_pos].rfind("[USER_QUERY")
+                        {
+                            app.streaming_text.truncate(open_pos);
+                        }
+                        app.flush_streaming();
                         app.pending_usage = None;
                         app.current_request_id = None;
                         app.generating = false;
