@@ -599,6 +599,8 @@ pub struct AppState {
     pub pending_new_session: bool,
     /// 用户输入了 /list 命令，主循环需要列出 session
     pub pending_list_sessions: bool,
+    /// 用户输入了 /sessions <id>，主循环需要切换到目标 session
+    pub pending_switch_session: Option<String>,
     /// 是否显示帮助弹窗
     pub show_help: bool,
 }
@@ -636,6 +638,7 @@ impl AppState {
             mouse_captured: true,
             pending_new_session: false,
             pending_list_sessions: false,
+            pending_switch_session: None,
             show_help: false,
         }
     }
@@ -772,6 +775,7 @@ impl AppState {
         self.total_cache_read_input_tokens = 0;
         self.pending_new_session = false;
         self.pending_list_sessions = false;
+        self.pending_switch_session = None;
         self.session_id = session_id;
         self.model = model;
     }

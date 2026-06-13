@@ -218,6 +218,26 @@ pub async fn run(
             app.pending_list_sessions = false;
         }
 
+        // 处理 /sessions <id> 命令：切换到指定 session
+        if let Some(ref target_id) = app.pending_switch_session.clone() {
+            match client.get_session(target_id).await {
+                Ok(session) => {
+                    chat_handle.send_cancel();
+                    let full_id = session.session_id.clone();
+                    let model = session.model.clone();
+                    let short: String = full_id.chars().take(8).collect();
+                    chat_handle.session_id = full_id.clone();
+                    app.reset_for_new_session(full_id, model);
+                    chat_handle.send_join();
+                    app.add_message(LineType::Status, format!("Switched to session {short}"));
+                }
+                Err(e) => {
+                    app.add_message(LineType::Error, format!("Session not found: {e}"));
+                    app.pending_switch_session = None;
+                }
+            }
+        }
+
         if app.needs_render {
             // 确认状态始终需要渲染，不受流节流影响
             if app.generating && app.confirm.is_none() && !app.try_begin_stream_render() {
@@ -425,7 +445,14 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                         .unwrap_or_default();
                     if current.starts_with('/') {
                         let cmds = [
-                            "/clear", "/help", "/list", "/temp ", "/model ", "/init", "/mouse",
+                            "/clear",
+                            "/help",
+                            "/list",
+                            "/sessions ",
+                            "/temp ",
+                            "/model ",
+                            "/init",
+                            "/mouse",
                         ];
                         let completion = if current.len() > 1 {
                             cmds.iter()
@@ -708,6 +735,25 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
         "/list" => {
             app.add_message(LineType::Status, "Fetching sessions...".into());
             app.pending_list_sessions = true;
+        }
+        "/sessions" => {
+            if parts.len() >= 2 && !parts[1].is_empty() {
+                let target = parts[1].to_string();
+                app.add_message(
+                    LineType::Status,
+                    format!("Switching to session {target}..."),
+                );
+                app.streaming_text.clear();
+                app.generating = false;
+                app.stale_done_expected = false;
+                app.current_request_id = None;
+                app.confirm = None;
+                app.pending_switch_session = Some(target);
+            } else {
+                // 无参数：同 /list
+                app.add_message(LineType::Status, "Fetching sessions...".into());
+                app.pending_list_sessions = true;
+            }
         }
         "/temp" if parts.len() >= 2 => {
             if let Ok(temp) = parts[1].parse::<f64>() {
