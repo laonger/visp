@@ -334,19 +334,20 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                     return false;
                 }
                 KeyCode::Enter => {
-                    if let Some(idx) = ms.state.selected()
+                    if let Some(ms) = app.model_select.take()
+                        && let Some(idx) = ms.state.selected()
                         && idx < ms.model_names.len()
                     {
-                        let model = ms.model_names[idx].clone();
-                        app.model_select = None;
+                        let model_key = ms.model_names[idx].clone();
+                        app.model = ms.display_labels[idx].clone();
                         chat_handle.send_config_update(LlmConfig {
-                            model: Some(model.clone()),
+                            model: Some(model_key),
                             temperature: None,
                             max_tokens: None,
                             max_context_tokens: None,
                             extra: Default::default(),
                         });
-                        app.add_message(LineType::Status, format!("Model set to {model}"));
+                        app.add_message(LineType::Status, format!("Model set to {}", app.model));
                     }
                     app.needs_render = true;
                     return false;
