@@ -305,7 +305,6 @@ impl CoderDaemon for CoderDaemonService {
         let mut in_stream = request.into_inner();
         let (tx, rx) = mpsc::channel::<Result<proto::ServerMessage, Status>>(128);
 
-        let provider = self.provider.read().unwrap().clone();
         let tool_registry = self.tool_registry.clone();
         let rule_engine = self.rule_engine.clone();
         let session_mgr = self.session_mgr.clone();
@@ -411,8 +410,8 @@ impl CoderDaemon for CoderDaemonService {
                         // User message will be appended by run_agent_loop
                         let user_msg = Message::user(&text);
 
-                        // Clone Arc refs for the inner spawn
-                        let p = provider.clone();
+                        // 每次 agent loop 从 RwLock 读取当前 provider（可能已被 ConfigUpdate 切换）
+                        let p = provider_ref.read().unwrap().clone();
                         let tr = tool_registry.clone();
                         let re = rule_engine.clone();
                         let sm = session_mgr.clone();
