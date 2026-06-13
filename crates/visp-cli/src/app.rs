@@ -594,6 +594,8 @@ pub struct AppState {
 
     // 状态
     pub generating: bool,
+    /// generating 期间的 spinner 帧序号，由主循环 tick 递增
+    pub spinner_frame: usize,
     pub stale_done_expected: bool,
     /// 当前正在处理的请求 ID（用于 Done 后发 Ack）
     pub current_request_id: Option<&'static str>,
@@ -647,6 +649,7 @@ impl AppState {
             input_history: Vec::new(),
             history_index: None,
             generating: false,
+            spinner_frame: 0,
             stale_done_expected: false,
             current_request_id: None,
             needs_render: true,
@@ -753,6 +756,17 @@ impl AppState {
         true
     }
 
+    /// Points 三点跑马灯当前帧（generating 期间用作 placeholder 动画）
+    pub fn spinner_glyph(&self) -> &'static str {
+        const FRAMES: [&str; 4] = [
+            "\u{2219}\u{2219}\u{2219}",
+            "\u{25cf}\u{2219}\u{2219}",
+            "\u{2219}\u{25cf}\u{2219}",
+            "\u{2219}\u{2219}\u{25cf}",
+        ];
+        FRAMES[self.spinner_frame % FRAMES.len()]
+    }
+
     pub fn try_begin_stream_render(&mut self) -> bool {
         const COOLDOWN_MS: u128 = 30;
         let now = std::time::Instant::now();
@@ -820,6 +834,25 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_spinner_glyph_cycles_points_frames() {
+        let mut app = AppState::new("sid".into(), "m".into());
+        // Points 四帧循环：∙∙∙ / ●∙∙ / ∙●∙ / ∙∙●
+        let expected = [
+            "\u{2219}\u{2219}\u{2219}",
+            "\u{25cf}\u{2219}\u{2219}",
+            "\u{2219}\u{25cf}\u{2219}",
+            "\u{2219}\u{2219}\u{25cf}",
+        ];
+        for (i, want) in expected.iter().enumerate() {
+            app.spinner_frame = i;
+            assert_eq!(app.spinner_glyph(), *want);
+        }
+        // 回绕：第 5 帧回到第 1 帧
+        app.spinner_frame = 4;
+        assert_eq!(app.spinner_glyph(), expected[0]);
+    }
 
     // ════════════════════════════════════════════════════════════
     // wrap_text 测试

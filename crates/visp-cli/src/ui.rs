@@ -528,7 +528,8 @@ fn render_input_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     } else if app.generating {
         app.textarea
             .set_style(Style::default().fg(theme::INPUT_NOTICE_FG));
-        app.textarea.set_placeholder_text("[Generating...]");
+        app.textarea
+            .set_placeholder_text(format!("[Generating {}]", app.spinner_glyph()));
     } else {
         app.textarea.set_style(Style::default().fg(theme::INPUT_FG));
         app.textarea.set_placeholder_text("Type your message...");
