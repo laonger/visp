@@ -57,7 +57,7 @@ visp 采用 **前后端分离的 daemon 架构**，核心决策是让后端（Da
 | [visp](crates/visp/) | Launcher — 一键启动 daemon + CLI | [README](crates/visp/README.md) |
 | [visp-core](crates/visp-core/) | 核心抽象层 — Agent/Session/Tool/Prompt/Rules | [README](crates/visp-core/README.md) |
 | [visp-proto](crates/visp-proto/) | gRPC 协议定义 + 代码生成 | [README](crates/visp-proto/README.md) |
-| [visp-llm](crates/visp-llm/) | LLM 提供器 — Anthropic API 集成 | [README](crates/visp-llm/README.md) |
+| [visp-llm](crates/visp-llm/) | LLM 提供器 — Anthropic/OpenAI API 集成 | [README](crates/visp-llm/README.md) |
 | [visp-tools](crates/visp-tools/) | 内置工具 — 文件/Bash/搜索/WebFetch/CodeGraph | [README](crates/visp-tools/README.md) |
 | [visp-codegraph](crates/visp-codegraph/) | 代码图谱引擎 — tree-sitter + SQLite | [README](crates/visp-codegraph/README.md) |
 | [visp-context](crates/visp-context/) | 上下文裁剪器 — token 预算 + 轮次剪枝 + 工具输出压缩 | [README](crates/visp-context/README.md) |
@@ -84,7 +84,10 @@ visp 采用 **前后端分离的 daemon 架构**，核心决策是让后端（Da
 **审批流程**：LLM 请求执行工具 → `requires_approval_for(args)` → 已始终允许？→ 执行；否则弹出对话框 → 用户选择【允许 / 拒绝 / 始终允许】。
 
 ### 会话管理
-独立会话生命周期（Idle → Running → Completed/Error），每个会话维护独立的对话历史和 LLM 配置。当前为内存存储，可通过 `SessionStore` trait 替换为持久化实现。
+独立会话生命周期（Idle → Running → Completed/Error），每个会话维护独立的对话历史和 LLM 配置。支持通过 SQLite 持久化保存和恢复会话，`-s <short-id>` 前缀匹配恢复，`/list` 和 `/sessions` 交互式选择。
+
+### 多模型配置
+支持在配置文件中配置多个 LLM 模型，每个模型可独立指定 provider、api_key、base_url、temperature、max_tokens 等参数。通过 `/model` 交互式选择器实时切换，切换时自动更新 provider 驱动和全部参数。详见 [`docs/daemon.example.toml`](docs/daemon.example.toml)。
 
 ### 上下文裁剪
 长对话自动管理 context window，通过三段式剪枝（HEAD/MIDDLE/TAIL）和工具输出压缩控制 token 用量。详见 [visp-context](crates/visp-context/README.md)。
@@ -218,14 +221,22 @@ cargo build --release
 # 手动分别启动（调试用）
 ./target/release/visp-daemon              # 终端 1
 ./target/release/visp-cli -p /path        # 终端 2
+
+# 恢复 Session（支持 short-id 前缀匹配）
+./target/release/visp -p /path -s <session-id-or-prefix>
+
+# 列出所有 Session
+./target/release/visp -p /path --list
 ```
 
 ### CLI 参数
 
 | 参数 | 说明 |
-|---|---|
+|---|---|---|
 | `-p, --project` | 项目路径（默认 `.`） |
 | `-a, --addr` | daemon 地址（默认 `[::1]:50051`） |
+| `-s, --session` | 恢复指定 session（支持 short-id 前缀匹配） |
+| `--list` | 列出所有 session |
 | `--model` / `--temperature` / `--thinking-budget` | LLM 配置覆盖 |
 
 ### TUI 内快捷键
@@ -248,12 +259,17 @@ cargo build --release
 
 | 命令 | 用途 |
 |------|------|
-| `/temp <val>` / `/model <name>` | 设置 LLM 参数 |
-| `/mouse` | 切换鼠标捕获模式（或点按状态栏的 `[Mouse]` / `[Select]`） |
-| `/init` | 初始化项目配置 |
+| `/model` | 交互式模型选择器（↑↓ 选择，Enter 切换） |
+| `/model <name>` | 直接切换模型 |
+| `/temp <val>` | 设置 LLM 温度 |
+| `/list` | 交互式 session 选择器 |
+| `/sessions` | 列出所有 session（同 `/list`） |
+| `/sessions <id>` | 切换到指定 session（支持 short-id） |
+| `/new` | 创建新 session |
+| `/init` | 初始化项目配置并生成 AGENTS.md |
+| `/mouse` | 切换鼠标捕获模式 |
 | `/clear` | 清屏 |
 | `/help` | 显示帮助 |
-| `/quit` | 退出 |
 
 ## 质量门禁
 
@@ -267,8 +283,8 @@ Rust (edition 2024) · tokio · tonic + prost · serde · ratatui + crossterm ·
 
 ## 已知限制
 
-- 当前仅支持 Anthropic Claude API（可通过 `base_url` 兼容 OpenAI 接口）
-- Session 存储为内存实现（重启丢失）
+- Session 存储为 SQLite，重启 daemon 后可恢复（需使用 `-s` 参数）
+- 多模型配置下切换模型时动态创建 provider，切换后新 agent loop 生效
 
 详见 [docs/TODO.md](docs/TODO.md).
 
