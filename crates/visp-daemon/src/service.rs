@@ -574,9 +574,20 @@ impl CoderDaemon for CoderDaemonService {
                         if let Some(update_config) = &update.config {
                             if let Some(model) = &update_config.model {
                                 // 查找模型配置，创建对应的 provider
+                                tracing::debug!(
+                                    lookup_key = %model,
+                                    available = %model_configs.iter().map(|mc| mc.key()).collect::<Vec<_>>().join(", "),
+                                    "ConfigUpdate: looking up model"
+                                );
                                 if let Some(model_config) =
                                     model_configs.iter().find(|mc| mc.key() == *model)
                                 {
+                                    tracing::debug!(
+                                        found = %model_config.name,
+                                        api_model = %model_config.model,
+                                        protocol = %model_config.protocol,
+                                        "ConfigUpdate: model found, switching provider"
+                                    );
                                     match create_llm_provider(model_config) {
                                         Ok(new_provider) => {
                                             *provider_ref.write().unwrap() = new_provider;
