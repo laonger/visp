@@ -134,6 +134,7 @@ message ToolResult {
 message StatusUpdate {
     string message = 1;
     string session_id = 2;
+    repeated string user_inputs = 3;
 }
 
 message Error {

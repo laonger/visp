@@ -298,6 +298,7 @@ impl CoderDaemon for CoderDaemonService {
                                                         proto::StatusUpdate {
                                                             message: s.clone(),
                                                             session_id: session_id.clone(),
+                                                            user_inputs: vec![],
                                                         },
                                                     ),
                                                 ),
@@ -423,6 +424,13 @@ impl CoderDaemon for CoderDaemonService {
                                     }
                                 }
                                 history_lines.push("═══ End of history ═══".into());
+                                // 收集用户输入，供 CLI 填充 input_history（↑↓ 翻找历史提问）
+                                let user_inputs: Vec<String> = session
+                                    .history
+                                    .iter()
+                                    .filter(|m| m.role == Role::User)
+                                    .map(|m| m.content.clone())
+                                    .collect();
                                 let _ = tx
                                     .send(Ok(proto::ServerMessage {
                                         payload: Some(
@@ -430,6 +438,7 @@ impl CoderDaemon for CoderDaemonService {
                                                 proto::StatusUpdate {
                                                     message: history_lines.join("\n"),
                                                     session_id: session_id.clone(),
+                                                    user_inputs,
                                                 },
                                             ),
                                         ),
@@ -803,6 +812,7 @@ fn agent_event_to_server_message(event: AgentEvent, session_id: &str) -> proto::
                 proto::StatusUpdate {
                     message,
                     session_id: sid,
+                    user_inputs: vec![],
                 },
             )),
         },

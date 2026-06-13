@@ -636,7 +636,15 @@ fn handle_grpc_message(
             app.total_cache_read_input_tokens += ui.cache_read_input_tokens;
         }
         Some(server_message::Payload::StatusUpdate(su)) => {
-            app.add_message(LineType::Status, su.message)
+            app.add_message(LineType::Status, su.message);
+            // 加载 session 历史中的用户输入到 input_history（↑↓ 翻找历史提问）
+            if !su.user_inputs.is_empty() {
+                for input in &su.user_inputs {
+                    if !app.input_history.contains(input) {
+                        app.input_history.push(input.clone());
+                    }
+                }
+            }
         }
         Some(server_message::Payload::UserQuery(uq)) => {
             app.confirm = Some(ConfirmState {
