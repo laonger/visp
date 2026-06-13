@@ -29,8 +29,9 @@ pub struct DaemonSection {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LlmSection {
-    #[serde(default = "default_provider")]
-    pub provider: String,
+    /// 驱动协议类型（anthropic / openai），接受旧名 provider
+    #[serde(default = "default_provider", alias = "provider")]
+    pub protocol: String,
     #[serde(default = "default_model")]
     pub model: String,
     #[serde(default = "default_temperature")]
@@ -57,8 +58,13 @@ pub struct LlmSection {
 /// 单个 LLM 模型配置
 #[derive(Debug, Clone, Deserialize)]
 pub struct LlmModelConfig {
+    /// 显示名称（在 /model 列表中展示）
     pub name: String,
-    pub provider: String,
+    /// 驱动协议类型（anthropic / openai）
+    pub protocol: String,
+    /// 服务商显示名，如 "Anthropic" / "OpenAI"；缺省时使用 protocol
+    #[serde(default)]
+    pub provider: Option<String>,
     pub model: String,
     #[serde(default)]
     pub api_key: Option<String>,
@@ -79,7 +85,13 @@ impl LlmSection {
     /// 如果配置了 models 数组则返回其中的 name，否则用单 model 字段
     pub fn available_models(&self) -> Vec<String> {
         if !self.models.is_empty() {
-            self.models.iter().map(|m| m.name.clone()).collect()
+            self.models
+                .iter()
+                .map(|m| {
+                    let display_provider = m.provider.as_deref().unwrap_or(&m.protocol);
+                    format!("{} ({})", m.name, display_provider)
+                })
+                .collect()
         } else {
             vec![self.model.clone()]
         }
@@ -207,7 +219,7 @@ fn default_config() -> DaemonConfig {
             log_level: default_log_level(),
         },
         llm: LlmSection {
-            provider: default_provider(),
+            protocol: default_provider(),
             model: default_model(),
             temperature: default_temperature(),
             max_tokens: default_max_tokens(),
@@ -299,7 +311,7 @@ file_max_size_bytes = 256000
         let config = load_config(Some(file.path())).unwrap();
         assert_eq!(config.daemon.listen_addr, "127.0.0.1:9090");
         assert_eq!(config.daemon.log_level, "debug");
-        assert_eq!(config.llm.provider, "openai");
+        assert_eq!(config.llm.protocol, "openai");
         assert_eq!(config.llm.model, "gpt-4");
         assert!((config.llm.temperature - 0.5).abs() < f64::EPSILON);
         assert_eq!(config.llm.max_tokens, 2048);
@@ -317,7 +329,7 @@ file_max_size_bytes = 256000
         let config = default_config();
         assert_eq!(config.daemon.listen_addr, "[::1]:50051");
         assert_eq!(config.daemon.log_level, "info");
-        assert_eq!(config.llm.provider, "anthropic");
+        assert_eq!(config.llm.protocol, "anthropic");
         assert_eq!(config.llm.model, "claude-3-7-sonnet-20250219");
         assert!((config.llm.temperature - 0.7).abs() < f64::EPSILON);
         assert_eq!(config.llm.max_tokens, 4096);
@@ -434,7 +446,7 @@ file_max_size_bytes = 256000
         let config = result.unwrap();
         assert_eq!(config.daemon.listen_addr, "0.0.0.0:8080");
         assert_eq!(config.daemon.log_level, "warn");
-        assert_eq!(config.llm.provider, "ollama");
+        assert_eq!(config.llm.protocol, "ollama");
         assert_eq!(config.llm.model, "deepseek-v4-flash");
         assert_eq!(config.llm.api_key.as_deref(), Some("test-key"));
         assert_eq!(

@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(listen_addr = %config.daemon.listen_addr, "starting visp-daemon");
 
     // 3. Create LLM provider
-    let provider: Arc<dyn visp_core::provider::LlmProvider> = match config.llm.provider.as_str() {
+    let provider: Arc<dyn visp_core::provider::LlmProvider> = match config.llm.protocol.as_str() {
         "openai" => {
             let api_key = config
                 .llm
@@ -81,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     };
-    tracing::info!(provider = %config.llm.provider, "LLM provider created");
+    tracing::info!(protocol = %config.llm.protocol, "LLM provider created");
 
     // 4. Create tool registry
     let tool_registry = ToolRegistry::new();

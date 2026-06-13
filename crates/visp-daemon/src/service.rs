@@ -71,9 +71,9 @@ impl CoderDaemonService {
         let default_llm_config = {
             let mut model = llm_section.model.clone();
             // 当 provider 为 openai 且 model 是默认的 Claude 时，自动切换为 GPT
-            if llm_section.provider == "openai" && model == *crate::config::default_model() {
+            if llm_section.protocol == "openai" && model == *crate::config::default_model() {
                 model = "gpt-4o".to_string();
-                tracing::info!("provider=openai, overriding default model to gpt-4o");
+                tracing::info!("protocol=openai, overriding default model to gpt-4o");
             }
             LlmConfig {
                 model,

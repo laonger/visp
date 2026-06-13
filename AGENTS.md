@@ -133,8 +133,8 @@ CLI 与 daemon 通过 gRPC 双向流通信（`Chat` RPC）。`ChatHandle` 封装
     ```toml
     [llm]
     models = [
-      { name = "Claude Sonnet", provider = "anthropic", model = "claude-sonnet-4-20250514" },
-      { name = "GPT-4o", provider = "openai", model = "gpt-4o", api_key = "${OPENAI_API_KEY}" },
+      { name = "Claude Sonnet", provider = "Anthropic", protocol = "anthropic", model = "claude-sonnet-4-20250514" },
+      { name = "GPT-4o", provider = "OpenAI", protocol = "openai", model = "gpt-4o", api_key = "${OPENAI_API_KEY}" },
     ]
     ```
   - 无 `models` 时回退到单 `model` 字段（向后兼容）
