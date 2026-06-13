@@ -49,6 +49,41 @@ pub struct LlmSection {
     /// 额外的 provider 特定参数（如 OpenAI 的 seed, response_format 等）
     #[serde(default)]
     pub extra: HashMap<String, String>,
+    /// 多模型配置列表（支持多个 LLM）
+    #[serde(default)]
+    pub models: Vec<LlmModelConfig>,
+}
+
+/// 单个 LLM 模型配置
+#[derive(Debug, Clone, Deserialize)]
+pub struct LlmModelConfig {
+    pub name: String,
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub max_context_tokens: Option<u32>,
+    #[serde(default)]
+    pub extra: std::collections::HashMap<String, String>,
+}
+
+impl LlmSection {
+    /// 返回可用的模型名称列表
+    /// 如果配置了 models 数组则返回其中的 name，否则用单 model 字段
+    pub fn available_models(&self) -> Vec<String> {
+        if !self.models.is_empty() {
+            self.models.iter().map(|m| m.name.clone()).collect()
+        } else {
+            vec![self.model.clone()]
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -181,6 +216,7 @@ fn default_config() -> DaemonConfig {
             base_url: None,
             thinking_budget_tokens: None,
             extra: HashMap::new(),
+            models: Vec::new(),
         },
         tools: ToolsSection {
             bash_timeout_secs: default_bash_timeout(),

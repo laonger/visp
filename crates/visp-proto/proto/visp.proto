@@ -12,6 +12,7 @@ message Session {
     google.protobuf.Timestamp created_at = 4;
     string model = 5;
     string last_user_message = 6;
+    repeated string available_models = 7;
 }
 
 enum SessionStatus {

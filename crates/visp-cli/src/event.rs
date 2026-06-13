@@ -81,6 +81,7 @@ pub async fn run(
     model: String,
     client: &mut VbwClient,
     project_path: &str,
+    available_models: Vec<String>,
 ) -> io::Result<()> {
     if let Ok((_w, _h)) = crossterm::terminal::size() {
         debug_log!("session start: {_w}x{_h}, model={model}");
@@ -93,6 +94,7 @@ pub async fn run(
     let _guard = TerminalGuard;
     let mut terminal = ratatui::init();
     let mut app = AppState::new(session_id.clone(), model);
+    app.available_models = available_models;
 
     // exit 信号：键盘线程检测到 Ctrl+D 时通知主循环无条件退出
     let (exit_tx, mut exit_rx) = tokio::sync::watch::channel(false);
@@ -217,6 +219,17 @@ pub async fn run(
             app.pending_list_sessions = false;
         }
 
+        // 处理 /model 命令：创建交互式模型选择器
+        if app.pending_model_select {
+            if !app.available_models.is_empty() {
+                let models = app.available_models.clone();
+                let mut state = ratatui::widgets::ListState::default();
+                state.select(Some(0));
+                app.model_select = Some(crate::app::ModelSelectState { models, state });
+            }
+            app.pending_model_select = false;
+        }
+
         // 处理 /sessions <id> 命令：切换到指定 session
         if let Some(ref target_id) = app.pending_switch_session.clone() {
             match client.get_session(target_id).await {
@@ -296,6 +309,51 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
         // 选择模式下拦截所有其他按键
         return false;
     }
+
+    // 模型选择模式下：↑↓ 导航，Enter 确认，Esc/q 退出
+    if let Some(ref mut ms) = app.model_select {
+        if let Event::Key(key) = event {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    ms.state.select_previous();
+                    app.needs_render = true;
+                    return false;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    ms.state.select_next();
+                    app.needs_render = true;
+                    return false;
+                }
+                KeyCode::Enter => {
+                    if let Some(idx) = ms.state.selected()
+                        && idx < ms.models.len()
+                    {
+                        let model = ms.models[idx].clone();
+                        app.model_select = None;
+                        chat_handle.send_config_update(LlmConfig {
+                            model: Some(model.clone()),
+                            temperature: None,
+                            max_tokens: None,
+                            max_context_tokens: None,
+                            extra: Default::default(),
+                        });
+                        app.add_message(LineType::Status, format!("Model set to {model}"));
+                    }
+                    app.needs_render = true;
+                    return false;
+                }
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    app.model_select = None;
+                    app.needs_render = true;
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        // 模型选择模式下拦截所有其他按键
+        return false;
+    }
+
     app.needs_render = true;
     match event {
         Event::Key(key) => {
@@ -825,6 +883,14 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
                 extra: Default::default(),
             });
             app.add_message(LineType::Status, format!("Model set to {}", parts[1]));
+        }
+        "/model" => {
+            if app.available_models.is_empty() {
+                app.add_message(LineType::Status, "No alternate models configured".into());
+            } else {
+                app.add_message(LineType::Status, "Select a model:".into());
+                app.pending_model_select = true;
+            }
         }
         _ => {}
     }

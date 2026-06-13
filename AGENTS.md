@@ -111,7 +111,8 @@ TUI 中的斜杠命令在 `crates/visp-cli/src/event.rs` 的 `handle_command()` 
 | `/sessions [id]` | 无参 = 同 `/list`；有参 = 切换到指定 session |
 | `/new` | 创建新 session 并切换 |
 | `/temp <0.0–1.0>` | 设置 temperature |
-| `/model <name>` | 切换模型 |
+| `/model <name>` | 直接切换模型 |
+| `/model` | 无参时弹出交互式选择器（↑↓选择，Enter切换） |
 | `/init` | 发送初始化提示给 LLM |
 | `/mouse` | 切换鼠标捕获模式 |
 
@@ -128,6 +129,15 @@ CLI 与 daemon 通过 gRPC 双向流通信（`Chat` RPC）。`ChatHandle` 封装
 ## 配置路径
 
 - daemon 配置：`~/.config/visp/daemon.toml`（可选，所有字段有默认值）
+  - 多模型配置示例：
+    ```toml
+    [llm]
+    models = [
+      { name = "Claude Sonnet", provider = "anthropic", model = "claude-sonnet-4-20250514" },
+      { name = "GPT-4o", provider = "openai", model = "gpt-4o", api_key = "${OPENAI_API_KEY}" },
+    ]
+    ```
+  - 无 `models` 时回退到单 `model` 字段（向后兼容）
 - 项目规则：`.visp/rules/`（Markdown + YAML frontmatter）
 - 全局规则：`~/.config/visp/rules/`
 - daemon 日志：`~/.visp/logs/daemon-<timestamp>.log`

@@ -569,6 +569,12 @@ pub struct SessionSelectState {
     pub session_ids: Vec<String>,
 }
 
+/// 模型选择器状态
+pub struct ModelSelectState {
+    pub models: Vec<String>,
+    pub state: ListState,
+}
+
 pub struct AppState {
     // 对话
     pub messages: Vec<ChatLine>,
@@ -613,6 +619,12 @@ pub struct AppState {
     pub show_help: bool,
     /// session 选择器弹出面板（/list 或 /sessions 无参触发）
     pub session_select: Option<SessionSelectState>,
+    /// 可用的模型名称列表
+    pub available_models: Vec<String>,
+    /// 用户输入了 /model（无参），主循环需要获取模型列表并显示选择器
+    pub pending_model_select: bool,
+    /// 模型选择器弹出面板（/model 无参触发）
+    pub model_select: Option<ModelSelectState>,
 }
 
 impl AppState {
@@ -651,6 +663,9 @@ impl AppState {
             pending_switch_session: None,
             show_help: false,
             session_select: None,
+            available_models: Vec::new(),
+            pending_model_select: false,
+            model_select: None,
         }
     }
 
@@ -787,7 +802,9 @@ impl AppState {
         self.pending_new_session = false;
         self.pending_list_sessions = false;
         self.pending_switch_session = None;
+        self.pending_model_select = false;
         self.session_select = None;
+        self.model_select = None;
         self.session_id = session_id;
         self.model = model;
     }

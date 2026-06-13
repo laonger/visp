@@ -43,6 +43,8 @@ pub struct CoderDaemonService {
     context_trimmer: Arc<dyn ContextTrimmer + Send + Sync>,
     /// MCP 服务器管理器
     mcp_manager: Arc<McpManager>,
+    /// 可用的模型名称列表
+    available_models: Vec<String>,
 }
 
 impl CoderDaemonService {
@@ -56,6 +58,7 @@ impl CoderDaemonService {
         llm_section: LlmSection,
         context_trimmer: Arc<dyn ContextTrimmer + Send + Sync>,
         mcp_manager: Arc<McpManager>,
+        available_models: Vec<String>,
     ) -> Self {
         let mut extra = std::collections::HashMap::new();
         if let Some(budget) = llm_section.thinking_budget_tokens {
@@ -91,6 +94,7 @@ impl CoderDaemonService {
             default_llm_config,
             context_trimmer,
             mcp_manager,
+            available_models,
         }
     }
 
@@ -168,7 +172,10 @@ impl CoderDaemon for CoderDaemonService {
             .session_mgr
             .create(Path::new(&req.project_path), config)
             .map_err(|e| Status::internal(e.to_string()))?;
-        Ok(Response::new(session_to_proto(&session)))
+        Ok(Response::new(session_to_proto(
+            &session,
+            &self.available_models,
+        )))
     }
 
     async fn list_sessions(
@@ -180,7 +187,10 @@ impl CoderDaemon for CoderDaemonService {
             .list()
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(proto::ListSessionsResponse {
-            sessions: sessions.iter().map(session_to_proto).collect(),
+            sessions: sessions
+                .iter()
+                .map(|s| session_to_proto(s, &self.available_models))
+                .collect(),
         }))
     }
 
@@ -192,7 +202,10 @@ impl CoderDaemon for CoderDaemonService {
 
         // Step 1: Exact match
         if let Ok(session) = self.session_mgr.get(&session_id) {
-            return Ok(Response::new(session_to_proto(&session)));
+            return Ok(Response::new(session_to_proto(
+                &session,
+                &self.available_models,
+            )));
         }
 
         // Step 2: Prefix matching
@@ -208,7 +221,10 @@ impl CoderDaemon for CoderDaemonService {
 
         match matched.len() {
             0 => Err(Status::not_found("Session not found")),
-            1 => Ok(Response::new(session_to_proto(matched[0]))),
+            1 => Ok(Response::new(session_to_proto(
+                matched[0],
+                &self.available_models,
+            ))),
             _ => Err(Status::not_found("Session not found")),
         }
     }
@@ -679,7 +695,10 @@ impl CoderDaemon for CoderDaemonService {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn session_to_proto(session: &visp_core::session::Session) -> proto::Session {
+fn session_to_proto(
+    session: &visp_core::session::Session,
+    available_models: &[String],
+) -> proto::Session {
     let status = match session.status {
         SessionStatus::Idle => proto::SessionStatus::Idle,
         SessionStatus::Running => proto::SessionStatus::Running,
@@ -703,6 +722,7 @@ fn session_to_proto(session: &visp_core::session::Session) -> proto::Session {
             seconds: created_secs,
             nanos: 0,
         }),
+        available_models: available_models.to_vec(),
     }
 }
 
@@ -862,6 +882,7 @@ mod tests {
             default_llm_config: LlmConfig::default(),
             context_trimmer: Arc::new(visp_core::context::NoopTrimmer),
             mcp_manager: Arc::new(McpManager::new(vec![])),
+            available_models: vec![],
         }
     }
 
@@ -1106,6 +1127,7 @@ mod tests {
             default_llm_config,
             context_trimmer: Arc::new(visp_core::context::NoopTrimmer),
             mcp_manager: Arc::new(McpManager::new(vec![])),
+            available_models: vec![],
         };
 
         let request = tonic::Request::new(proto::CreateSessionRequest {
@@ -1143,6 +1165,7 @@ mod tests {
             default_llm_config,
             context_trimmer: Arc::new(visp_core::context::NoopTrimmer),
             mcp_manager: Arc::new(McpManager::new(vec![])),
+            available_models: vec![],
         };
 
         let request = tonic::Request::new(proto::CreateSessionRequest {
@@ -1177,7 +1200,7 @@ mod tests {
             approved_tools: HashSet::new(),
         };
 
-        let proto = session_to_proto(&session);
+        let proto = session_to_proto(&session, &[]);
         assert_eq!(proto.session_id, "test-1");
         assert_eq!(proto.status, proto::SessionStatus::Idle as i32);
         assert_eq!(proto.project_path, "/tmp");
@@ -1202,19 +1225,19 @@ mod tests {
         };
 
         assert_eq!(
-            session_to_proto(&base(SessionStatus::Idle)).status,
+            session_to_proto(&base(SessionStatus::Idle), &[]).status,
             proto::SessionStatus::Idle as i32
         );
         assert_eq!(
-            session_to_proto(&base(SessionStatus::Running)).status,
+            session_to_proto(&base(SessionStatus::Running), &[]).status,
             proto::SessionStatus::Running as i32
         );
         assert_eq!(
-            session_to_proto(&base(SessionStatus::Completed)).status,
+            session_to_proto(&base(SessionStatus::Completed), &[]).status,
             proto::SessionStatus::Completed as i32
         );
         assert_eq!(
-            session_to_proto(&base(SessionStatus::Error)).status,
+            session_to_proto(&base(SessionStatus::Error), &[]).status,
             proto::SessionStatus::Error as i32
         );
     }

@@ -227,6 +227,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // 9. Assemble service
+    let available_models = config.llm.available_models();
     let service = CoderDaemonService::new(
         provider,
         tool_registry,
@@ -236,6 +237,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.llm,
         context_trimmer,
         mcp_manager,
+        available_models,
     );
 
     // 10. Start gRPC server

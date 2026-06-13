@@ -117,6 +117,11 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
     if app.session_select.is_some() {
         render_session_select(f, f.area(), app);
     }
+
+    // 模型选择器弹出面板
+    if app.model_select.is_some() {
+        render_model_select(f, f.area(), app);
+    }
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -794,5 +799,58 @@ fn render_session_select(f: &mut Frame, area: Rect, app: &mut AppState) {
             );
 
         f.render_stateful_widget(list, popup_area, &mut ss.state);
+    }
+}
+
+/// 渲染模型选择器弹出面板（/model 无参触发）
+fn render_model_select(f: &mut Frame, area: Rect, app: &mut AppState) {
+    use crate::theme;
+    use ratatui::style::Modifier;
+
+    if let Some(ref mut ms) = app.model_select {
+        let model_count = ms.models.len();
+        let content_height = (model_count as u16).clamp(3, 15);
+        let popup_width = (area.width / 2).clamp(36, 80);
+        let popup_height = content_height + 4;
+
+        let x = (area.width.saturating_sub(popup_width)) / 2;
+        let y = (area.height.saturating_sub(popup_height)) / 2;
+        let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+        f.render_widget(Clear, popup_area);
+
+        let items: Vec<ListItem> = ms
+            .models
+            .iter()
+            .map(|m| {
+                ListItem::new(Span::styled(
+                    format!("  {m}"),
+                    Style::default().fg(theme::SELECT_ITEM_FG),
+                ))
+            })
+            .collect();
+
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .title(Line::from(Span::styled(
+                        " Model ",
+                        Style::default().fg(theme::SELECT_TITLE_FG),
+                    )))
+                    .title_bottom(Line::from(Span::styled(
+                        " ↑↓ navigate  Enter switch  Esc/q cancel ",
+                        Style::default().fg(theme::HELP_HINT_FG),
+                    )))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme::SELECT_BORDER_FG))
+                    .style(Style::default().bg(theme::SELECT_BG)),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(theme::SELECT_HIGHLIGHT_BG)
+                    .add_modifier(Modifier::BOLD),
+            );
+
+        f.render_stateful_widget(list, popup_area, &mut ms.state);
     }
 }
