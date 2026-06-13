@@ -476,6 +476,26 @@ impl CoderDaemon for CoderDaemonService {
                     Some(proto::client_message::Payload::JoinSession(join)) => {
                         let session_id = join.session_id;
                         if let Ok(session) = session_mgr.get(&session_id) {
+                            // 切换 provider 以匹配 session 的模型配置
+                            if let Some(model_config) = model_configs
+                                .iter()
+                                .find(|mc| mc.model == session.config.model)
+                            {
+                                match create_llm_provider(model_config) {
+                                    Ok(new_provider) => {
+                                        *provider_ref.write().unwrap() = new_provider;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            session_id = %session_id,
+                                            model = %session.config.model,
+                                            error = %e,
+                                            "failed to create provider for session model"
+                                        );
+                                    }
+                                }
+                            }
+
                             if session.history.is_empty() {
                                 // no-op: new session, no history to show
                             } else {
