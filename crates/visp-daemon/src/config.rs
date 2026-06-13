@@ -53,6 +53,9 @@ pub struct LlmSection {
     /// 多模型配置列表（支持多个 LLM）
     #[serde(default)]
     pub models: Vec<LlmModelConfig>,
+    /// 默认模型 key（格式 `[provider].[name]`），缺省时使用 models 第一个
+    #[serde(default)]
+    pub default: Option<String>,
 }
 
 /// 单个 LLM 模型配置
@@ -258,6 +261,7 @@ fn default_config() -> DaemonConfig {
             thinking_budget_tokens: None,
             extra: HashMap::new(),
             models: Vec::new(),
+            default: None,
         },
         tools: ToolsSection {
             bash_timeout_secs: default_bash_timeout(),

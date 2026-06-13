@@ -46,10 +46,12 @@
 # base_url = "https://api.anthropic.com"
 
 # ── 多模型模式 ─────────────────────────────────────────────────────
-# 配置 models 后，上面的单模型字段只作为启动时的默认值。
+# 配置 models 后，上面的单模型字段只作为启动时的 fallback 值。
 # 在 CLI 中输入 /model 可交互式切换模型。
 #
 [llm]
+# 预设模型（格式 [provider].[name]），缺省时使用 models 第一个
+# default = "Anthropic.Claude Sonnet"
 
 [[llm.models]]
 name = "Claude Sonnet"

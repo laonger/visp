@@ -117,23 +117,26 @@ impl CoderDaemonService {
         for (k, v) in llm_section.extra.iter() {
             extra.insert(k.clone(), v.clone());
         }
-        let default_llm_config = {
-            let mut model = llm_section.model.clone();
-            // 当 provider 为 openai 且 model 是默认的 Claude 时，自动切换为 GPT
-            if llm_section.protocol == "openai" && model == *crate::config::default_model() {
-                model = "gpt-4o".to_string();
-                tracing::info!("protocol=openai, overriding default model to gpt-4o");
-            }
-            LlmConfig {
-                model,
-                temperature: llm_section.temperature,
-                max_tokens: llm_section.max_tokens,
-                max_context_tokens: llm_section.max_context_tokens,
-                extra,
-            }
-        };
+        // 查找默认模型
+        let default_idx = llm_section
+            .default
+            .as_ref()
+            .and_then(|key| model_configs.iter().position(|mc| mc.key() == *key))
+            .unwrap_or(0);
+        let default_cfg = &model_configs[default_idx];
+
         let initial_provider =
-            create_llm_provider(&model_configs[0]).expect("failed to create initial LLM provider");
+            create_llm_provider(default_cfg).expect("failed to create initial LLM provider");
+
+        let default_llm_config = LlmConfig {
+            model: default_cfg.model.clone(),
+            temperature: default_cfg.temperature.unwrap_or(llm_section.temperature),
+            max_tokens: default_cfg.max_tokens.unwrap_or(llm_section.max_tokens),
+            max_context_tokens: default_cfg
+                .max_context_tokens
+                .unwrap_or(llm_section.max_context_tokens),
+            extra,
+        };
         let model_config_names: Vec<String> = model_configs.iter().map(|mc| mc.key()).collect();
         Self {
             provider: Arc::new(StdRwLock::new(initial_provider)),
