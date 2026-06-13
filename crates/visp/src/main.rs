@@ -24,6 +24,9 @@ struct Cli {
 
     #[arg(long)]
     thinking_budget: Option<u32>,
+
+    #[arg(short = 's', long)]
+    session: Option<String>,
 }
 
 #[tokio::main]
@@ -109,6 +112,10 @@ async fn main() {
     if let Some(budget) = cli.thinking_budget {
         cli_args.push("--thinking-budget".to_string());
         cli_args.push(budget.to_string());
+    }
+    if let Some(session) = &cli.session {
+        cli_args.push("--session".to_string());
+        cli_args.push(session.clone());
     }
 
     // 6. Start CLI
@@ -219,4 +226,48 @@ fn format_timestamp() -> String {
 async fn kill_daemon(daemon: &mut Child) {
     let _ = daemon.kill().await;
     let _ = daemon.wait().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_short_flag_passthrough() {
+        let cli = Cli::try_parse_from(["visp", "-s", "abc"]).unwrap();
+        assert_eq!(cli.session.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn session_long_flag_passthrough() {
+        let cli = Cli::try_parse_from(["visp", "--session", "xyz"]).unwrap();
+        assert_eq!(cli.session.as_deref(), Some("xyz"));
+    }
+
+    #[test]
+    fn no_session_defaults_to_none() {
+        let cli = Cli::try_parse_from(["visp"]).unwrap();
+        assert!(cli.session.is_none());
+    }
+
+    #[test]
+    fn session_with_project_short() {
+        let cli = Cli::try_parse_from(["visp", "-s", "abc", "-p", "/tmp"]).unwrap();
+        assert_eq!(cli.session.as_deref(), Some("abc"));
+        assert_eq!(cli.project, "/tmp");
+    }
+
+    #[test]
+    fn session_with_project_long() {
+        let cli = Cli::try_parse_from(["visp", "--session", "abc", "--project", "/tmp"]).unwrap();
+        assert_eq!(cli.session.as_deref(), Some("abc"));
+        assert_eq!(cli.project, "/tmp");
+    }
+
+    #[test]
+    fn session_alone_uses_default_project() {
+        let cli = Cli::try_parse_from(["visp", "-s", "abc"]).unwrap();
+        assert_eq!(cli.session.as_deref(), Some("abc"));
+        assert_eq!(cli.project, ".");
+    }
 }
