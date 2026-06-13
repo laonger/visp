@@ -5,7 +5,7 @@ pub struct Migrator;
 
 impl Migrator {
     /// Current schema version (incremented on each migration).
-    pub const VERSION: i64 = 1;
+    pub const VERSION: i64 = 2;
 
     /// SQL to create the session table.
     const CREATE_SESSION: &'static str = r#"
@@ -34,6 +34,7 @@ impl Migrator {
             tool_call_id          TEXT,
             tool_name             TEXT,
             tool_arguments        TEXT,
+            tool_calls_json       TEXT,
             tool_result_is_error  INTEGER,
             tool_result_duration_ms INTEGER,
             estimated_tokens      INTEGER NOT NULL DEFAULT 0,
@@ -86,6 +87,20 @@ impl Migrator {
         // Create indexes
         for idx in Self::INDEXES {
             conn.execute_batch(idx)?;
+        }
+
+        // v1→v2 migration: add tool_calls_json column to message table
+        if current_version < 2 {
+            let has_column: bool = conn
+                .prepare(
+                    "SELECT COUNT(*) FROM pragma_table_info('message') WHERE name='tool_calls_json'",
+                )
+                .and_then(|mut s| s.query_row([], |row| row.get::<_, i64>(0)))
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            if !has_column {
+                conn.execute_batch("ALTER TABLE message ADD COLUMN tool_calls_json TEXT;")?;
+            }
         }
 
         // Update version
@@ -165,7 +180,83 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
+        assert_eq!(version, 2);
+    }
+
+    #[test]
+    fn test_migrate_v1_to_v2() {
+        // Create a v1 database first (simulate schema without tool_calls_json)
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA foreign_keys = ON;
+             PRAGMA cache_size = -64000;
+             PRAGMA user_version = 1;
+             CREATE TABLE IF NOT EXISTS session (
+                id TEXT PRIMARY KEY,
+                project_path TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'idle',
+                model TEXT NOT NULL DEFAULT '',
+                system_prompt_template TEXT NOT NULL DEFAULT '',
+                config_json TEXT NOT NULL DEFAULT '{}',
+                approved_tools TEXT NOT NULL DEFAULT '[]',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS message (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
+                role TEXT NOT NULL,
+                type TEXT NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                tool_call_id TEXT,
+                tool_name TEXT,
+                tool_arguments TEXT,
+                tool_result_is_error INTEGER,
+                tool_result_duration_ms INTEGER,
+                estimated_tokens INTEGER NOT NULL DEFAULT 0,
+                extra_blocks TEXT,
+                provider_metadata TEXT,
+                actual_tokens_input INTEGER,
+                actual_tokens_output INTEGER,
+                actual_cache_read INTEGER,
+                actual_cache_write INTEGER,
+                actual_cost REAL,
+                created_at INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+
+        // Verify version is 1
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
         assert_eq!(version, 1);
+
+        // Run migration (should upgrade to v2)
+        Migrator::run(&conn).unwrap();
+
+        // Verify version is now 2
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+
+        // Verify tool_calls_json column exists
+        let has_column: bool = conn
+            .prepare(
+                "SELECT COUNT(*) FROM pragma_table_info('message') WHERE name='tool_calls_json'",
+            )
+            .and_then(|mut s| s.query_row([], |row| row.get::<_, i64>(0)))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        assert!(
+            has_column,
+            "tool_calls_json column should exist after migration"
+        );
     }
 
     #[test]

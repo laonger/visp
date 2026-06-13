@@ -989,6 +989,8 @@ pub async fn run_agent_loop(
 /// 但只有 2 个 tool_results 跟随，也会清空 tool_calls。
 fn cleanup_orphan_tool_uses(history: &mut [Message]) {
     let len = history.len();
+
+    // 第一遍：从后向前，清理 orphan tool_calls（assistant 消息有 tool_calls 但没有配对的 tool 结果）
     let mut i = len;
     while i > 0 {
         i -= 1;
@@ -996,21 +998,57 @@ fn cleanup_orphan_tool_uses(history: &mut [Message]) {
             && let Some(ref calls) = history[i].tool_calls
         {
             let num_calls = calls.len();
-            // 紧跟在此 assistant 后面的 num_calls 条消息必须全是 Tool 角色，
-            // 否则说明此 assistant 的 tool_calls 是孤儿（中断未执行完）。
-            // 之前用 count() 统计 i 之后 ALL tool 消息会误判——后续成功轮次的
-            // tool_result 会让本应清理的孤儿漏网。
-            let all_have_results = (1..=num_calls).all(|offset| {
-                let idx = i + offset;
-                idx < len && history[idx].role == Role::Tool
+            // 紧跟在 assistant 后面的 num_calls 条消息必须全是 Tool 角色，
+            // 且各自的 tool_call_id 必须与 assistant 的 ToolCallRequest.id 逐一对应
+            let all_have_results = (0..num_calls).all(|offset| {
+                let idx = i + 1 + offset;
+                idx < len
+                    && history[idx].role == Role::Tool
+                    && history[idx].tool_call_id.as_deref() == Some(&calls[offset].id)
             });
 
             if !all_have_results {
+                // 清理 orphan tool_calls
+                // 同时标记对应的 tool 结果为 skip_context（如果存在但 ID 不匹配）
+                for offset in 0..num_calls {
+                    let idx = i + 1 + offset;
+                    if idx < len && history[idx].role == Role::Tool {
+                        // Tool 消息存在但 ID 不匹配 → 标记为 skip_context
+                        history[idx].skip_context = true;
+                    }
+                }
                 history[i].tool_calls = None;
-                // 继续检查更早的 assistant 消息（可能也有孤儿）
-            } else {
-                // 找到了完整配对的 tool_result，更早的 assistant 不需要再检查
-                break;
+            }
+            // 不 break！继续检查更早的 assistant 消息
+        }
+    }
+
+    // 第二遍：从后向前，清理孤儿 Tool 消息（tool 消息的 tool_call_id 没有对应的 assistant tool_call）
+    let mut i = len;
+    while i > 0 {
+        i -= 1;
+        if history[i].role == Role::Tool
+            && let Some(ref call_id) = history[i].tool_call_id
+        {
+            // 向前查找最近的 assistant 消息
+            let mut found = false;
+            let mut j = i;
+            while j > 0 {
+                j -= 1;
+                if history[j].role == Role::Assistant
+                    && let Some(ref calls) = history[j].tool_calls
+                {
+                    // 找到了 assistant，检查是否有匹配的 tool_call id
+                    if calls.iter().any(|c| c.id == *call_id) {
+                        found = true;
+                    }
+                    break; // 找到最近的 assistant 消息就停止（不管是否匹配）
+                } else if history[j].role == Role::User {
+                    break; // 遇到 user 消息停止
+                }
+            }
+            if !found {
+                history[i].skip_context = true;
             }
         }
     }
@@ -2404,5 +2442,144 @@ mod tests {
         assert!(guide.contains("codegraph"));
         assert!(guide.contains("Network"));
         assert!(guide.contains("fetch"));
+    }
+
+    // ── cleanup_orphan_tool_uses ──────────────────────────────────────────────
+
+    #[test]
+    fn test_cleanup_single_orphan_at_end() {
+        let mut history = vec![
+            Message::user("do task"),
+            Message::tool_call(vec![ToolCallRequest {
+                id: "call_a".to_string(),
+                name: "search".to_string(),
+                arguments: "{}".to_string(),
+            }]),
+        ];
+        cleanup_orphan_tool_uses(&mut history);
+        // 孤儿 tool_call 被清空
+        assert!(history[1].tool_calls.is_none());
+    }
+
+    #[test]
+    fn test_cleanup_complete_pair_unchanged() {
+        let mut history = vec![
+            Message::user("do task"),
+            Message::tool_call(vec![ToolCallRequest {
+                id: "call_a".to_string(),
+                name: "search".to_string(),
+                arguments: "{}".to_string(),
+            }]),
+            Message::tool("result", "call_a"),
+        ];
+        let original = history.clone();
+        cleanup_orphan_tool_uses(&mut history);
+        // 完整配对保持不变
+        assert_eq!(history[1].tool_calls, original[1].tool_calls);
+        assert_eq!(history[2].role, Role::Tool);
+    }
+
+    #[test]
+    fn test_cleanup_orphan_middle_complete_end() {
+        // orphan 在中间，完整配对在末尾 → 两个都应该被检查
+        let mut history = vec![
+            Message::user("task A"),
+            Message::tool_call(vec![ToolCallRequest {
+                id: "call_orphan".to_string(),
+                name: "search".to_string(),
+                arguments: "{}".to_string(),
+            }]),
+            // 中间 user 消息隔开（模拟中断后用户新消息）
+            Message::user("task B"),
+            Message::tool_call(vec![ToolCallRequest {
+                id: "call_good".to_string(),
+                name: "read".to_string(),
+                arguments: "{}".to_string(),
+            }]),
+            Message::tool("result", "call_good"),
+        ];
+        cleanup_orphan_tool_uses(&mut history);
+        // 孤儿 tool_call 应该被清空（之前因为 break bug 会漏掉）
+        assert!(
+            history[1].tool_calls.is_none(),
+            "orphan tool_calls should be cleared"
+        );
+        // 完整配对应该保留
+        assert!(history[3].tool_calls.is_some(), "good pair should stay");
+        assert_eq!(history[4].role, Role::Tool);
+    }
+
+    #[test]
+    fn test_cleanup_id_mismatch() {
+        // assistant tool_call id 与 tool 结果 id 不匹配
+        let mut history = vec![
+            Message::user("do task"),
+            Message::tool_call(vec![ToolCallRequest {
+                id: "call_a".to_string(),
+                name: "search".to_string(),
+                arguments: "{}".to_string(),
+            }]),
+            Message::tool("result", "call_b"), // ID 不匹配！
+        ];
+        cleanup_orphan_tool_uses(&mut history);
+        // ID 不匹配 → tool_calls 被清空
+        assert!(
+            history[1].tool_calls.is_none(),
+            "mismatched tool_calls should be cleared"
+        );
+        // tool 消息被标记为 skip_context
+        assert!(
+            history[2].skip_context,
+            "orphan tool result should be skip_context"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_orphan_tool_message() {
+        // tool 消息存在但没有匹配的 assistant tool_call
+        let mut history = vec![
+            Message::user("do task"),
+            Message::assistant("done"),
+            Message::tool("orphan result", "call_orphan"),
+        ];
+        cleanup_orphan_tool_uses(&mut history);
+        // 孤儿 tool 消息被标记为 skip_context
+        assert!(
+            history[2].skip_context,
+            "orphan tool message should be skip_context"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_multi_tool_calls_partial_match() {
+        // assistant 有 2 个 tool_calls，但只有 1 个 tool 结果（且 ID 匹配第一个）
+        let mut history = vec![
+            Message::user("do task"),
+            Message::tool_call(vec![
+                ToolCallRequest {
+                    id: "call_a".to_string(),
+                    name: "search".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                ToolCallRequest {
+                    id: "call_b".to_string(),
+                    name: "read".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            ]),
+            Message::tool("result a", "call_a"),
+            // call_b 的结果缺失！
+        ];
+        cleanup_orphan_tool_uses(&mut history);
+        // 部分匹配 → tool_calls 全部清空
+        assert!(
+            history[1].tool_calls.is_none(),
+            "partial match should clear all"
+        );
+        // tool 消息 call_a 被标记为孤儿
+        assert!(
+            history[2].skip_context,
+            "orphan tool result should be skip_context"
+        );
     }
 }

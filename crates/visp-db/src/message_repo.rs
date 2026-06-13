@@ -39,6 +39,12 @@ impl MessageRepo {
             (None, None)
         };
 
+        // Full tool_calls serialized as JSON (preserves all calls including their IDs)
+        let tool_calls_json = msg
+            .tool_calls
+            .as_ref()
+            .map(|calls| serde_json::to_string(calls).unwrap_or_default());
+
         let extra_blocks = msg
             .extra_blocks
             .as_ref()
@@ -49,8 +55,8 @@ impl MessageRepo {
             .map(|v| serde_json::to_string(v).unwrap_or_default());
 
         conn.execute(
-            "INSERT INTO message (session_id, role, type, content, tool_call_id, tool_name, tool_arguments, tool_result_is_error, tool_result_duration_ms, estimated_tokens, extra_blocks, provider_metadata, actual_tokens_input, actual_tokens_output, actual_cache_read, actual_cache_write, actual_cost, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            "INSERT INTO message (session_id, role, type, content, tool_call_id, tool_name, tool_arguments, tool_calls_json, tool_result_is_error, tool_result_duration_ms, estimated_tokens, extra_blocks, provider_metadata, actual_tokens_input, actual_tokens_output, actual_cache_read, actual_cache_write, actual_cost, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 session_id,
                 role_str,
@@ -59,6 +65,7 @@ impl MessageRepo {
                 msg.tool_call_id,
                 tool_name,
                 tool_arguments,
+                tool_calls_json,
                 msg.tool_result_is_error.map(|v| v as i64),
                 msg.tool_result_duration_ms.map(|v| v as i64),
                 msg.estimated_tokens,
@@ -78,7 +85,7 @@ impl MessageRepo {
     /// Get all messages for a session, ordered by id (insertion order).
     pub fn get_by_session(conn: &Connection, session_id: &str) -> Result<Vec<Message>> {
         let mut stmt = conn.prepare(
-            "SELECT id, role, type, content, tool_call_id, tool_name, tool_arguments, tool_result_is_error, tool_result_duration_ms, estimated_tokens, extra_blocks, provider_metadata, actual_tokens_input, actual_tokens_output, actual_cache_read, actual_cache_write, actual_cost, created_at
+            "SELECT id, role, type, content, tool_call_id, tool_name, tool_arguments, tool_calls_json, tool_result_is_error, tool_result_duration_ms, estimated_tokens, extra_blocks, provider_metadata, actual_tokens_input, actual_tokens_output, actual_cache_read, actual_cache_write, actual_cost, created_at
              FROM message WHERE session_id = ?1 ORDER BY id ASC",
         )?;
 
@@ -91,17 +98,18 @@ impl MessageRepo {
                 let tool_call_id: Option<String> = row.get(4)?;
                 let tool_name: Option<String> = row.get(5)?;
                 let tool_arguments: Option<String> = row.get(6)?;
-                let tool_result_is_error: Option<i64> = row.get(7)?;
-                let tool_result_duration_ms: Option<i64> = row.get(8)?;
-                let estimated_tokens: u32 = row.get(9)?;
-                let extra_blocks_str: Option<String> = row.get(10)?;
-                let provider_metadata_str: Option<String> = row.get(11)?;
-                let actual_tokens_input: Option<u32> = row.get(12)?;
-                let actual_tokens_output: Option<u32> = row.get(13)?;
-                let actual_cache_read: Option<u32> = row.get(14)?;
-                let actual_cache_write: Option<u32> = row.get(15)?;
-                let actual_cost: Option<f64> = row.get(16)?;
-                let created_at: Option<i64> = row.get(17)?;
+                let tool_calls_json: Option<String> = row.get(7)?;
+                let tool_result_is_error: Option<i64> = row.get(8)?;
+                let tool_result_duration_ms: Option<i64> = row.get(9)?;
+                let estimated_tokens: u32 = row.get(10)?;
+                let extra_blocks_str: Option<String> = row.get(11)?;
+                let provider_metadata_str: Option<String> = row.get(12)?;
+                let actual_tokens_input: Option<u32> = row.get(13)?;
+                let actual_tokens_output: Option<u32> = row.get(14)?;
+                let actual_cache_read: Option<u32> = row.get(15)?;
+                let actual_cache_write: Option<u32> = row.get(16)?;
+                let actual_cost: Option<f64> = row.get(17)?;
+                let created_at: Option<i64> = row.get(18)?;
 
                 let role = match role_str.as_str() {
                     "user" => Role::User,
@@ -127,9 +135,15 @@ impl MessageRepo {
                 let provider_metadata = provider_metadata_str
                     .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
 
-                // Reconstruct tool_calls from tool_name + tool_arguments if type is tool_call
+                // Reconstruct tool_calls: prefer tool_calls_json if present (v2+),
+                // fall back to tool_name + tool_arguments (v1 compat)
                 let tool_calls = if kind == MessageType::ToolCall {
-                    if let (Some(name), Some(args)) = (&tool_name, &tool_arguments) {
+                    if let Some(ref json) = tool_calls_json {
+                        // v2+: deserialize from JSON (preserves all calls & their IDs)
+                        serde_json::from_str(json).ok()
+                    } else if let (Some(name), Some(args)) = (&tool_name, &tool_arguments) {
+                        // v1 fallback: reconstruct from tool_name + tool_arguments
+                        // v1 data has empty tool_call_id, which is a known bug.
                         Some(vec![visp_core::message::ToolCallRequest {
                             id: tool_call_id.clone().unwrap_or_default(),
                             name: name.clone(),
@@ -313,5 +327,131 @@ mod tests {
             MessageRepo::get_by_session(&conn, "ses-del").unwrap().len(),
             0
         );
+    }
+
+    #[test]
+    fn test_tool_calls_json_roundtrip() {
+        let conn = setup();
+        insert_session(&conn, "ses-tcj-1");
+
+        let msg = Message {
+            role: Role::Assistant,
+            kind: MessageType::ToolCall,
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: Some(vec![
+                visp_core::message::ToolCallRequest {
+                    id: "call_abc123".to_string(),
+                    name: "search".to_string(),
+                    arguments: r#"{"query":"test"}"#.to_string(),
+                },
+                visp_core::message::ToolCallRequest {
+                    id: "call_def456".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: r#"{"path":"/tmp/test"}"#.to_string(),
+                },
+            ]),
+            extra_blocks: None,
+            skip_context: false,
+            estimated_tokens: 0,
+            actual_tokens_input: None,
+            actual_tokens_output: None,
+            actual_cache_read: None,
+            actual_cache_write: None,
+            actual_cost: None,
+            provider_metadata: None,
+            tool_result_is_error: None,
+            tool_result_duration_ms: None,
+            created_at: None,
+        };
+
+        MessageRepo::insert(&conn, "ses-tcj-1", &msg).unwrap();
+        let loaded = MessageRepo::get_by_session(&conn, "ses-tcj-1").unwrap();
+        assert_eq!(loaded.len(), 1);
+
+        let restored = &loaded[0];
+        let calls = restored.tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 2, "should restore both tool_calls");
+        assert_eq!(calls[0].id, "call_abc123");
+        assert_eq!(calls[0].name, "search");
+        assert_eq!(calls[0].arguments, r#"{"query":"test"}"#);
+        assert_eq!(calls[1].id, "call_def456");
+        assert_eq!(calls[1].name, "read_file");
+        assert_eq!(calls[1].arguments, r#"{"path":"/tmp/test"}"#);
+    }
+
+    #[test]
+    fn test_tool_calls_json_empty_calls() {
+        let conn = setup();
+        insert_session(&conn, "ses-tcj-2");
+
+        // Message with kind=ToolCall but no tool_calls
+        let msg = Message {
+            role: Role::Assistant,
+            kind: MessageType::ToolCall,
+            content: "text".to_string(),
+            tool_call_id: None,
+            tool_calls: None,
+            extra_blocks: None,
+            skip_context: false,
+            estimated_tokens: 0,
+            actual_tokens_input: None,
+            actual_tokens_output: None,
+            actual_cache_read: None,
+            actual_cache_write: None,
+            actual_cost: None,
+            provider_metadata: None,
+            tool_result_is_error: None,
+            tool_result_duration_ms: None,
+            created_at: None,
+        };
+
+        MessageRepo::insert(&conn, "ses-tcj-2", &msg).unwrap();
+        let loaded = MessageRepo::get_by_session(&conn, "ses-tcj-2").unwrap();
+        assert!(loaded[0].tool_calls.is_none());
+    }
+
+    #[test]
+    fn test_tool_calls_json_v1_fallback() {
+        let conn = Connection::open_in_memory().unwrap();
+        Migrator::run(&conn).unwrap();
+        insert_session(&conn, "ses-tcj-3");
+
+        // Insert manually using raw SQL to simulate v1 data (no tool_calls_json)
+        conn.execute(
+            "INSERT INTO message (session_id, role, type, content, tool_call_id, tool_name, tool_arguments, tool_calls_json, tool_result_is_error, tool_result_duration_ms, estimated_tokens, extra_blocks, provider_metadata, actual_tokens_input, actual_tokens_output, actual_cache_read, actual_cache_write, actual_cost, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            rusqlite::params![
+                "ses-tcj-3",
+                "assistant",
+                "tool_call",
+                "",
+                Option::<String>::None, // tool_call_id
+                "search",
+                r#"{"query":"test"}"#,
+                Option::<i64>::None, // tool_result_is_error
+                Option::<i64>::None, // tool_result_duration_ms
+                0_i64,              // estimated_tokens
+                Option::<String>::None, // extra_blocks
+                Option::<String>::None, // provider_metadata
+                Option::<i64>::None, // actual_tokens_input
+                Option::<i64>::None, // actual_tokens_output
+                Option::<i64>::None, // actual_cache_read
+                Option::<i64>::None, // actual_cache_write
+                Option::<f64>::None, // actual_cost
+                1700000000000_i64,   // created_at
+            ],
+        )
+        .unwrap();
+
+        // Load via normal API (should fall back to v1 logic)
+        let loaded = MessageRepo::get_by_session(&conn, "ses-tcj-3").unwrap();
+        assert_eq!(loaded.len(), 1);
+        let calls = loaded[0].tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1, "v1 fallback should reconstruct single call");
+        assert_eq!(calls[0].name, "search");
+        assert_eq!(calls[0].arguments, r#"{"query":"test"}"#);
+        // v1 data has empty tool_call_id
+        assert_eq!(calls[0].id, "");
     }
 }

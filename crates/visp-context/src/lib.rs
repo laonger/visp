@@ -254,17 +254,47 @@ pub(crate) fn keep_head_and_tail(history: &[Message], budget: u32) -> Vec<Messag
         }
     }
 
-    // 反转得到原始顺序，然后过滤孤立 ToolResult
+    // 反转得到原始顺序
     tail_indices.reverse();
+
+    // 构建 confirmed_tool_ids 集合（被保留的 assistant tool_calls 需要对应的 tool_result）
+    let confirmed_ids_set: std::collections::HashSet<&str> =
+        confirmed_tool_ids.iter().map(|s| s.as_str()).collect();
+
+    // 收集结果中实际存在的 tool_call_ids（从 Tool 消息）
+    let mut present_tool_call_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for &i in &tail_indices {
+        let msg = &history[i];
+        if msg.role == Role::Tool
+            && let Some(ref call_id) = msg.tool_call_id
+        {
+            present_tool_call_ids.insert(call_id.clone());
+        }
+    }
+
+    // 过滤：移除孤儿 ToolResult 和孤儿 ToolCall
     let filtered_indices: Vec<usize> = tail_indices
         .into_iter()
         .filter(|&i| {
             let msg = &history[i];
             if msg.role == Role::Tool {
+                // orphan ToolResult：没有匹配的 assistant tool_call
                 if let Some(ref call_id) = msg.tool_call_id {
-                    return confirmed_tool_ids.contains(call_id);
+                    return confirmed_ids_set.contains(call_id.as_str());
                 }
                 return false;
+            }
+            if msg.role == Role::Assistant
+                && let Some(ref calls) = msg.tool_calls
+            {
+                // orphan ToolCall：assistant tool_calls 存在但 tool_result 不在结果中
+                // 如果所有 tool_calls 的 id 都不在 present_tool_call_ids 中，过滤掉这个 assistant
+                let any_result_present =
+                    calls.iter().any(|c| present_tool_call_ids.contains(&c.id));
+                if !any_result_present {
+                    return false;
+                }
             }
             true
         })
@@ -570,7 +600,67 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    // ---- 6: trim (via DefaultContextTrimmer) ----
+    // ---- 6: keep_head_and_tail orphan tool_call filter ----
+
+    #[test]
+    fn test_keep_head_and_tail_filter_orphan_toolcall() {
+        // Assistant 的 tool_call 在结果中，但 tool_result 不在 → tool_call 应被过滤
+        let mut a1 = Message::assistant("a1");
+        a1.tool_calls = Some(vec![ToolCallRequest {
+            id: "call_a".to_string(),
+            name: "tool".to_string(),
+            arguments: "{}".to_string(),
+        }]);
+        a1.estimated_tokens = estimate_message_tokens(&a1);
+        let history = vec![
+            Message::user("u1"),
+            a1.clone(),
+            Message::user("u2"),
+            Message::assistant("a2"),
+        ];
+        // budget=12: 从后往前，u2(2)+a2(2)+a1(2) fits, u1(2) fits
+        // 但 a1 有 tool_calls("call_a")，没有对应的 tool_result → 应被过滤
+        let result = keep_head_and_tail(&history, 12);
+        // a1 应该被过滤掉（orphan tool_call）
+        assert!(
+            !result
+                .iter()
+                .any(|m| m.role == Role::Assistant && m.tool_calls.is_some()),
+            "orphan tool_call should be filtered"
+        );
+        assert_eq!(result[0], Message::user("u1"));
+    }
+
+    #[test]
+    fn test_keep_head_and_tail_orphan_toolcall_but_keep_result() {
+        // 正常情况：assistant tool_call 和 tool_result 都在结果中 → 都保留
+        let mut a1 = Message::assistant("a1");
+        a1.tool_calls = Some(vec![ToolCallRequest {
+            id: "call_a".to_string(),
+            name: "tool".to_string(),
+            arguments: "{}".to_string(),
+        }]);
+        a1.estimated_tokens = estimate_message_tokens(&a1);
+        let tr1 = Message::tool("tr1", "call_a");
+        let history = vec![
+            Message::user("u1"),
+            a1.clone(),
+            tr1.clone(),
+            Message::user("u2"),
+            Message::assistant("a2"),
+        ];
+        // budget=20: u1(2)+a1(6)+tr1(4)+u2(2)+a2(2) = 16, all fit
+        let result = keep_head_and_tail(&history, 20);
+        // a1 和 tr1 应该都被保留
+        let has_call = result
+            .iter()
+            .any(|m| m.role == Role::Assistant && m.tool_calls.is_some());
+        assert!(has_call, "confirmed tool_call should be kept");
+        let has_result = result.iter().any(|m| m.role == Role::Tool);
+        assert!(has_result, "confirmed tool_result should be kept");
+    }
+
+    // ---- 7: trim (via DefaultContextTrimmer) ----
 
     #[test]
     fn test_trim_context_all_fit() {
