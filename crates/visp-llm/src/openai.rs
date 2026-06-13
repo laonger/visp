@@ -644,6 +644,7 @@ impl LlmProvider for OpenAiProvider {
         let body = build_openai_request(messages, tools, config);
         let headers = build_openai_headers(&self.api_key);
 
+        tracing::debug!(url = %url, model = %config.model, "OpenAI request");
         let response = self
             .client
             .post(&url)

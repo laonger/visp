@@ -452,6 +452,7 @@ impl LlmProvider for AnthropicProvider {
         let body = build_anthropic_request(messages, tools, config);
         let headers = build_anthropic_headers(&self.api_key);
 
+        tracing::debug!(url = %url, model = %config.model, "Anthropic request");
         let response = self
             .client
             .post(&url)
