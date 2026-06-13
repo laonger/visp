@@ -172,6 +172,7 @@ mod tests {
             created_at: std::time::Instant::now(),
             created_at_unix: Some(1700000000000),
             history: vec![],
+            last_user_message: None,
             config: LlmConfig::default(),
             system_prompt_template: "default".into(),
             approved_tools: HashSet::new(),

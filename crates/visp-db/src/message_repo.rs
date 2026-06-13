@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Result, params};
+use rusqlite::{Connection, OptionalExtension, Result, params};
 use visp_core::message::{Message, MessageType, Role};
 
 /// Message table DAO (Data Access Object).
@@ -181,6 +181,23 @@ impl MessageRepo {
         Ok(messages)
     }
 
+    /// 获取某个 session 的最后一条用户消息内容（截断到 80 字符）
+    pub fn get_last_user_message(conn: &Connection, session_id: &str) -> Result<Option<String>> {
+        let mut stmt = conn.prepare(
+            "SELECT content FROM message WHERE session_id = ?1 AND role = 'user' ORDER BY id DESC LIMIT 1",
+        )?;
+        let result: Option<String> = stmt
+            .query_row(params![session_id], |row| row.get(0))
+            .optional()?;
+        Ok(result.map(|s| {
+            if s.chars().count() > 80 {
+                format!("{}...", s.chars().take(80).collect::<String>())
+            } else {
+                s
+            }
+        }))
+    }
+
     /// Delete all messages for a session.
     pub fn delete_by_session(conn: &Connection, session_id: &str) -> Result<usize> {
         conn.execute(
@@ -213,6 +230,7 @@ mod tests {
             created_at: std::time::Instant::now(),
             created_at_unix: Some(1700000000000),
             history: vec![],
+            last_user_message: None,
             config: LlmConfig::default(),
             system_prompt_template: "default".into(),
             approved_tools: HashSet::new(),
@@ -453,5 +471,41 @@ mod tests {
         assert_eq!(calls[0].arguments, r#"{"query":"test"}"#);
         // v1 data has empty tool_call_id
         assert_eq!(calls[0].id, "");
+    }
+
+    #[test]
+    fn test_get_last_user_message() {
+        let conn = setup();
+        insert_session(&conn, "ses-last-msg");
+
+        // 插入一些消息
+        MessageRepo::insert(&conn, "ses-last-msg", &Message::user("hello")).unwrap();
+        MessageRepo::insert(&conn, "ses-last-msg", &Message::assistant("hi there")).unwrap();
+        MessageRepo::insert(&conn, "ses-last-msg", &Message::user("second question")).unwrap();
+
+        let last = MessageRepo::get_last_user_message(&conn, "ses-last-msg").unwrap();
+        assert_eq!(last, Some("second question".to_string()));
+    }
+
+    #[test]
+    fn test_get_last_user_message_empty() {
+        let conn = setup();
+        insert_session(&conn, "ses-empty-msg");
+
+        let last = MessageRepo::get_last_user_message(&conn, "ses-empty-msg").unwrap();
+        assert_eq!(last, None);
+    }
+
+    #[test]
+    fn test_get_last_user_message_truncated() {
+        let conn = setup();
+        insert_session(&conn, "ses-long-msg");
+
+        let long_msg = "a".repeat(100);
+        MessageRepo::insert(&conn, "ses-long-msg", &Message::user(&long_msg)).unwrap();
+
+        let last = MessageRepo::get_last_user_message(&conn, "ses-long-msg").unwrap();
+        let expected = format!("{}...", "a".repeat(80));
+        assert_eq!(last, Some(expected));
     }
 }

@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::agent::AgentLoopContext;
 use crate::error::SessionError;
 use crate::message::Message;
+use crate::message::Role;
 use crate::provider::LlmConfig;
 
 /// 会话状态
@@ -30,6 +31,8 @@ pub struct Session {
     /// Unix 毫秒时间戳，用于 DB 持久化（Option 以兼容运行时无法确定时间的场景）
     pub created_at_unix: Option<i64>,
     pub history: Vec<Message>,
+    /// 最后一条用户消息内容（用于 /list 显示），截断到 80 字符
+    pub last_user_message: Option<String>,
     pub config: LlmConfig,
     pub system_prompt_template: String,
     /// 已审批的工具名称集合（Always Allow）
@@ -88,7 +91,22 @@ impl SessionStore for InMemorySessionStore {
     }
 
     fn list(&self) -> Result<Vec<Session>, SessionError> {
-        Ok(self.sessions.values().cloned().collect())
+        let mut sessions: Vec<Session> = self.sessions.values().cloned().collect();
+        for session in &mut sessions {
+            session.last_user_message = session
+                .history
+                .iter()
+                .rev()
+                .find(|m| m.role == Role::User)
+                .map(|m| {
+                    if m.content.chars().count() > 80 {
+                        format!("{}...", m.content.chars().take(80).collect::<String>())
+                    } else {
+                        m.content.clone()
+                    }
+                });
+        }
+        Ok(sessions)
     }
 
     fn delete(&mut self, session_id: &str) -> Result<(), SessionError> {
@@ -122,12 +140,27 @@ impl SessionStore for InMemorySessionStore {
 
     fn list_by_project(&self, project_path: &str) -> Result<Vec<Session>, SessionError> {
         let target = PathBuf::from(project_path);
-        Ok(self
+        let mut sessions: Vec<Session> = self
             .sessions
             .values()
             .filter(|s| s.project_path == target)
             .cloned()
-            .collect())
+            .collect();
+        for session in &mut sessions {
+            session.last_user_message = session
+                .history
+                .iter()
+                .rev()
+                .find(|m| m.role == Role::User)
+                .map(|m| {
+                    if m.content.chars().count() > 80 {
+                        format!("{}...", m.content.chars().take(80).collect::<String>())
+                    } else {
+                        m.content.clone()
+                    }
+                });
+        }
+        Ok(sessions)
     }
 }
 
@@ -349,6 +382,7 @@ impl SessionManager {
             created_at: Instant::now(),
             created_at_unix: None,
             history: Vec::new(),
+            last_user_message: None,
             config,
             system_prompt_template: prompt_template,
             approved_tools: HashSet::new(),
@@ -477,9 +511,8 @@ impl SessionManager {
 mod tests {
     use super::*;
     use crate::context::ContextTrimmer;
-    use crate::message::Message;
     use crate::message::MessageType;
-    use crate::message::Role;
+    use crate::message::{Message, Role};
     use std::path::Path;
 
     struct MockTrimmer;
@@ -501,6 +534,7 @@ mod tests {
             created_at: Instant::now(),
             created_at_unix: None,
             history: vec![],
+            last_user_message: None,
             config: LlmConfig::default(),
             system_prompt_template: "default".into(),
             approved_tools: HashSet::new(),
@@ -521,6 +555,7 @@ mod tests {
             created_at: Instant::now(),
             created_at_unix: Some(1700000000000),
             history: vec![],
+            last_user_message: None,
             config: LlmConfig::default(),
             system_prompt_template: "default".into(),
             approved_tools: HashSet::new(),
@@ -563,6 +598,7 @@ mod tests {
             created_at: Instant::now(),
             created_at_unix: None,
             history: vec![],
+            last_user_message: None,
             config: LlmConfig::default(),
             system_prompt_template: "default".into(),
             approved_tools: HashSet::new(),

@@ -2,6 +2,8 @@ use rusqlite::{Connection, Result, params};
 use visp_core::provider::LlmConfig;
 use visp_core::session::{Session, SessionStatus};
 
+use crate::message_repo::MessageRepo;
+
 /// Session table DAO (Data Access Object).
 /// All methods receive a `&rusqlite::Connection` and operate on the `session` table.
 pub struct SessionRepo;
@@ -79,6 +81,7 @@ impl SessionRepo {
                     created_at: std::time::Instant::now(),
                     created_at_unix: Some(created_at_unix),
                     history: vec![],
+                    last_user_message: None,
                     config,
                     system_prompt_template: prompt,
                     approved_tools: approved_tools.into_iter().collect(),
@@ -95,7 +98,7 @@ impl SessionRepo {
              FROM session ORDER BY created_at DESC",
         )?;
 
-        let sessions = stmt
+        let mut sessions = stmt
             .query_map([], |row| {
                 let id: String = row.get(0)?;
                 let project_path: String = row.get(1)?;
@@ -124,12 +127,18 @@ impl SessionRepo {
                     created_at: std::time::Instant::now(),
                     created_at_unix: Some(created_at_unix),
                     history: vec![],
+                    last_user_message: None,
                     config,
                     system_prompt_template: prompt,
                     approved_tools: approved_tools.into_iter().collect(),
                 })
             })?
             .collect::<Result<Vec<_>>>()?;
+
+        for session in &mut sessions {
+            session.last_user_message =
+                MessageRepo::get_last_user_message(conn, &session.id).unwrap_or(None);
+        }
 
         Ok(sessions)
     }
@@ -141,7 +150,7 @@ impl SessionRepo {
              FROM session WHERE project_path = ?1 ORDER BY created_at DESC",
         )?;
 
-        let sessions = stmt
+        let mut sessions = stmt
             .query_map(params![project_path], |row| {
                 let id: String = row.get(0)?;
                 let project_path: String = row.get(1)?;
@@ -170,12 +179,18 @@ impl SessionRepo {
                     created_at: std::time::Instant::now(),
                     created_at_unix: Some(created_at_unix),
                     history: vec![],
+                    last_user_message: None,
                     config,
                     system_prompt_template: prompt,
                     approved_tools: approved_tools.into_iter().collect(),
                 })
             })?
             .collect::<Result<Vec<_>>>()?;
+
+        for session in &mut sessions {
+            session.last_user_message =
+                MessageRepo::get_last_user_message(conn, &session.id).unwrap_or(None);
+        }
 
         Ok(sessions)
     }
@@ -234,6 +249,7 @@ mod tests {
             created_at: std::time::Instant::now(),
             created_at_unix: Some(1700000000000),
             history: vec![],
+            last_user_message: None,
             config: LlmConfig::default(),
             system_prompt_template: "default".into(),
             approved_tools: HashSet::new(),
@@ -360,5 +376,66 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_list_populates_last_user_message() {
+        let conn = setup();
+        SessionRepo::insert(&conn, &sample_session("ses-list-msg")).unwrap();
+
+        // Insert messages, last one being a user message
+        conn.execute(
+            "INSERT INTO message (session_id, role, type, content, created_at) VALUES (?1, 'user', 'user', 'first question', 1700000000001)",
+            params!["ses-list-msg"],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO message (session_id, role, type, content, created_at) VALUES (?1, 'assistant', 'text', 'some answer', 1700000000002)",
+            params!["ses-list-msg"],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO message (session_id, role, type, content, created_at) VALUES (?1, 'user', 'user', 'second question', 1700000000003)",
+            params!["ses-list-msg"],
+        ).unwrap();
+
+        let list = SessionRepo::list(&conn).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(
+            list[0].last_user_message,
+            Some("second question".to_string())
+        );
+    }
+
+    #[test]
+    fn test_list_last_user_message_none_when_no_messages() {
+        let conn = setup();
+        SessionRepo::insert(&conn, &sample_session("ses-no-msg")).unwrap();
+
+        let list = SessionRepo::list(&conn).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].last_user_message, None);
+    }
+
+    #[test]
+    fn test_list_by_project_populates_last_user_message() {
+        let conn = setup();
+        let mut s = sample_session("ses-proj-msg");
+        s.project_path = "/my-project".into();
+        SessionRepo::insert(&conn, &s).unwrap();
+
+        conn.execute(
+            "INSERT INTO message (session_id, role, type, content, created_at) VALUES (?1, 'user', 'user', 'project question', 1700000000000)",
+            params!["ses-proj-msg"],
+        ).unwrap();
+
+        let list = SessionRepo::list_by_project(&conn, "/my-project").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(
+            list[0].last_user_message,
+            Some("project question".to_string())
+        );
+
+        // Other project should have no sessions
+        let other = SessionRepo::list_by_project(&conn, "/other").unwrap();
+        assert!(other.is_empty());
     }
 }

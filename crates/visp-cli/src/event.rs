@@ -194,14 +194,20 @@ pub async fn run(
                                 3 => "ERROR",
                                 _ => "UNKNOWN",
                             };
+                            let last_msg = if s.last_user_message.is_empty() {
+                                "(no messages)"
+                            } else {
+                                s.last_user_message.as_str()
+                            };
                             app.add_message(
                                 LineType::Status,
-                                format!("  {short_id}  {status_str:>9}  {}", s.session_id),
+                                format!("  {short_id}  {status_str:>9}  {last_msg}"),
                             );
                         }
                         app.add_message(
                             LineType::Status,
-                            "Use: /new to start a new session, visp -s <id> to resume".into(),
+                            "Use: /new to start, visp -s <id> to resume (supports short-id prefix)"
+                                .into(),
                         );
                     }
                 }
