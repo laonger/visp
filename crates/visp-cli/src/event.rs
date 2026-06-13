@@ -134,6 +134,9 @@ pub async fn run(
 
     let _ = terminal.draw(|f| render(&mut app, f));
 
+    // Points spinner 动画 tick：generating 期间每 140ms 推进一帧
+    let mut spinner_tick = tokio::time::interval(std::time::Duration::from_millis(140));
+
     loop {
         tokio::select! {
             event = key_rx.recv() => {
@@ -152,6 +155,13 @@ pub async fn run(
                 // Ctrl+D: 先发 Cancel 让 daemon 优雅停止，再断开连接
                 chat_handle.send_cancel();
                 break;
+            }
+            _ = spinner_tick.tick() => {
+                // 仅 generating 期间推进 spinner 帧并请求重绘
+                if app.generating {
+                    app.spinner_frame = app.spinner_frame.wrapping_add(1);
+                    app.needs_render = true;
+                }
             }
         }
         if app.should_quit {
@@ -340,6 +350,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                     {
                         let model_key = ms.model_names[idx].clone();
                         app.model = ms.display_labels[idx].clone();
+                        eprintln!("[CLI] Sending ConfigUpdate: model_key={}", model_key);
                         chat_handle.send_config_update(LlmConfig {
                             model: Some(model_key),
                             temperature: None,
