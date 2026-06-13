@@ -7,8 +7,8 @@ use tokio::sync::mpsc;
 use tonic::transport::Channel;
 
 use visp_proto::visp::{
-    Ack, Cancel, ClientMessage, ConfigUpdate, CreateSessionRequest, GetSessionRequest, LlmConfig,
-    ServerMessage, Session, UserInput, UserResponse, client_message,
+    Ack, Cancel, ClientMessage, ConfigUpdate, CreateSessionRequest, GetSessionRequest, JoinSession,
+    LlmConfig, ServerMessage, Session, UserInput, UserResponse, client_message,
     coder_daemon_client::CoderDaemonClient,
 };
 
@@ -68,6 +68,15 @@ impl VbwClient {
             .await
             .map_err(|e| format!("get session: {}", e))?;
         Ok(resp.into_inner())
+    }
+
+    pub async fn list_sessions(&mut self) -> Result<Vec<Session>, String> {
+        let resp = self
+            .client
+            .list_sessions(())
+            .await
+            .map_err(|e| format!("list sessions: {}", e))?;
+        Ok(resp.into_inner().sessions)
     }
 
     pub async fn chat(&mut self, session_id: &str) -> Result<ChatHandle, String> {
@@ -136,6 +145,18 @@ impl ChatHandle {
     pub fn send_cancel(&self) {
         let msg = ClientMessage {
             payload: Some(client_message::Payload::Cancel(Cancel {
+                session_id: self.session_id.clone(),
+            })),
+        };
+        let tx = self.request_tx.clone();
+        tokio::spawn(async move {
+            let _ = tx.send(msg).await;
+        });
+    }
+
+    pub fn send_join(&self) {
+        let msg = ClientMessage {
+            payload: Some(client_message::Payload::JoinSession(JoinSession {
                 session_id: self.session_id.clone(),
             })),
         };

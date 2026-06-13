@@ -46,6 +46,10 @@ message GetSessionRequest {
 }
 
 // ============ Chat (双向流) ============
+message JoinSession {
+    string session_id = 1;
+}
+
 message ClientMessage {
     oneof payload {
         UserInput user_input = 1;
@@ -53,6 +57,7 @@ message ClientMessage {
         UserResponse user_response = 3;
         Cancel cancel = 4;
         Ack ack = 5;
+        JoinSession join_session = 6;
     }
 }
 

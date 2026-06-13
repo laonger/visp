@@ -12,7 +12,7 @@ use visp_codegraph::CodeGraph;
 use visp_core::{
     agent::{AgentConfig, AgentEvent, UserQueryResult, run_agent_loop},
     context::ContextTrimmer,
-    message::Message,
+    message::{Message, Role},
     provider::{LlmConfig, LlmProvider},
     rules::RuleEngine,
     session::{SessionManager, SessionStatus},
@@ -316,6 +316,7 @@ impl CoderDaemon for CoderDaemonService {
                         } else {
                             text
                         };
+
                         let ctx = match session_mgr.start_loop(&session_id, &context_trimmer) {
                             Ok(c) => c,
                             Err(e) => {
@@ -395,6 +396,47 @@ impl CoderDaemon for CoderDaemonService {
                                 }
                             }
                         });
+                    }
+                    Some(proto::client_message::Payload::JoinSession(join)) => {
+                        let session_id = join.session_id;
+                        if let Ok(session) = session_mgr.get(&session_id) {
+                            if session.history.is_empty() {
+                                // no-op: new session, no history to show
+                            } else {
+                                let mut history_lines = Vec::new();
+                                history_lines.push(format!(
+                                    "═══ Resumed session ({} previous messages) ═══",
+                                    session.history.len()
+                                ));
+                                for msg in &session.history {
+                                    let role_label = match msg.role {
+                                        Role::User => "User",
+                                        Role::Assistant => "Assistant",
+                                        Role::Tool => "  Tool",
+                                        _ => continue,
+                                    };
+                                    let preview: String = msg.content.chars().take(120).collect();
+                                    if preview.len() < msg.content.len() {
+                                        history_lines.push(format!("{role_label}: {preview}..."));
+                                    } else {
+                                        history_lines.push(format!("{role_label}: {preview}"));
+                                    }
+                                }
+                                history_lines.push("═══ End of history ═══".into());
+                                let _ = tx
+                                    .send(Ok(proto::ServerMessage {
+                                        payload: Some(
+                                            proto::server_message::Payload::StatusUpdate(
+                                                proto::StatusUpdate {
+                                                    message: history_lines.join("\n"),
+                                                    session_id: session_id.clone(),
+                                                },
+                                            ),
+                                        ),
+                                    }))
+                                    .await;
+                            }
+                        }
                     }
                     Some(proto::client_message::Payload::ConfigUpdate(update)) => {
                         let session_id = update.session_id;
