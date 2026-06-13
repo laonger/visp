@@ -193,14 +193,14 @@ pub fn load_config(config_path: Option<&Path>) -> Result<DaemonConfig, String> {
         return load_from_file(path);
     }
 
-    // 尝试默认路径 ~/.config/visp/daemon.toml
+    // 尝试默认路径 ~/.config/visp/daemon.{toml,yaml,yml}
     if let Ok(home) = std::env::var("HOME") {
-        let default_path = std::path::Path::new(&home)
-            .join(".config")
-            .join("visp")
-            .join("daemon.toml");
-        if default_path.exists() {
-            return load_from_file(&default_path);
+        let base = std::path::Path::new(&home).join(".config").join("visp");
+        for name in ["daemon.toml", "daemon.yaml", "daemon.yml"] {
+            let path = base.join(name);
+            if path.exists() {
+                return load_from_file(&path);
+            }
         }
     }
 
@@ -209,7 +209,12 @@ pub fn load_config(config_path: Option<&Path>) -> Result<DaemonConfig, String> {
 
 fn load_from_file(path: &Path) -> Result<DaemonConfig, String> {
     let content = std::fs::read_to_string(path).map_err(|e| format!("read config: {}", e))?;
-    toml::from_str(&content).map_err(|e| format!("parse config: {}", e))
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("yaml" | "yml") => {
+            yaml_serde::from_str(&content).map_err(|e| format!("parse YAML config: {e}"))
+        }
+        _ => toml::from_str(&content).map_err(|e| format!("parse TOML config: {e}")),
+    }
 }
 
 fn default_config() -> DaemonConfig {
