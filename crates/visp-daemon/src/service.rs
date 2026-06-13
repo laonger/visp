@@ -134,8 +134,7 @@ impl CoderDaemonService {
         };
         let initial_provider =
             create_llm_provider(&model_configs[0]).expect("failed to create initial LLM provider");
-        let model_config_names: Vec<String> =
-            model_configs.iter().map(|mc| mc.name.clone()).collect();
+        let model_config_names: Vec<String> = model_configs.iter().map(|mc| mc.key()).collect();
         Self {
             provider: Arc::new(StdRwLock::new(initial_provider)),
             tool_registry,
@@ -556,7 +555,7 @@ impl CoderDaemon for CoderDaemonService {
                             if let Some(model) = &update_config.model {
                                 // 查找模型配置，创建对应的 provider
                                 if let Some(model_config) =
-                                    model_configs.iter().find(|mc| mc.name == *model)
+                                    model_configs.iter().find(|mc| mc.key() == *model)
                                 {
                                     match create_llm_provider(model_config) {
                                         Ok(new_provider) => {

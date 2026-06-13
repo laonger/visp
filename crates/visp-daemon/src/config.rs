@@ -80,6 +80,14 @@ pub struct LlmModelConfig {
     pub extra: std::collections::HashMap<String, String>,
 }
 
+impl LlmModelConfig {
+    /// 全局唯一标识 `[provider].[name]`，作为模型切换的 lookup key
+    pub fn key(&self) -> String {
+        let p = self.provider.as_deref().unwrap_or(&self.protocol);
+        format!("{p}.{}", self.name)
+    }
+}
+
 impl LlmSection {
     /// 返回有效的模型配置列表
     /// 如果配置了 models 数组则使用，否则从单模型字段推导
