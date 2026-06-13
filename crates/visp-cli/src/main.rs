@@ -190,6 +190,7 @@ async fn main() {
         &mut client,
         session.project_path.as_str(),
         session.available_models.clone(),
+        session.model_names.clone(),
     )
     .await
     {

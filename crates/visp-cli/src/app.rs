@@ -571,7 +571,10 @@ pub struct SessionSelectState {
 
 /// 模型选择器状态
 pub struct ModelSelectState {
-    pub models: Vec<String>,
+    /// 选择器中显示的标签（如 "GPT-4o (OpenAI)"）
+    pub display_labels: Vec<String>,
+    /// 发送给 daemon 的模型名称（如 "GPT-4o"）
+    pub model_names: Vec<String>,
     pub state: ListState,
 }
 
@@ -619,8 +622,10 @@ pub struct AppState {
     pub show_help: bool,
     /// session 选择器弹出面板（/list 或 /sessions 无参触发）
     pub session_select: Option<SessionSelectState>,
-    /// 可用的模型名称列表
+    /// 可用的模型名称列表（显示标签）
     pub available_models: Vec<String>,
+    /// 可用的模型 lookup key 列表
+    pub model_names: Vec<String>,
     /// 用户输入了 /model（无参），主循环需要获取模型列表并显示选择器
     pub pending_model_select: bool,
     /// 模型选择器弹出面板（/model 无参触发）
@@ -664,6 +669,7 @@ impl AppState {
             show_help: false,
             session_select: None,
             available_models: Vec::new(),
+            model_names: Vec::new(),
             pending_model_select: false,
             model_select: None,
         }
@@ -805,6 +811,7 @@ impl AppState {
         self.pending_model_select = false;
         self.session_select = None;
         self.model_select = None;
+        self.model_names = Vec::new();
         self.session_id = session_id;
         self.model = model;
     }

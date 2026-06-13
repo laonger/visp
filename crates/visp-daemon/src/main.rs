@@ -13,8 +13,7 @@ use visp_core::{
     session::{InMemorySessionStore, SessionManager, SessionStore},
     tool_registry::ToolRegistry,
 };
-use visp_llm::anthropic::AnthropicProvider;
-use visp_llm::openai::OpenAiProvider;
+
 use visp_mcp::manager::McpManager;
 use visp_tools::{
     bash::Bash,
@@ -47,41 +46,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(listen_addr = %config.daemon.listen_addr, "starting visp-daemon");
 
-    // 3. Create LLM provider
-    let provider: Arc<dyn visp_core::provider::LlmProvider> = match config.llm.protocol.as_str() {
-        "openai" => {
-            let api_key = config
-                .llm
-                .api_key
-                .clone()
-                .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-                .ok_or_else(|| {
-                    "OPENAI_API_KEY not set (configure llm.api_key or set env)".to_string()
-                })?;
-            if let Some(ref base_url) = config.llm.base_url {
-                Arc::new(OpenAiProvider::with_base_url(api_key, base_url.clone()))
-            } else {
-                Arc::new(OpenAiProvider::new(api_key))
-            }
-        }
-        // default to anthropic
-        _ => {
-            let api_key = config
-                .llm
-                .api_key
-                .clone()
-                .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-                .ok_or_else(|| {
-                    "ANTHROPIC_API_KEY not set (configure llm.api_key or set env)".to_string()
-                })?;
-            if let Some(ref base_url) = config.llm.base_url {
-                Arc::new(AnthropicProvider::with_base_url(api_key, base_url.clone()))
-            } else {
-                Arc::new(AnthropicProvider::new(api_key))
-            }
-        }
-    };
-    tracing::info!(protocol = %config.llm.protocol, "LLM provider created");
+    // 3. Build model configs
+    let model_configs = config.llm.effective_models();
+    let model_names: Vec<String> = model_configs.iter().map(|mc| mc.name.clone()).collect();
+    let available_models = config.llm.available_models();
+
+    tracing::info!(
+        protocol = %config.llm.protocol,
+        models = %model_names.join(", "),
+        "LLM configured"
+    );
 
     // 4. Create tool registry
     let tool_registry = ToolRegistry::new();
@@ -227,9 +201,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // 9. Assemble service
-    let available_models = config.llm.available_models();
     let service = CoderDaemonService::new(
-        provider,
+        model_configs,
         tool_registry,
         rule_engine,
         session_mgr,

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::RwLock as StdRwLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
@@ -22,14 +23,58 @@ use visp_core::{
 use visp_mcp::manager::McpManager;
 use visp_proto::visp::{self as proto, coder_daemon_server::CoderDaemon};
 
+use crate::config::LlmModelConfig;
 use crate::config::LlmSection;
 
 type ResponseStream =
     Pin<Box<dyn futures::Stream<Item = Result<proto::ServerMessage, tonic::Status>> + Send>>;
 type CodeGraphMap = Arc<RwLock<HashMap<String, Arc<CodeGraph>>>>;
 
+fn create_llm_provider(config: &LlmModelConfig) -> Result<Arc<dyn LlmProvider>, String> {
+    match config.protocol.as_str() {
+        "openai" => {
+            let api_key = config
+                .api_key
+                .clone()
+                .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+                .ok_or_else(|| {
+                    "OPENAI_API_KEY not set (configure api_key or set env)".to_string()
+                })?;
+            if let Some(ref base_url) = config.base_url {
+                Ok(Arc::new(visp_llm::openai::OpenAiProvider::with_base_url(
+                    api_key,
+                    base_url.clone(),
+                )))
+            } else {
+                Ok(Arc::new(visp_llm::openai::OpenAiProvider::new(api_key)))
+            }
+        }
+        _ => {
+            let api_key = config
+                .api_key
+                .clone()
+                .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+                .ok_or_else(|| {
+                    "ANTHROPIC_API_KEY not set (configure api_key or set env)".to_string()
+                })?;
+            if let Some(ref base_url) = config.base_url {
+                Ok(Arc::new(
+                    visp_llm::anthropic::AnthropicProvider::with_base_url(
+                        api_key,
+                        base_url.clone(),
+                    ),
+                ))
+            } else {
+                Ok(Arc::new(visp_llm::anthropic::AnthropicProvider::new(
+                    api_key,
+                )))
+            }
+        }
+    }
+}
+
 pub struct CoderDaemonService {
-    provider: Arc<dyn LlmProvider>,
+    provider: Arc<StdRwLock<Arc<dyn LlmProvider>>>,
     tool_registry: Arc<ToolRegistry>,
     rule_engine: Arc<RuleEngine>,
     session_mgr: Arc<SessionManager>,
@@ -45,12 +90,16 @@ pub struct CoderDaemonService {
     mcp_manager: Arc<McpManager>,
     /// 可用的模型名称列表
     available_models: Vec<String>,
+    /// 完整模型配置列表
+    model_configs: Vec<LlmModelConfig>,
+    /// 模型名称列表（用于 proto Session 的 model_names 字段）
+    model_config_names: Vec<String>,
 }
 
 impl CoderDaemonService {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        provider: Arc<dyn LlmProvider>,
+        model_configs: Vec<LlmModelConfig>,
         tool_registry: Arc<ToolRegistry>,
         rule_engine: Arc<RuleEngine>,
         session_mgr: Arc<SessionManager>,
@@ -83,8 +132,12 @@ impl CoderDaemonService {
                 extra,
             }
         };
+        let initial_provider =
+            create_llm_provider(&model_configs[0]).expect("failed to create initial LLM provider");
+        let model_config_names: Vec<String> =
+            model_configs.iter().map(|mc| mc.name.clone()).collect();
         Self {
-            provider,
+            provider: Arc::new(StdRwLock::new(initial_provider)),
             tool_registry,
             rule_engine,
             session_mgr,
@@ -95,6 +148,8 @@ impl CoderDaemonService {
             context_trimmer,
             mcp_manager,
             available_models,
+            model_configs,
+            model_config_names,
         }
     }
 
@@ -175,6 +230,7 @@ impl CoderDaemon for CoderDaemonService {
         Ok(Response::new(session_to_proto(
             &session,
             &self.available_models,
+            &self.model_config_names,
         )))
     }
 
@@ -189,7 +245,7 @@ impl CoderDaemon for CoderDaemonService {
         Ok(Response::new(proto::ListSessionsResponse {
             sessions: sessions
                 .iter()
-                .map(|s| session_to_proto(s, &self.available_models))
+                .map(|s| session_to_proto(s, &self.available_models, &self.model_config_names))
                 .collect(),
         }))
     }
@@ -205,6 +261,7 @@ impl CoderDaemon for CoderDaemonService {
             return Ok(Response::new(session_to_proto(
                 &session,
                 &self.available_models,
+                &self.model_config_names,
             )));
         }
 
@@ -224,6 +281,7 @@ impl CoderDaemon for CoderDaemonService {
             1 => Ok(Response::new(session_to_proto(
                 matched[0],
                 &self.available_models,
+                &self.model_config_names,
             ))),
             _ => Err(Status::not_found("Session not found")),
         }
@@ -247,12 +305,14 @@ impl CoderDaemon for CoderDaemonService {
         let mut in_stream = request.into_inner();
         let (tx, rx) = mpsc::channel::<Result<proto::ServerMessage, Status>>(128);
 
-        let provider = self.provider.clone();
+        let provider = self.provider.read().unwrap().clone();
         let tool_registry = self.tool_registry.clone();
         let rule_engine = self.rule_engine.clone();
         let session_mgr = self.session_mgr.clone();
         let agent_config = self.agent_config.clone();
         let context_trimmer = self.context_trimmer.clone();
+        let model_configs = self.model_configs.clone();
+        let provider_ref = self.provider.clone();
 
         tokio::spawn(async move {
             let pending_queries: Arc<
@@ -494,7 +554,42 @@ impl CoderDaemon for CoderDaemonService {
                         let mut config = session.config.clone();
                         if let Some(update_config) = &update.config {
                             if let Some(model) = &update_config.model {
-                                config.model = model.clone();
+                                // 查找模型配置，创建对应的 provider
+                                if let Some(model_config) =
+                                    model_configs.iter().find(|mc| mc.name == *model)
+                                {
+                                    match create_llm_provider(model_config) {
+                                        Ok(new_provider) => {
+                                            *provider_ref.write().unwrap() = new_provider;
+                                            config.model = model_config.model.clone();
+                                            if let Some(temp) = model_config.temperature {
+                                                config.temperature = temp;
+                                            }
+                                            if let Some(tokens) = model_config.max_tokens {
+                                                config.max_tokens = tokens;
+                                            }
+                                            if let Some(ctx) = model_config.max_context_tokens {
+                                                config.max_context_tokens = ctx;
+                                            }
+                                            if !model_config.extra.is_empty() {
+                                                config.extra.extend(model_config.extra.clone());
+                                            }
+                                        }
+                                        Err(e) => {
+                                            let _ = tx
+                                                .send(Ok(session_error_msg(
+                                                    "ProviderError",
+                                                    &e,
+                                                    &session_id,
+                                                )))
+                                                .await;
+                                            continue;
+                                        }
+                                    }
+                                } else {
+                                    // 不在配置列表中的模型名，直接设为 model 字符串（兼容旧行为）
+                                    config.model = model.clone();
+                                }
                             }
                             if let Some(temp) = update_config.temperature {
                                 config.temperature = temp;
@@ -698,6 +793,7 @@ impl CoderDaemon for CoderDaemonService {
 fn session_to_proto(
     session: &visp_core::session::Session,
     available_models: &[String],
+    model_names: &[String],
 ) -> proto::Session {
     let status = match session.status {
         SessionStatus::Idle => proto::SessionStatus::Idle,
@@ -723,6 +819,7 @@ fn session_to_proto(
             nanos: 0,
         }),
         available_models: available_models.to_vec(),
+        model_names: model_names.to_vec(),
     }
 }
 
@@ -872,7 +969,9 @@ mod tests {
 
     fn make_service(mgr: StdArc<SessionManager>) -> CoderDaemonService {
         CoderDaemonService {
-            provider: Arc::new(MockProvider::new(vec![])),
+            provider: Arc::new(StdRwLock::new(
+                Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>
+            )),
             tool_registry: Arc::new(ToolRegistry::new()),
             rule_engine: Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap()),
             session_mgr: mgr,
@@ -883,6 +982,8 @@ mod tests {
             context_trimmer: Arc::new(visp_core::context::NoopTrimmer),
             mcp_manager: Arc::new(McpManager::new(vec![])),
             available_models: vec![],
+            model_configs: vec![],
+            model_config_names: vec![],
         }
     }
 
@@ -1117,7 +1218,9 @@ mod tests {
             ..LlmConfig::default()
         };
         let service = CoderDaemonService {
-            provider: Arc::new(MockProvider::new(vec![])),
+            provider: Arc::new(StdRwLock::new(
+                Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>
+            )),
             tool_registry: Arc::new(ToolRegistry::new()),
             rule_engine: Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap()),
             session_mgr: mgr.clone(),
@@ -1128,6 +1231,8 @@ mod tests {
             context_trimmer: Arc::new(visp_core::context::NoopTrimmer),
             mcp_manager: Arc::new(McpManager::new(vec![])),
             available_models: vec![],
+            model_configs: vec![],
+            model_config_names: vec![],
         };
 
         let request = tonic::Request::new(proto::CreateSessionRequest {
@@ -1155,7 +1260,9 @@ mod tests {
             ..LlmConfig::default()
         };
         let service = CoderDaemonService {
-            provider: Arc::new(MockProvider::new(vec![])),
+            provider: Arc::new(StdRwLock::new(
+                Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>
+            )),
             tool_registry: Arc::new(ToolRegistry::new()),
             rule_engine: Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap()),
             session_mgr: mgr.clone(),
@@ -1166,6 +1273,8 @@ mod tests {
             context_trimmer: Arc::new(visp_core::context::NoopTrimmer),
             mcp_manager: Arc::new(McpManager::new(vec![])),
             available_models: vec![],
+            model_configs: vec![],
+            model_config_names: vec![],
         };
 
         let request = tonic::Request::new(proto::CreateSessionRequest {
@@ -1200,7 +1309,7 @@ mod tests {
             approved_tools: HashSet::new(),
         };
 
-        let proto = session_to_proto(&session, &[]);
+        let proto = session_to_proto(&session, &[], &[]);
         assert_eq!(proto.session_id, "test-1");
         assert_eq!(proto.status, proto::SessionStatus::Idle as i32);
         assert_eq!(proto.project_path, "/tmp");
@@ -1225,19 +1334,19 @@ mod tests {
         };
 
         assert_eq!(
-            session_to_proto(&base(SessionStatus::Idle), &[]).status,
+            session_to_proto(&base(SessionStatus::Idle), &[], &[]).status,
             proto::SessionStatus::Idle as i32
         );
         assert_eq!(
-            session_to_proto(&base(SessionStatus::Running), &[]).status,
+            session_to_proto(&base(SessionStatus::Running), &[], &[]).status,
             proto::SessionStatus::Running as i32
         );
         assert_eq!(
-            session_to_proto(&base(SessionStatus::Completed), &[]).status,
+            session_to_proto(&base(SessionStatus::Completed), &[], &[]).status,
             proto::SessionStatus::Completed as i32
         );
         assert_eq!(
-            session_to_proto(&base(SessionStatus::Error), &[]).status,
+            session_to_proto(&base(SessionStatus::Error), &[], &[]).status,
             proto::SessionStatus::Error as i32
         );
     }

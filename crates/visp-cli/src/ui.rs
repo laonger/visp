@@ -808,7 +808,7 @@ fn render_model_select(f: &mut Frame, area: Rect, app: &mut AppState) {
     use ratatui::style::Modifier;
 
     if let Some(ref mut ms) = app.model_select {
-        let model_count = ms.models.len();
+        let model_count = ms.display_labels.len();
         let content_height = (model_count as u16).clamp(3, 15);
         let popup_width = (area.width / 2).clamp(36, 80);
         let popup_height = content_height + 4;
@@ -820,11 +820,11 @@ fn render_model_select(f: &mut Frame, area: Rect, app: &mut AppState) {
         f.render_widget(Clear, popup_area);
 
         let items: Vec<ListItem> = ms
-            .models
+            .display_labels
             .iter()
-            .map(|m| {
+            .map(|label| {
                 ListItem::new(Span::styled(
-                    format!("  {m}"),
+                    format!("  {label}"),
                     Style::default().fg(theme::SELECT_ITEM_FG),
                 ))
             })

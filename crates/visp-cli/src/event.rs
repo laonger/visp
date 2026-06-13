@@ -82,6 +82,7 @@ pub async fn run(
     client: &mut VbwClient,
     project_path: &str,
     available_models: Vec<String>,
+    model_names: Vec<String>,
 ) -> io::Result<()> {
     if let Ok((_w, _h)) = crossterm::terminal::size() {
         debug_log!("session start: {_w}x{_h}, model={model}");
@@ -95,6 +96,7 @@ pub async fn run(
     let mut terminal = ratatui::init();
     let mut app = AppState::new(session_id.clone(), model);
     app.available_models = available_models;
+    app.model_names = model_names;
 
     // exit 信号：键盘线程检测到 Ctrl+D 时通知主循环无条件退出
     let (exit_tx, mut exit_rx) = tokio::sync::watch::channel(false);
@@ -222,10 +224,15 @@ pub async fn run(
         // 处理 /model 命令：创建交互式模型选择器
         if app.pending_model_select {
             if !app.available_models.is_empty() {
-                let models = app.available_models.clone();
+                let display_labels = app.available_models.clone();
+                let model_names = app.model_names.clone();
                 let mut state = ratatui::widgets::ListState::default();
                 state.select(Some(0));
-                app.model_select = Some(crate::app::ModelSelectState { models, state });
+                app.model_select = Some(crate::app::ModelSelectState {
+                    display_labels,
+                    model_names,
+                    state,
+                });
             }
             app.pending_model_select = false;
         }
@@ -326,9 +333,9 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 }
                 KeyCode::Enter => {
                     if let Some(idx) = ms.state.selected()
-                        && idx < ms.models.len()
+                        && idx < ms.model_names.len()
                     {
-                        let model = ms.models[idx].clone();
+                        let model = ms.model_names[idx].clone();
                         app.model_select = None;
                         chat_handle.send_config_update(LlmConfig {
                             model: Some(model.clone()),

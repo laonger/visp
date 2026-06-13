@@ -81,11 +81,32 @@ pub struct LlmModelConfig {
 }
 
 impl LlmSection {
+    /// 返回有效的模型配置列表
+    /// 如果配置了 models 数组则使用，否则从单模型字段推导
+    pub fn effective_models(&self) -> Vec<LlmModelConfig> {
+        if !self.models.is_empty() {
+            return self.models.clone();
+        }
+        vec![LlmModelConfig {
+            name: self.model.clone(),
+            protocol: self.protocol.clone(),
+            provider: Some(self.protocol.clone()),
+            model: self.model.clone(),
+            api_key: self.api_key.clone(),
+            base_url: self.base_url.clone(),
+            temperature: Some(self.temperature),
+            max_tokens: Some(self.max_tokens),
+            max_context_tokens: Some(self.max_context_tokens),
+            extra: self.extra.clone(),
+        }]
+    }
+
     /// 返回可用的模型名称列表
     /// 如果配置了 models 数组则返回其中的 name，否则用单 model 字段
     pub fn available_models(&self) -> Vec<String> {
-        if !self.models.is_empty() {
-            self.models
+        let models = self.effective_models();
+        if !models.is_empty() {
+            models
                 .iter()
                 .map(|m| {
                     let display_provider = m.provider.as_deref().unwrap_or(&m.protocol);
@@ -193,14 +214,14 @@ pub fn load_config(config_path: Option<&Path>) -> Result<DaemonConfig, String> {
         return load_from_file(path);
     }
 
-    // 尝试默认路径 ~/.config/visp/daemon.{toml,yaml,yml}
+    // 尝试默认路径 ~/.config/visp/daemon.toml
     if let Ok(home) = std::env::var("HOME") {
-        let base = std::path::Path::new(&home).join(".config").join("visp");
-        for name in ["daemon.toml", "daemon.yaml", "daemon.yml"] {
-            let path = base.join(name);
-            if path.exists() {
-                return load_from_file(&path);
-            }
+        let default_path = std::path::Path::new(&home)
+            .join(".config")
+            .join("visp")
+            .join("daemon.toml");
+        if default_path.exists() {
+            return load_from_file(&default_path);
         }
     }
 
@@ -209,12 +230,7 @@ pub fn load_config(config_path: Option<&Path>) -> Result<DaemonConfig, String> {
 
 fn load_from_file(path: &Path) -> Result<DaemonConfig, String> {
     let content = std::fs::read_to_string(path).map_err(|e| format!("read config: {}", e))?;
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("yaml" | "yml") => {
-            yaml_serde::from_str(&content).map_err(|e| format!("parse YAML config: {e}"))
-        }
-        _ => toml::from_str(&content).map_err(|e| format!("parse TOML config: {e}")),
-    }
+    toml::from_str(&content).map_err(|e| format!("parse config: {}", e))
 }
 
 fn default_config() -> DaemonConfig {
