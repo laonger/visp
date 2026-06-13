@@ -531,7 +531,7 @@ fn render_input_area(app: &mut AppState, f: &mut Frame, area: Rect) {
             .unwrap_or("");
         if current.starts_with('/') {
             let all_cmds = [
-                "/clear", "/help", "/new", "/temp", "/model", "/init", "/mouse",
+                "/clear", "/help", "/list", "/new", "/temp", "/model", "/init", "/mouse",
             ];
             let hint: Vec<&str> = if current.len() > 1 {
                 all_cmds
@@ -637,6 +637,7 @@ fn render_help_popup(f: &mut Frame, area: Rect) {
     let cmd_items = [
         ("/clear", "Clear chat history"),
         ("/help", "Show this help popup"),
+        ("/list", "List all sessions"),
         ("/new", "Start a new session"),
         ("/temp <n>", "Set temperature (0.0–1.0)"),
         ("/model <m>", "Switch model"),

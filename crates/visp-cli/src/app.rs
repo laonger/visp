@@ -597,6 +597,8 @@ pub struct AppState {
     pub mouse_captured: bool,
     /// 用户输入了 /new 命令，主循环需要创建新 session
     pub pending_new_session: bool,
+    /// 用户输入了 /list 命令，主循环需要列出 session
+    pub pending_list_sessions: bool,
     /// 是否显示帮助弹窗
     pub show_help: bool,
 }
@@ -633,6 +635,7 @@ impl AppState {
             total_cache_read_input_tokens: 0,
             mouse_captured: true,
             pending_new_session: false,
+            pending_list_sessions: false,
             show_help: false,
         }
     }
@@ -768,6 +771,7 @@ impl AppState {
         self.total_cache_creation_input_tokens = 0;
         self.total_cache_read_input_tokens = 0;
         self.pending_new_session = false;
+        self.pending_list_sessions = false;
         self.session_id = session_id;
         self.model = model;
     }

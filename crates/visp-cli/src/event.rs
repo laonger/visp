@@ -177,6 +177,41 @@ pub async fn run(
             }
         }
 
+        // 处理 /list 命令：获取所有 session 列表并显示
+        if app.pending_list_sessions {
+            match client.list_sessions().await {
+                Ok(sessions) => {
+                    app.add_message(LineType::Status, "── Sessions ──".into());
+                    if sessions.is_empty() {
+                        app.add_message(LineType::Status, "No sessions found.".into());
+                    } else {
+                        for s in &sessions {
+                            let short_id: String = s.session_id.chars().take(8).collect();
+                            let status_str = match s.status {
+                                0 => "IDLE",
+                                1 => "RUNNING",
+                                2 => "COMPLETED",
+                                3 => "ERROR",
+                                _ => "UNKNOWN",
+                            };
+                            app.add_message(
+                                LineType::Status,
+                                format!("  {short_id}  {status_str:>9}  {}", s.session_id),
+                            );
+                        }
+                        app.add_message(
+                            LineType::Status,
+                            "Use: /new to start a new session, visp -s <id> to resume".into(),
+                        );
+                    }
+                }
+                Err(e) => {
+                    app.add_message(LineType::Error, format!("Failed to list sessions: {e}"));
+                }
+            }
+            app.pending_list_sessions = false;
+        }
+
         if app.needs_render {
             // 确认状态始终需要渲染，不受流节流影响
             if app.generating && app.confirm.is_none() && !app.try_begin_stream_render() {
@@ -383,7 +418,9 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                         .map(|s| s.to_string())
                         .unwrap_or_default();
                     if current.starts_with('/') {
-                        let cmds = ["/clear", "/help", "/temp ", "/model ", "/init", "/mouse"];
+                        let cmds = [
+                            "/clear", "/help", "/list", "/temp ", "/model ", "/init", "/mouse",
+                        ];
                         let completion = if current.len() > 1 {
                             cmds.iter()
                                 .find(|c| c.starts_with(&current))
@@ -661,6 +698,10 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
         }
         "/mouse" => {
             toggle_mouse_mode(app);
+        }
+        "/list" => {
+            app.add_message(LineType::Status, "Fetching sessions...".into());
+            app.pending_list_sessions = true;
         }
         "/temp" if parts.len() >= 2 => {
             if let Ok(temp) = parts[1].parse::<f64>() {
