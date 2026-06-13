@@ -4,6 +4,7 @@
 use ratatui::{
     style::Style,
     text::{Line, Span},
+    widgets::ListState,
 };
 use ratatui_textarea::WrapMode;
 use unicode_width::UnicodeWidthChar;
@@ -561,6 +562,13 @@ pub(crate) fn pad_to_width(s: &str, width: usize) -> String {
     }
 }
 
+/// Session 选择器状态（ratatui List widget）
+pub struct SessionSelectState {
+    pub labels: Vec<String>,
+    pub state: ListState,
+    pub session_ids: Vec<String>,
+}
+
 pub struct AppState {
     // 对话
     pub messages: Vec<ChatLine>,
@@ -603,6 +611,8 @@ pub struct AppState {
     pub pending_switch_session: Option<String>,
     /// 是否显示帮助弹窗
     pub show_help: bool,
+    /// session 选择器弹出面板（/list 或 /sessions 无参触发）
+    pub session_select: Option<SessionSelectState>,
 }
 
 impl AppState {
@@ -640,6 +650,7 @@ impl AppState {
             pending_list_sessions: false,
             pending_switch_session: None,
             show_help: false,
+            session_select: None,
         }
     }
 
@@ -776,6 +787,7 @@ impl AppState {
         self.pending_new_session = false;
         self.pending_list_sessions = false;
         self.pending_switch_session = None;
+        self.session_select = None;
         self.session_id = session_id;
         self.model = model;
     }

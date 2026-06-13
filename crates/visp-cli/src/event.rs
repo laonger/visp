@@ -177,38 +177,37 @@ pub async fn run(
             }
         }
 
-        // 处理 /list 命令：获取所有 session 列表并显示
+        // 处理 /list 命令：创建交互式 session 选择器
         if app.pending_list_sessions {
             match client.list_sessions().await {
                 Ok(sessions) => {
-                    app.add_message(LineType::Status, "── Sessions ──".into());
                     if sessions.is_empty() {
                         app.add_message(LineType::Status, "No sessions found.".into());
                     } else {
-                        for s in &sessions {
-                            let short_id: String = s.session_id.chars().take(8).collect();
-                            let status_str = match s.status {
-                                0 => "IDLE",
-                                1 => "RUNNING",
-                                2 => "COMPLETED",
-                                3 => "ERROR",
-                                _ => "UNKNOWN",
-                            };
-                            let last_msg = if s.last_user_message.is_empty() {
-                                "(no messages)"
-                            } else {
-                                s.last_user_message.as_str()
-                            };
-                            app.add_message(
-                                LineType::Status,
-                                format!("  {short_id}  {status_str:>9}  {last_msg}"),
-                            );
-                        }
-                        app.add_message(
-                            LineType::Status,
-                            "Use: /new to start, visp -s <id> to resume (supports short-id prefix)"
-                                .into(),
-                        );
+                        let labels: Vec<String> = sessions
+                            .iter()
+                            .map(|s| {
+                                let short_id: String = s.session_id.chars().take(8).collect();
+                                let status_str = match s.status {
+                                    0 => "IDLE",
+                                    1 => "RUNNING",
+                                    2 => "COMPLETED",
+                                    3 => "ERROR",
+                                    _ => "UNKNOWN",
+                                };
+                                let last_msg = s.last_user_message.as_str();
+                                format!("  {short_id}  {status_str:>9}  {last_msg}")
+                            })
+                            .collect();
+                        let session_ids: Vec<String> =
+                            sessions.iter().map(|s| s.session_id.clone()).collect();
+                        let mut state = ratatui::widgets::ListState::default();
+                        state.select(Some(0));
+                        app.session_select = Some(crate::app::SessionSelectState {
+                            labels,
+                            state,
+                            session_ids,
+                        });
                     }
                 }
                 Err(e) => {
@@ -255,6 +254,48 @@ pub async fn run(
 }
 
 fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHandle) -> bool {
+    // 选择模式下：↑↓ 导航，Enter 确认，Esc/q 退出
+    if let Some(ref mut ss) = app.session_select {
+        if let Event::Key(key) = event {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    ss.state.select_previous();
+                    app.needs_render = true;
+                    return false;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    ss.state.select_next();
+                    app.needs_render = true;
+                    return false;
+                }
+                KeyCode::Enter => {
+                    if let Some(idx) = ss.state.selected()
+                        && idx < ss.session_ids.len()
+                    {
+                        let target_id = ss.session_ids[idx].clone();
+                        app.session_select = None;
+                        app.streaming_text.clear();
+                        app.generating = false;
+                        app.stale_done_expected = false;
+                        app.current_request_id = None;
+                        app.confirm = None;
+                        app.pending_switch_session = Some(target_id);
+                        app.add_message(LineType::Status, "Switching session...".into());
+                    }
+                    app.needs_render = true;
+                    return false;
+                }
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    app.session_select = None;
+                    app.needs_render = true;
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        // 选择模式下拦截所有其他按键
+        return false;
+    }
     app.needs_render = true;
     match event {
         Event::Key(key) => {

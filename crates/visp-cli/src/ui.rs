@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
 
 use crate::app::{AppState, MessageCache, pad_to_width};
@@ -111,6 +111,11 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
     // 帮助弹窗（在最上层绘制）
     if app.show_help {
         render_help_popup(f, f.area());
+    }
+
+    // Session 选择器弹出面板
+    if app.session_select.is_some() {
+        render_session_select(f, f.area(), app);
     }
 }
 
@@ -731,4 +736,50 @@ fn render_help_popup(f: &mut Frame, area: Rect) {
         )
         .style(Style::default().bg(theme::HELP_BG));
     f.render_widget(popup, popup_area);
+}
+
+// ════════════════════════════════════════════════════════════════
+// Session 选择器弹出面板
+// ════════════════════════════════════════════════════════════════
+
+/// 渲染 Session 选择器弹出面板（/list 或 /sessions 无参触发）
+fn render_session_select(f: &mut Frame, area: Rect, app: &mut AppState) {
+    use ratatui::style::{Color, Modifier};
+
+    if let Some(ref mut ss) = app.session_select {
+        let session_count = ss.session_ids.len();
+        let content_height = (session_count as u16).clamp(5, 20);
+        let popup_width = (area.width * 3 / 4).clamp(50, 100);
+        let popup_height = content_height + 4;
+
+        let x = (area.width.saturating_sub(popup_width)) / 2;
+        let y = (area.height.saturating_sub(popup_height)) / 2;
+        let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+        // 清除背景
+        f.render_widget(Clear, popup_area);
+
+        // 构建 ListItems
+        let items: Vec<ListItem> = ss
+            .labels
+            .iter()
+            .map(|label| ListItem::new(label.as_str()))
+            .collect();
+
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .title(" Sessions ")
+                    .title_bottom(" ↑↓ navigate  Enter switch  Esc/q cancel ")
+                    .borders(Borders::ALL)
+                    .style(Style::default().bg(Color::Black)),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            );
+
+        f.render_stateful_widget(list, popup_area, &mut ss.state);
+    }
 }
