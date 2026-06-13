@@ -174,7 +174,7 @@ mod tests {
         Migrator::run(&conn).unwrap();
 
         // journal_mode should be WAL (in-memory may differ, so just check no error)
-        let journal_mode: String = conn
+        let _journal_mode: String = conn
             .pragma_query_value(None, "journal_mode", |row| row.get(0))
             .unwrap();
         // In-memory databases may not support WAL, so just verify it ran
