@@ -236,7 +236,11 @@ pub async fn run(
         if app.pending_model_select {
             if !app.available_models.is_empty() {
                 let display_labels = app.available_models.clone();
-                let model_names = app.model_names.clone();
+                let model_names = if app.model_names.is_empty() {
+                    app.available_models.clone()
+                } else {
+                    app.model_names.clone()
+                };
                 let mut state = ratatui::widgets::ListState::default();
                 state.select(Some(0));
                 app.model_select = Some(crate::app::ModelSelectState {
@@ -355,7 +359,6 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                     {
                         let model_key = ms.model_names[idx].clone();
                         app.model = ms.display_labels[idx].clone();
-                        eprintln!("[CLI] Sending ConfigUpdate: model_key={}", model_key);
                         chat_handle.send_config_update(LlmConfig {
                             model: Some(model_key),
                             temperature: None,

@@ -543,7 +543,6 @@ impl CoderDaemon for CoderDaemonService {
                         }
                     }
                     Some(proto::client_message::Payload::ConfigUpdate(update)) => {
-                        eprintln!("[DAEMON] ConfigUpdate received");
                         let session_id = update.session_id;
 
                         let session = match session_mgr.get(&session_id) {
