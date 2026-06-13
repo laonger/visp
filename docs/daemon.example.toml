@@ -50,12 +50,12 @@
 # 在 CLI 中输入 /model 可交互式切换模型。
 #
 [llm]
-# 预设模型（格式 [provider].[name]），缺省时使用 models 第一个
+# 预设模型（格式 [vendor].[name]），缺省时使用 models 第一个
 # default = "Anthropic.Claude Sonnet"
 
 [[llm.models]]
 name = "Claude Sonnet"
-provider = "Anthropic"
+vendor = "Anthropic"
 protocol = "anthropic"
 model = "claude-sonnet-4-20250514"
 # api_key 缺省时依次尝试: 字段 api_key → 环境变量 ANTHROPIC_API_KEY
@@ -68,7 +68,7 @@ max_context_tokens = 128000
 
 [[llm.models]]
 name = "GPT-4o"
-provider = "OpenAI"
+vendor = "OpenAI"
 protocol = "openai"
 model = "gpt-4o"
 api_key = "${OPENAI_API_KEY}"

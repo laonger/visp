@@ -136,13 +136,13 @@ CLI 与 daemon 通过 gRPC 双向流通信（`Chat` RPC）。`ChatHandle` 封装
 
     [[llm.models]]
     name = "Claude Sonnet"
-    provider = "Anthropic"
+    vendor = "Anthropic"
     protocol = "anthropic"
     model = "claude-sonnet-4-20250514"
 
     [[llm.models]]
     name = "GPT-4o"
-    provider = "OpenAI"
+    vendor = "OpenAI"
     protocol = "openai"
     model = "gpt-4o"
     api_key = "${OPENAI_API_KEY}"
