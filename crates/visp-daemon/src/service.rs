@@ -130,11 +130,9 @@ impl CoderDaemonService {
 
         let default_llm_config = LlmConfig {
             model: default_cfg.model.clone(),
-            temperature: default_cfg.temperature.unwrap_or(llm_section.temperature),
-            max_tokens: default_cfg.max_tokens.unwrap_or(llm_section.max_tokens),
-            max_context_tokens: default_cfg
-                .max_context_tokens
-                .unwrap_or(llm_section.max_context_tokens),
+            temperature: default_cfg.temperature.unwrap_or(0.7),
+            max_tokens: default_cfg.max_tokens.unwrap_or(4096),
+            max_context_tokens: default_cfg.max_context_tokens.unwrap_or(128_000),
             extra,
         };
         let model_config_names: Vec<String> = model_configs.iter().map(|mc| mc.key()).collect();

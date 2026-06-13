@@ -20,35 +20,9 @@
 # ---------------------------------------------------------------------------
 # [llm] — 大语言模型配置
 # ---------------------------------------------------------------------------
-# 支持两种模式：
-#   1. 单模型（向后兼容）：直接设置 protocol、model、api_key 等字段
-#   2. 多模型：通过 [[llm.models]] 列出多个模型，运行时用 /model 切换
+# 使用 [[llm.models]] 配置多个模型，在 CLI 中用 /model 切换。
 # ---------------------------------------------------------------------------
 
-# ── 单模型模式（不配置 models 时使用） ──────────────────────────────
-#
-# 驱动协议: "anthropic"（默认）、"openai"
-# protocol = "anthropic"
-#
-# 模型名称（请求时使用）
-# model = "claude-sonnet-4-20250514"
-#
-# 生成温度 (0.0 ~ 1.0)
-# temperature = 0.7
-#
-# 最大输出 token 数
-# max_tokens = 4096
-#
-# API Key（优先使用环境变量 ANTHROPIC_API_KEY / OPENAI_API_KEY）
-# api_key = "sk-ant-xxxxxxxxxxxx"
-#
-# 自定义 API 地址（用于代理或兼容 API 的第三方服务）
-# base_url = "https://api.anthropic.com"
-
-# ── 多模型模式 ─────────────────────────────────────────────────────
-# 配置 models 后，上面的单模型字段只作为启动时的 fallback 值。
-# 在 CLI 中输入 /model 可交互式切换模型。
-#
 [llm]
 # 预设模型（格式 {provider}.{name}），缺省时使用 models 第一个
 # default = "Anthropic.Claude Sonnet"

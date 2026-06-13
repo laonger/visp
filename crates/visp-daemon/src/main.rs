@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let default_protocol = model_configs
         .first()
         .map(|mc| mc.protocol.as_str())
-        .unwrap_or(&config.llm.protocol);
+        .unwrap_or("anthropic");
     let available_models = config.llm.available_models();
 
     tracing::info!(

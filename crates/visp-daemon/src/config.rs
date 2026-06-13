@@ -29,31 +29,16 @@ pub struct DaemonSection {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LlmSection {
-    /// 驱动协议类型（anthropic / openai），接受旧名 provider
-    #[serde(default = "default_provider", alias = "provider")]
-    pub protocol: String,
-    #[serde(default = "default_model")]
-    pub model: String,
-    #[serde(default = "default_temperature")]
-    pub temperature: f64,
-    #[serde(default = "default_max_tokens")]
-    pub max_tokens: u32,
-    #[serde(default = "default_max_context_tokens")]
-    pub max_context_tokens: u32,
-    #[serde(default)]
-    pub api_key: Option<String>,
-    #[serde(default)]
-    pub base_url: Option<String>,
     /// Claude thinking 模式预算 token 数（如 2048）
     #[serde(default)]
     pub thinking_budget_tokens: Option<u32>,
     /// 额外的 provider 特定参数（如 OpenAI 的 seed, response_format 等）
     #[serde(default)]
     pub extra: HashMap<String, String>,
-    /// 多模型配置列表（支持多个 LLM）
+    /// 多模型配置列表
     #[serde(default)]
     pub models: Vec<LlmModelConfig>,
-    /// 默认模型 key（格式 `[provider].[name]`），缺省时使用 models 第一个
+    /// 默认模型 key（格式 {provider}.{name}），缺省时使用 models 第一个
     #[serde(default)]
     pub default: Option<String>,
 }
@@ -94,40 +79,22 @@ impl LlmModelConfig {
 
 impl LlmSection {
     /// 返回有效的模型配置列表
-    /// 如果配置了 models 数组则使用，否则从单模型字段推导
     pub fn effective_models(&self) -> Vec<LlmModelConfig> {
-        if !self.models.is_empty() {
-            return self.models.clone();
-        }
-        vec![LlmModelConfig {
-            name: self.model.clone(),
-            protocol: self.protocol.clone(),
-            provider: Some(self.protocol.clone()),
-            model: self.model.clone(),
-            api_key: self.api_key.clone(),
-            base_url: self.base_url.clone(),
-            temperature: Some(self.temperature),
-            max_tokens: Some(self.max_tokens),
-            max_context_tokens: Some(self.max_context_tokens),
-            extra: self.extra.clone(),
-        }]
+        self.models.clone()
     }
 
-    /// 返回可用的模型名称列表
-    /// 如果配置了 models 数组则返回其中的 name，否则用单 model 字段
+    /// 返回可用的模型显示标签列表
     pub fn available_models(&self) -> Vec<String> {
-        let models = self.effective_models();
-        if !models.is_empty() {
-            models
-                .iter()
-                .map(|m| {
-                    let display_provider = m.provider.as_deref().unwrap_or(&m.protocol);
-                    format!("{} ({})", m.name, display_provider)
-                })
-                .collect()
-        } else {
-            vec![self.model.clone()]
+        if self.models.is_empty() {
+            return vec![];
         }
+        self.models
+            .iter()
+            .map(|m| {
+                let display_provider = m.provider.as_deref().unwrap_or(&m.protocol);
+                format!("{} ({})", m.name, display_provider)
+            })
+            .collect()
     }
 }
 
@@ -252,13 +219,6 @@ fn default_config() -> DaemonConfig {
             log_level: default_log_level(),
         },
         llm: LlmSection {
-            protocol: default_provider(),
-            model: default_model(),
-            temperature: default_temperature(),
-            max_tokens: default_max_tokens(),
-            max_context_tokens: default_max_context_tokens(),
-            api_key: None,
-            base_url: None,
             thinking_budget_tokens: None,
             extra: HashMap::new(),
             models: Vec::new(),
@@ -297,6 +257,10 @@ mod tests {
 listen_addr = "[::1]:50051"
 
 [llm]
+[[llm.models]]
+name = "gpt-4"
+protocol = "openai"
+model = "gpt-4"
 api_key = "sk-test-key"
 base_url = "https://custom.api.com"
 
@@ -305,9 +269,9 @@ base_url = "https://custom.api.com"
 [agent]
 "#;
         let config: DaemonConfig = toml::from_str(toml).unwrap();
-        assert_eq!(config.llm.api_key.as_deref(), Some("sk-test-key"));
+        assert_eq!(config.llm.models[0].api_key.as_deref(), Some("sk-test-key"));
         assert_eq!(
-            config.llm.base_url.as_deref(),
+            config.llm.models[0].base_url.as_deref(),
             Some("https://custom.api.com")
         );
     }
@@ -323,7 +287,9 @@ listen_addr = "127.0.0.1:9090"
 log_level = "debug"
 
 [llm]
-provider = "openai"
+[[llm.models]]
+name = "gpt-4"
+protocol = "openai"
 model = "gpt-4"
 temperature = 0.5
 max_tokens = 2048
@@ -345,10 +311,10 @@ file_max_size_bytes = 256000
         let config = load_config(Some(file.path())).unwrap();
         assert_eq!(config.daemon.listen_addr, "127.0.0.1:9090");
         assert_eq!(config.daemon.log_level, "debug");
-        assert_eq!(config.llm.protocol, "openai");
-        assert_eq!(config.llm.model, "gpt-4");
-        assert!((config.llm.temperature - 0.5).abs() < f64::EPSILON);
-        assert_eq!(config.llm.max_tokens, 2048);
+        assert_eq!(config.llm.models[0].protocol, "openai");
+        assert_eq!(config.llm.models[0].model, "gpt-4");
+        assert!((config.llm.models[0].temperature.unwrap() - 0.5).abs() < f64::EPSILON);
+        assert_eq!(config.llm.models[0].max_tokens.unwrap(), 2048);
         assert_eq!(config.tools.bash_timeout_secs, 60);
         assert_eq!(config.tools.file_max_size_bytes, 512000);
         assert_eq!(config.agent.soft_limit, 10);
@@ -363,10 +329,8 @@ file_max_size_bytes = 256000
         let config = default_config();
         assert_eq!(config.daemon.listen_addr, "[::1]:50051");
         assert_eq!(config.daemon.log_level, "info");
-        assert_eq!(config.llm.protocol, "anthropic");
-        assert_eq!(config.llm.model, "claude-3-7-sonnet-20250219");
-        assert!((config.llm.temperature - 0.7).abs() < f64::EPSILON);
-        assert_eq!(config.llm.max_tokens, 4096);
+        assert_eq!(config.llm.models.len(), 0);
+        assert!(config.llm.models.is_empty());
         assert_eq!(config.tools.bash_timeout_secs, 120);
         assert_eq!(config.tools.file_max_size_bytes, 1048576);
         assert_eq!(config.agent.soft_limit, 50);
@@ -388,7 +352,9 @@ file_max_size_bytes = 256000
 listen_addr = "[::1]:50051"
 
 [llm]
-provider = "anthropic"
+[[llm.models]]
+name = "test"
+protocol = "anthropic"
 model = "claude-3-7-sonnet-20250219"
 max_context_tokens = 64000
 
@@ -397,7 +363,7 @@ max_context_tokens = 64000
 [agent]
 "#;
         let config: DaemonConfig = toml::from_str(toml).unwrap();
-        assert_eq!(config.llm.max_context_tokens, 64_000);
+        assert_eq!(config.llm.models[0].max_context_tokens, Some(64_000));
     }
 
     #[test]
@@ -407,7 +373,9 @@ max_context_tokens = 64000
 listen_addr = "[::1]:50051"
 
 [llm]
-provider = "anthropic"
+[[llm.models]]
+name = "test"
+protocol = "anthropic"
 model = "claude-3-7-sonnet-20250219"
 
 [tools]
@@ -415,13 +383,12 @@ model = "claude-3-7-sonnet-20250219"
 [agent]
 "#;
         let config: DaemonConfig = toml::from_str(toml).unwrap();
-        assert_eq!(config.llm.max_context_tokens, 128_000);
+        assert_eq!(config.llm.models[0].max_context_tokens, None);
     }
 
     #[test]
     fn test_default_config_max_context_tokens() {
-        let config = default_config();
-        assert_eq!(config.llm.max_context_tokens, 128_000);
+        assert_eq!(default_max_context_tokens(), 128_000);
     }
 
     #[test]
@@ -441,7 +408,9 @@ listen_addr = "0.0.0.0:8080"
 log_level = "warn"
 
 [llm]
-provider = "ollama"
+[[llm.models]]
+name = "DeepSeek"
+protocol = "ollama"
 model = "deepseek-v4-flash"
 temperature = 0.1
 max_tokens = 2048
@@ -480,11 +449,11 @@ file_max_size_bytes = 256000
         let config = result.unwrap();
         assert_eq!(config.daemon.listen_addr, "0.0.0.0:8080");
         assert_eq!(config.daemon.log_level, "warn");
-        assert_eq!(config.llm.protocol, "ollama");
-        assert_eq!(config.llm.model, "deepseek-v4-flash");
-        assert_eq!(config.llm.api_key.as_deref(), Some("test-key"));
+        assert_eq!(config.llm.models[0].protocol, "ollama");
+        assert_eq!(config.llm.models[0].model, "deepseek-v4-flash");
+        assert_eq!(config.llm.models[0].api_key.as_deref(), Some("test-key"));
         assert_eq!(
-            config.llm.base_url.as_deref(),
+            config.llm.models[0].base_url.as_deref(),
             Some("http://localhost:11434")
         );
         assert_eq!(config.tools.bash_timeout_secs, 30);
