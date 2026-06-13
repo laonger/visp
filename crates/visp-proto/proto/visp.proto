@@ -41,6 +41,10 @@ message DeleteSessionRequest {
     string session_id = 1;
 }
 
+message GetSessionRequest {
+    string session_id = 1;
+}
+
 // ============ Chat (双向流) ============
 message ClientMessage {
     oneof payload {
@@ -217,6 +221,7 @@ service CoderDaemon {
     rpc CreateSession(CreateSessionRequest) returns (Session);
     rpc ListSessions(google.protobuf.Empty) returns (ListSessionsResponse);
     rpc DeleteSession(DeleteSessionRequest) returns (google.protobuf.Empty);
+    rpc GetSession(GetSessionRequest) returns (Session);
 
     // Core conversation (bidirectional streaming)
     rpc Chat(stream ClientMessage) returns (stream ServerMessage);
