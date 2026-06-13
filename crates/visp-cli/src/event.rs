@@ -224,6 +224,10 @@ pub async fn run(
 
         // 处理 /model 命令：创建交互式模型选择器
         if app.pending_model_select {
+            eprintln!(
+                "[debug] pending_model_select: available_models={:?} model_names={:?}",
+                app.available_models, app.model_names
+            );
             if !app.available_models.is_empty() {
                 let display_labels = app.available_models.clone();
                 let model_names = app.model_names.clone();
@@ -894,6 +898,10 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
             app.add_message(LineType::Status, format!("Model set to {}", parts[1]));
         }
         "/model" => {
+            eprintln!(
+                "[debug] /model: available_models={:?} model_names={:?}",
+                app.available_models, app.model_names
+            );
             if app.available_models.is_empty() {
                 app.add_message(LineType::Status, "No alternate models configured".into());
             } else {
