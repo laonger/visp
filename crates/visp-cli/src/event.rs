@@ -212,6 +212,7 @@ pub async fn run(
                             state,
                             session_ids,
                         });
+                        app.needs_render = true;
                     }
                 }
                 Err(e) => {
@@ -233,6 +234,7 @@ pub async fn run(
                     model_names,
                     state,
                 });
+                app.needs_render = true;
             }
             app.pending_model_select = false;
         }
