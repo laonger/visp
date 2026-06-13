@@ -4,6 +4,11 @@ use std::sync::{Arc, RwLock};
 use crate::message::ToolDefinition;
 use crate::tool::{Tool, ToolContext, ToolResult};
 
+/// 大小写不敏感的名称比较
+fn name_eq(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
 #[derive(Default)]
 pub struct ToolRegistry {
     tools: RwLock<Vec<Arc<dyn Tool>>>,
@@ -20,7 +25,7 @@ impl ToolRegistry {
     pub fn register(&self, tool: Box<dyn Tool>) -> Result<(), String> {
         let name = tool.name().to_string();
         let mut tools = self.tools.write().unwrap();
-        if tools.iter().any(|t| t.name() == name) {
+        if tools.iter().any(|t| name_eq(t.name(), &name)) {
             return Err(format!("duplicate tool name: {name}"));
         }
         tools.push(Arc::from(tool));
@@ -30,15 +35,21 @@ impl ToolRegistry {
     /// 注册 MCP 工具，跳过与核心工具名称冲突的工具
     pub fn register_mcp(&self, tool: Box<dyn Tool>) -> Result<(), String> {
         let name = tool.name().to_string();
-        let core_names = self.core_tool_names.read().unwrap();
-        if core_names.contains(&name) {
+        let core_names: HashSet<String> = self
+            .core_tool_names
+            .read()
+            .unwrap()
+            .iter()
+            .map(|n| n.to_lowercase())
+            .collect();
+        if core_names.contains(&name.to_lowercase()) {
             tracing::warn!("MCP tool '{name}' conflicts with built-in tool, skipping");
             return Ok(());
         }
         drop(core_names); // release read lock before taking write lock
 
         let mut tools = self.tools.write().unwrap();
-        if tools.iter().any(|t| t.name() == name) {
+        if tools.iter().any(|t| name_eq(t.name(), &name)) {
             tracing::warn!("MCP tool '{name}' conflicts with another registered tool, skipping");
             return Ok(());
         }
@@ -59,7 +70,7 @@ impl ToolRegistry {
     /// 移除已注册的工具
     pub fn remove(&self, name: &str) -> Result<(), String> {
         let mut tools = self.tools.write().unwrap();
-        let pos = tools.iter().position(|t| t.name() == name);
+        let pos = tools.iter().position(|t| name_eq(t.name(), name));
         match pos {
             Some(i) => {
                 tools.remove(i);
@@ -72,7 +83,7 @@ impl ToolRegistry {
     /// 更新/替换同名工具
     pub fn update(&self, name: &str, tool: Box<dyn Tool>) -> Result<(), String> {
         let mut tools = self.tools.write().unwrap();
-        let pos = tools.iter().position(|t| t.name() == name);
+        let pos = tools.iter().position(|t| name_eq(t.name(), name));
         match pos {
             Some(i) => {
                 tools[i] = Arc::from(tool);
@@ -84,7 +95,7 @@ impl ToolRegistry {
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         let tools = self.tools.read().unwrap();
-        tools.iter().find(|t| t.name() == name).cloned()
+        tools.iter().find(|t| name_eq(t.name(), name)).cloned()
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
