@@ -574,20 +574,9 @@ impl CoderDaemon for CoderDaemonService {
                         if let Some(update_config) = &update.config {
                             if let Some(model) = &update_config.model {
                                 // 查找模型配置，创建对应的 provider
-                                eprintln!("[ConfigUpdate] lookup key={}", model);
-                                eprintln!(
-                                    "[ConfigUpdate] available models: {:?}",
-                                    model_configs.iter().map(|mc| mc.key()).collect::<Vec<_>>()
-                                );
                                 if let Some(model_config) =
                                     model_configs.iter().find(|mc| mc.key() == *model)
                                 {
-                                    eprintln!(
-                                        "[ConfigUpdate] FOUND: name={} api_model={} protocol={}",
-                                        model_config.name,
-                                        model_config.model,
-                                        model_config.protocol
-                                    );
                                     match create_llm_provider(model_config) {
                                         Ok(new_provider) => {
                                             *provider_ref.write().unwrap() = new_provider;
@@ -617,10 +606,6 @@ impl CoderDaemon for CoderDaemonService {
                                         }
                                     }
                                 } else {
-                                    eprintln!(
-                                        "[ConfigUpdate] NOT FOUND in model_configs, fallback to direct string: {}",
-                                        model
-                                    );
                                     // 不在配置列表中的模型名，直接设为 model 字符串（兼容旧行为）
                                     config.model = model.clone();
                                 }

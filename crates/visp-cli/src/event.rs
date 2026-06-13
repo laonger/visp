@@ -348,11 +348,6 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                     return false;
                 }
                 KeyCode::Enter => {
-                    eprintln!(
-                        "[CLI] Enter handler reached, model_select={}, model_names.len={}",
-                        app.model_select.is_some(),
-                        app.model_select.as_ref().map_or(0, |s| s.model_names.len())
-                    );
                     if let Some(ms) = app.model_select.take()
                         && let Some(idx) = ms.state.selected()
                         && idx < ms.model_names.len()
