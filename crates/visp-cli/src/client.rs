@@ -7,8 +7,9 @@ use tokio::sync::mpsc;
 use tonic::transport::Channel;
 
 use visp_proto::visp::{
-    Ack, Cancel, ClientMessage, ConfigUpdate, CreateSessionRequest, LlmConfig, ServerMessage,
-    Session, UserInput, UserResponse, client_message, coder_daemon_client::CoderDaemonClient,
+    Ack, Cancel, ClientMessage, ConfigUpdate, CreateSessionRequest, GetSessionRequest, LlmConfig,
+    ServerMessage, Session, UserInput, UserResponse, client_message,
+    coder_daemon_client::CoderDaemonClient,
 };
 
 pub struct VbwClient {
@@ -54,6 +55,18 @@ impl VbwClient {
             .create_session(req)
             .await
             .map_err(|e| format!("create session: {}", e))?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn get_session(&mut self, session_id: &str) -> Result<Session, String> {
+        let req = GetSessionRequest {
+            session_id: session_id.to_string(),
+        };
+        let resp = self
+            .client
+            .get_session(req)
+            .await
+            .map_err(|e| format!("get session: {}", e))?;
         Ok(resp.into_inner())
     }
 
