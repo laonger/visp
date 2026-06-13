@@ -61,14 +61,14 @@ pub struct LlmSection {
 /// 单个 LLM 模型配置
 #[derive(Debug, Clone, Deserialize)]
 pub struct LlmModelConfig {
-    /// 显示名称（在 /model 列表中展示）
+    /// 模型显示名（在 /model 列表中展示）
     pub name: String,
-    /// 驱动协议类型（anthropic / openai），接受旧名 provider
-    #[serde(alias = "provider")]
+    /// 驱动协议（openai / anthropic）
     pub protocol: String,
-    /// 服务商显示名，如 "Anthropic" / "OpenAI"；缺省时使用 protocol
+    /// 服务商名字，如 "Anthropic" / "OpenAI"；缺省时使用 protocol
     #[serde(default)]
-    pub vendor: Option<String>,
+    pub provider: Option<String>,
+    /// 请求时的模型 key
     pub model: String,
     #[serde(default)]
     pub api_key: Option<String>,
@@ -85,9 +85,9 @@ pub struct LlmModelConfig {
 }
 
 impl LlmModelConfig {
-    /// 全局唯一标识 `[vendor].[name]`，作为模型切换的 lookup key
+    /// 全局唯一标识 `{provider}.{name}`，作为模型切换的 lookup key
     pub fn key(&self) -> String {
-        let p = self.vendor.as_deref().unwrap_or(&self.protocol);
+        let p = self.provider.as_deref().unwrap_or(&self.protocol);
         format!("{p}.{}", self.name)
     }
 }
@@ -102,7 +102,7 @@ impl LlmSection {
         vec![LlmModelConfig {
             name: self.model.clone(),
             protocol: self.protocol.clone(),
-            vendor: Some(self.protocol.clone()),
+            provider: Some(self.protocol.clone()),
             model: self.model.clone(),
             api_key: self.api_key.clone(),
             base_url: self.base_url.clone(),
@@ -121,7 +121,7 @@ impl LlmSection {
             models
                 .iter()
                 .map(|m| {
-                    let display_provider = m.vendor.as_deref().unwrap_or(&m.protocol);
+                    let display_provider = m.provider.as_deref().unwrap_or(&m.protocol);
                     format!("{} ({})", m.name, display_provider)
                 })
                 .collect()

@@ -27,10 +27,10 @@
 
 # ── 单模型模式（不配置 models 时使用） ──────────────────────────────
 #
-# 驱动协议类型: "anthropic"（默认）、"openai"
+# 驱动协议: "anthropic"（默认）、"openai"
 # protocol = "anthropic"
 #
-# 模型名称
+# 模型名称（请求时使用）
 # model = "claude-sonnet-4-20250514"
 #
 # 生成温度 (0.0 ~ 1.0)
@@ -50,12 +50,12 @@
 # 在 CLI 中输入 /model 可交互式切换模型。
 #
 [llm]
-# 预设模型（格式 [vendor].[name]），缺省时使用 models 第一个
+# 预设模型（格式 {provider}.{name}），缺省时使用 models 第一个
 # default = "Anthropic.Claude Sonnet"
 
 [[llm.models]]
 name = "Claude Sonnet"
-vendor = "Anthropic"
+provider = "Anthropic"
 protocol = "anthropic"
 model = "claude-sonnet-4-20250514"
 # api_key 缺省时依次尝试: 字段 api_key → 环境变量 ANTHROPIC_API_KEY
@@ -68,7 +68,7 @@ max_context_tokens = 128000
 
 [[llm.models]]
 name = "GPT-4o"
-vendor = "OpenAI"
+provider = "OpenAI"
 protocol = "openai"
 model = "gpt-4o"
 api_key = "${OPENAI_API_KEY}"
