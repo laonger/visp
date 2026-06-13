@@ -60,7 +60,7 @@ protocol = "anthropic"
 model = "claude-sonnet-4-20250514"
 # api_key 缺省时依次尝试: 字段 api_key → 环境变量 ANTHROPIC_API_KEY
 # api_key = "${ANTHROPIC_API_KEY}"
-temperature = 0.0
+temperature = 0.3
 max_tokens = 8192
 max_context_tokens = 128000
 # Claude thinking 模式预算 token（仅 anthropic 协议有效）
