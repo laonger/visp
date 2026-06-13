@@ -736,19 +736,11 @@ mod tests {
     fn test_build_messages_with_tool_result() {
         let msgs = vec![
             Message::user("Read the file."),
-            Message {
-                role: Role::Assistant,
-                content: "".into(),
-                tool_calls: Some(vec![ToolCallRequest {
-                    id: "call_1".into(),
-                    name: "read_file".into(),
-                    arguments: r#"{"path":"test.txt"}"#.into(),
-                }]),
-                tool_call_id: None,
-                extra_blocks: None,
-                skip_context: false,
-                estimated_tokens: 0,
-            },
+            Message::tool_call(vec![ToolCallRequest {
+                id: "call_1".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"test.txt"}"#.into(),
+            }]),
             Message::tool("file content", "call_1"),
         ];
         let result = build_openai_messages(&msgs);
@@ -766,6 +758,7 @@ mod tests {
             Message {
                 role: Role::Assistant,
                 content: "Let me think".into(),
+                kind: visp_core::message::MessageType::Text,
                 tool_calls: None,
                 tool_call_id: None,
                 extra_blocks: Some(vec![serde_json::json!({
@@ -775,6 +768,15 @@ mod tests {
                 })]),
                 skip_context: false,
                 estimated_tokens: 0,
+                actual_tokens_input: None,
+                actual_tokens_output: None,
+                actual_cache_read: None,
+                actual_cache_write: None,
+                actual_cost: None,
+                provider_metadata: None,
+                tool_result_is_error: None,
+                tool_result_duration_ms: None,
+                created_at: None,
             },
         ];
         let result = build_openai_messages(&msgs);
@@ -795,6 +797,7 @@ mod tests {
             Message {
                 role: Role::Assistant,
                 content: "Original content".into(),
+                kind: visp_core::message::MessageType::ToolCall,
                 tool_calls: Some(vec![ToolCallRequest {
                     id: "call_1".into(),
                     name: "read_file".into(),
@@ -810,6 +813,15 @@ mod tests {
                 })]),
                 skip_context: false,
                 estimated_tokens: 0,
+                actual_tokens_input: None,
+                actual_tokens_output: None,
+                actual_cache_read: None,
+                actual_cache_write: None,
+                actual_cost: None,
+                provider_metadata: None,
+                tool_result_is_error: None,
+                tool_result_duration_ms: None,
+                created_at: None,
             },
         ];
         let result = build_openai_messages(&msgs);

@@ -4044,6 +4044,7 @@ dependencies = [
  "visp-codegraph",
  "visp-context",
  "visp-core",
+ "visp-db",
  "visp-llm",
  "visp-mcp",
  "visp-proto",

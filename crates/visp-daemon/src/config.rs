@@ -15,6 +15,8 @@ pub struct DaemonConfig {
     pub tool: HashMap<String, toml::Value>,
     #[serde(default)]
     pub mcp: McpConfig,
+    #[serde(default = "default_storage_section")]
+    pub storage: StorageSection,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -73,6 +75,14 @@ pub struct AgentSection {
     pub file_max_size_bytes: u64,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct StorageSection {
+    #[serde(default = "default_storage_driver")]
+    pub driver: String,
+    #[serde(default = "default_storage_path")]
+    pub path: String,
+}
+
 fn default_listen_addr() -> String {
     "[::1]:50051".into()
 }
@@ -114,6 +124,21 @@ fn default_retry_delay() -> u64 {
 }
 fn default_bash_confirm() -> bool {
     true
+}
+
+fn default_storage_driver() -> String {
+    "sqlite".into()
+}
+
+fn default_storage_path() -> String {
+    "~/.visp/data/visp.db".into()
+}
+
+fn default_storage_section() -> StorageSection {
+    StorageSection {
+        driver: default_storage_driver(),
+        path: default_storage_path(),
+    }
 }
 
 pub fn load_config(config_path: Option<&Path>) -> Result<DaemonConfig, String> {
@@ -171,6 +196,10 @@ fn default_config() -> DaemonConfig {
         },
         tool: HashMap::new(),
         mcp: McpConfig::default(),
+        storage: StorageSection {
+            driver: default_storage_driver(),
+            path: default_storage_path(),
+        },
     }
 }
 
@@ -435,5 +464,56 @@ max_iterations = 50
     fn default_doom_loop_threshold() {
         let config = default_config();
         assert_eq!(config.agent.doom_loop_threshold, 5);
+    }
+
+    #[test]
+    fn test_storage_default_sqlite() {
+        let config = default_config();
+        assert_eq!(config.storage.driver, "sqlite");
+    }
+
+    #[test]
+    fn test_storage_default_path() {
+        let config = default_config();
+        assert_eq!(config.storage.path, "~/.visp/data/visp.db");
+    }
+
+    #[test]
+    fn test_storage_memory_mode() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+
+[tools]
+
+[agent]
+
+[storage]
+driver = "memory"
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.storage.driver, "memory");
+    }
+
+    #[test]
+    fn test_storage_custom_path() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+
+[tools]
+
+[agent]
+
+[storage]
+driver = "sqlite"
+path = "/tmp/custom/visp.db"
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.storage.path, "/tmp/custom/visp.db");
     }
 }

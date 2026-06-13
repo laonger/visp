@@ -131,6 +131,33 @@ impl SessionStore for InMemorySessionStore {
     }
 }
 
+impl SessionStore for Box<dyn SessionStore> {
+    fn create(&mut self, session: Session) -> Result<(), SessionError> {
+        (**self).create(session)
+    }
+    fn get(&self, session_id: &str) -> Result<Session, SessionError> {
+        (**self).get(session_id)
+    }
+    fn list(&self) -> Result<Vec<Session>, SessionError> {
+        (**self).list()
+    }
+    fn delete(&mut self, session_id: &str) -> Result<(), SessionError> {
+        (**self).delete(session_id)
+    }
+    fn update(&mut self, session: Session) -> Result<(), SessionError> {
+        (**self).update(session)
+    }
+    fn get_messages(&self, session_id: &str) -> Result<Vec<Message>, SessionError> {
+        (**self).get_messages(session_id)
+    }
+    fn append_message(&mut self, session_id: &str, message: Message) -> Result<(), SessionError> {
+        (**self).append_message(session_id, message)
+    }
+    fn list_by_project(&self, project_path: &str) -> Result<Vec<Session>, SessionError> {
+        (**self).list_by_project(project_path)
+    }
+}
+
 const DEFAULT_SYSTEM_PROMPT: &str = concat!(
     "You are visp, a lightweight AI coding assistant.\n",
     "\n",

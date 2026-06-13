@@ -10,7 +10,7 @@ use visp_core::{
     agent::AgentConfig,
     context::ContextTrimmer,
     rules::RuleEngine,
-    session::{InMemorySessionStore, SessionManager},
+    session::{InMemorySessionStore, SessionManager, SessionStore},
     tool_registry::ToolRegistry,
 };
 use visp_llm::anthropic::AnthropicProvider;
@@ -200,7 +200,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(visp_context::DefaultContextTrimmer::default());
 
     // 7. Create session manager
-    let session_mgr = Arc::new(SessionManager::new(InMemorySessionStore::new()));
+    let store: Box<dyn SessionStore> = match config.storage.driver.as_str() {
+        "memory" => Box::new(InMemorySessionStore::new()),
+        "sqlite" => {
+            let sqlite_store = visp_db::SqliteSessionStore::open(&config.storage.path)
+                .map_err(|e| format!("failed to open sqlite store: {e}"))?;
+            Box::new(sqlite_store)
+        }
+        other => {
+            return Err(
+                format!("unknown storage driver: {other} (expected 'sqlite' or 'memory')").into(),
+            );
+        }
+    };
+    let session_mgr = Arc::new(SessionManager::new(store));
 
     // 8. Agent config
     let agent_config = AgentConfig {
