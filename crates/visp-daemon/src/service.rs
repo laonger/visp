@@ -184,6 +184,35 @@ impl CoderDaemon for CoderDaemonService {
         }))
     }
 
+    async fn get_session(
+        &self,
+        request: Request<proto::GetSessionRequest>,
+    ) -> Result<Response<proto::Session>, Status> {
+        let session_id = request.into_inner().session_id;
+
+        // Step 1: Exact match
+        if let Ok(session) = self.session_mgr.get(&session_id) {
+            return Ok(Response::new(session_to_proto(&session)));
+        }
+
+        // Step 2: Prefix matching
+        let sessions = self
+            .session_mgr
+            .list()
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let matched: Vec<_> = sessions
+            .iter()
+            .filter(|s| s.id.starts_with(&session_id))
+            .collect();
+
+        match matched.len() {
+            0 => Err(Status::not_found("Session not found")),
+            1 => Ok(Response::new(session_to_proto(matched[0]))),
+            _ => Err(Status::not_found("Session not found")),
+        }
+    }
+
     async fn delete_session(
         &self,
         request: Request<proto::DeleteSessionRequest>,
@@ -301,19 +330,8 @@ impl CoderDaemon for CoderDaemonService {
                             }
                         };
 
-                        // Append user message
+                        // User message will be appended by run_agent_loop
                         let user_msg = Message::user(&text);
-                        if let Err(e) = session_mgr.append_message(&session_id, user_msg.clone()) {
-                            let _ = session_mgr.finish_loop(&session_id, SessionStatus::Error);
-                            let _ = tx
-                                .send(Ok(session_error_msg(
-                                    "InternalError",
-                                    &e.to_string(),
-                                    &session_id,
-                                )))
-                                .await;
-                            continue;
-                        }
 
                         // Clone Arc refs for the inner spawn
                         let p = provider.clone();
@@ -774,7 +792,148 @@ mod tests {
     use visp_core::session::InMemorySessionStore;
     use visp_core::session::Session;
     use visp_core::session::SessionStatus as CoreStatus;
+    use visp_core::session::SessionStore;
     use visp_llm::mock::MockProvider;
+
+    // ── Helpers ─────────────────────────────────────────────────────────────
+
+    fn make_service(mgr: StdArc<SessionManager>) -> CoderDaemonService {
+        CoderDaemonService {
+            provider: Arc::new(MockProvider::new(vec![])),
+            tool_registry: Arc::new(ToolRegistry::new()),
+            rule_engine: Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap()),
+            session_mgr: mgr,
+            agent_config: AgentConfig::default(),
+            start_time: Instant::now(),
+            codegraphs: Arc::new(RwLock::new(HashMap::new())),
+            default_llm_config: LlmConfig::default(),
+            context_trimmer: Arc::new(visp_core::context::NoopTrimmer),
+            mcp_manager: Arc::new(McpManager::new(vec![])),
+        }
+    }
+
+    // ── GetSession tests ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_session_exact_match() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = mgr.create(Path::new("/tmp"), LlmConfig::default()).unwrap();
+        let session_id = session.id.clone();
+        let service = make_service(mgr);
+
+        let request = tonic::Request::new(proto::GetSessionRequest {
+            session_id: session_id.clone(),
+        });
+        let response = service.get_session(request).await.unwrap();
+        let result = response.into_inner();
+        assert_eq!(result.session_id, session_id);
+        assert_eq!(result.project_path, "/tmp");
+    }
+
+    #[tokio::test]
+    async fn test_get_session_prefix_unique() {
+        let mut store = InMemorySessionStore::new();
+        store
+            .create(Session {
+                id: "unique-abcdef".into(),
+                project_path: Path::new("/tmp").to_path_buf(),
+                status: SessionStatus::Idle,
+                created_at: Instant::now(),
+                created_at_unix: None,
+                history: vec![],
+                config: LlmConfig::default(),
+                system_prompt_template: "default".into(),
+                approved_tools: HashSet::new(),
+            })
+            .unwrap();
+        let mgr = StdArc::new(SessionManager::new(store));
+        let service = make_service(mgr);
+
+        let request = tonic::Request::new(proto::GetSessionRequest {
+            session_id: "unique".into(),
+        });
+        let response = service.get_session(request).await.unwrap();
+        let result = response.into_inner();
+        assert_eq!(result.session_id, "unique-abcdef");
+    }
+
+    #[tokio::test]
+    async fn test_get_session_prefix_zero() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        mgr.create(Path::new("/tmp"), LlmConfig::default()).unwrap();
+        let service = make_service(mgr);
+
+        let request = tonic::Request::new(proto::GetSessionRequest {
+            session_id: "nonexistent-prefix-".into(),
+        });
+        let err = service.get_session(request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_get_session_prefix_multiple() {
+        let mut store = InMemorySessionStore::new();
+        store
+            .create(Session {
+                id: "common-prefix-a".into(),
+                project_path: Path::new("/tmp/a").to_path_buf(),
+                status: SessionStatus::Idle,
+                created_at: Instant::now(),
+                created_at_unix: None,
+                history: vec![],
+                config: LlmConfig::default(),
+                system_prompt_template: "default".into(),
+                approved_tools: HashSet::new(),
+            })
+            .unwrap();
+        store
+            .create(Session {
+                id: "common-prefix-b".into(),
+                project_path: Path::new("/tmp/b").to_path_buf(),
+                status: SessionStatus::Idle,
+                created_at: Instant::now(),
+                created_at_unix: None,
+                history: vec![],
+                config: LlmConfig::default(),
+                system_prompt_template: "default".into(),
+                approved_tools: HashSet::new(),
+            })
+            .unwrap();
+        let mgr = StdArc::new(SessionManager::new(store));
+        let service = make_service(mgr);
+
+        let request = tonic::Request::new(proto::GetSessionRequest {
+            session_id: "common".into(),
+        });
+        let err = service.get_session(request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_get_session_not_found() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        mgr.create(Path::new("/tmp"), LlmConfig::default()).unwrap();
+        let service = make_service(mgr);
+
+        let request = tonic::Request::new(proto::GetSessionRequest {
+            session_id: "i-do-not-exist".into(),
+        });
+        let err = service.get_session(request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_get_session_error_propagation() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let service = make_service(mgr);
+
+        let request = tonic::Request::new(proto::GetSessionRequest {
+            session_id: "missing".into(),
+        });
+        let err = service.get_session(request).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(err.message(), "Session not found");
+    }
 
     // ── Cancel tests ────────────────────────────────────────────────────────
 
