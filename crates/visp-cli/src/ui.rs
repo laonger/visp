@@ -744,7 +744,8 @@ fn render_help_popup(f: &mut Frame, area: Rect) {
 
 /// 渲染 Session 选择器弹出面板（/list 或 /sessions 无参触发）
 fn render_session_select(f: &mut Frame, area: Rect, app: &mut AppState) {
-    use ratatui::style::{Color, Modifier};
+    use crate::theme;
+    use ratatui::style::Modifier;
 
     if let Some(ref mut ss) = app.session_select {
         let session_count = ss.session_ids.len();
@@ -763,20 +764,32 @@ fn render_session_select(f: &mut Frame, area: Rect, app: &mut AppState) {
         let items: Vec<ListItem> = ss
             .labels
             .iter()
-            .map(|label| ListItem::new(label.as_str()))
+            .map(|label| {
+                ListItem::new(Span::styled(
+                    label.as_str(),
+                    Style::default().fg(theme::SELECT_ITEM_FG),
+                ))
+            })
             .collect();
 
         let list = List::new(items)
             .block(
                 Block::default()
-                    .title(" Sessions ")
-                    .title_bottom(" ↑↓ navigate  Enter switch  Esc/q cancel ")
+                    .title(Line::from(Span::styled(
+                        " Sessions ",
+                        Style::default().fg(theme::SELECT_TITLE_FG),
+                    )))
+                    .title_bottom(Line::from(Span::styled(
+                        " ↑↓ navigate  Enter switch  Esc/q cancel ",
+                        Style::default().fg(theme::HELP_HINT_FG),
+                    )))
                     .borders(Borders::ALL)
-                    .style(Style::default().bg(Color::Black)),
+                    .border_style(Style::default().fg(theme::SELECT_BORDER_FG))
+                    .style(Style::default().bg(theme::SELECT_BG)),
             )
             .highlight_style(
                 Style::default()
-                    .bg(Color::DarkGray)
+                    .bg(theme::SELECT_HIGHLIGHT_BG)
                     .add_modifier(Modifier::BOLD),
             );
 

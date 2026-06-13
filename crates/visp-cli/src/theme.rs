@@ -94,6 +94,21 @@ pub const HELP_DESC_FG: Color = Color::DarkGray;
 pub const HELP_HINT_FG: Color = Color::DarkGray;
 
 // ════════════════════════════════════════════════════════════════
+// Session Select Popup
+// ════════════════════════════════════════════════════════════════
+
+/// Session 选择器背景
+pub const SELECT_BG: Color = HELP_BG;
+/// Session 选择器边框
+pub const SELECT_BORDER_FG: Color = HELP_BORDER_FG;
+/// Session 选择器标题
+pub const SELECT_TITLE_FG: Color = HELP_TITLE_FG;
+/// Session 选择器列表项文字
+pub const SELECT_ITEM_FG: Color = Color::White;
+/// Session 选择器高亮行背景
+pub const SELECT_HIGHLIGHT_BG: Color = CONFIRM_SELECTED_BG;
+
+// ════════════════════════════════════════════════════════════════
 // BlockStyle — 消息块布局参数
 // ════════════════════════════════════════════════════════════════
 
