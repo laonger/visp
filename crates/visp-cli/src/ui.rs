@@ -584,23 +584,39 @@ fn render_input_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     f.render_widget(&app.textarea, input_area);
 }
 
+/// 将 model 字符串拆为 (provider, model_label)
+/// 期望格式为 "{provider}.{name}"，如 "Ollama.deepseek-v4-flash"
+/// 无分隔点时 provider 为空字符串
+fn split_model_name(model: &str) -> (&str, &str) {
+    model.split_once('.').unwrap_or(("", model))
+}
+
+/// 格式化状态栏左侧字符串
+fn format_status_left(
+    session_id: &str,
+    model: &str,
+    generating: bool,
+    mouse_captured: bool,
+) -> String {
+    let sid: String = session_id.chars().take(8).collect();
+    let status = if generating { "Generating" } else { "Idle" };
+    let mouse = if mouse_captured { "Mouse" } else { "Select" };
+    let (provider, model_label) = split_model_name(model);
+    format!(
+        "{sid} | {model}({provider}) | {status} | [{mouse}] | /help = help",
+        sid = sid,
+        model = model_label,
+        provider = provider
+    )
+}
+
 /// 底部状态栏：左对齐显示会话 ID / 模型 / 状态 / 鼠标模式，token 统计靠右对齐
 fn render_status_bar(app: &AppState, f: &mut Frame, area: Rect) {
-    let sid = app.session_id.chars().take(8).collect::<String>();
-    let status = if app.generating { "Generating" } else { "Idle" };
-    let mouse = if app.mouse_captured {
-        "Mouse"
-    } else {
-        "Select"
-    };
-
-    // model 格式为 "{provider}.{name}"，如 "Ollama.deepseek-v4-flash"
-    let (provider, model_label) = app.model.split_once('.').unwrap_or(("", &app.model));
-
-    let left_text = format!(
-        "{sid} | {model}({provider}) | {status} | [{mouse}] | /help = help",
-        model = model_label,
-        provider = provider,
+    let left_text = format_status_left(
+        &app.session_id,
+        &app.model,
+        app.generating,
+        app.mouse_captured,
     );
 
     // 有 token 时左右分割显示，否则整行给左侧
@@ -857,5 +873,69 @@ fn render_model_select(f: &mut Frame, area: Rect, app: &mut AppState) {
             );
 
         f.render_stateful_widget(list, popup_area, &mut ms.state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_model_name_normal() {
+        assert_eq!(
+            split_model_name("Ollama.deepseek-v4-flash"),
+            ("Ollama", "deepseek-v4-flash")
+        );
+    }
+
+    #[test]
+    fn test_split_model_name_no_dot() {
+        assert_eq!(
+            split_model_name("deepseek-v4-flash"),
+            ("", "deepseek-v4-flash")
+        );
+    }
+
+    #[test]
+    fn test_split_model_name_with_parens_no_dot() {
+        assert_eq!(
+            split_model_name("DeepSeek v4 Flash(Ollama)"),
+            ("", "DeepSeek v4 Flash(Ollama)")
+        );
+    }
+
+    #[test]
+    fn test_split_model_name_multi_word() {
+        assert_eq!(
+            split_model_name("Anthropic.Claude Sonnet"),
+            ("Anthropic", "Claude Sonnet")
+        );
+    }
+
+    #[test]
+    fn test_format_status_left_generating() {
+        let s = format_status_left("abc12345", "Ollama.deepseek-v4-flash", true, false);
+        assert_eq!(
+            s,
+            "abc12345 | deepseek-v4-flash(Ollama) | Generating | [Select] | /help = help"
+        );
+    }
+
+    #[test]
+    fn test_format_status_left_idle_mouse() {
+        let s = format_status_left("sess_xyz", "Anthropic.claude-sonnet-4", false, true);
+        assert_eq!(
+            s,
+            "sess_xyz | claude-sonnet-4(Anthropic) | Idle | [Mouse] | /help = help"
+        );
+    }
+
+    #[test]
+    fn test_format_status_left_empty_provider() {
+        let s = format_status_left("abcdefgh", "claude-sonnet-4", false, false);
+        assert_eq!(
+            s,
+            "abcdefgh | claude-sonnet-4() | Idle | [Select] | /help = help"
+        );
     }
 }

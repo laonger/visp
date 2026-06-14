@@ -353,7 +353,8 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                         && idx < ms.model_names.len()
                     {
                         let model_key = ms.model_names[idx].clone();
-                        app.model = ms.display_labels[idx].clone();
+                        let display_label = ms.display_labels[idx].clone();
+                        app.model = model_key.clone();
                         chat_handle.send_config_update(LlmConfig {
                             model: Some(model_key),
                             temperature: None,
@@ -361,7 +362,10 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                             max_context_tokens: None,
                             extra: Default::default(),
                         });
-                        app.add_message(LineType::Status, format!("Model set to {}", app.model));
+                        app.add_message(
+                            LineType::Status,
+                            format!("Model set to {}", display_label),
+                        );
                     }
                     app.needs_render = true;
                     return false;

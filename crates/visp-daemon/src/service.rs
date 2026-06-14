@@ -580,7 +580,7 @@ impl CoderDaemon for CoderDaemonService {
                                     match create_llm_provider(model_config) {
                                         Ok(new_provider) => {
                                             *provider_ref.write().unwrap() = new_provider;
-                                            config.model = model_config.model.clone();
+                                            config.model = model.clone();
                                             if let Some(temp) = model_config.temperature {
                                                 config.temperature = temp;
                                             }
