@@ -89,7 +89,23 @@
 
 ---
 
-### P3：`Session.created_at` 使用 `Instant`（core / visp-db）
+### P2：Memory 系统（core / db / tools）
+
+**问题**：当前 Agent 是无状态的——每次对话从头开始，没有跨 session 的知识积累。Agent 无法记住用户偏好、项目约定、已解决的问题、之前发现的 bug 位置等。
+
+**状态**：不存在任何记忆存储/检索机制。Session 历史虽持久化到 SQLite，但只作为对话回放用，Agent 不会主动写入或查询结构化记忆。
+
+**功能设计**：
+- `memory` 工具（tool）：Agent 可显式调用 `memory write` / `memory read` / `memory search`
+- 记忆条目：键值对 + 自然语言内容 + 标签 + 时间戳
+- 存储：独立 SQLite 表（`memory`），非 session 绑定，跨对话共享
+- 检索：支持按 tag 过滤、全文搜索、最近使用排序
+- 注入：每次 Agent 循环启动时，自动注入相关记忆到 system prompt（由 context trimmer 控制预算）
+
+**后续考虑**：
+- 记忆优先级/衰减：高频使用的记忆保留，低频的自动归档
+- 会话级 vs 项目级 vs 用户级作用域
+- LLM 自动总结旧记忆、合并重复条目
 
 **问题**：`crates/visp-core/src/session.rs:30` 中 `created_at: Instant` 是相对时间戳，db 持久化重启后无法回溯真实的创建时间。
 
