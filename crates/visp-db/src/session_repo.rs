@@ -167,6 +167,9 @@ impl SessionRepo {
             config,
             system_prompt_template: prompt,
             approved_tools: approved_tools.into_iter().collect(),
+            agent_name: "default".to_string(),
+            parent_id: None,
+            permission: Vec::new(),
         })
     }
 }
@@ -195,6 +198,9 @@ mod tests {
             config: LlmConfig::default(),
             system_prompt_template: "default".into(),
             approved_tools: HashSet::new(),
+            agent_name: "default".into(),
+            parent_id: None,
+            permission: vec![],
         }
     }
 

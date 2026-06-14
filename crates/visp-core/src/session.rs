@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::agent::AgentLoopContext;
+use crate::agent_definition::PermissionRule;
 use crate::error::SessionError;
 use crate::message::Message;
 use crate::message::Role;
@@ -37,6 +38,12 @@ pub struct Session {
     pub system_prompt_template: String,
     /// 已审批的工具名称集合（Always Allow）
     pub approved_tools: HashSet<String>,
+    /// 当前使用的 Agent 名称
+    pub agent_name: String,
+    /// 父 Session ID（子 Session 用）
+    pub parent_id: Option<String>,
+    /// 运行时权限规则集
+    pub permission: Vec<PermissionRule>,
 }
 
 /// 会话存储抽象 trait
@@ -312,6 +319,12 @@ fn load_skills_from_dir(dir: &Path, seen_names: &mut HashSet<String>, sections: 
     }
 }
 
+/// 构建 Agent 的系统提示词模板
+fn build_system_prompt(project_path: &Path, agent_name: &str) -> String {
+    let base = load_system_prompt_template(project_path);
+    format!("You are agent \"{agent_name}\" working on a project.\n\n{base}")
+}
+
 /// 返回用户的 home 目录路径
 pub fn home_dir() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
@@ -352,6 +365,17 @@ fn strip_frontmatter(content: &str) -> &str {
     }
 }
 
+/// 参数：创建子会话
+pub struct SubSessionParams {
+    pub parent_id: Option<String>,
+    pub agent_name: String,
+    pub permission: Vec<PermissionRule>,
+    /// Some = 复用已有 session，None = 新 UUID
+    pub session_id: Option<String>,
+    pub project_path: PathBuf,
+    pub config: LlmConfig,
+}
+
 /// 会话管理器
 pub struct SessionManager {
     store: Arc<Mutex<dyn SessionStore>>,
@@ -386,12 +410,53 @@ impl SessionManager {
             config,
             system_prompt_template: prompt_template,
             approved_tools: HashSet::new(),
+            agent_name: "default".to_string(),
+            parent_id: None,
+            permission: Vec::new(),
         };
 
         let mut store = self.store.lock().unwrap();
         let cloned = session.clone();
         store.create(cloned)?;
 
+        Ok(session)
+    }
+
+    /// 创建子会话（多 Agent）
+    /// session_id 为 Some 时复用已有 session，否则生成新 UUID
+    pub fn create_sub(&self, params: SubSessionParams) -> Result<Session, SessionError> {
+        // 复用
+        if let Some(sid) = &params.session_id {
+            let store = self.store.lock().unwrap();
+            if let Ok(existing) = store.get(sid) {
+                return Ok(existing);
+            }
+        }
+
+        let id = params
+            .session_id
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let system_prompt_template = build_system_prompt(&params.project_path, &params.agent_name);
+
+        let session = Session {
+            id,
+            project_path: params.project_path,
+            status: SessionStatus::Idle,
+            created_at: Instant::now(),
+            created_at_unix: None,
+            history: Vec::new(),
+            last_user_message: None,
+            config: params.config,
+            system_prompt_template,
+            approved_tools: HashSet::new(),
+            agent_name: params.agent_name,
+            parent_id: params.parent_id,
+            permission: params.permission,
+        };
+
+        let mut store = self.store.lock().unwrap();
+        let cloned = session.clone();
+        store.create(cloned)?;
         Ok(session)
     }
 
@@ -538,6 +603,9 @@ mod tests {
             config: LlmConfig::default(),
             system_prompt_template: "default".into(),
             approved_tools: HashSet::new(),
+            agent_name: "default".into(),
+            parent_id: None,
+            permission: vec![],
         };
         let id = session.id.clone();
         store.create(session).unwrap();
@@ -559,6 +627,9 @@ mod tests {
             config: LlmConfig::default(),
             system_prompt_template: "default".into(),
             approved_tools: HashSet::new(),
+            agent_name: "default".into(),
+            parent_id: None,
+            permission: vec![],
         };
         let id = session.id.clone();
         store.create(session.clone()).unwrap();
@@ -602,6 +673,9 @@ mod tests {
             config: LlmConfig::default(),
             system_prompt_template: "default".into(),
             approved_tools: HashSet::new(),
+            agent_name: "default".into(),
+            parent_id: None,
+            permission: vec![],
         };
 
         // create

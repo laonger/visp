@@ -1105,6 +1105,9 @@ mod tests {
                 config: LlmConfig::default(),
                 system_prompt_template: "default".into(),
                 approved_tools: HashSet::new(),
+                agent_name: "default".into(),
+                parent_id: None,
+                permission: vec![],
             })
             .unwrap();
         let mgr = StdArc::new(SessionManager::new(store));
@@ -1146,6 +1149,9 @@ mod tests {
                 config: LlmConfig::default(),
                 system_prompt_template: "default".into(),
                 approved_tools: HashSet::new(),
+                agent_name: "default".into(),
+                parent_id: None,
+                permission: vec![],
             })
             .unwrap();
         store
@@ -1160,6 +1166,9 @@ mod tests {
                 config: LlmConfig::default(),
                 system_prompt_template: "default".into(),
                 approved_tools: HashSet::new(),
+                agent_name: "default".into(),
+                parent_id: None,
+                permission: vec![],
             })
             .unwrap();
         let mgr = StdArc::new(SessionManager::new(store));
@@ -1397,6 +1406,9 @@ mod tests {
             config: LlmConfig::default(),
             system_prompt_template: "default".into(),
             approved_tools: HashSet::new(),
+            agent_name: "default".into(),
+            parent_id: None,
+            permission: vec![],
         };
 
         let proto = session_to_proto(&session, &[], &[], &[]);
@@ -1420,6 +1432,9 @@ mod tests {
                 config: LlmConfig::default(),
                 system_prompt_template: "".into(),
                 approved_tools: HashSet::new(),
+                agent_name: "default".into(),
+                parent_id: None,
+                permission: vec![],
             }
         };
 

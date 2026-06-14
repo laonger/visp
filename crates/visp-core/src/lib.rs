@@ -1,4 +1,6 @@
 pub mod agent;
+pub mod agent_definition;
+pub mod agent_registry;
 pub mod context;
 pub mod error;
 pub mod message;
