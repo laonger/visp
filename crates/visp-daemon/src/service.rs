@@ -254,7 +254,14 @@ impl CoderDaemon for CoderDaemonService {
         Ok(Response::new(proto::ListSessionsResponse {
             sessions: sessions
                 .iter()
-                .map(|s| session_to_proto(s, &self.available_models, &self.model_config_keys, &self.model_configs))
+                .map(|s| {
+                    session_to_proto(
+                        s,
+                        &self.available_models,
+                        &self.model_config_keys,
+                        &self.model_configs,
+                    )
+                })
                 .collect(),
         }))
     }
@@ -589,10 +596,9 @@ impl CoderDaemon for CoderDaemonService {
                                 .as_ref()
                                 .and_then(|mk| model_configs.iter().find(|mc| mc.key() == *mk))
                                 .or_else(|| {
-                                    update_config
-                                        .model
-                                        .as_ref()
-                                        .and_then(|m| model_configs.iter().find(|mc| mc.model == *m))
+                                    update_config.model.as_ref().and_then(|m| {
+                                        model_configs.iter().find(|mc| mc.model == *m)
+                                    })
                                 });
 
                             if let Some(model_config) = matched {
