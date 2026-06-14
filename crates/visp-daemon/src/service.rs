@@ -129,7 +129,7 @@ impl CoderDaemonService {
             create_llm_provider(default_cfg).expect("failed to create initial LLM provider");
 
         let default_llm_config = LlmConfig {
-            model: default_cfg.key(),
+            model: default_cfg.model.clone(),
             temperature: default_cfg.temperature.unwrap_or(0.7),
             max_tokens: default_cfg.max_tokens.unwrap_or(4096),
             max_context_tokens: default_cfg.max_context_tokens.unwrap_or(128_000),
@@ -213,6 +213,14 @@ impl CoderDaemon for CoderDaemonService {
         // 客户端未传的字段用 daemon 默认值
         if config.model == LlmConfig::default().model {
             config.model = self.default_llm_config.model.clone();
+        }
+        // 解析模型名：支持 key 格式 ("Anthropic.Claude Sonnet") 和直接 API model key
+        if let Some(mc) = self
+            .model_configs
+            .iter()
+            .find(|mc| mc.key() == config.model)
+        {
+            config.model = mc.model.clone();
         }
         if (config.temperature - LlmConfig::default().temperature).abs() < f64::EPSILON {
             config.temperature = self.default_llm_config.temperature;
@@ -580,7 +588,7 @@ impl CoderDaemon for CoderDaemonService {
                                     match create_llm_provider(model_config) {
                                         Ok(new_provider) => {
                                             *provider_ref.write().unwrap() = new_provider;
-                                            config.model = model.clone();
+                                            config.model = model_config.model.clone();
                                             if let Some(temp) = model_config.temperature {
                                                 config.temperature = temp;
                                             }
