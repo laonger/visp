@@ -574,7 +574,7 @@ pub struct ModelSelectState {
     /// 选择器中显示的标签（如 "GPT-4o (OpenAI)"）
     pub display_labels: Vec<String>,
     /// 发送给 daemon 的模型名称（如 "GPT-4o"）
-    pub model_names: Vec<String>,
+    pub model_keys: Vec<String>,
     pub state: ListState,
 }
 
@@ -605,6 +605,7 @@ pub struct AppState {
     pub next_message_id: u64,
     pub confirm: Option<ConfirmState>,
     pub model: String,
+    pub model_key: String,
     pub session_id: String,
     pub should_quit: bool,
     pub pending_usage: Option<(u32, u32, u32, u32, u32)>,
@@ -627,7 +628,7 @@ pub struct AppState {
     /// 可用的模型名称列表（显示标签）
     pub available_models: Vec<String>,
     /// 可用的模型 lookup key 列表
-    pub model_names: Vec<String>,
+    pub model_keys: Vec<String>,
     /// 用户输入了 /model（无参），主循环需要获取模型列表并显示选择器
     pub pending_model_select: bool,
     /// 模型选择器弹出面板（/model 无参触发）
@@ -635,7 +636,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(session_id: String, model: String) -> Self {
+    pub fn new(session_id: String, model: String, model_key: String) -> Self {
         let mut textarea = Self::new_textarea();
         textarea.set_placeholder_text("Type your message...");
         Self {
@@ -658,6 +659,7 @@ impl AppState {
             next_message_id: 0,
             confirm: None,
             model,
+            model_key,
             session_id,
             should_quit: false,
             pending_usage: None,
@@ -672,7 +674,7 @@ impl AppState {
             show_help: false,
             session_select: None,
             available_models: Vec::new(),
-            model_names: Vec::new(),
+            model_keys: Vec::new(),
             pending_model_select: false,
             model_select: None,
         }
@@ -805,7 +807,7 @@ impl AppState {
     }
 
     /// 重置为新 session 的状态（保留 mouse 设置和 textarea 内容）
-    pub fn reset_for_new_session(&mut self, session_id: String, model: String) {
+    pub fn reset_for_new_session(&mut self, session_id: String, model: String, model_key: String) {
         self.messages.clear();
         self.message_caches.clear();
         self.streaming_text.clear();
@@ -827,6 +829,7 @@ impl AppState {
         self.model_select = None;
         self.session_id = session_id;
         self.model = model;
+        self.model_key = model_key;
     }
 }
 
@@ -836,7 +839,7 @@ mod tests {
 
     #[test]
     fn test_spinner_glyph_cycles_points_frames() {
-        let mut app = AppState::new("sid".into(), "m".into());
+        let mut app = AppState::new("sid".into(), "m".into(), "".into());
         // Points 四帧循环：∙∙∙ / ●∙∙ / ∙●∙ / ∙∙●
         let expected = [
             "\u{2219}\u{2219}\u{2219}",
@@ -938,13 +941,13 @@ mod tests {
 
     #[test]
     fn test_stale_done_expected_default() {
-        let app = AppState::new("s".into(), "m".into());
+        let app = AppState::new("s".into(), "m".into(), "".into());
         assert!(!app.stale_done_expected);
     }
 
     #[test]
     fn test_app_state_new() {
-        let app = AppState::new("test-session".into(), "deepseek-v4-flash".into());
+        let app = AppState::new("test-session".into(), "deepseek-v4-flash".into(), "".into());
         assert_eq!(app.session_id, "test-session");
         assert_eq!(app.model, "deepseek-v4-flash");
         assert!(app.messages.is_empty());
@@ -961,7 +964,7 @@ mod tests {
 
     #[test]
     fn test_add_message() {
-        let mut app = AppState::new("s".into(), "m".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into());
         app.add_message(LineType::User, "hello".into());
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.messages[0].content, "hello");
@@ -970,7 +973,7 @@ mod tests {
 
     #[test]
     fn test_add_message_id_increments() {
-        let mut app = AppState::new("s".into(), "m".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into());
         app.add_message(LineType::User, "a".into());
         app.add_message(LineType::Assistant, "b".into());
         assert_eq!(app.messages[0].id, 0);
@@ -979,14 +982,14 @@ mod tests {
 
     #[test]
     fn test_add_message_version_initial() {
-        let mut app = AppState::new("s".into(), "m".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into());
         app.add_message(LineType::User, "hello".into());
         assert_eq!(app.messages[0].version, 0);
     }
 
     #[test]
     fn test_streaming_text() {
-        let mut app = AppState::new("s".into(), "m".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into());
         app.append_streaming("Hello ");
         app.append_streaming("world");
         assert_eq!(app.streaming_text, "Hello world");
@@ -999,7 +1002,7 @@ mod tests {
 
     #[test]
     fn test_update_message_increments_version() {
-        let mut app = AppState::new("s".into(), "m".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into());
         app.add_message(LineType::Assistant, "original".into());
         let id = app.messages[0].id;
         app.update_message(id, "updated".into());
@@ -1009,7 +1012,7 @@ mod tests {
 
     #[test]
     fn test_update_message_id_not_found_does_nothing() {
-        let mut app = AppState::new("s".into(), "m".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into());
         app.add_message(LineType::Assistant, "original".into());
         let original_version = app.messages[0].version;
         app.update_message(999, "nope".into());
@@ -1019,7 +1022,7 @@ mod tests {
 
     #[test]
     fn test_clear_messages() {
-        let mut app = AppState::new("s".into(), "m".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into());
         app.add_message(LineType::User, "hello".into());
         app.add_message(LineType::Assistant, "world".into());
         assert_eq!(app.messages.len(), 2);
@@ -1104,7 +1107,7 @@ mod tests {
 
     #[test]
     fn test_clear_messages_also_clears_caches() {
-        let mut app = AppState::new("s".into(), "m".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into());
         app.add_message(LineType::User, "hello".into());
         // 手动添加一个 cache 模拟渲染后的状态
         app.message_caches
@@ -1117,7 +1120,7 @@ mod tests {
 
     #[test]
     fn test_add_tool_line_stores_call_id() {
-        let mut app = AppState::new("s".into(), "m".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into());
         app.add_tool_line(
             LineType::ToolCall {
                 name: "test".into(),
@@ -1130,7 +1133,7 @@ mod tests {
 
     #[test]
     fn test_insert_tool_result_appends_to_matching_call() {
-        let mut app = AppState::new("s".into(), "m".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into());
         app.add_tool_line(
             LineType::ToolCall {
                 name: "test".into(),
@@ -1157,7 +1160,7 @@ mod tests {
 
     #[test]
     fn test_insert_tool_result_without_matching_call_appends() {
-        let mut app = AppState::new("s".into(), "m".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into());
         app.add_tool_line(
             LineType::ToolCall {
                 name: "test".into(),
@@ -1173,7 +1176,7 @@ mod tests {
 
     #[test]
     fn test_multiple_tool_calls_grouped() {
-        let mut app = AppState::new("s".into(), "m".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into());
         app.add_tool_line(
             LineType::ToolCall {
                 name: "test".into(),

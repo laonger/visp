@@ -75,14 +75,16 @@ impl Drop for TerminalGuard {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     session_id: String,
     mut chat_handle: ChatHandle,
     model: String,
+    model_key: String,
     client: &mut VispClient,
     project_path: &str,
     available_models: Vec<String>,
-    model_names: Vec<String>,
+    model_keys: Vec<String>,
 ) -> io::Result<()> {
     if let Ok((_w, _h)) = crossterm::terminal::size() {
         debug_log!("session start: {_w}x{_h}, model={model}");
@@ -94,9 +96,9 @@ pub async fn run(
     io::stdout().flush()?;
     let _guard = TerminalGuard;
     let mut terminal = ratatui::init();
-    let mut app = AppState::new(session_id.clone(), model);
+    let mut app = AppState::new(session_id.clone(), model.clone(), model_key);
     app.available_models = available_models;
-    app.model_names = model_names;
+    app.model_keys = model_keys;
 
     // exit 信号：键盘线程检测到 Ctrl+D 时通知主循环无条件退出
     let (exit_tx, mut exit_rx) = tokio::sync::watch::channel(false);
@@ -175,7 +177,8 @@ pub async fn run(
                     chat_handle.send_cancel();
                     chat_handle.session_id = session.session_id.clone();
                     let model = session.model.clone();
-                    app.reset_for_new_session(session.session_id, model);
+                    let model_key = session.model_key.clone();
+                    app.reset_for_new_session(session.session_id, model, model_key);
                     app.add_message(
                         LineType::Status,
                         "New session started. Use /help for available commands.".into(),
@@ -236,16 +239,16 @@ pub async fn run(
         if app.pending_model_select {
             if !app.available_models.is_empty() {
                 let display_labels = app.available_models.clone();
-                let model_names = if app.model_names.is_empty() {
+                let model_keys = if app.model_keys.is_empty() {
                     app.available_models.clone()
                 } else {
-                    app.model_names.clone()
+                    app.model_keys.clone()
                 };
                 let mut state = ratatui::widgets::ListState::default();
                 state.select(Some(0));
                 app.model_select = Some(crate::app::ModelSelectState {
                     display_labels,
-                    model_names,
+                    model_keys,
                     state,
                 });
                 app.needs_render = true;
@@ -260,9 +263,10 @@ pub async fn run(
                     chat_handle.send_cancel();
                     let full_id = session.session_id.clone();
                     let model = session.model.clone();
+                    let model_key = session.model_key.clone();
                     let short: String = full_id.chars().take(8).collect();
                     chat_handle.session_id = full_id.clone();
-                    app.reset_for_new_session(full_id, model);
+                    app.reset_for_new_session(full_id, model, model_key);
                     chat_handle.send_join();
                     app.add_message(LineType::Status, format!("Switched to session {short}"));
                 }
@@ -350,13 +354,14 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 KeyCode::Enter => {
                     if let Some(ms) = app.model_select.take()
                         && let Some(idx) = ms.state.selected()
-                        && idx < ms.model_names.len()
+                        && idx < ms.model_keys.len()
                     {
-                        let model_key = ms.model_names[idx].clone();
+                        let model_key = ms.model_keys[idx].clone();
                         let display_label = ms.display_labels[idx].clone();
-                        app.model = model_key.clone();
+                        app.model_key = model_key.clone();
                         chat_handle.send_config_update(LlmConfig {
-                            model: Some(model_key),
+                            model_key: Some(model_key),
+                            model: None,
                             temperature: None,
                             max_tokens: None,
                             max_context_tokens: None,
@@ -894,6 +899,7 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
             if let Ok(temp) = parts[1].parse::<f64>() {
                 chat_handle.send_config_update(LlmConfig {
                     model: None,
+                    model_key: None,
                     temperature: Some(temp),
                     max_tokens: None,
                     max_context_tokens: None,

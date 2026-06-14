@@ -9,7 +9,7 @@ use crate::message::{Message, ToolDefinition};
 /// LLM 配置参数
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmConfig {
-    /// 模型名称
+    /// API model key（发送到 LLM API 的 model 字段，如 "deepseek-v4-flash"）
     pub model: String,
     /// 温度（0.0-2.0）
     pub temperature: f64,

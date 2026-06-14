@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Build model configs
     let model_configs = config.llm.effective_models();
-    let model_names: Vec<String> = model_configs.iter().map(|mc| mc.key()).collect();
+    let model_keys: Vec<String> = model_configs.iter().map(|mc| mc.key()).collect();
     let default_protocol = model_configs
         .first()
         .map(|mc| mc.protocol.as_str())
@@ -57,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(
         protocol = %default_protocol,
-        models = %model_names.join(", "),
+        models = %model_keys.join(", "),
         "LLM configured"
     );
 

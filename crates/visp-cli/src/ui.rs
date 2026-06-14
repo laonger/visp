@@ -594,14 +594,14 @@ fn split_model_name(model: &str) -> (&str, &str) {
 /// 格式化状态栏左侧字符串
 fn format_status_left(
     session_id: &str,
-    model: &str,
+    model_key: &str,
     generating: bool,
     mouse_captured: bool,
 ) -> String {
     let sid: String = session_id.chars().take(8).collect();
     let status = if generating { "Generating" } else { "Idle" };
     let mouse = if mouse_captured { "Mouse" } else { "Select" };
-    let (provider, model_label) = split_model_name(model);
+    let (provider, model_label) = split_model_name(model_key);
     format!(
         "{sid} | {model}({provider}) | {status} | [{mouse}] | /help = help",
         sid = sid,
@@ -614,7 +614,7 @@ fn format_status_left(
 fn render_status_bar(app: &AppState, f: &mut Frame, area: Rect) {
     let left_text = format_status_left(
         &app.session_id,
-        &app.model,
+        &app.model_key,
         app.generating,
         app.mouse_captured,
     );
@@ -914,28 +914,28 @@ mod tests {
 
     #[test]
     fn test_format_status_left_generating() {
-        let s = format_status_left("abc12345", "Ollama.deepseek-v4-flash", true, false);
+        let s = format_status_left("abc12345", "Ollama.DeepSeek", true, false);
         assert_eq!(
             s,
-            "abc12345 | deepseek-v4-flash(Ollama) | Generating | [Select] | /help = help"
+            "abc12345 | DeepSeek(Ollama) | Generating | [Select] | /help = help"
         );
     }
 
     #[test]
     fn test_format_status_left_idle_mouse() {
-        let s = format_status_left("sess_xyz", "Anthropic.claude-sonnet-4", false, true);
+        let s = format_status_left("sess_xyz", "Anthropic.Claude Sonnet", false, true);
         assert_eq!(
             s,
-            "sess_xyz | claude-sonnet-4(Anthropic) | Idle | [Mouse] | /help = help"
+            "sess_xyz | Claude Sonnet(Anthropic) | Idle | [Mouse] | /help = help"
         );
     }
 
     #[test]
     fn test_format_status_left_empty_provider() {
-        let s = format_status_left("abcdefgh", "claude-sonnet-4", false, false);
+        let s = format_status_left("abcdefgh", "ollama.deepseek-v4-flash", false, false);
         assert_eq!(
             s,
-            "abcdefgh | claude-sonnet-4() | Idle | [Select] | /help = help"
+            "abcdefgh | deepseek-v4-flash(ollama) | Idle | [Select] | /help = help"
         );
     }
 }

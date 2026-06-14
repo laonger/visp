@@ -88,12 +88,12 @@ pub struct CoderDaemonService {
     context_trimmer: Arc<dyn ContextTrimmer + Send + Sync>,
     /// MCP 服务器管理器
     mcp_manager: Arc<McpManager>,
-    /// 可用的模型名称列表
+    /// 模型显示标签列表（格式 "{name}({provider})"，用于 proto Session.available_models）
     available_models: Vec<String>,
     /// 完整模型配置列表
     model_configs: Vec<LlmModelConfig>,
-    /// 模型名称列表（用于 proto Session 的 model_names 字段）
-    model_config_names: Vec<String>,
+    /// 模型 key 列表（格式 "{provider}.{name}"，用于 proto Session.model_keys）
+    model_config_keys: Vec<String>,
 }
 
 impl CoderDaemonService {
@@ -135,7 +135,7 @@ impl CoderDaemonService {
             max_context_tokens: default_cfg.max_context_tokens.unwrap_or(128_000),
             extra,
         };
-        let model_config_names: Vec<String> = model_configs.iter().map(|mc| mc.key()).collect();
+        let model_config_keys: Vec<String> = model_configs.iter().map(|mc| mc.key()).collect();
         Self {
             provider: Arc::new(StdRwLock::new(initial_provider)),
             tool_registry,
@@ -149,7 +149,7 @@ impl CoderDaemonService {
             mcp_manager,
             available_models,
             model_configs,
-            model_config_names,
+            model_config_keys,
         }
     }
 
@@ -238,7 +238,8 @@ impl CoderDaemon for CoderDaemonService {
         Ok(Response::new(session_to_proto(
             &session,
             &self.available_models,
-            &self.model_config_names,
+            &self.model_config_keys,
+            &self.model_configs,
         )))
     }
 
@@ -253,7 +254,7 @@ impl CoderDaemon for CoderDaemonService {
         Ok(Response::new(proto::ListSessionsResponse {
             sessions: sessions
                 .iter()
-                .map(|s| session_to_proto(s, &self.available_models, &self.model_config_names))
+                .map(|s| session_to_proto(s, &self.available_models, &self.model_config_keys, &self.model_configs))
                 .collect(),
         }))
     }
@@ -269,7 +270,8 @@ impl CoderDaemon for CoderDaemonService {
             return Ok(Response::new(session_to_proto(
                 &session,
                 &self.available_models,
-                &self.model_config_names,
+                &self.model_config_keys,
+                &self.model_configs,
             )));
         }
 
@@ -289,7 +291,8 @@ impl CoderDaemon for CoderDaemonService {
             1 => Ok(Response::new(session_to_proto(
                 matched[0],
                 &self.available_models,
-                &self.model_config_names,
+                &self.model_config_keys,
+                &self.model_configs,
             ))),
             _ => Err(Status::invalid_argument("Ambiguous session prefix")),
         }
@@ -580,43 +583,50 @@ impl CoderDaemon for CoderDaemonService {
 
                         let mut config = session.config.clone();
                         if let Some(update_config) = &update.config {
-                            if let Some(model) = &update_config.model {
-                                // 查找模型配置，创建对应的 provider
-                                if let Some(model_config) =
-                                    model_configs.iter().find(|mc| mc.key() == *model)
-                                {
-                                    match create_llm_provider(model_config) {
-                                        Ok(new_provider) => {
-                                            *provider_ref.write().unwrap() = new_provider;
-                                            config.model = model_config.model.clone();
-                                            if let Some(temp) = model_config.temperature {
-                                                config.temperature = temp;
-                                            }
-                                            if let Some(tokens) = model_config.max_tokens {
-                                                config.max_tokens = tokens;
-                                            }
-                                            if let Some(ctx) = model_config.max_context_tokens {
-                                                config.max_context_tokens = ctx;
-                                            }
-                                            if !model_config.extra.is_empty() {
-                                                config.extra.extend(model_config.extra.clone());
-                                            }
+                            // model_key 优先匹配，然后 model（API model key 或 key 格式）作为回退
+                            let matched = update_config
+                                .model_key
+                                .as_ref()
+                                .and_then(|mk| model_configs.iter().find(|mc| mc.key() == *mk))
+                                .or_else(|| {
+                                    update_config
+                                        .model
+                                        .as_ref()
+                                        .and_then(|m| model_configs.iter().find(|mc| mc.model == *m))
+                                });
+
+                            if let Some(model_config) = matched {
+                                match create_llm_provider(model_config) {
+                                    Ok(new_provider) => {
+                                        *provider_ref.write().unwrap() = new_provider;
+                                        config.model = model_config.model.clone();
+                                        if let Some(temp) = model_config.temperature {
+                                            config.temperature = temp;
                                         }
-                                        Err(e) => {
-                                            let _ = tx
-                                                .send(Ok(session_error_msg(
-                                                    "ProviderError",
-                                                    &e,
-                                                    &session_id,
-                                                )))
-                                                .await;
-                                            continue;
+                                        if let Some(tokens) = model_config.max_tokens {
+                                            config.max_tokens = tokens;
+                                        }
+                                        if let Some(ctx) = model_config.max_context_tokens {
+                                            config.max_context_tokens = ctx;
+                                        }
+                                        if !model_config.extra.is_empty() {
+                                            config.extra.extend(model_config.extra.clone());
                                         }
                                     }
-                                } else {
-                                    // 不在配置列表中的模型名，直接设为 model 字符串（兼容旧行为）
-                                    config.model = model.clone();
+                                    Err(e) => {
+                                        let _ = tx
+                                            .send(Ok(session_error_msg(
+                                                "ProviderError",
+                                                &e,
+                                                &session_id,
+                                            )))
+                                            .await;
+                                        continue;
+                                    }
                                 }
+                            } else if let Some(model) = &update_config.model {
+                                // 未匹配到配置，直接使用（兼容旧行为）
+                                config.model = model.clone();
                             }
                             if let Some(temp) = update_config.temperature {
                                 config.temperature = temp;
@@ -820,7 +830,8 @@ impl CoderDaemon for CoderDaemonService {
 fn session_to_proto(
     session: &visp_core::session::Session,
     available_models: &[String],
-    model_names: &[String],
+    model_keys: &[String],
+    model_configs: &[LlmModelConfig],
 ) -> proto::Session {
     let status = match session.status {
         SessionStatus::Idle => proto::SessionStatus::Idle,
@@ -835,18 +846,34 @@ fn session_to_proto(
         .unwrap_or_default();
     let created_secs = now.as_secs() as i64 - elapsed.as_secs() as i64;
 
+    // proto model_key 字段用于 CLI 状态栏显示，用 key 格式 "{provider}.{name}"
+    let display_model_key = model_configs
+        .iter()
+        .find(|mc| mc.model == session.config.model)
+        .map(|mc| mc.key())
+        .unwrap_or_else(|| session.config.model.clone());
+
+    // proto model 字段用于 CLI 状态栏显示，使用 key 格式 "{provider}.{model_name}"
+    // 以便 CLI 端 split_model_name 能正确拆出 provider 和模型名
+    let display_model = model_configs
+        .iter()
+        .find(|mc| mc.model == session.config.model)
+        .map(|mc| mc.key())
+        .unwrap_or_else(|| session.config.model.clone());
+
     proto::Session {
         session_id: session.id.clone(),
         status: status.into(),
         project_path: session.project_path.to_string_lossy().to_string(),
-        model: session.config.model.clone(),
+        model: display_model,
         last_user_message: session.last_user_message.clone().unwrap_or_default(),
         created_at: Some(prost_types::Timestamp {
             seconds: created_secs,
             nanos: 0,
         }),
         available_models: available_models.to_vec(),
-        model_names: model_names.to_vec(),
+        model_keys: model_keys.to_vec(),
+        model_key: display_model_key,
     }
 }
 
@@ -1010,7 +1037,7 @@ mod tests {
             mcp_manager: Arc::new(McpManager::new(vec![])),
             available_models: vec![],
             model_configs: vec![],
-            model_config_names: vec![],
+            model_config_keys: vec![],
         }
     }
 
@@ -1190,6 +1217,7 @@ mod tests {
     fn test_map_llm_config_empty() {
         let config = proto::LlmConfig {
             model: None,
+            model_key: None,
             temperature: None,
             max_tokens: None,
             max_context_tokens: None,
@@ -1207,6 +1235,7 @@ mod tests {
         extra.insert("custom_key".into(), "custom_val".into());
         let config = proto::LlmConfig {
             model: Some("gpt-4".into()),
+            model_key: None,
             temperature: Some(0.5),
             max_tokens: Some(2048),
             max_context_tokens: Some(64000),
@@ -1225,6 +1254,7 @@ mod tests {
     fn test_map_llm_config_partial() {
         let config = proto::LlmConfig {
             model: Some("gpt-4".into()),
+            model_key: None,
             temperature: None,
             max_tokens: None,
             max_context_tokens: None,
@@ -1259,13 +1289,14 @@ mod tests {
             mcp_manager: Arc::new(McpManager::new(vec![])),
             available_models: vec![],
             model_configs: vec![],
-            model_config_names: vec![],
+            model_config_keys: vec![],
         };
 
         let request = tonic::Request::new(proto::CreateSessionRequest {
             project_path: "/tmp".into(),
             config: Some(proto::LlmConfig {
                 model: None,
+                model_key: None,
                 temperature: None,
                 max_tokens: None,
                 max_context_tokens: None,
@@ -1301,13 +1332,14 @@ mod tests {
             mcp_manager: Arc::new(McpManager::new(vec![])),
             available_models: vec![],
             model_configs: vec![],
-            model_config_names: vec![],
+            model_config_keys: vec![],
         };
 
         let request = tonic::Request::new(proto::CreateSessionRequest {
             project_path: "/tmp".into(),
             config: Some(proto::LlmConfig {
                 model: None,
+                model_key: None,
                 temperature: None,
                 max_tokens: None,
                 max_context_tokens: Some(32000),
@@ -1336,7 +1368,7 @@ mod tests {
             approved_tools: HashSet::new(),
         };
 
-        let proto = session_to_proto(&session, &[], &[]);
+        let proto = session_to_proto(&session, &[], &[], &[]);
         assert_eq!(proto.session_id, "test-1");
         assert_eq!(proto.status, proto::SessionStatus::Idle as i32);
         assert_eq!(proto.project_path, "/tmp");
@@ -1361,19 +1393,19 @@ mod tests {
         };
 
         assert_eq!(
-            session_to_proto(&base(SessionStatus::Idle), &[], &[]).status,
+            session_to_proto(&base(SessionStatus::Idle), &[], &[], &[]).status,
             proto::SessionStatus::Idle as i32
         );
         assert_eq!(
-            session_to_proto(&base(SessionStatus::Running), &[], &[]).status,
+            session_to_proto(&base(SessionStatus::Running), &[], &[], &[]).status,
             proto::SessionStatus::Running as i32
         );
         assert_eq!(
-            session_to_proto(&base(SessionStatus::Completed), &[], &[]).status,
+            session_to_proto(&base(SessionStatus::Completed), &[], &[], &[]).status,
             proto::SessionStatus::Completed as i32
         );
         assert_eq!(
-            session_to_proto(&base(SessionStatus::Error), &[], &[]).status,
+            session_to_proto(&base(SessionStatus::Error), &[], &[], &[]).status,
             proto::SessionStatus::Error as i32
         );
     }

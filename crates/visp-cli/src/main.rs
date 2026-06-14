@@ -146,6 +146,7 @@ async fn main() {
         let config = if cli.model.is_some() || cli.temperature.is_some() || !extra.is_empty() {
             Some(ProtoLlmConfig {
                 model: cli.model.clone(),
+                model_key: None,
                 temperature: cli.temperature,
                 max_tokens: None,
                 max_context_tokens: None,
@@ -182,15 +183,17 @@ async fn main() {
     chat_handle.send_join();
 
     let model = cli.model.clone().unwrap_or_else(|| session.model.clone());
+    let model_key = session.model_key.clone();
     let sid_for_display = session.session_id.clone();
     if let Err(e) = event::run(
         session_id,
         chat_handle,
         model.clone(),
+        model_key,
         &mut client,
         session.project_path.as_str(),
         session.available_models.clone(),
-        session.model_names.clone(),
+        session.model_keys.clone(),
     )
     .await
     {

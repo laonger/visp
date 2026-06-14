@@ -5,201 +5,371 @@ import "google/protobuf/empty.proto";
 import "google/protobuf/timestamp.proto";
 
 // ============ Session ============
+
+// 会话：一次对话，包含上下文和状态。由 daemon 创建，通过 RPC 返回给 CLI。
 message Session {
+    // 会话全局唯一标识。UUID v4 格式。
+    // 支持前缀匹配查找，CLI 状态栏截取前 8 字符作为 short-id 显示。
     string session_id = 1;
+
+    // 会话当前生命周期状态（Idle/Running/Completed/Error）。
+    // 只有 Idle 状态的会话才能接收新消息或修改配置。
     SessionStatus status = 2;
+
+    // 会话关联的项目根目录绝对路径。
+    // 作为工具执行（bash、read_file 等）的工作目录。
     string project_path = 3;
+
+    // 会话创建时间。
     google.protobuf.Timestamp created_at = 4;
+
+    // 当前会话的模型 key，格式 "{provider}.{name}"。
+    // 用于 CLI 状态栏显示，CLI 端按 "." 拆出 provider 和 name 后
+    // 显示为 "name(provider)"。
+    // 例如 "Ollama.DeepSeek" → 状态栏显示 "DeepSeek(Ollama)"。
+    string model_key = 9;
+
+    // 当前会话使用的模型标识（API model key）。
+    // 在 ConfigUpdate 时通过 LlmConfig.model 传回 daemon，
+    // daemon 端用 mc.key() 查找匹配的 LlmModelConfig 后取 mc.model 发送到 LLM API。
+    // 如果客户端传入的是 key 格式（"{provider}.{name}"），
+    // daemon 会在 create_session 时解析为 API model key。
     string model = 5;
+
+    // 最后一条用户消息的文本预览，用于 session 列表中的快速识别。
     string last_user_message = 6;
+
+    // 所有可用模型的显示标签列表，格式 "{name}({provider})"。
+    // 数据源为 daemon.toml 中 [[llm.models]] 的 name 和 provider（或 protocol）。
+    // 示例：["DeepSeek(Ollama)", "Claude Sonnet(Anthropic)"]。
+    // CLI 在 /model 无参时弹出选择器供用户选择。
     repeated string available_models = 7;
-    repeated string model_names = 8;
+
+    // 所有可用模型的 lookup key 列表，格式 "{provider}.{name}"。
+    // 与 available_models 一一对应。用户选择模型后，CLI 取对应项
+    // 通过 ConfigUpdate 发送给 daemon，daemon 用 mc.key() 匹配。
+    repeated string model_keys = 8;
 }
 
+// 会话生命周期状态
 enum SessionStatus {
-    IDLE = 0;
-    RUNNING = 1;
-    COMPLETED = 2;
-    ERROR = 3;
+    IDLE = 0;       // 空闲，可接收新消息或修改配置
+    RUNNING = 1;    // Agent loop 运行中，不可操作
+    COMPLETED = 2;  // 已完成（暂未使用）
+    ERROR = 3;      // 异常终止
 }
 
+// LLM 运行时配置。通过 create_session 或 ConfigUpdate 从 CLI 发送到 daemon。
+// 所有字段可选，daemon 端与默认配置合并（客户端未传的字段用 daemon 配置覆盖）。
 message LlmConfig {
+    // API model key，如 "deepseek-v4-flash"。直接发送到 LLM API 的 model 字段。
+    // 此字段与 model_key 二选一。同时设置时 model_key 优先。
     optional string model = 1;
+
+    // 模型 lookup key，格式 "{provider}.{name}"，如 "Ollama.DeepSeek"。
+    // daemon 端用此值匹配 daemon.toml 中 [[llm.models]] 的配置，
+    // 匹配成功后自动取对应的 mc.model（API model key）发送到 LLM API。
+    // 此字段与 model 二选一。同时设置时优先于 model。
+    // CLI 的 /model 选择器使用此字段。
+    optional string model_key = 6;
+
+    // LLM API temperature 参数（0.0-2.0）。默认 0.7。
+    // 控制生成文本的随机性。
     optional double temperature = 2;
+
+    // LLM API max_tokens 参数。默认 4096。
+    // 限制单次生成的最大 token 数。
     optional uint32 max_tokens = 3;
+
+    // 扩展参数（provider 特定参数）。key-value 字符串对。
+    // 常用 key：thinking_budget_tokens（Claude thinking 模式）、
+    // tool_choice（控制工具选择策略）、response_format、seed、
+    // frequency_penalty、presence_penalty、top_p 等。
+    // daemon 端会与配置文件中 [llm.extra] 的默认值合并。
     map<string, string> extra = 4;
+
+    // 最大上下文 token 数。默认 128000。
+    // 用于上下文裁剪决策，超过此限制时会丢弃最早的消息。
     optional uint32 max_context_tokens = 5;
 }
 
+// 创建新会话的请求。
 message CreateSessionRequest {
+    // 项目根目录绝对路径，由 CLI -p 参数传入。
     string project_path = 1;
+    // 初始 LLM 配置。所有字段可选，daemon 端与 daemon.toml 默认配置合并。
+    // 例如未传 model 时使用 daemon 默认模型。
     LlmConfig config = 2;
 }
 
+// 会话列表响应。
 message ListSessionsResponse {
     repeated Session sessions = 1;
 }
 
+// 删除会话请求。
 message DeleteSessionRequest {
+    // 要删除的会话 ID（支持前缀匹配）。
     string session_id = 1;
 }
 
+// 获取会话请求。
 message GetSessionRequest {
+    // 要获取的会话 ID（支持前缀匹配）。
     string session_id = 1;
 }
 
 // ============ Chat (双向流) ============
+
+// 加入会话。客户端发送后，daemon 切换 provider 以匹配目标 session 的模型配置，
+// 并返回会话消息历史（通过 StatusUpdate.user_inputs 恢复 CLI 输入历史）。
+// 用于 /sessions 切换场景。
 message JoinSession {
     string session_id = 1;
 }
 
+// 客户端 → daemon 消息（Chat RPC 的客户端流）。
+// oneof 设计：每条消息只携带一种 payload，通过消息类型区分。
 message ClientMessage {
     oneof payload {
-        UserInput user_input = 1;
-        ConfigUpdate config_update = 2;
-        UserResponse user_response = 3;
-        Cancel cancel = 4;
-        Ack ack = 5;
-        JoinSession join_session = 6;
+        UserInput user_input = 1;         // 用户发送的对话消息
+        ConfigUpdate config_update = 2;   // 更新运行时配置（如切换模型）
+        UserResponse user_response = 3;   // 用户对 Agent 提问的响应
+        Cancel cancel = 4;                // 取消当前正在运行的 agent loop
+        Ack ack = 5;                      // 确认收到 Done 消息（仅用于日志追踪）
+        JoinSession join_session = 6;     // 切换到另一个会话
     }
 }
 
+// 用户输入的对话消息，对应 CLI 输入框中发送的内容。
 message UserInput {
+    // 消息文本内容。
     string text = 1;
+    // 目标会话 ID。
     string session_id = 2;
+    // 请求 ID，用于关联后续 Done 消息以确认处理完成。
+    // 由 CLI 端自增生成。
     string request_id = 3;
 }
 
+// 确认接收。客户端收到 Done 后发送 Ack，表示已处理完成。
+// 当前主要用于日志追踪，服务端不依赖此消息做状态管理。
 message Ack {
     string request_id = 1;
 }
 
+// 配置更新请求。由 CLI 的 /model、/temp、/init 等命令触发。
+// 会话必须在 Idle 状态才能更新配置。
 message ConfigUpdate {
     string session_id = 1;
+    // 需要更新的配置字段。只传要修改的字段，未传字段保持原有值不变。
     LlmConfig config = 2;
 }
 
+// 用户对 Agent 提问的响应。
+// Agent 可能向用户发起两种确认：选项选择（如"你想分析哪个文件？"）
+// 或工具审批（如"允许执行 bash 吗？"），两者都通过此消息回复。
 message UserResponse {
+    // 对应 UserQuery 的 query_id，用于匹配待处理的查询。
     string query_id = 1;
-    int32 selected_index = 2; // 选中项索引；-1 = Other 自定义输入
-    string text = 3;          // 自定义文本（selected_index==-1 时使用）
+    // 选中项索引。正常选择为 0-based 索引；
+    // -1 表示用户选择了 "Other" 自定义输入，此时 text 为实际输入内容。
+    int32 selected_index = 2;
+    // 自定义文本输入。仅 selected_index == -1 时有效；
+    // 正常选择时此字段为空。
+    string text = 3;
 }
 
+// Agent 向用户发起的提问/确认。由 agent loop 中的 UserQuery 事件转换而来。
+// 用于两种场景：工具执行需要用户审批，或 LLM 向用户提问选择。
 message UserQuery {
     string query_id = 1;
+    // 向用户显示的提示文本。
     string message = 2;
     string session_id = 3;
-    repeated string options = 4;  // LLM 提供选项；空列表 = 工具审批模式
-    bool allow_other = 5;        // 是否显示 Other 按钮
+    // 选项列表：空列表表示工具审批模式，CLI 显示 Approve/Deny/Always Allow；
+    // 非空列表为 LLM 提供的选项，CLI 显示为可选列表，另带 Other 按钮允许自定义输入。
+    repeated string options = 4;
+    // 选项模式时，是否显示 "Other" 自定义输入按钮。
+    bool allow_other = 5;
 }
 
+// Claude thinking 块信息。用于流式显示 LLM 的推理过程。
 message ThinkingBlock {
+    // 推理/思考内容文本。
     string thinking = 1;
+    // 加密签名，Claude API 用于验证 thinking 内容未被篡改。
     string signature = 2;
     string session_id = 3;
 }
 
+// 服务端 → 客户端消息（Chat RPC 的服务端流）。
+// oneof 设计，通过消息类型区分不同的事件。
 message ServerMessage {
     oneof payload {
-        TextDelta text_delta = 1;
-        ToolCall tool_call = 2;
-        ToolResult tool_result = 3;
-        StatusUpdate status_update = 4;
-        Error error = 5;
-        Done done = 6;
-        UserQuery user_query = 7;
-        ThinkingBlock thinking_block = 8;
-        UsageInfo usage_info = 9;
+        TextDelta text_delta = 1;         // 流式文本增量
+        ToolCall tool_call = 2;           // LLM 请求调用工具
+        ToolResult tool_result = 3;       // 工具执行结果
+        StatusUpdate status_update = 4;   // 状态信息（session 历史/初始化进度）
+        Error error = 5;                  // 错误信息
+        Done done = 6;                    // 当前 agent loop 执行完毕
+        UserQuery user_query = 7;         // Agent 向用户提问
+        ThinkingBlock thinking_block = 8; // LLM 推理过程
+        UsageInfo usage_info = 9;         // LLM API token 用量统计
     }
 }
 
+// 流式文本增量。LLM 响应通过多个 TextDelta 流式传输。
 message TextDelta {
+    // 增量文本片段，CLI 逐个追加到当前流式文本缓冲区。
     string delta = 1;
     string session_id = 2;
 }
 
+// LLM 发起的工具调用请求，对应 ChatEvent::ToolCall。
 message ToolCall {
+    // LLM 生成的工具调用唯一标识（如 "call_abc123"），
+    // 用于匹配后续的 ToolResult。
     string call_id = 1;
+    // 工具名称（如 "read_file", "bash", "grep"）。
     string tool_name = 2;
-    string arguments = 3; // JSON string
+    // 工具参数 JSON 字符串。
+    string arguments = 3;
     string session_id = 4;
 }
 
+// 工具执行结果，对应 AgentEvent::ToolCallResult。
 message ToolResult {
+    // 对应 ToolCall 的 call_id，CLI 通过它匹配到对应的工具调用行。
     string call_id = 1;
+    // 工具输出内容（stdout 或结果文本）。
     string content = 2;
+    // 工具是否执行出错。为 true 时 CLI 会用错误样式显示。
     bool is_error = 3;
     string session_id = 4;
+    // 工具名称。
     string tool_name = 5;
 }
 
+// 状态更新消息。用于在 CLI 对话区显示信息。
 message StatusUpdate {
+    // 状态文本内容。
     string message = 1;
     string session_id = 2;
+    // 用户历史输入列表。仅 JoinSession 时填充，
+    // 从 session 历史中收集所有用户消息，用于恢复 CLI 的 ↑↓ 翻找历史功能。
+    // 其他场景此字段为空。
     repeated string user_inputs = 3;
 }
 
+// 错误消息。daemon 处理用户输入过程中发生错误时发送。
 message Error {
+    // 错误码，用于 CLI 判断错误类型："SessionNotFound"、"SessionBusy"、
+    // "ProviderError"、"InternalError"、"InitError" 等。
     string code = 1;
+    // 错误描述文本，显示给用户。
     string message = 2;
     string session_id = 3;
 }
 
+// LLM API token 用量统计。由 ChatEvent::UsageInfo 转换而来。
+// CLI 累计各次用量，在 Done 消息时汇总显示在对话区，
+// 同时在状态栏右侧实时显示总 token 数。
 message UsageInfo {
+    // 本次 LLM 调用的输入 token 数。
     uint32 input_tokens = 1;
+    // 本次 LLM 调用的输出 token 数。
     uint32 output_tokens = 2;
+    // 当前 agent loop 回合中的工具调用次数。
     uint32 tool_calls = 3;
     string session_id = 4;
+    // 本次请求中写入缓存的 token 数（prompt caching）。
+    // 仅当 > 0 时更新，CLI 累计后显示在状态栏。
     uint32 cache_creation_input_tokens = 5;
+    // 本次请求中从缓存读取的 token 数。
+    // 仅当 > 0 时更新。
     uint32 cache_read_input_tokens = 6;
 }
 
+// Agent loop 正常执行完毕。CLI 收到 Done 后发送 Ack 确认，
+// 并重置状态以接收下一条用户输入。
 message Done {
     string session_id = 1;
 }
 
+// 取消当前正在运行的 agent loop。
+// 由 CLI 的 Ctrl+C 或 /new 等需要中断当前操作时发送。
 message Cancel {
     string session_id = 1;
 }
 
 // ============ File ============
+
+// 读取文件请求。由工具系统中的 read_file 工具发起。
+// 支持行范围读取，用于在大型文件中只读取相关部分。
 message ReadFileRequest {
+    // 文件路径（绝对路径或相对于项目目录的相对路径）。
     string path = 1;
     string session_id = 2;
+    // 起始行号（1-based，含）。不传时从文件开头读取。
+    // CLI 端传入时已在内部减 1 转为 0-based 索引。
     optional int32 start_line = 3;
+    // 结束行号（1-based，含）。不传时读到文件末尾。
     optional int32 end_line = 4;
 }
 
+// 读取文件响应。
 message ReadFileResponse {
+    // 文件内容。
     string content = 1;
+    // 请求的原始路径（原样返回，用于调用方确认）。
     string path = 2;
 }
 
 // ============ CodeGraph ============
+
+// 符号搜索请求。由 codegraph_search 工具发起。
 message SearchSymbolsRequest {
+    // 搜索关键词。支持前缀匹配、子串匹配、首字母匹配。
     string query = 1;
+    // 项目路径，用于定位 CodeGraph 索引。
     string project_path = 2;
+    // 最大结果数。<= 0 时服务端使用默认值 20。
     int32 limit = 3;
 }
 
+// 符号基本信息。CodeGraph 搜索结果的单个条目。
 message SymbolInfo {
+    // 符号名称。
     string name = 1;
+    // 符号类型：function / method / class / interface / type /
+    // variable / enum / route / component。
     string kind = 2;
+    // 符号所在文件路径（相对于项目根）。
     string file_path = 3;
+    // 符号定义行号（0-based）。
     uint32 line = 4;
+    // 符号定义列号（0-based）。
     uint32 column = 5;
+    // 函数/方法签名摘要（如 "fn foo(a: i32) -> String"）。
     string signature = 6;
 }
 
+// 符号搜索响应。
 message SearchSymbolsResponse {
     repeated SymbolInfo symbols = 1;
 }
 
+// 符号详情查询请求。由 codegraph_get_details 工具发起。
 message GetSymbolDetailsRequest {
+    // 符号名称（必须精确匹配）。
     string symbol_name = 1;
+    // 项目路径。
     string project_path = 2;
 }
 
+// 符号详细信息，包含源码和调用链。
+// 用于 LLM 理解某个符号的实现细节。
 message SymbolDetails {
     string name = 1;
     string kind = 2;
@@ -207,42 +377,53 @@ message SymbolDetails {
     uint32 line = 4;
     uint32 column = 5;
     string signature = 6;
+    // 文档注释。
     string docstring = 7;
+    // 符号的完整源码。
     string source = 8;
+    // 调用此符号的位置列表（格式 "file:line"），用于理解"谁用了它"。
     repeated string callers = 9;
+    // 此符号调用的位置列表（格式 "file:line"），用于理解"它依赖谁"。
     repeated string callees = 10;
 }
 
 // ============ Daemon ============
+
+// Daemon 健康状态，由 CLI 启动时轮询检查，超时 15 秒。
 message HealthStatus {
+    // Daemon 是否存活并可服务。
     bool alive = 1;
+    // 版本号（Cargo.toml 中的 package.version）。
     string version = 2;
+    // 自启动以来的运行秒数。
     uint64 uptime_seconds = 3;
 }
 
+// 关闭 daemon 请求。由 CLI 退出时发送（visp launcher 的清理流程）。
 message ShutdownRequest {
+    // 是否强制关闭（暂未使用，预留）。
     bool force = 1;
 }
 
 // ============ Service ============
 service CoderDaemon {
-    // Session management
+    // Session 管理：创建、列举、删除、查询
     rpc CreateSession(CreateSessionRequest) returns (Session);
     rpc ListSessions(google.protobuf.Empty) returns (ListSessionsResponse);
     rpc DeleteSession(DeleteSessionRequest) returns (google.protobuf.Empty);
     rpc GetSession(GetSessionRequest) returns (Session);
 
-    // Core conversation (bidirectional streaming)
+    // 核心对话：双向流，CLI 发送用户输入，daemon 流式返回 LLM 响应
     rpc Chat(stream ClientMessage) returns (stream ServerMessage);
 
-    // Fast file access
+    // 快速文件读取（绕过工具系统，daemon 直接访问文件系统）
     rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
 
-    // Code intelligence
+    // 代码智能：CodeGraph 符号搜索与详情查询
     rpc SearchSymbols(SearchSymbolsRequest) returns (SearchSymbolsResponse);
     rpc GetSymbolDetails(GetSymbolDetailsRequest) returns (SymbolDetails);
 
-    // Daemon control
+    // Daemon 控制：健康检查和关闭
     rpc HealthCheck(google.protobuf.Empty) returns (HealthStatus);
     rpc Shutdown(ShutdownRequest) returns (google.protobuf.Empty);
 }
