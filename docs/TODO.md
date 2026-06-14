@@ -73,6 +73,35 @@
 
 ---
 
+### P2：Prompt 整体优化（core / tools）
+
+**问题**：项目内各 tool 的 prompt 描述、Agent system prompt、rule 注入方式等分散在多处，缺乏统一的 prompt 工程策略。部分 tool 描述过于简略或表述不一致，导致 LLM 理解偏差、生成不准确的工具调用参数。
+
+**状态**：需系统梳理 `visp-core/src/agent.rs` 中的 system prompt、各 Tool 的 `description()` 返回、rules 注入格式，统一风格、补充缺失说明、优化英文/中文表述。
+
+**方案参考**：
+- 统一 prompt 模板中英文使用规范（中英文混合场景 vs 全英文场景）
+- 为每个 tool 的 description 增加参数说明、返回值格式、使用示例
+- 优化 system prompt 的结构——职责声明、工具选择指南、输出格式要求
+- 对 rules 注入做 token 预算分配，避免 rules 过长挤占正常对话空间
+
+---
+
+### P2：Tool 名称适配 Claude 大写调用（tools）
+
+**问题**：Claude 模型在生成 tool call 时，倾向于将 tool 名称首字母大写（如 `ReadFile`、`Bash`、`Grep`），而当前所有 tool 名称为小写 snake_case（`read_file`、`bash`、`grep`）。这导致 tool 调用匹配失败，LLM 报 "tool not found" 错误。
+
+**状态**：当前 tool 名称列表：
+- `bash`, `read_file`, `write_file`, `edit_file`, `grep`, `glob`, `fetch_web`
+- `codegraph_rebuild`, `codegraph_search`, `codegraph_get_details`, `codegraph_context`, `codegraph_trace`, `codegraph_impact`
+
+**方案参考**：
+- 将 tool 名称统一改为首字母大写或 PascalCase（如 `ReadFile`、`WriteFile`、`EditFile`、`Bash`、`Grep`、`FetchWeb`、`CodegraphSearch` 等）
+- 需同步更新所有调用处：Tool trait 的 `name()` 返回值、tool registry 注册、daemon 中 tool 路由、测试中匹配 tool name 的字符串字面量
+- 在 `visp-core/src/tool.rs` 的 `Tool` trait 文档中注明命名规范（PascalCase）
+
+---
+
 ### P2：`SessionError::AlreadyExists` 错误消息错误（core）
 
 **问题**：`crates/visp-core/src/error.rs:90-91` 的 `AlreadyExists` 变体错误消息显示 "Session not found: {0}"，与 `NotFound` 完全一样（应该是 "Session already exists: {0}" 或其他指明「已存在」的消息）。
@@ -125,13 +154,13 @@ Agent 循环在等待 UserQuery 确认时 panic，mpsc sender 被 drop，daemon 
 
 **后续方案**：用 `tokio::select!` 同时监听 mpsc receiver 和 UserResponse，加 heartbeat 检测。
 
-#### 2. 规则热重载不打断运行中的 Agent（core — 设计行为）
+#### ~~2. 规则热重载不打断运行中的 Agent（core — 设计行为~~ -- 不打算制作热重载
 
-规则文件变更后，正在运行的 Agent 循环继续使用旧规则（快照机制）。只有下一轮对话才加载新规则。这是设计行为，但部分用户可能期望立即生效。
+~~规则文件变更后，正在运行的 Agent 循环继续使用旧规则（快照机制）。只有下一轮对话才加载新规则。这是设计行为，但部分用户可能期望立即生效。~~
 
-#### 3. Chat 流中 UserQuery 等待时无法处理其他消息（daemon — 设计限制）
+#### ~~3. Chat 流中 UserQuery 等待时无法处理其他消息（daemon — 设计限制）~~ -- 没有意义
 
-当 daemon service 阻塞等待客户端回复 UserQuery 时，无法处理同一 Chat 流上的其他消息（如新的 UserInput）。当前设计下，同一会话同一时刻只有一个 UserQuery，此限制可接受。
+~~当 daemon service 阻塞等待客户端回复 UserQuery 时，无法处理同一 Chat 流上的其他消息（如新的 UserInput）。当前设计下，同一会话同一时刻只有一个 UserQuery，此限制可接受。~~
 
 ### Phase 5 已知限制
 
