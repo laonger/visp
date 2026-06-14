@@ -21,7 +21,7 @@ macro_rules! debug_log {
 }
 
 use crate::app::{AppState, ConfirmState, LineType};
-use crate::client::{ChatHandle, VbwClient};
+use crate::client::{ChatHandle, VispClient};
 use crate::ui::render;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use std::io::{self, Write};
@@ -79,7 +79,7 @@ pub async fn run(
     session_id: String,
     mut chat_handle: ChatHandle,
     model: String,
-    client: &mut VbwClient,
+    client: &mut VispClient,
     project_path: &str,
     available_models: Vec<String>,
     model_names: Vec<String>,
@@ -812,7 +812,7 @@ fn handle_grpc_message(
             app.flush_streaming();
             app.generating = false;
             if let Some(rid) = app.current_request_id.take() {
-                chat_handle.send_ack(rid);
+                chat_handle.send_ack(&rid);
             }
         }
         None => {}

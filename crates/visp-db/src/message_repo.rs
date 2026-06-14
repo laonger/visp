@@ -55,8 +55,8 @@ impl MessageRepo {
             .map(|v| serde_json::to_string(v).unwrap_or_default());
 
         conn.execute(
-            "INSERT INTO message (session_id, role, type, content, tool_call_id, tool_name, tool_arguments, tool_calls_json, tool_result_is_error, tool_result_duration_ms, estimated_tokens, extra_blocks, provider_metadata, actual_tokens_input, actual_tokens_output, actual_cache_read, actual_cache_write, actual_cost, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            "INSERT INTO message (session_id, role, type, content, tool_call_id, tool_name, tool_arguments, tool_calls_json, tool_result_is_error, tool_result_duration_ms, estimated_tokens, extra_blocks, provider_metadata, actual_tokens_input, actual_tokens_output, actual_cache_read, actual_cache_write, actual_cost, skip_context, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 session_id,
                 role_str,
@@ -76,6 +76,7 @@ impl MessageRepo {
                 msg.actual_cache_read,
                 msg.actual_cache_write,
                 msg.actual_cost,
+                msg.skip_context as i64,
                 now,
             ],
         )?;
@@ -85,7 +86,7 @@ impl MessageRepo {
     /// Get all messages for a session, ordered by id (insertion order).
     pub fn get_by_session(conn: &Connection, session_id: &str) -> Result<Vec<Message>> {
         let mut stmt = conn.prepare(
-            "SELECT id, role, type, content, tool_call_id, tool_name, tool_arguments, tool_calls_json, tool_result_is_error, tool_result_duration_ms, estimated_tokens, extra_blocks, provider_metadata, actual_tokens_input, actual_tokens_output, actual_cache_read, actual_cache_write, actual_cost, created_at
+            "SELECT id, role, type, content, tool_call_id, tool_name, tool_arguments, tool_calls_json, tool_result_is_error, tool_result_duration_ms, estimated_tokens, extra_blocks, provider_metadata, actual_tokens_input, actual_tokens_output, actual_cache_read, actual_cache_write, actual_cost, skip_context, created_at
              FROM message WHERE session_id = ?1 ORDER BY id ASC",
         )?;
 
@@ -109,7 +110,8 @@ impl MessageRepo {
                 let actual_cache_read: Option<u32> = row.get(15)?;
                 let actual_cache_write: Option<u32> = row.get(16)?;
                 let actual_cost: Option<f64> = row.get(17)?;
-                let created_at: Option<i64> = row.get(18)?;
+                let skip_context_int: i64 = row.get(18)?;
+                let created_at: Option<i64> = row.get(19)?;
 
                 let role = match role_str.as_str() {
                     "user" => Role::User,
@@ -163,7 +165,7 @@ impl MessageRepo {
                     tool_call_id,
                     tool_calls,
                     extra_blocks,
-                    skip_context: false,
+                    skip_context: skip_context_int != 0,
                     estimated_tokens,
                     actual_tokens_input,
                     actual_tokens_output,
@@ -507,5 +509,59 @@ mod tests {
         let last = MessageRepo::get_last_user_message(&conn, "ses-long-msg").unwrap();
         let expected = format!("{}...", "a".repeat(80));
         assert_eq!(last, Some(expected));
+    }
+
+    #[test]
+    fn test_skip_context_roundtrip() {
+        let conn = setup();
+        insert_session(&conn, "ses-sk-1");
+
+        // Insert a message with skip_context: true
+        let skip_msg = Message {
+            skip_context: true,
+            ..Message::user("skip me")
+        };
+        MessageRepo::insert(&conn, "ses-sk-1", &skip_msg).unwrap();
+
+        // Insert a normal message with skip_context: false (default)
+        let normal_msg = Message::user("keep me");
+        MessageRepo::insert(&conn, "ses-sk-1", &normal_msg).unwrap();
+
+        // Load and verify
+        let loaded = MessageRepo::get_by_session(&conn, "ses-sk-1").unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].content, "skip me");
+        assert!(
+            loaded[0].skip_context,
+            "first message should have skip_context=true"
+        );
+        assert_eq!(loaded[1].content, "keep me");
+        assert!(
+            !loaded[1].skip_context,
+            "second message should have skip_context=false"
+        );
+    }
+
+    #[test]
+    fn test_skip_context_v2_default() {
+        let conn = setup();
+        insert_session(&conn, "ses-sk-2");
+
+        // Insert raw SQL without skip_context column — v2 backward compat
+        conn.execute(
+            "INSERT INTO message (session_id, role, type, content, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["ses-sk-2", "user", "user", "legacy msg", 1700000000000_i64],
+        )
+        .unwrap();
+
+        // Load and verify skip_context defaulted to false
+        let loaded = MessageRepo::get_by_session(&conn, "ses-sk-2").unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].content, "legacy msg");
+        assert!(
+            !loaded[0].skip_context,
+            "v2 legacy data should default to false"
+        );
     }
 }

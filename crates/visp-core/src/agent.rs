@@ -1295,7 +1295,7 @@ mod tests {
 
         let registry = ToolRegistry::new();
         for tool in tools {
-            registry.register(tool).unwrap();
+            registry.register(Arc::from(tool)).unwrap();
         }
         let tool_registry = StdArc::new(registry);
         let config = AgentConfig {
@@ -1648,7 +1648,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel(64);
         let registry = ToolRegistry::new();
-        registry.register(tool).unwrap();
+        registry.register(Arc::from(tool)).unwrap();
 
         let setup = test_setup();
         let config = AgentConfig {
@@ -1715,7 +1715,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel(64);
         let registry = ToolRegistry::new();
-        registry.register(tool).unwrap();
+        registry.register(Arc::from(tool)).unwrap();
 
         let setup = test_setup();
         let config = AgentConfig {
@@ -1784,7 +1784,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel(64);
         let registry = ToolRegistry::new();
-        registry.register(tool).unwrap();
+        registry.register(Arc::from(tool)).unwrap();
 
         let setup = test_setup();
         let config = AgentConfig {
@@ -2415,19 +2415,19 @@ mod tests {
 
         let registry = ToolRegistry::new();
         registry
-            .register(Box::new(CategorisedTool {
+            .register(Arc::new(CategorisedTool {
                 name: "bash",
                 cat: "common",
             }))
             .unwrap();
         registry
-            .register(Box::new(CategorisedTool {
+            .register(Arc::new(CategorisedTool {
                 name: "codegraph",
                 cat: "analyze",
             }))
             .unwrap();
         registry
-            .register(Box::new(CategorisedTool {
+            .register(Arc::new(CategorisedTool {
                 name: "fetch",
                 cat: "network",
             }))

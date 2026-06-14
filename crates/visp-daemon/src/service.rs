@@ -129,7 +129,7 @@ impl CoderDaemonService {
             create_llm_provider(default_cfg).expect("failed to create initial LLM provider");
 
         let default_llm_config = LlmConfig {
-            model: default_cfg.model.clone(),
+            model: default_cfg.key(),
             temperature: default_cfg.temperature.unwrap_or(0.7),
             max_tokens: default_cfg.max_tokens.unwrap_or(4096),
             max_context_tokens: default_cfg.max_context_tokens.unwrap_or(128_000),
@@ -283,7 +283,7 @@ impl CoderDaemon for CoderDaemonService {
                 &self.available_models,
                 &self.model_config_names,
             ))),
-            _ => Err(Status::not_found("Session not found")),
+            _ => Err(Status::invalid_argument("Ambiguous session prefix")),
         }
     }
 
@@ -1103,7 +1103,7 @@ mod tests {
             session_id: "common".into(),
         });
         let err = service.get_session(request).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 
     #[tokio::test]

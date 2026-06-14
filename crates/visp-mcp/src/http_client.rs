@@ -117,14 +117,18 @@ fn extract_sse_data(body: &str) -> Option<String> {
         if event.is_empty() {
             continue;
         }
-        // 查找 data: 行
+        // 收集同一事件内所有 data: 行，用 \n 拼接
+        let mut data_parts: Vec<String> = Vec::new();
         for line in event.lines() {
             if let Some(value) = line.strip_prefix("data:") {
                 let value = value.trim();
                 if !value.is_empty() {
-                    return Some(value.to_string());
+                    data_parts.push(value.to_string());
                 }
             }
+        }
+        if !data_parts.is_empty() {
+            return Some(data_parts.join("\n"));
         }
     }
     None
@@ -641,5 +645,16 @@ mod tests {
     fn test_extract_sse_data_empty_data() {
         let body = "event: message\ndata:\n\n";
         assert!(extract_sse_data(body).is_none());
+    }
+
+    #[test]
+    fn test_extract_sse_data_multiline() {
+        // 模拟 JSON 被 SSE 拆成多行 data
+        let body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\ndata: \"id\":1,\ndata: \"result\":{\"tools\":[]}}\n\n";
+        let data = extract_sse_data(body);
+        assert_eq!(
+            data,
+            Some("{\"jsonrpc\":\"2.0\",\n\"id\":1,\n\"result\":{\"tools\":[]}}".to_string())
+        );
     }
 }

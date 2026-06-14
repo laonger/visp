@@ -594,9 +594,13 @@ fn render_status_bar(app: &AppState, f: &mut Frame, area: Rect) {
         "Select"
     };
 
+    // model 格式为 "{provider}.{name}"，如 "Ollama.deepseek-v4-flash"
+    let (provider, model_label) = app.model.split_once('.').unwrap_or(("", &app.model));
+
     let left_text = format!(
-        "{sid} | {model} | {status} | [{mouse}] | /help = help",
-        model = app.model
+        "{sid} | {model}({provider}) | {status} | [{mouse}] | /help = help",
+        model = model_label,
+        provider = provider,
     );
 
     // 有 token 时左右分割显示，否则整行给左侧

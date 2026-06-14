@@ -598,7 +598,7 @@ pub struct AppState {
     pub spinner_frame: usize,
     pub stale_done_expected: bool,
     /// 当前正在处理的请求 ID（用于 Done 后发 Ack）
-    pub current_request_id: Option<&'static str>,
+    pub current_request_id: Option<String>,
     pub needs_render: bool,
     pub last_scroll_time: Option<std::time::Instant>,
     pub last_stream_render: Option<std::time::Instant>,
@@ -825,7 +825,6 @@ impl AppState {
         self.pending_model_select = false;
         self.session_select = None;
         self.model_select = None;
-        self.model_names = Vec::new();
         self.session_id = session_id;
         self.model = model;
     }

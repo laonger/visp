@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Build model configs
     let model_configs = config.llm.effective_models();
-    let model_names: Vec<String> = model_configs.iter().map(|mc| mc.name.clone()).collect();
+    let model_names: Vec<String> = model_configs.iter().map(|mc| mc.key()).collect();
     let default_protocol = model_configs
         .first()
         .map(|mc| mc.protocol.as_str())
@@ -66,57 +66,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 常用工具 ──
     tool_registry
-        .register(Box::new(Bash::from_toml(config.tool.get("bash"))))
+        .register(Arc::new(Bash::from_toml(config.tool.get("bash"))))
         .map_err(|e| format!("register bash: {e}"))?;
     tool_registry
-        .register(Box::new(ReadFile::from_toml(config.tool.get("read_file"))))
+        .register(Arc::new(ReadFile::from_toml(config.tool.get("read_file"))))
         .map_err(|e| format!("register read_file: {e}"))?;
     tool_registry
-        .register(Box::new(WriteFile::from_toml(
+        .register(Arc::new(WriteFile::from_toml(
             config.tool.get("write_file"),
         )))
         .map_err(|e| format!("register write_file: {e}"))?;
     tool_registry
-        .register(Box::new(EditFile::from_toml(config.tool.get("edit_file"))))
+        .register(Arc::new(EditFile::from_toml(config.tool.get("edit_file"))))
         .map_err(|e| format!("register edit_file: {e}"))?;
     tool_registry
-        .register(Box::new(Grep::from_toml(config.tool.get("grep"))))
+        .register(Arc::new(Grep::from_toml(config.tool.get("grep"))))
         .map_err(|e| format!("register grep: {e}"))?;
     tool_registry
-        .register(Box::new(Glob::from_toml(config.tool.get("glob"))))
+        .register(Arc::new(Glob::from_toml(config.tool.get("glob"))))
         .map_err(|e| format!("register glob: {e}"))?;
 
     // ── 网络工具 ──
     tool_registry
-        .register(Box::new(WebFetch::from_toml(config.tool.get("webfetch"))))
+        .register(Arc::new(WebFetch::from_toml(config.tool.get("webfetch"))))
         .map_err(|e| format!("register fetch_web: {e}"))?;
 
     // ── 代码分析工具 ──
     tool_registry
-        .register(Box::new(CodeGraphSearch::from_toml(
+        .register(Arc::new(CodeGraphSearch::from_toml(
             config.tool.get("codegraph_search"),
         )))
         .map_err(|e| format!("register codegraph_search: {e}"))?;
     tool_registry
-        .register(Box::new(CodeGraphGetDetails::from_toml(
+        .register(Arc::new(CodeGraphGetDetails::from_toml(
             config.tool.get("codegraph_get_details"),
         )))
         .map_err(|e| format!("register codegraph_get_details: {e}"))?;
     tool_registry
-        .register(Box::new(CodeGraphRebuild))
+        .register(Arc::new(CodeGraphRebuild))
         .map_err(|e| format!("register codegraph_rebuild: {e}"))?;
     tool_registry
-        .register(Box::new(CodeGraphContext::from_toml(
+        .register(Arc::new(CodeGraphContext::from_toml(
             config.tool.get("codegraph_context"),
         )))
         .map_err(|e| format!("register codegraph_context: {e}"))?;
     tool_registry
-        .register(Box::new(CodeGraphTrace::from_toml(
+        .register(Arc::new(CodeGraphTrace::from_toml(
             config.tool.get("codegraph_trace"),
         )))
         .map_err(|e| format!("register codegraph_trace: {e}"))?;
     tool_registry
-        .register(Box::new(CodeGraphImpact::from_toml(
+        .register(Arc::new(CodeGraphImpact::from_toml(
             config.tool.get("codegraph_impact"),
         )))
         .map_err(|e| format!("register codegraph_impact: {e}"))?;
@@ -153,6 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 注册/更新新工具
             for (i, tool) in tools.into_iter().enumerate() {
                 let tool_name = &tool_names[i];
+                let tool = Arc::from(tool); // Box → Arc
                 if old_tool_names.contains(tool_name) {
                     // 重连场景：更新现有工具
                     if let Err(e) = tr.update(tool_name, tool) {
@@ -205,6 +206,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // 9. Assemble service
+    let mcp_shutdown = mcp_manager.clone();
     let service = CoderDaemonService::new(
         model_configs,
         tool_registry,
@@ -228,6 +230,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 11. Wait for Ctrl+C
     tokio::signal::ctrl_c().await?;
     tracing::info!("shutdown signal received, stopping server");
+
+    // Gracefully shut down MCP connections before aborting the server
+    mcp_shutdown.shutdown_all().await;
 
     server_handle.abort();
 

@@ -5,7 +5,7 @@ mod theme;
 mod ui;
 
 use clap::Parser;
-use client::VbwClient;
+use client::VispClient;
 use visp_proto::visp::LlmConfig as ProtoLlmConfig;
 
 #[derive(Parser)]
@@ -37,7 +37,7 @@ struct Cli {
 async fn main() {
     let cli = Cli::parse();
 
-    let mut client = match VbwClient::connect(&cli.addr).await {
+    let mut client = match VispClient::connect(&cli.addr).await {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Failed to connect to daemon at {}: {}", cli.addr, e);

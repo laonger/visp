@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -9,6 +7,7 @@ use visp_mcp::config::McpConfig;
 pub struct DaemonConfig {
     pub daemon: DaemonSection,
     pub llm: LlmSection,
+    #[allow(dead_code)]
     pub tools: ToolsSection,
     pub agent: AgentSection,
     #[serde(default)]
@@ -24,6 +23,7 @@ pub struct DaemonSection {
     #[serde(default = "default_listen_addr")]
     pub listen_addr: String,
     #[serde(default = "default_log_level")]
+    #[allow(dead_code)]
     pub log_level: String,
 }
 
@@ -92,7 +92,7 @@ impl LlmSection {
             .iter()
             .map(|m| {
                 let display_provider = m.provider.as_deref().unwrap_or(&m.protocol);
-                format!("{} ({})", m.name, display_provider)
+                format!("{}({})", m.name, display_provider)
             })
             .collect()
     }
@@ -100,8 +100,10 @@ impl LlmSection {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ToolsSection {
+    #[allow(dead_code)]
     #[serde(default = "default_bash_timeout")]
     pub bash_timeout_secs: u64,
+    #[allow(dead_code)]
     #[serde(default = "default_file_max_size")]
     pub file_max_size_bytes: u64,
 }
@@ -135,21 +137,6 @@ fn default_listen_addr() -> String {
 }
 fn default_log_level() -> String {
     "info".into()
-}
-fn default_provider() -> String {
-    "anthropic".into()
-}
-pub(crate) fn default_model() -> String {
-    "claude-3-7-sonnet-20250219".into()
-}
-fn default_temperature() -> f64 {
-    0.7
-}
-fn default_max_tokens() -> u32 {
-    4096
-}
-fn default_max_context_tokens() -> u32 {
-    128_000
 }
 fn default_bash_timeout() -> u64 {
     120
@@ -341,11 +328,6 @@ file_max_size_bytes = 256000
     }
 
     #[test]
-    fn test_default_max_context_tokens() {
-        assert_eq!(default_max_context_tokens(), 128_000);
-    }
-
-    #[test]
     fn test_config_with_explicit_max_context_tokens() {
         let toml = r#"
 [daemon]
@@ -384,11 +366,6 @@ model = "claude-3-7-sonnet-20250219"
 "#;
         let config: DaemonConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.llm.models[0].max_context_tokens, None);
-    }
-
-    #[test]
-    fn test_default_config_max_context_tokens() {
-        assert_eq!(default_max_context_tokens(), 128_000);
     }
 
     #[test]

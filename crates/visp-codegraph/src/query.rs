@@ -86,10 +86,7 @@ impl QueryEngine {
                 .map_err(|e| e.to_string())?;
         }
 
-        let max_fts = results
-            .iter()
-            .map(|r| r.score)
-            .fold(f64::NEG_INFINITY, f64::max);
+        let max_fts = results.iter().map(|r| r.score).fold(0.0, f64::max);
 
         if results.len() < limit {
             let like_results = self
@@ -1090,18 +1087,6 @@ mod tests {
     // --- Step 2a: Search orchestration tests ---
 
     #[test]
-    fn test_new_accepts_3params() {
-        let (store_raw, _db_dir) = create_store();
-        let engine = QueryEngine::new(
-            Arc::new(store_raw),
-            Arc::new(AtomicBool::new(false)),
-            HashSet::new(),
-        );
-        // Compile-time check: 3-param constructor works
-        let _ = engine.search("x", 10);
-    }
-
-    #[test]
     fn test_search_empty_query() {
         let (store_raw, _db_dir) = create_store();
         let store = Arc::new(store_raw);
@@ -1123,6 +1108,36 @@ mod tests {
             !results.is_empty(),
             "empty query should return results via LIKE"
         );
+    }
+
+    #[test]
+    fn test_search_fts_empty_like_fallback() {
+        let (store_raw, _db_dir) = create_store();
+        let store = Arc::new(store_raw);
+        // Insert a camelCase symbol. FTS5 unicode61 tokenizer doesn't split
+        // camelCase, so "fooBarBaz" is stored as a single token.
+        // Searching "arBa": FTS5 does prefix match "arba"* → 0 results
+        // ("foobarbaz" doesn't start with "arba").
+        // LIKE does substring match %arBa% → 1 result.
+        insert_symbol(
+            &store,
+            "fooBarBaz",
+            SymbolKind::Function,
+            "a.rs",
+            1,
+            1,
+            None,
+            None,
+        );
+
+        let engine = QueryEngine::new(store, Arc::new(AtomicBool::new(false)), HashSet::new());
+        let results = engine.search("arBa", 10).unwrap();
+
+        // Must find the symbol via LIKE fallback when FTS returns 0.
+        // (Before the fix, max_fts = NEG_INFINITY caused all fallback
+        // scores to be NEG_INFINITY, breaking sort — but results would
+        // still be returned. This assertion ensures the FTS→LIKE path.)
+        assert_eq!(results.len(), 1, "LIKE fallback should find 'fooBarBaz'");
     }
 
     #[test]
@@ -1213,18 +1228,6 @@ mod tests {
             results.iter().any(|r| r.name == "getUser"),
             "exact match getUser should be in results"
         );
-    }
-
-    #[test]
-    fn test_project_name_tokens_empty() {
-        let (store_raw, _db_dir) = create_store();
-        let engine = QueryEngine::new(
-            Arc::new(store_raw),
-            Arc::new(AtomicBool::new(false)),
-            HashSet::new(),
-        );
-        // Empty tokens should not affect search
-        let _ = engine.search("foo", 10);
     }
 
     // --- Step 2b: Scoring tests ---

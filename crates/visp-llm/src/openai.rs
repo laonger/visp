@@ -188,7 +188,7 @@ pub fn build_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                 // 合并 extra_blocks（如 thinking）到 assistant message 顶层字段
                 // 部分 OpenAI 兼容模型支持这些扩展字段
                 // 跳过 OpenAI 保留字段，避免意外覆盖
-                const RESERVED_FIELDS: &[&str] = &["type", "role", "content", "tool_calls", "name"];
+                const RESERVED_FIELDS: &[&str] = &["type", "role", "content", "tool_calls"];
                 if let Some(ref blocks) = msg.extra_blocks {
                     for block in blocks {
                         if let Some(obj) = block.as_object() {
@@ -351,7 +351,6 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<OpenAiStreamEvent, Llm
             {
                 let name = func["name"].as_str().unwrap_or("").to_string();
                 // arguments 在首个 delta 中总是空的，后续通过 ToolCallDelta 累积
-                let _unused = func["arguments"].as_str();
                 return Ok(OpenAiStreamEvent::ToolCallStart {
                     index: tc_index,
                     id: id.to_string(),
@@ -412,6 +411,19 @@ fn byte_stream_to_chat_events(
         usage_emitted: bool,
         /// 是否已发射 Done
         done_emitted: bool,
+    }
+
+    /// 将累积的工具调用（tool_acc）转移到 pending_tool_calls
+    fn flush_tool_acc(state: &mut StreamState) {
+        if !state.tool_acc.is_empty() {
+            state.tool_call_count = state.tool_acc.len() as u32;
+            let calls: Vec<(String, String, String)> = state
+                .tool_acc
+                .drain()
+                .map(|(_, (id, name, args))| (id, name, args))
+                .collect();
+            state.pending_tool_calls = calls.into_iter().rev().collect();
+        }
     }
 
     let state = StreamState {
@@ -513,16 +525,7 @@ fn byte_stream_to_chat_events(
                             Ok(OpenAiStreamEvent::Skip) => {}
                             Ok(OpenAiStreamEvent::StreamEnd) => {
                                 state.stream_ended = true;
-
-                                if !state.tool_acc.is_empty() {
-                                    state.tool_call_count = state.tool_acc.len() as u32;
-                                    let calls: Vec<(String, String, String)> = state
-                                        .tool_acc
-                                        .drain()
-                                        .map(|(_, (id, name, args))| (id, name, args))
-                                        .collect();
-                                    state.pending_tool_calls = calls.into_iter().rev().collect();
-                                }
+                                flush_tool_acc(&mut state);
                             }
                             Err(e) => {
                                 return Some((Err(e), state));
@@ -589,16 +592,7 @@ fn byte_stream_to_chat_events(
                 None => {
                     // 流自然结束
                     state.stream_ended = true;
-
-                    if !state.tool_acc.is_empty() {
-                        state.tool_call_count = state.tool_acc.len() as u32;
-                        let calls: Vec<(String, String, String)> = state
-                            .tool_acc
-                            .drain()
-                            .map(|(_, (id, name, args))| (id, name, args))
-                            .collect();
-                        state.pending_tool_calls = calls.into_iter().rev().collect();
-                    }
+                    flush_tool_acc(&mut state);
                 }
             }
         }

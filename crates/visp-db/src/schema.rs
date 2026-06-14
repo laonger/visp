@@ -5,7 +5,7 @@ pub struct Migrator;
 
 impl Migrator {
     /// Current schema version (incremented on each migration).
-    pub const VERSION: i64 = 2;
+    pub const VERSION: i64 = 3;
 
     /// SQL to create the session table.
     const CREATE_SESSION: &'static str = r#"
@@ -45,6 +45,7 @@ impl Migrator {
             actual_cache_read     INTEGER,
             actual_cache_write    INTEGER,
             actual_cost           REAL,
+            skip_context          INTEGER NOT NULL DEFAULT 0,
             created_at            INTEGER NOT NULL
         );
     "#;
@@ -100,6 +101,22 @@ impl Migrator {
                 .unwrap_or(false);
             if !has_column {
                 conn.execute_batch("ALTER TABLE message ADD COLUMN tool_calls_json TEXT;")?;
+            }
+        }
+
+        // v2→v3 migration: add skip_context column to message table
+        if current_version < 3 {
+            let has_column: bool = conn
+                .prepare(
+                    "SELECT COUNT(*) FROM pragma_table_info('message') WHERE name='skip_context'",
+                )
+                .and_then(|mut s| s.query_row([], |row| row.get::<_, i64>(0)))
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            if !has_column {
+                conn.execute_batch(
+                    "ALTER TABLE message ADD COLUMN skip_context INTEGER NOT NULL DEFAULT 0;",
+                )?;
             }
         }
 
@@ -180,7 +197,7 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     #[test]
@@ -239,11 +256,11 @@ mod tests {
         // Run migration (should upgrade to v2)
         Migrator::run(&conn).unwrap();
 
-        // Verify version is now 2
+        // Verify version is now 3 (migrates through v2→v3 as well)
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
 
         // Verify tool_calls_json column exists
         let has_column: bool = conn
@@ -257,6 +274,116 @@ mod tests {
             has_column,
             "tool_calls_json column should exist after migration"
         );
+    }
+
+    #[test]
+    fn test_migrate_v2_to_v3() {
+        // Simulate a v2 database: message table WITH tool_calls_json but WITHOUT skip_context
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA foreign_keys = ON;
+             PRAGMA cache_size = -64000;
+             PRAGMA user_version = 2;
+             CREATE TABLE IF NOT EXISTS session (
+                id TEXT PRIMARY KEY,
+                project_path TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'idle',
+                model TEXT NOT NULL DEFAULT '',
+                system_prompt_template TEXT NOT NULL DEFAULT '',
+                config_json TEXT NOT NULL DEFAULT '{}',
+                approved_tools TEXT NOT NULL DEFAULT '[]',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS message (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
+                role TEXT NOT NULL,
+                type TEXT NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                tool_call_id TEXT,
+                tool_name TEXT,
+                tool_arguments TEXT,
+                tool_calls_json TEXT,
+                tool_result_is_error INTEGER,
+                tool_result_duration_ms INTEGER,
+                estimated_tokens INTEGER NOT NULL DEFAULT 0,
+                extra_blocks TEXT,
+                provider_metadata TEXT,
+                actual_tokens_input INTEGER,
+                actual_tokens_output INTEGER,
+                actual_cache_read INTEGER,
+                actual_cache_write INTEGER,
+                actual_cost REAL,
+                created_at INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+
+        // Verify version is 2
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+
+        // Verify skip_context column does NOT exist yet
+        let has_column_before: bool = conn
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('message') WHERE name='skip_context'")
+            .and_then(|mut s| s.query_row([], |row| row.get::<_, i64>(0)))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        assert!(
+            !has_column_before,
+            "skip_context should not exist before migration"
+        );
+
+        // Insert a session and a row with raw SQL to verify default value after migration
+        conn.execute(
+            "INSERT INTO session (id, project_path, created_at, updated_at)
+             VALUES ('test-session', '/tmp', 1700000000000, 1700000000000)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (session_id, role, type, content, created_at)
+             VALUES ('test-session', 'user', 'user', 'test content', 1700000000000)",
+            [],
+        )
+        .unwrap();
+
+        // Run migration (should upgrade to v3)
+        Migrator::run(&conn).unwrap();
+
+        // Verify version is now 3
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+
+        // Verify skip_context column exists
+        let has_column: bool = conn
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('message') WHERE name='skip_context'")
+            .and_then(|mut s| s.query_row([], |row| row.get::<_, i64>(0)))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        assert!(
+            has_column,
+            "skip_context column should exist after migration"
+        );
+
+        // Verify existing data has skip_context = 0 (default)
+        let skip_val: i64 = conn
+            .query_row(
+                "SELECT skip_context FROM message WHERE session_id = 'test-session'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(skip_val, 0, "existing rows should default to 0");
     }
 
     #[test]

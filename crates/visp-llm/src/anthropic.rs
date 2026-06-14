@@ -118,7 +118,7 @@ fn build_anthropic_messages(messages: &[&Message]) -> Vec<serde_json::Value> {
     for msg in messages {
         if msg.role == Role::Tool {
             let tool_use_id = msg.tool_call_id.as_deref().unwrap_or_else(|| {
-                tracing::warn!("Tool message without tool_call_id");
+                tracing::error!("Tool message without tool_call_id");
                 ""
             });
             let tool_result = serde_json::json!({
@@ -555,6 +555,39 @@ fn byte_stream_to_chat_events(
             return Some((Ok(ChatEvent::Done), state));
         }
 
+        /// 更新 token 计数
+        fn update_anthropic_usage(
+            state: &mut StreamState,
+            input_tokens: u32,
+            output_tokens: u32,
+            cache_creation_input_tokens: u32,
+            cache_read_input_tokens: u32,
+        ) {
+            if input_tokens > 0 {
+                state.input_tokens = input_tokens;
+            }
+            if output_tokens > 0 {
+                state.output_tokens = output_tokens;
+            }
+            if cache_creation_input_tokens > 0 {
+                state.cache_creation_input_tokens = cache_creation_input_tokens;
+            }
+            if cache_read_input_tokens > 0 {
+                state.cache_read_input_tokens = cache_read_input_tokens;
+            }
+        }
+
+        /// 构建 UsageInfo（表示 Done 事件）
+        fn build_done_usage_info(state: &StreamState) -> ChatEvent {
+            ChatEvent::UsageInfo {
+                input_tokens: state.input_tokens,
+                output_tokens: state.output_tokens,
+                tool_calls: 0,
+                cache_creation_input_tokens: state.cache_creation_input_tokens,
+                cache_read_input_tokens: state.cache_read_input_tokens,
+            }
+        }
+
         loop {
             if let Some(pos) = state.buf.find("\n\n") {
                 let chunk = state.buf[..pos].to_string();
@@ -570,17 +603,7 @@ fn byte_stream_to_chat_events(
                             if matches!(chat_event, ChatEvent::Done) {
                                 state.done_pending = true;
                                 state.usage_emitted = true;
-                                return Some((
-                                    Ok(ChatEvent::UsageInfo {
-                                        input_tokens: state.input_tokens,
-                                        output_tokens: state.output_tokens,
-                                        tool_calls: 0,
-                                        cache_creation_input_tokens: state
-                                            .cache_creation_input_tokens,
-                                        cache_read_input_tokens: state.cache_read_input_tokens,
-                                    }),
-                                    state,
-                                ));
+                                return Some((Ok(build_done_usage_info(&state)), state));
                             }
                             return Some((Ok(chat_event), state));
                         }
@@ -590,18 +613,13 @@ fn byte_stream_to_chat_events(
                             cache_creation_input_tokens,
                             cache_read_input_tokens,
                         }) => {
-                            if input_tokens > 0 {
-                                state.input_tokens = input_tokens;
-                            }
-                            if output_tokens > 0 {
-                                state.output_tokens = output_tokens;
-                            }
-                            if cache_creation_input_tokens > 0 {
-                                state.cache_creation_input_tokens = cache_creation_input_tokens;
-                            }
-                            if cache_read_input_tokens > 0 {
-                                state.cache_read_input_tokens = cache_read_input_tokens;
-                            }
+                            update_anthropic_usage(
+                                &mut state,
+                                input_tokens,
+                                output_tokens,
+                                cache_creation_input_tokens,
+                                cache_read_input_tokens,
+                            );
                         }
                         Ok(ParsedEvent::ThinkingDelta {
                             index,
@@ -700,18 +718,7 @@ fn byte_stream_to_chat_events(
                                     if matches!(chat_event, ChatEvent::Done) {
                                         state.done_pending = true;
                                         state.usage_emitted = true;
-                                        return Some((
-                                            Ok(ChatEvent::UsageInfo {
-                                                input_tokens: state.input_tokens,
-                                                output_tokens: state.output_tokens,
-                                                tool_calls: 0,
-                                                cache_creation_input_tokens: state
-                                                    .cache_creation_input_tokens,
-                                                cache_read_input_tokens: state
-                                                    .cache_read_input_tokens,
-                                            }),
-                                            state,
-                                        ));
+                                        return Some((Ok(build_done_usage_info(&state)), state));
                                     }
                                     return Some((Ok(chat_event), state));
                                 }
@@ -721,19 +728,13 @@ fn byte_stream_to_chat_events(
                                     cache_creation_input_tokens,
                                     cache_read_input_tokens,
                                 }) => {
-                                    if input_tokens > 0 {
-                                        state.input_tokens = input_tokens;
-                                    }
-                                    if output_tokens > 0 {
-                                        state.output_tokens = output_tokens;
-                                    }
-                                    if cache_creation_input_tokens > 0 {
-                                        state.cache_creation_input_tokens =
-                                            cache_creation_input_tokens;
-                                    }
-                                    if cache_read_input_tokens > 0 {
-                                        state.cache_read_input_tokens = cache_read_input_tokens;
-                                    }
+                                    update_anthropic_usage(
+                                        &mut state,
+                                        input_tokens,
+                                        output_tokens,
+                                        cache_creation_input_tokens,
+                                        cache_read_input_tokens,
+                                    );
                                     continue;
                                 }
                                 Ok(_) => continue,

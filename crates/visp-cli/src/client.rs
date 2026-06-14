@@ -12,7 +12,7 @@ use visp_proto::visp::{
     coder_daemon_client::CoderDaemonClient,
 };
 
-pub struct VbwClient {
+pub struct VispClient {
     client: CoderDaemonClient<Channel>,
 }
 
@@ -24,7 +24,7 @@ pub struct ChatHandle {
     next_request_id: u64,
 }
 
-impl VbwClient {
+impl VispClient {
     pub async fn connect(addr: &str) -> Result<Self, String> {
         let client = CoderDaemonClient::connect(format!("http://{}", addr))
             .await
@@ -98,7 +98,7 @@ impl VbwClient {
 }
 
 impl ChatHandle {
-    pub fn send_input(&mut self, text: &str) -> &'static str {
+    pub fn send_input(&mut self, text: &str) -> String {
         let rid = self.next_request_id.to_string();
         self.next_request_id += 1;
         let msg = ClientMessage {
@@ -112,8 +112,7 @@ impl ChatHandle {
         tokio::spawn(async move {
             let _ = tx.send(msg).await;
         });
-        // Return a leaked string — the caller uses it immediately for the ack cycle
-        Box::leak(rid.into_boxed_str())
+        rid
     }
 
     pub fn send_ack(&self, request_id: &str) {
@@ -194,7 +193,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_client_connect_invalid_addr() {
-        let result = VbwClient::connect("invalid:0").await;
+        let result = VispClient::connect("invalid:0").await;
         assert!(result.is_err());
     }
 }

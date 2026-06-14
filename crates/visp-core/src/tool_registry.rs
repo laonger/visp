@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
+use crate::error::CoreError;
 use crate::message::ToolDefinition;
 use crate::tool::{Tool, ToolContext, ToolResult};
 
@@ -22,18 +23,18 @@ impl ToolRegistry {
 }
 
 impl ToolRegistry {
-    pub fn register(&self, tool: Box<dyn Tool>) -> Result<(), String> {
+    pub fn register(&self, tool: Arc<dyn Tool>) -> Result<(), CoreError> {
         let name = tool.name().to_string();
         let mut tools = self.tools.write().unwrap();
         if tools.iter().any(|t| name_eq(t.name(), &name)) {
-            return Err(format!("duplicate tool name: {name}"));
+            return Err(CoreError::Tool(format!("duplicate tool name: {name}")));
         }
-        tools.push(Arc::from(tool));
+        tools.push(tool);
         Ok(())
     }
 
     /// 注册 MCP 工具，跳过与核心工具名称冲突的工具
-    pub fn register_mcp(&self, tool: Box<dyn Tool>) -> Result<(), String> {
+    pub fn register_mcp(&self, tool: Arc<dyn Tool>) -> Result<(), CoreError> {
         let name = tool.name().to_string();
         let core_names: HashSet<String> = self
             .core_tool_names
@@ -53,7 +54,7 @@ impl ToolRegistry {
             tracing::warn!("MCP tool '{name}' conflicts with another registered tool, skipping");
             return Ok(());
         }
-        tools.push(Arc::from(tool));
+        tools.push(tool);
         Ok(())
     }
 
@@ -68,7 +69,7 @@ impl ToolRegistry {
     }
 
     /// 移除已注册的工具
-    pub fn remove(&self, name: &str) -> Result<(), String> {
+    pub fn remove(&self, name: &str) -> Result<(), CoreError> {
         let mut tools = self.tools.write().unwrap();
         let pos = tools.iter().position(|t| name_eq(t.name(), name));
         match pos {
@@ -76,20 +77,20 @@ impl ToolRegistry {
                 tools.remove(i);
                 Ok(())
             }
-            None => Err(format!("tool '{name}' not found")),
+            None => Err(CoreError::Tool(format!("tool '{name}' not found"))),
         }
     }
 
     /// 更新/替换同名工具
-    pub fn update(&self, name: &str, tool: Box<dyn Tool>) -> Result<(), String> {
+    pub fn update(&self, name: &str, tool: Arc<dyn Tool>) -> Result<(), CoreError> {
         let mut tools = self.tools.write().unwrap();
         let pos = tools.iter().position(|t| name_eq(t.name(), name));
         match pos {
             Some(i) => {
-                tools[i] = Arc::from(tool);
+                tools[i] = tool;
                 Ok(())
             }
-            None => Err(format!("tool '{name}' not found")),
+            None => Err(CoreError::Tool(format!("tool '{name}' not found"))),
         }
     }
 
@@ -158,8 +159,8 @@ mod tests {
         }
     }
 
-    fn mock_tool(name: &str, desc: &str) -> Box<dyn Tool> {
-        Box::new(MockTool {
+    fn mock_tool(name: &str, desc: &str) -> Arc<dyn Tool> {
+        Arc::new(MockTool {
             name: name.to_string(),
             description: desc.to_string(),
             parameters: serde_json::json!({}),
@@ -219,7 +220,11 @@ mod tests {
         registry.register(mock_tool("echo", "Echo tool")).unwrap();
         let err = registry.register(mock_tool("echo", "Another echo"));
         assert!(err.is_err());
-        assert!(err.unwrap_err().contains("duplicate tool name: echo"));
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains("duplicate tool name: echo")
+        );
     }
 
     #[test]

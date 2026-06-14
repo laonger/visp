@@ -54,38 +54,9 @@ impl SessionRepo {
         let mut rows = stmt.query(params![session_id])?;
         match rows.next()? {
             Some(row) => {
-                let id: String = row.get(0)?;
-                let project_path: String = row.get(1)?;
-                let status_str: String = row.get(2)?;
-                let _model: String = row.get(3)?;
-                let prompt: String = row.get(4)?;
-                let config_json: String = row.get(5)?;
-                let approved_json: String = row.get(6)?;
-                let created_at_unix: i64 = row.get(7)?;
-
-                let status = match status_str.as_str() {
-                    "running" => SessionStatus::Running,
-                    "completed" => SessionStatus::Completed,
-                    "error" => SessionStatus::Error,
-                    _ => SessionStatus::Idle,
-                };
-
-                let config: LlmConfig = serde_json::from_str(&config_json).unwrap_or_default();
-                let approved_tools: Vec<String> =
-                    serde_json::from_str(&approved_json).unwrap_or_default();
-
-                Ok(Some(Session {
-                    id,
-                    project_path: project_path.into(),
-                    status,
-                    created_at: std::time::Instant::now(),
-                    created_at_unix: Some(created_at_unix),
-                    history: vec![],
-                    last_user_message: None,
-                    config,
-                    system_prompt_template: prompt,
-                    approved_tools: approved_tools.into_iter().collect(),
-                }))
+                let session = Self::row_to_session(row)?;
+                // Note: updated_at at index 8 is selected but not used here
+                Ok(Some(session))
             }
             None => Ok(None),
         }
@@ -99,40 +70,7 @@ impl SessionRepo {
         )?;
 
         let mut sessions = stmt
-            .query_map([], |row| {
-                let id: String = row.get(0)?;
-                let project_path: String = row.get(1)?;
-                let status_str: String = row.get(2)?;
-                let _model: String = row.get(3)?;
-                let prompt: String = row.get(4)?;
-                let config_json: String = row.get(5)?;
-                let approved_json: String = row.get(6)?;
-                let created_at_unix: i64 = row.get(7)?;
-
-                let status = match status_str.as_str() {
-                    "running" => SessionStatus::Running,
-                    "completed" => SessionStatus::Completed,
-                    "error" => SessionStatus::Error,
-                    _ => SessionStatus::Idle,
-                };
-
-                let config: LlmConfig = serde_json::from_str(&config_json).unwrap_or_default();
-                let approved_tools: Vec<String> =
-                    serde_json::from_str(&approved_json).unwrap_or_default();
-
-                Ok(Session {
-                    id,
-                    project_path: project_path.into(),
-                    status,
-                    created_at: std::time::Instant::now(),
-                    created_at_unix: Some(created_at_unix),
-                    history: vec![],
-                    last_user_message: None,
-                    config,
-                    system_prompt_template: prompt,
-                    approved_tools: approved_tools.into_iter().collect(),
-                })
-            })?
+            .query_map([], Self::row_to_session)?
             .collect::<Result<Vec<_>>>()?;
 
         for session in &mut sessions {
@@ -151,40 +89,7 @@ impl SessionRepo {
         )?;
 
         let mut sessions = stmt
-            .query_map(params![project_path], |row| {
-                let id: String = row.get(0)?;
-                let project_path: String = row.get(1)?;
-                let status_str: String = row.get(2)?;
-                let _model: String = row.get(3)?;
-                let prompt: String = row.get(4)?;
-                let config_json: String = row.get(5)?;
-                let approved_json: String = row.get(6)?;
-                let created_at_unix: i64 = row.get(7)?;
-
-                let status = match status_str.as_str() {
-                    "running" => SessionStatus::Running,
-                    "completed" => SessionStatus::Completed,
-                    "error" => SessionStatus::Error,
-                    _ => SessionStatus::Idle,
-                };
-
-                let config: LlmConfig = serde_json::from_str(&config_json).unwrap_or_default();
-                let approved_tools: Vec<String> =
-                    serde_json::from_str(&approved_json).unwrap_or_default();
-
-                Ok(Session {
-                    id,
-                    project_path: project_path.into(),
-                    status,
-                    created_at: std::time::Instant::now(),
-                    created_at_unix: Some(created_at_unix),
-                    history: vec![],
-                    last_user_message: None,
-                    config,
-                    system_prompt_template: prompt,
-                    approved_tools: approved_tools.into_iter().collect(),
-                })
-            })?
+            .query_map(params![project_path], Self::row_to_session)?
             .collect::<Result<Vec<_>>>()?;
 
         for session in &mut sessions {
@@ -226,6 +131,43 @@ impl SessionRepo {
     /// Delete a session by ID. Returns the number of rows affected.
     pub fn delete(conn: &Connection, session_id: &str) -> Result<usize> {
         conn.execute("DELETE FROM session WHERE id = ?1", params![session_id])
+    }
+
+    /// Convert a SQLite row into a `Session`.
+    /// Expects columns in order: id, project_path, status, model, system_prompt_template,
+    /// config_json, approved_tools, created_at.
+    fn row_to_session(row: &rusqlite::Row) -> Result<Session> {
+        let id: String = row.get(0)?;
+        let project_path: String = row.get(1)?;
+        let status_str: String = row.get(2)?;
+        let _model: String = row.get(3)?;
+        let prompt: String = row.get(4)?;
+        let config_json: String = row.get(5)?;
+        let approved_json: String = row.get(6)?;
+        let created_at_unix: i64 = row.get(7)?;
+
+        let status = match status_str.as_str() {
+            "running" => SessionStatus::Running,
+            "completed" => SessionStatus::Completed,
+            "error" => SessionStatus::Error,
+            _ => SessionStatus::Idle,
+        };
+
+        let config: LlmConfig = serde_json::from_str(&config_json).unwrap_or_default();
+        let approved_tools: Vec<String> = serde_json::from_str(&approved_json).unwrap_or_default();
+
+        Ok(Session {
+            id,
+            project_path: project_path.into(),
+            status,
+            created_at: std::time::Instant::now(),
+            created_at_unix: Some(created_at_unix),
+            history: vec![],
+            last_user_message: None,
+            config,
+            system_prompt_template: prompt,
+            approved_tools: approved_tools.into_iter().collect(),
+        })
     }
 }
 
