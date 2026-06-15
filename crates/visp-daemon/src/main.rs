@@ -1,4 +1,5 @@
 #[allow(dead_code)]
+mod agent_loader;
 mod command;
 mod config;
 mod server;

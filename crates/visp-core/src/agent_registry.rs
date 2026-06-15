@@ -25,6 +25,11 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// 注册或替换 agent（同名时覆盖）
+    pub fn register_or_replace(&mut self, agent: AgentDefinition) {
+        self.agents.insert(agent.name.clone(), agent);
+    }
+
     /// 按名称查找 agent
     pub fn get(&self, name: &str) -> Option<&AgentDefinition> {
         self.agents.get(name)
