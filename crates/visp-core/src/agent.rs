@@ -485,7 +485,7 @@ pub async fn run_agent_loop(
                  If all work is done, respond without making any tool calls.]",
                 );
             }
-            let messages = PromptBuilder::build(
+            let mut messages = PromptBuilder::build(
                 &enriched_template,
                 &rule_engine.get_active_rules(),
                 &ctx.history,
@@ -495,6 +495,11 @@ pub async fn run_agent_loop(
                 ctx.config.max_tokens,
                 ctx.context_trimmer.as_ref(),
             );
+
+            // 防御性清理：确保 tool_calls/tool_result 配对完整，
+            // 防止因上下文裁剪导致 orphan tool_calls 被发送到 LLM 引发 400 错误。
+            cleanup_orphan_tool_uses(&mut messages);
+            messages.retain(|m| !m.skip_context);
 
             // c. Get tool definitions
             let tools = tool_registry.definitions();

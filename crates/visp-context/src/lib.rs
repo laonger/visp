@@ -1,6 +1,7 @@
 use visp_core::context::ContextTrimmer;
 use visp_core::message::Message;
 use visp_core::message::Role;
+use visp_core::message::ToolCallRequest;
 use visp_core::message::estimate_message_tokens;
 
 const TOOL_OUTPUT_MAX_CHARS: usize = 2_000;
@@ -311,6 +312,32 @@ pub(crate) fn keep_head_and_tail(history: &[Message], budget: u32) -> Vec<Messag
         }
         for &i in &filtered_indices {
             result.push(history[i].clone());
+        }
+    }
+
+    // 修复：将 assistant 消息的 tool_calls 中，没有对应 tool_result 的条目移除。
+    // 防止因部分 tool_result 被裁剪导致 API 400 错误
+    // ("An assistant message with 'tool_calls' must be followed by tool messages")
+    let result_tool_ids: std::collections::HashSet<String> = result
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .filter_map(|m| m.tool_call_id.clone())
+        .collect();
+
+    for msg in &mut result {
+        if msg.role == Role::Assistant
+            && let Some(ref calls) = msg.tool_calls.clone()
+        {
+            let valid: Vec<ToolCallRequest> = calls
+                .iter()
+                .filter(|c| result_tool_ids.contains(&c.id))
+                .cloned()
+                .collect();
+            if valid.is_empty() {
+                msg.tool_calls = None;
+            } else if valid.len() < calls.len() {
+                msg.tool_calls = Some(valid);
+            }
         }
     }
 
