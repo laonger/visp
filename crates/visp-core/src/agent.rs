@@ -347,14 +347,46 @@ pub async fn run_agent_loop(
     // Wrap entire body in catch_unwind for panic safety.
     // On panic, session is reset to Idle before re-raising.
     let result = AssertUnwindSafe(async move {
+        // Helper: convert AgentEvent to AgentMessage for global_tx forwarding
+        fn event_to_msg(event: &AgentEvent) -> Option<AgentMessage> {
+            match event {
+                AgentEvent::TextDelta(s) => Some(AgentMessage::TextDelta(s.clone())),
+                AgentEvent::ThinkingBlock(v) => Some(AgentMessage::ThinkingBlock(v.clone())),
+                AgentEvent::UsageInfo { input_tokens, output_tokens, tool_calls, cache_creation_input_tokens, cache_read_input_tokens } => {
+                    Some(AgentMessage::UsageInfo { input_tokens: *input_tokens, output_tokens: *output_tokens, tool_calls: *tool_calls, cache_creation_input_tokens: *cache_creation_input_tokens, cache_read_input_tokens: *cache_read_input_tokens })
+                }
+                AgentEvent::StatusUpdate(s) => Some(AgentMessage::StatusUpdate(s.clone())),
+                AgentEvent::Error { code, message } => Some(AgentMessage::Error { code: code.clone(), message: message.clone() }),
+                AgentEvent::ToolCallRequest { call_id, tool_name, arguments } => {
+                    Some(AgentMessage::ToolCallRequest { call_id: call_id.clone(), tool_name: tool_name.clone(), arguments: arguments.clone() })
+                }
+                AgentEvent::ToolCallResult { call_id, tool_name, content, is_error } => {
+                    Some(AgentMessage::ToolCallResult { call_id: call_id.clone(), tool_name: tool_name.clone(), content: content.clone(), is_error: *is_error })
+                }
+                AgentEvent::UserQuery { .. } => None, // oneshot not clonable
+                AgentEvent::Done => Some(AgentMessage::Done),
+            }
+        }
+
         // Helper: send event, return false if receiver dropped
         macro_rules! try_send {
-            ($event:expr) => {
-                if tx.send($event).await.is_err() {
+            ($event:expr) => {{
+                let event = $event;
+                // Forward to global_tx (for orchestrator)
+                if let Some(ref gtx) = ctx.global_tx {
+                    if let Some(msg) = event_to_msg(&event) {
+                        let _ = gtx.send(Envelope {
+                            session_id: ctx.session_id.clone(),
+                            message: msg,
+                        }).await;
+                    }
+                }
+                // Send to tx (for CLI)
+                if tx.send(event).await.is_err() {
                     let _ = sm.finish_loop(&sid, SessionStatus::Error);
                     return;
                 }
-            };
+            }};
         }
 
         // Early cancellation check before appending
@@ -850,6 +882,7 @@ pub async fn run_agent_loop(
 
             for (i, tc) in tool_calls.iter().enumerate() {
                 let tx = tx.clone();
+                let global_tx = ctx.global_tx.clone();
                 let cancel = ctx.cancel_token.clone();
                 let registry = tool_registry.clone();
                 let session_id = sid.clone();
@@ -857,10 +890,35 @@ pub async fn run_agent_loop(
                 let tc = tc.clone();
                 let sm = sm.clone();
                 let permissions = ctx.permission_rules.clone();
+                let sid2 = sid.clone();
 
                 exec_tasks.push(tokio::spawn(async move {
+                    // Helper: forward AgentMessage to global_tx
+                    macro_rules! forward_global {
+                        ($msg:expr) => {
+                            if let Some(ref gtx) = global_tx {
+                                let _ = gtx.try_send(Envelope {
+                                    session_id: sid2.clone(),
+                                    message: $msg,
+                                });
+                            }
+                        };
+                    }
+
                     // Cancellation check
                     if cancel.is_cancelled() {
+                        let result = ToolExecResult {
+                            index: i,
+                            call_id: tc.id.clone(),
+                            result: ToolResult::error("Cancelled"),
+                        };
+                        // Forward to global_tx before sending to tx
+                        forward_global!(AgentMessage::ToolCallResult {
+                            call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            content: "Cancelled".into(),
+                            is_error: true,
+                        });
                         let _ = tx
                             .send(AgentEvent::ToolCallResult {
                                 call_id: tc.id.clone(),
@@ -869,14 +927,15 @@ pub async fn run_agent_loop(
                                 is_error: true,
                             })
                             .await;
-                        return ToolExecResult {
-                            index: i,
-                            call_id: tc.id,
-                            result: ToolResult::error("Cancelled"),
-                        };
+                        return result;
                     }
 
                     // Send ToolCallRequest
+                    forward_global!(AgentMessage::ToolCallRequest {
+                        call_id: tc.id.clone(),
+                        tool_name: tc.name.clone(),
+                        arguments: tc.arguments.clone(),
+                    });
                     let _ = tx
                         .send(AgentEvent::ToolCallRequest {
                             call_id: tc.id.clone(),
@@ -920,6 +979,12 @@ pub async fn run_agent_loop(
                             }
                             _ => {
                                 let result = ToolResult::error("User denied");
+                                forward_global!(AgentMessage::ToolCallResult {
+                                    call_id: tc.id.clone(),
+                                    tool_name: tc.name.clone(),
+                                    content: result.content.clone(),
+                                    is_error: result.is_error,
+                                });
                                 let _ = tx
                                     .send(AgentEvent::ToolCallResult {
                                         call_id: tc.id.clone(),
@@ -956,6 +1021,12 @@ pub async fn run_agent_loop(
                                  - Do NOT retry the same large write_file call — it will fail again.",
                                 tc.arguments.len(), e
                             ));
+                            forward_global!(AgentMessage::ToolCallResult {
+                                call_id: tc.id.clone(),
+                                tool_name: tc.name.clone(),
+                                content: result.content.clone(),
+                                is_error: result.is_error,
+                            });
                             let _ = tx
                                 .send(AgentEvent::ToolCallResult {
                                     call_id: tc.id.clone(),
@@ -983,6 +1054,12 @@ pub async fn run_agent_loop(
                         .unwrap_or_else(|| ToolResult::error("Tool not found in registry"));
 
                     // Send result
+                    forward_global!(AgentMessage::ToolCallResult {
+                        call_id: tc.id.clone(),
+                        tool_name: tc.name.clone(),
+                        content: result.content.clone(),
+                        is_error: result.is_error,
+                    });
                     let _ = tx
                         .send(AgentEvent::ToolCallResult {
                             call_id: tc.id.clone(),
