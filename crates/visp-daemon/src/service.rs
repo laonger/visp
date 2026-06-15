@@ -2,16 +2,16 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::RwLock as StdRwLock;
+use std::sync::{Mutex, RwLock as StdRwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, mpsc, oneshot};
 use tonic::{Request, Response, Status, Streaming};
 
 use visp_codegraph::CodeGraph;
 use visp_core::{
-    agent::{AgentConfig, AgentEvent},
+    agent::{AgentConfig, AgentEvent, UserQueryResult},
     context::ContextTrimmer,
     provider::{LlmConfig, LlmProvider},
     rules::RuleEngine,
@@ -352,7 +352,15 @@ impl CoderDaemon for CoderDaemonService {
         let client_tx = self.client_tx.clone();
         let response_tx = tx.clone();
 
-        // ── Inbound: CLI → Orchestrator ──
+        // Shared pending user queries: maps query_id → respond sender
+        // Used to route UserResponse from CLI back to the agent loop that's waiting
+        // for it. This is necessary because the orchestrator cannot store the respond
+        // sender (it's not clonable and the event bypasses global_tx).
+        let pending_queries: Arc<Mutex<HashMap<String, oneshot::Sender<UserQueryResult>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        // ── Inbound: CLI → Orchestrator / Pending Queries ──
+        let pending_inbound = pending_queries.clone();
         tokio::spawn(async move {
             while let Some(msg_result) = in_stream.next().await {
                 let msg = match msg_result {
@@ -370,13 +378,34 @@ impl CoderDaemon for CoderDaemonService {
                         }
                     }
                     Some(proto::client_message::Payload::UserResponse(resp)) => {
-                        let cli_msg = visp_agent::orchestrator::ClientMessage::UserQueryResponse {
-                            query_id: resp.query_id,
-                            selected_index: resp.selected_index,
-                            text: resp.text,
+                        let query_id = resp.query_id;
+                        let text = resp.text;
+                        let selected_index = resp.selected_index;
+
+                        // Try daemon-level pending queries first (direct route to agent loop)
+                        let responded = {
+                            let mut map = pending_inbound.lock().unwrap();
+                            if let Some(respond) = map.remove(&query_id) {
+                                let _ = respond.send(UserQueryResult {
+                                    selected_index,
+                                    text: text.clone(),
+                                });
+                                true
+                            } else {
+                                false
+                            }
                         };
-                        if client_tx.send(cli_msg).await.is_err() {
-                            break;
+                        if !responded {
+                            // Fall back to orchestrator
+                            let cli_msg =
+                                visp_agent::orchestrator::ClientMessage::UserQueryResponse {
+                                    query_id,
+                                    selected_index,
+                                    text,
+                                };
+                            if client_tx.send(cli_msg).await.is_err() {
+                                break;
+                            }
                         }
                     }
                     Some(proto::client_message::Payload::Cancel(cancel)) => {
@@ -393,18 +422,51 @@ impl CoderDaemon for CoderDaemonService {
         });
 
         // ── Outbound: Orchestrator → CLI ──
+        let pending_outbound = pending_queries.clone();
         tokio::spawn(async move {
             while let Some(event) = orchestrator_rx.recv().await {
-                let proto_msg = agent_event_to_server_message(event, "");
-                if let Some(payload) = proto_msg.payload
-                    && response_tx
-                        .send(Ok(proto::ServerMessage {
-                            payload: Some(payload),
-                        }))
-                        .await
-                        .is_err()
-                {
-                    break;
+                match event {
+                    AgentEvent::UserQuery {
+                        query_id,
+                        message,
+                        options,
+                        allow_other,
+                        respond,
+                    } => {
+                        // Store the respond sender so the inbound task can route
+                        // UserResponse back directly to the waiting agent loop.
+                        pending_outbound
+                            .lock()
+                            .unwrap()
+                            .insert(query_id.clone(), respond);
+                        let proto_msg = proto::ServerMessage {
+                            payload: Some(proto::server_message::Payload::UserQuery(
+                                proto::UserQuery {
+                                    query_id,
+                                    message,
+                                    options,
+                                    allow_other,
+                                    session_id: String::new(),
+                                },
+                            )),
+                        };
+                        if response_tx.send(Ok(proto_msg)).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ => {
+                        let proto_msg = agent_event_to_server_message(event, "");
+                        if let Some(payload) = proto_msg.payload
+                            && response_tx
+                                .send(Ok(proto::ServerMessage {
+                                    payload: Some(payload),
+                                }))
+                                .await
+                                .is_err()
+                        {
+                            break;
+                        }
+                    }
                 }
             }
         });
