@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/visp",
+    "crates/visp", "crates/visp-agent",
     "crates/visp-cli",
     "crates/visp-codegraph",
     "crates/visp-context",
