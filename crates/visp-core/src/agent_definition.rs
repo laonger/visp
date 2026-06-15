@@ -10,14 +10,14 @@ pub enum AgentMode {
 }
 
 /// 权限动作
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PermissionAction {
     Allow,
     Deny,
 }
 
 /// 权限规则三元组
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PermissionRule {
     /// 工具名，如 "edit"，"*" 表示所有工具
     pub permission: String,

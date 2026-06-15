@@ -17,6 +17,7 @@ impl SessionRepo {
         let config_json = serde_json::to_string(&session.config).unwrap_or_default();
         let approved_tools: Vec<&str> = session.approved_tools.iter().map(|s| s.as_str()).collect();
         let approved_json = serde_json::to_string(&approved_tools).unwrap_or_default();
+        let permission_json = serde_json::to_string(&session.permission).unwrap_or_default();
         let status = match session.status {
             SessionStatus::Idle => "idle",
             SessionStatus::Running => "running",
@@ -25,8 +26,8 @@ impl SessionRepo {
         };
 
         conn.execute(
-            "INSERT INTO session (id, project_path, title, status, model, system_prompt_template, config_json, approved_tools, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO session (id, project_path, title, status, model, system_prompt_template, config_json, approved_tools, agent_name, parent_id, permission_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 session.id,
                 session.project_path.to_string_lossy().as_ref(),
@@ -36,6 +37,9 @@ impl SessionRepo {
                 session.system_prompt_template,
                 config_json,
                 approved_json,
+                session.agent_name,
+                session.parent_id,
+                permission_json,
                 created_at_unix,
                 updated_at,
             ],
@@ -47,7 +51,7 @@ impl SessionRepo {
     /// The returned session has `history` empty.
     pub fn get(conn: &Connection, session_id: &str) -> Result<Option<Session>> {
         let mut stmt = conn.prepare(
-            "SELECT id, project_path, status, model, system_prompt_template, config_json, approved_tools, created_at, updated_at
+            "SELECT id, project_path, status, model, system_prompt_template, config_json, approved_tools, agent_name, parent_id, permission_json, created_at, updated_at
              FROM session WHERE id = ?1",
         )?;
 
@@ -55,7 +59,6 @@ impl SessionRepo {
         match rows.next()? {
             Some(row) => {
                 let session = Self::row_to_session(row)?;
-                // Note: updated_at at index 8 is selected but not used here
                 Ok(Some(session))
             }
             None => Ok(None),
@@ -65,7 +68,7 @@ impl SessionRepo {
     /// List all sessions. Returns sessions with empty history.
     pub fn list(conn: &Connection) -> Result<Vec<Session>> {
         let mut stmt = conn.prepare(
-            "SELECT id, project_path, status, model, system_prompt_template, config_json, approved_tools, created_at
+            "SELECT id, project_path, status, model, system_prompt_template, config_json, approved_tools, agent_name, parent_id, permission_json, created_at
              FROM session ORDER BY created_at DESC",
         )?;
 
@@ -84,7 +87,7 @@ impl SessionRepo {
     /// List sessions filtered by project path.
     pub fn list_by_project(conn: &Connection, project_path: &str) -> Result<Vec<Session>> {
         let mut stmt = conn.prepare(
-            "SELECT id, project_path, status, model, system_prompt_template, config_json, approved_tools, created_at
+            "SELECT id, project_path, status, model, system_prompt_template, config_json, approved_tools, agent_name, parent_id, permission_json, created_at
              FROM session WHERE project_path = ?1 ORDER BY created_at DESC",
         )?;
 
@@ -106,6 +109,7 @@ impl SessionRepo {
         let config_json = serde_json::to_string(&session.config).unwrap_or_default();
         let approved_tools: Vec<&str> = session.approved_tools.iter().map(|s| s.as_str()).collect();
         let approved_json = serde_json::to_string(&approved_tools).unwrap_or_default();
+        let permission_json = serde_json::to_string(&session.permission).unwrap_or_default();
         let status = match session.status {
             SessionStatus::Idle => "idle",
             SessionStatus::Running => "running",
@@ -114,7 +118,7 @@ impl SessionRepo {
         };
 
         conn.execute(
-            "UPDATE session SET project_path = ?1, status = ?2, model = ?3, system_prompt_template = ?4, config_json = ?5, approved_tools = ?6, updated_at = ?7 WHERE id = ?8",
+            "UPDATE session SET project_path = ?1, status = ?2, model = ?3, system_prompt_template = ?4, config_json = ?5, approved_tools = ?6, agent_name = ?7, parent_id = ?8, permission_json = ?9, updated_at = ?10 WHERE id = ?11",
             params![
                 session.project_path.to_string_lossy().as_ref(),
                 status,
@@ -122,6 +126,9 @@ impl SessionRepo {
                 session.system_prompt_template,
                 config_json,
                 approved_json,
+                session.agent_name,
+                session.parent_id,
+                permission_json,
                 now,
                 session.id,
             ],
@@ -135,7 +142,7 @@ impl SessionRepo {
 
     /// Convert a SQLite row into a `Session`.
     /// Expects columns in order: id, project_path, status, model, system_prompt_template,
-    /// config_json, approved_tools, created_at.
+    /// config_json, approved_tools, agent_name, parent_id, permission_json, created_at.
     fn row_to_session(row: &rusqlite::Row) -> Result<Session> {
         let id: String = row.get(0)?;
         let project_path: String = row.get(1)?;
@@ -144,7 +151,10 @@ impl SessionRepo {
         let prompt: String = row.get(4)?;
         let config_json: String = row.get(5)?;
         let approved_json: String = row.get(6)?;
-        let created_at_unix: i64 = row.get(7)?;
+        let agent_name: String = row.get(7)?;
+        let parent_id: Option<String> = row.get(8)?;
+        let permission_json: String = row.get(9)?;
+        let created_at_unix: i64 = row.get(10)?;
 
         let status = match status_str.as_str() {
             "running" => SessionStatus::Running,
@@ -155,6 +165,8 @@ impl SessionRepo {
 
         let config: LlmConfig = serde_json::from_str(&config_json).unwrap_or_default();
         let approved_tools: Vec<String> = serde_json::from_str(&approved_json).unwrap_or_default();
+        let permission: Vec<visp_core::agent_definition::PermissionRule> =
+            serde_json::from_str(&permission_json).unwrap_or_default();
 
         Ok(Session {
             id,
@@ -167,9 +179,9 @@ impl SessionRepo {
             config,
             system_prompt_template: prompt,
             approved_tools: approved_tools.into_iter().collect(),
-            agent_name: "default".to_string(),
-            parent_id: None,
-            permission: Vec::new(),
+            agent_name,
+            parent_id,
+            permission,
         })
     }
 }

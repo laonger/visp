@@ -18,6 +18,9 @@ impl Migrator {
             system_prompt_template TEXT NOT NULL DEFAULT '',
             config_json       TEXT NOT NULL DEFAULT '{}',
             approved_tools    TEXT NOT NULL DEFAULT '[]',
+            agent_name        TEXT NOT NULL DEFAULT 'default',
+            parent_id         TEXT,
+            permission_json   TEXT NOT NULL DEFAULT '[]',
             created_at        INTEGER NOT NULL,
             updated_at        INTEGER NOT NULL
         );
@@ -118,7 +121,7 @@ impl Migrator {
             }
         }
 
-        // v3→v4: tool_call_count
+        // v3→v4: tool_call_count (message table)
         {
             let has_column: bool = conn
                 .prepare(
@@ -131,6 +134,28 @@ impl Migrator {
                 conn.execute_batch(
                     "ALTER TABLE message ADD COLUMN tool_call_count INTEGER NOT NULL DEFAULT 0;",
                 )?;
+            }
+        }
+
+        // v3→v4: multi-agent columns (session table)
+        {
+            for (col, def) in &[
+                ("agent_name", "TEXT NOT NULL DEFAULT 'default'"),
+                ("parent_id", "TEXT"),
+                ("permission_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ] {
+                let has_column: bool = conn
+                    .prepare(&format!(
+                        "SELECT COUNT(*) FROM pragma_table_info('session') WHERE name='{col}'"
+                    ))
+                    .and_then(|mut s| s.query_row([], |row| row.get::<_, i64>(0)))
+                    .map(|c| c > 0)
+                    .unwrap_or(false);
+                if !has_column {
+                    conn.execute_batch(&format!(
+                        "ALTER TABLE session ADD COLUMN {col} {def};"
+                    ))?;
+                }
             }
         }
 
@@ -267,7 +292,7 @@ mod tests {
             .unwrap();
         assert_eq!(version, 1);
 
-        // Run migration (should upgrade to v2)
+        // Run migration (should upgrade to v4)
         Migrator::run(&conn).unwrap();
 
         // Verify version is now 4 (migrates through v2→v3→v4 as well)
@@ -369,7 +394,7 @@ mod tests {
         )
         .unwrap();
 
-        // Run migration (should upgrade to v3)
+        // Run migration (should upgrade to v3→v4)
         Migrator::run(&conn).unwrap();
 
         // Verify version is now 4 (migrates through v3→v4 as well)
@@ -398,6 +423,71 @@ mod tests {
             )
             .unwrap();
         assert_eq!(skip_val, 0, "existing rows should default to 0");
+    }
+
+    #[test]
+    fn test_migrate_v3_to_v4() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        // Start at V3 by running migration then downgrading version
+        Migrator::run(&conn).unwrap();
+        conn.pragma_update(None, "user_version", 3i64).unwrap();
+
+        // Insert a test row without the new columns (V3 schema)
+        conn.execute(
+            "INSERT INTO session (id, project_path, created_at, updated_at)
+             VALUES ('test-session-v3', '/tmp', 1700000000000, 1700000000000)",
+            [],
+        )
+        .unwrap();
+
+        // Run migration again (should upgrade to V4)
+        Migrator::run(&conn).unwrap();
+
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+
+        // Verify new columns exist
+        for col in &["agent_name", "parent_id", "permission_json"] {
+            let has_column: bool = conn
+                .prepare(&format!(
+                    "SELECT COUNT(*) FROM pragma_table_info('session') WHERE name='{col}'"
+                ))
+                .and_then(|mut s| s.query_row([], |row| row.get::<_, i64>(0)))
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            assert!(has_column, "{col} column should exist after V4 migration");
+        }
+
+        // Verify existing data has defaults
+        let agent_name: String = conn
+            .query_row(
+                "SELECT agent_name FROM session WHERE id = 'test-session-v3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(agent_name, "default", "existing rows should default to 'default'");
+
+        let parent_id: Option<String> = conn
+            .query_row(
+                "SELECT parent_id FROM session WHERE id = 'test-session-v3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(parent_id.is_none(), "existing rows should have NULL parent_id");
+
+        let permission_json: String = conn
+            .query_row(
+                "SELECT permission_json FROM session WHERE id = 'test-session-v3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(permission_json, "[]", "existing rows should default to '[]'");
     }
 
     #[test]
