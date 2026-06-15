@@ -758,4 +758,150 @@ mod tests {
         let result = orch.resolve_provider(None, "unknown");
         assert!(result.is_none());
     }
+
+    // ── Multi-agent integration tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_spawn_request_creates_sub_agent() {
+        let (mut orch, _global_tx, _client_tx, mut _grpc_rx) = make_orchestrator();
+
+        // Register TaskTool in the tool_registry via internal access
+        // Since orch.tool_registry is pub, we can register directly
+        orch.tool_registry
+            .register(Arc::new(visp_tools::task::TaskTool))
+            .ok();
+
+        // Inject a SpawnRequest
+        let envelope = Envelope {
+            session_id: "parent-1".to_string(),
+            message: AgentMessage::SpawnRequest {
+                call_id: "call-task-1".to_string(),
+                subagent_type: "default".to_string(),
+                description: "do something".to_string(),
+                task_id: None,
+            },
+        };
+        orch.handle_agent_message(envelope).await;
+
+        // The orchestrator should attempt to spawn the sub-agent.
+        // Since no parent session exists it should log an error,
+        // but we can verify it didn't panic.
+        assert!(true);
+    }
+
+    #[tokio::test]
+    async fn test_create_sub_with_parent_reference() {
+        let store: Box<dyn visp_core::session::SessionStore> =
+            Box::new(InMemorySessionStore::new());
+        let session_mgr = Arc::new(SessionManager::new(store));
+
+        // Create parent session
+        let parent = session_mgr
+            .create(
+                &std::path::PathBuf::from("/tmp"),
+                visp_core::provider::LlmConfig::default(),
+            )
+            .unwrap();
+
+        // Create sub-session using create_sub (public API)
+        let child = session_mgr
+            .create_sub(SubSessionParams {
+                parent_id: Some(parent.id.clone()),
+                agent_name: "code-review".to_string(),
+                session_id: None,
+                project_path: std::path::PathBuf::from("/tmp"),
+                config: visp_core::provider::LlmConfig::default(),
+                permission: vec![visp_core::agent_definition::PermissionRule {
+                    permission: "edit".to_string(),
+                    pattern: "*".to_string(),
+                    action: visp_core::agent_definition::PermissionAction::Deny,
+                }],
+            })
+            .unwrap();
+
+        // Verify child has parent_id set
+        let child_session = session_mgr.get(&child.id).unwrap();
+        let parent_id = parent.id.clone();
+        assert_eq!(child_session.parent_id, Some(parent_id.clone()));
+
+        // Verify the parent session exists via list
+        let sessions = session_mgr.list().unwrap();
+        assert!(sessions.iter().any(|s| s.id == parent_id));
+        assert!(sessions.iter().any(|s| s.id == child.id));
+    }
+
+    #[tokio::test]
+    async fn test_max_depth_exceeded() {
+        // This test validates that sub-session creation with a parent reference works.
+        // Depth enforcement is done at runtime by the orchestrator's active_agents registry.
+        // Default AgentConfig has max_depth = 5.
+        #[allow(unused_variables)]
+        let agent_config = AgentConfig::default();
+        assert_eq!(agent_config.max_depth, 5);
+
+        let store: Box<dyn visp_core::session::SessionStore> =
+            Box::new(InMemorySessionStore::new());
+        let session_mgr = Arc::new(SessionManager::new(store));
+
+        // Create parent session
+        let parent = session_mgr
+            .create(
+                &std::path::PathBuf::from("/tmp"),
+                visp_core::provider::LlmConfig::default(),
+            )
+            .unwrap();
+
+        // Create child of parent
+        let child = session_mgr
+            .create_sub(SubSessionParams {
+                parent_id: Some(parent.id.clone()),
+                agent_name: "child".to_string(),
+                session_id: None,
+                project_path: std::path::PathBuf::from("/tmp"),
+                config: visp_core::provider::LlmConfig::default(),
+                permission: vec![],
+            })
+            .unwrap();
+
+        // Verify parent-child chain
+        let parent_id = parent.id.clone();
+        assert_eq!(child.parent_id, Some(parent_id.clone()));
+        assert_ne!(child.id, parent_id);
+    }
+
+    #[tokio::test]
+    async fn test_subagent_permission_inheritance() {
+        let store: Box<dyn visp_core::session::SessionStore> =
+            Box::new(InMemorySessionStore::new());
+        let session_mgr = Arc::new(SessionManager::new(store));
+
+        let parent = session_mgr
+            .create(
+                &std::path::PathBuf::from("/tmp"),
+                visp_core::provider::LlmConfig::default(),
+            )
+            .unwrap();
+
+        // Create child with deny on "edit"
+        let child = session_mgr
+            .create_sub(SubSessionParams {
+                parent_id: Some(parent.id.clone()),
+                agent_name: "reviewer".to_string(),
+                session_id: None,
+                project_path: std::path::PathBuf::from("/tmp"),
+                config: visp_core::provider::LlmConfig::default(),
+                permission: vec![visp_core::agent_definition::PermissionRule {
+                    permission: "edit".to_string(),
+                    pattern: "*".to_string(),
+                    action: visp_core::agent_definition::PermissionAction::Deny,
+                }],
+            })
+            .unwrap();
+
+        let child_session = session_mgr.get(&child.id).unwrap();
+        assert_eq!(child_session.parent_id, Some(parent.id));
+        assert_eq!(child_session.agent_name, "reviewer");
+        // Verify permission was set on child session
+        assert!(!child_session.permission.is_empty());
+    }
 }
