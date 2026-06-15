@@ -44,6 +44,10 @@ pub enum ClientMessage {
         selected_index: i32,
         text: String,
     },
+    /// 取消正在运行的 agent
+    Cancel {
+        session_id: String,
+    },
 }
 
 /// Orchestrator 错误
@@ -151,66 +155,28 @@ impl Orchestrator {
     pub async fn handle_agent_message(&mut self, envelope: Envelope) {
         let session_id = envelope.session_id.clone();
         match envelope.message {
-            AgentMessage::TextDelta(content) => {
-                let _ = self.grpc_tx.send(AgentEvent::TextDelta(content)).await;
+            AgentMessage::TextDelta(_) => {
+                // TextDelta 已由 run_agent_loop 通过 tx（= grpc_tx）直接送达 CLI
+                // 此处不重复转发
             }
             AgentMessage::ThinkingBlock(_) => {
-                // Thinking blocks are not forwarded to CLI in V1
+                // 不在 V1 中转发
             }
-            AgentMessage::UsageInfo {
-                input_tokens,
-                output_tokens,
-                tool_calls,
-                cache_creation_input_tokens,
-                cache_read_input_tokens,
-            } => {
-                let _ = self
-                    .grpc_tx
-                    .send(AgentEvent::UsageInfo {
-                        input_tokens,
-                        output_tokens,
-                        tool_calls,
-                        cache_creation_input_tokens,
-                        cache_read_input_tokens,
-                    })
-                    .await;
+            AgentMessage::UsageInfo { .. } => {
+                // UsageInfo 已由 run_agent_loop 直接送达 CLI
             }
-            AgentMessage::StatusUpdate(content) => {
-                let _ = self.grpc_tx.send(AgentEvent::StatusUpdate(content)).await;
+            AgentMessage::StatusUpdate(_) => {
+                // StatusUpdate 已由 run_agent_loop 直接送达 CLI
             }
-            AgentMessage::Error { code, message } => {
-                let _ = self.grpc_tx.send(AgentEvent::Error { code, message }).await;
+            AgentMessage::Error { .. } => {
                 self.handle_done(&session_id).await;
+                // Error 已由 run_agent_loop 直接送达 CLI
             }
-            AgentMessage::ToolCallRequest {
-                call_id,
-                tool_name,
-                arguments,
-            } => {
-                let _ = self
-                    .grpc_tx
-                    .send(AgentEvent::ToolCallRequest {
-                        call_id,
-                        tool_name,
-                        arguments,
-                    })
-                    .await;
+            AgentMessage::ToolCallRequest { .. } => {
+                // ToolCallRequest 已由工具执行任务直接送达 CLI
             }
-            AgentMessage::ToolCallResult {
-                call_id,
-                tool_name,
-                content,
-                is_error,
-            } => {
-                let _ = self
-                    .grpc_tx
-                    .send(AgentEvent::ToolCallResult {
-                        call_id,
-                        tool_name,
-                        content,
-                        is_error,
-                    })
-                    .await;
+            AgentMessage::ToolCallResult { .. } => {
+                // ToolCallResult 已由工具执行任务直接送达 CLI
             }
             AgentMessage::UserQuery {
                 query_id,
@@ -274,6 +240,10 @@ impl Orchestrator {
                         text,
                     });
                 }
+            }
+            ClientMessage::Cancel { session_id } => {
+                tracing::info!(%session_id, "cancelling agent by user request");
+                self.cancel_agent(&session_id);
             }
         }
     }
@@ -703,10 +673,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_text_delta() {
+    async fn test_handle_text_delta_not_forwarded() {
         let (mut orch, global_tx, _client_tx, mut grpc_rx) = make_orchestrator();
 
-        // Send TextDelta via global_tx
+        // Send TextDelta via global_tx (现已不再转发到 grpc_tx)
         global_tx
             .send(Envelope {
                 session_id: "s-1".to_string(),
@@ -720,13 +690,12 @@ mod tests {
             orch.handle_agent_message(envelope).await;
         }
 
-        // Check it was forwarded to grpc_tx
-        if let Ok(msg) = grpc_rx.try_recv() {
-            match msg {
-                AgentEvent::TextDelta(content) => assert_eq!(content, "hello"),
-                _ => panic!("expected TextDelta"),
-            }
-        }
+        // TextDelta 不应再被转发到 grpc_tx（由 run_agent_loop 直接送达）
+        let result = grpc_rx.try_recv();
+        assert!(
+            result.is_err(),
+            "TextDelta should not be forwarded to grpc_tx"
+        );
     }
 
     #[tokio::test]

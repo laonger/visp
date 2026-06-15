@@ -379,6 +379,14 @@ impl CoderDaemon for CoderDaemonService {
                             break;
                         }
                     }
+                    Some(proto::client_message::Payload::Cancel(cancel)) => {
+                        let cli_msg = visp_agent::orchestrator::ClientMessage::Cancel {
+                            session_id: cancel.session_id,
+                        };
+                        if client_tx.send(cli_msg).await.is_err() {
+                            break;
+                        }
+                    }
                     _ => {}
                 }
             }
