@@ -301,6 +301,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: std::path::PathBuf::from("/tmp"),
             session_id: None,
+            permission_rules: None,
         };
         let result = adapter
             .execute(serde_json::json!({"param": "value"}), &ctx)

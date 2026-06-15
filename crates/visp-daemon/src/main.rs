@@ -203,6 +203,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         llm_retry_base_delay_ms: config.agent.llm_retry_base_delay_ms,
         bash_confirm_mode: config.agent.bash_confirm_mode,
         file_max_size_bytes: config.agent.file_max_size_bytes,
+        max_depth: config.agent.max_depth,
     };
 
     // 9. Assemble service

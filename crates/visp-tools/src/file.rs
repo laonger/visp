@@ -592,6 +592,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
+            permission_rules: None,
         };
         let args = serde_json::json!({"path": "test.txt"});
 
@@ -613,6 +614,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
+            permission_rules: None,
         };
         let args = serde_json::json!({"path": "nonexistent.txt"});
 
@@ -633,6 +635,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
+            permission_rules: None,
         };
         let args = serde_json::json!({"path": "large.txt"});
 
@@ -656,6 +659,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
+            permission_rules: None,
         };
         let args = serde_json::json!({"path": "binary.bin"});
 
@@ -677,6 +681,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
+            permission_rules: None,
         };
         let args = serde_json::json!({
             "path": "ranges.txt",
@@ -708,6 +713,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
+            permission_rules: None,
         };
         let args = serde_json::json!({
             "path": "ranges.txt",
@@ -743,6 +749,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
+            permission_rules: None,
         };
         let args = serde_json::json!({
             "path": "single.txt",
@@ -772,6 +779,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
+            permission_rules: None,
         };
         let args = serde_json::json!({
             "path": "small.txt",
@@ -795,6 +803,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
+            permission_rules: None,
         };
         let args = serde_json::json!({
             "path": "small.txt",
@@ -819,6 +828,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
+            permission_rules: None,
         };
         let args = serde_json::json!({
             "path": "small.txt",
@@ -844,6 +854,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
+            permission_rules: None,
         };
         let args = serde_json::json!({"path": "whole.txt"});
 
@@ -868,6 +879,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
+            permission_rules: None,
         };
         let args = serde_json::json!({"paths": ["a.rs", "b.rs"]});
 
@@ -894,6 +906,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
+            permission_rules: None,
         };
         let args = serde_json::json!({"paths": ["a.rs", "nonexistent.rs"]});
 
@@ -922,6 +935,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
+            permission_rules: None,
         };
         // 同时传 path 和 paths，path 优先
         let args = serde_json::json!({
@@ -949,6 +963,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
+            permission_rules: None,
         };
         let args = serde_json::json!({"path": "written.txt", "content": "hello write"});
 
@@ -972,6 +987,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
+            permission_rules: None,
         };
         let args = serde_json::json!({"path": "subdir/nested/file.txt", "content": "nested"});
 
@@ -1002,6 +1018,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
+            permission_rules: None,
         };
         let args = serde_json::json!({
             "path": "edit.txt",
@@ -1032,6 +1049,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
+            permission_rules: None,
         };
         let args = serde_json::json!({
             "path": "edit.txt",
@@ -1056,6 +1074,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
+            permission_rules: None,
         };
         let args = serde_json::json!({
             "path": "edit.txt",
@@ -1083,6 +1102,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
+            permission_rules: None,
         };
         let args = serde_json::json!({
             "path": "edit.txt",
@@ -1155,6 +1175,7 @@ mod tests {
         let ctx = ToolContext {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
+            permission_rules: None,
         };
         let args = serde_json::json!({
             "path": "edit_too_large.txt",

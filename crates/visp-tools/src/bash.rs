@@ -253,6 +253,7 @@ mod tests {
         ToolContext {
             working_dir: dir.to_path_buf(),
             session_id: None,
+            permission_rules: None,
         }
     }
 

@@ -3,10 +3,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::agent::AgentLoopContext;
+use crate::agent::Envelope;
+use crate::agent::OrchestratorMessage;
 use crate::agent_definition::PermissionRule;
 use crate::error::SessionError;
 use crate::message::Message;
@@ -505,6 +508,53 @@ impl SessionManager {
             config: session.config,
             cancel_token: token,
             context_trimmer: Arc::clone(context_trimmer),
+            global_tx: None,
+            inbox_rx: None,
+            permission_rules: None,
+        })
+    }
+
+    /// 启动 agent 循环（多 Agent 模式）
+    /// 与 `start_loop` 的区别：接受并传入 global_tx / inbox_rx / permission_rules
+    pub fn start_loop_v2(
+        &self,
+        id: &str,
+        context_trimmer: &Arc<dyn crate::context::ContextTrimmer + Send + Sync>,
+        global_tx: mpsc::Sender<Envelope>,
+        inbox_rx: mpsc::Receiver<OrchestratorMessage>,
+        permission_rules: Arc<Vec<PermissionRule>>,
+    ) -> Result<AgentLoopContext, SessionError> {
+        let token = CancellationToken::new();
+
+        let mut store = self.store.lock().unwrap();
+        let session = store.get(id)?;
+
+        if session.status != SessionStatus::Idle {
+            return Err(SessionError::SessionBusy {
+                session_id: id.to_string(),
+            });
+        }
+
+        let mut updated = session.clone();
+        updated.status = SessionStatus::Running;
+        store.update(updated)?;
+        drop(store);
+
+        self.running_tokens
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), token.clone());
+
+        Ok(AgentLoopContext {
+            session_id: id.to_string(),
+            history: session.history,
+            working_dir: session.project_path,
+            config: session.config,
+            cancel_token: token,
+            context_trimmer: Arc::clone(context_trimmer),
+            global_tx: Some(global_tx),
+            inbox_rx: Some(inbox_rx),
+            permission_rules: Some(permission_rules),
         })
     }
 

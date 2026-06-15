@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::agent_definition::PermissionRule;
 use crate::error::AgentErrorCode;
 use crate::error::LlmError;
 use crate::message::Message;
@@ -79,6 +80,69 @@ pub enum AgentEvent {
     },
 }
 
+/// Agent → Orchestrator 消息（通过全局事件总线）
+pub enum AgentMessage {
+    TextDelta(String),
+    ThinkingBlock(serde_json::Value),
+    UsageInfo {
+        input_tokens: u32,
+        output_tokens: u32,
+        tool_calls: u32,
+        cache_creation_input_tokens: u32,
+        cache_read_input_tokens: u32,
+    },
+    StatusUpdate(String),
+    Error {
+        code: AgentErrorCode,
+        message: String,
+    },
+    ToolCallRequest {
+        call_id: String,
+        tool_name: String,
+        arguments: String,
+    },
+    ToolCallResult {
+        call_id: String,
+        tool_name: String,
+        content: String,
+        is_error: bool,
+    },
+    UserQuery {
+        query_id: String,
+        message: String,
+        options: Vec<String>,
+        allow_other: bool,
+        respond: oneshot::Sender<UserQueryResult>,
+    },
+    SpawnRequest {
+        call_id: String,
+        subagent_type: String,
+        description: String,
+        task_id: Option<String>,
+    },
+    Done,
+}
+
+/// Orchestrator → Agent 消息（通过专属 inbox）
+pub enum OrchestratorMessage {
+    SubAgentComplete {
+        call_id: String,
+        content: String,
+        task_id: String,
+    },
+    SubAgentError {
+        call_id: String,
+        error: String,
+    },
+    Cancelled,
+}
+
+/// 事件总线信封
+pub struct Envelope {
+    pub session_id: String,
+    pub message: AgentMessage,
+}
+
 /// Agent 循环上下文
 pub struct AgentLoopContext {
     /// 会话 ID
@@ -93,6 +157,12 @@ pub struct AgentLoopContext {
     pub cancel_token: CancellationToken,
     /// 上下文裁剪器
     pub context_trimmer: Arc<dyn crate::context::ContextTrimmer + Send + Sync>,
+    /// 全局事件总线发送端（多 Agent 模式）
+    pub global_tx: Option<mpsc::Sender<Envelope>>,
+    /// 专属收件箱接收端（多 Agent 模式）
+    pub inbox_rx: Option<mpsc::Receiver<OrchestratorMessage>>,
+    /// 权限规则集
+    pub permission_rules: Option<Arc<Vec<PermissionRule>>>,
 }
 
 /// Agent 执行配置
@@ -112,6 +182,8 @@ pub struct AgentConfig {
     pub bash_confirm_mode: bool,
     /// 文件读取/写入的最大字节数
     pub file_max_size_bytes: u64,
+    /// Agent 嵌套深度上限
+    pub max_depth: u32,
 }
 
 impl Default for AgentConfig {
@@ -124,6 +196,7 @@ impl Default for AgentConfig {
             llm_retry_base_delay_ms: 1000,
             bash_confirm_mode: true,
             file_max_size_bytes: 1048576,
+            max_depth: 5,
         }
     }
 }
@@ -783,6 +856,7 @@ pub async fn run_agent_loop(
                 let working_dir = ctx.working_dir.clone();
                 let tc = tc.clone();
                 let sm = sm.clone();
+                let permissions = ctx.permission_rules.clone();
 
                 exec_tasks.push(tokio::spawn(async move {
                     // Cancellation check
@@ -900,6 +974,7 @@ pub async fn run_agent_loop(
                     let tool_ctx = ToolContext {
                         working_dir: working_dir.clone(),
                         session_id: Some(session_id),
+                        permission_rules: permissions.clone(),
                     };
 
                     let result = registry
@@ -1437,6 +1512,9 @@ mod tests {
             config: crate::provider::LlmConfig::default(),
             cancel_token: cancel.clone(),
             context_trimmer: trimmer,
+            global_tx: None,
+            inbox_rx: None,
+            permission_rules: None,
         };
         assert_eq!(ctx.session_id, "sess-1");
         assert!(ctx.history.is_empty());

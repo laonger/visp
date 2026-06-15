@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::agent_definition::PermissionRule;
 
 /// 工具执行上下文
 #[derive(Debug, Clone)]
@@ -9,6 +12,8 @@ pub struct ToolContext {
     pub working_dir: PathBuf,
     /// 会话 ID（用于日志追踪和 bash 确认模式判断）
     pub session_id: Option<String>,
+    /// 权限规则集（多 Agent 模式）
+    pub permission_rules: Option<Arc<Vec<PermissionRule>>>,
 }
 
 #[cfg(test)]
@@ -21,6 +26,7 @@ mod tests_toolcontext {
         let ctx = ToolContext {
             working_dir: PathBuf::from("/tmp"),
             session_id: None,
+            permission_rules: None,
         };
         assert_eq!(ctx.session_id, None);
         assert_eq!(ctx.working_dir, Path::new("/tmp"));

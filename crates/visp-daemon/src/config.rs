@@ -122,6 +122,8 @@ pub struct AgentSection {
     pub bash_confirm_mode: bool,
     #[serde(default = "default_file_max_size")]
     pub file_max_size_bytes: u64,
+    #[serde(default = "default_max_depth")]
+    pub max_depth: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -143,6 +145,10 @@ fn default_bash_timeout() -> u64 {
 }
 fn default_file_max_size() -> u64 {
     1048576
+}
+
+fn default_max_depth() -> u32 {
+    5
 }
 fn default_soft_limit() -> u32 {
     50
@@ -222,6 +228,7 @@ fn default_config() -> DaemonConfig {
             llm_retry_base_delay_ms: default_retry_delay(),
             bash_confirm_mode: default_bash_confirm(),
             file_max_size_bytes: default_file_max_size(),
+            max_depth: default_max_depth(),
         },
         tool: HashMap::new(),
         mcp: McpConfig::default(),

@@ -171,6 +171,7 @@ mod tests {
         ToolContext {
             working_dir: PathBuf::from("/tmp"),
             session_id: None,
+            permission_rules: None,
         }
     }
 

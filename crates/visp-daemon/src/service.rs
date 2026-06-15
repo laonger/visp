@@ -747,6 +747,7 @@ impl CoderDaemon for CoderDaemonService {
         let ctx = ToolContext {
             working_dir,
             session_id: Some(req.session_id),
+            permission_rules: None,
         };
 
         let mut args = serde_json::json!({ "path": path });
