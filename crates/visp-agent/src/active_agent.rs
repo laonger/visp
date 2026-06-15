@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 use visp_core::agent::OrchestratorMessage;
 
 /// 运行时活跃的 Agent 实例
+#[derive(Clone)]
 pub struct ActiveAgent {
     /// Session ID（全局唯一）
     pub session_id: String,
@@ -107,6 +108,11 @@ impl ActiveAgentRegistry {
     /// 是否为空
     pub fn is_empty(&self) -> bool {
         self.agents.is_empty()
+    }
+
+    /// 返回所有 agent 的克隆列表（用于遍历时避免借用问题）
+    pub fn agents_cloned(&self) -> Vec<ActiveAgent> {
+        self.agents.values().cloned().collect()
     }
 }
 
