@@ -209,6 +209,14 @@ struct ToolExecResult {
     result: ToolResult,
 }
 
+/// Pending sub-agent spawn (for multi-agent mode)
+#[allow(dead_code)]
+struct PendingSpawn {
+    index: usize,
+    call_id: String,
+    subagent_type: String,
+}
+
 fn llm_error_to_code(err: &LlmError) -> (AgentErrorCode, String) {
     match err {
         LlmError::Network(msg) => (AgentErrorCode::LlmNetwork, msg.clone()),
@@ -874,13 +882,56 @@ pub async fn run_agent_loop(
                 }
             }
 
-            // h. Execute tools in parallel
+            // h. Execute tools in parallel (Phase 1: dispatch)
             let num_tools = tool_calls.len();
             let mut exec_tasks = Vec::with_capacity(num_tools);
+            let mut pending_spawns: Vec<PendingSpawn> = Vec::new();
             // Store tool IDs indexed by spawn order, for error recovery when a task panics.
             let tool_ids: Vec<String> = tool_calls.iter().map(|tc| tc.id.clone()).collect();
+            let is_multi_agent = ctx.global_tx.is_some() && ctx.inbox_rx.is_some();
 
             for (i, tc) in tool_calls.iter().enumerate() {
+                // Multi-agent: intercept "task" tool calls
+                if is_multi_agent && tc.name == "task" {
+                    let task_args: serde_json::Value =
+                        serde_json::from_str(&tc.arguments).unwrap_or_default();
+                    let subagent_type = task_args
+                        .get("subagent_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("default")
+                        .to_string();
+                    let description = task_args
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let task_id = task_args
+                        .get("task_id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
+                    // Send SpawnRequest via global_tx
+                    if let Some(ref gtx) = ctx.global_tx {
+                        let _ = gtx.try_send(Envelope {
+                            session_id: ctx.session_id.clone(),
+                            message: AgentMessage::SpawnRequest {
+                                call_id: tc.id.clone(),
+                                subagent_type: subagent_type.clone(),
+                                description: description.clone(),
+                                task_id: task_id.clone(),
+                            },
+                        });
+                    }
+
+                    pending_spawns.push(PendingSpawn {
+                        index: i,
+                        call_id: tc.id.clone(),
+                        subagent_type,
+                    });
+                    continue;
+                }
+
+                // Regular tool execution (original spawn logic)
                 let tx = tx.clone();
                 let global_tx = ctx.global_tx.clone();
                 let cancel = ctx.cancel_token.clone();
@@ -1077,8 +1128,135 @@ pub async fn run_agent_loop(
                 }));
             }
 
-            // Join all tasks, with cancellation support
-            let task_results = {
+            // Phase 2: Collect results (select! with support for inbox_rx)
+            let task_results = if is_multi_agent {
+                let mut collected: Vec<ToolExecResult> = Vec::new();
+                let mut regular_done = exec_tasks.is_empty();
+                let mut inbox = ctx.inbox_rx.take();
+
+                loop {
+                    // Check cancellation first
+                    if ctx.cancel_token.is_cancelled() {
+                        for h in &exec_tasks { h.abort(); }
+                        break;
+                    }
+
+                    let has_tasks = !exec_tasks.is_empty();
+                    let has_pending = !pending_spawns.is_empty();
+
+                    if !has_tasks && !has_pending {
+                        break;
+                    }
+
+                    if has_tasks && inbox.is_some() && has_pending {
+                        // Both regular tasks and sub-agent results pending: select!
+                        let all_tasks = std::mem::take(&mut exec_tasks);
+                        let join_fut = futures::future::join_all(
+                            all_tasks
+                        );
+                        let recv_fut = async {
+                            // SAFETY: guarded by inbox.is_some() above
+                            inbox.as_mut().unwrap().recv().await
+                        };
+
+                        tokio::select! {
+                            biased;
+                            results = join_fut => {
+                                for r in results {
+                                    match r {
+                                        Ok(result) => collected.push(result),
+                                        Err(e) if e.is_cancelled() => {},
+                                        Err(e) => {
+                                            tracing::warn!("tool task failed: {e}");
+                                        }
+                                    }
+                                }
+                                regular_done = true;
+                            }
+                            msg = recv_fut => {
+                                match msg {
+                                    Some(OrchestratorMessage::SubAgentComplete { call_id, content, task_id: _ }) => {
+                                        if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id) {
+                                            let ps = pending_spawns.remove(pos);
+                                            collected.push(ToolExecResult {
+                                                index: ps.index,
+                                                call_id,
+                                                result: ToolResult::success(content),
+                                            });
+                                        }
+                                    }
+                                    Some(OrchestratorMessage::SubAgentError { call_id, error }) => {
+                                        if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id) {
+                                            let ps = pending_spawns.remove(pos);
+                                            collected.push(ToolExecResult {
+                                                index: ps.index,
+                                                call_id,
+                                                result: ToolResult::error(error),
+                                            });
+                                        }
+                                    }
+                                    Some(OrchestratorMessage::Cancelled) => {
+                                        break;
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    } else if has_tasks {
+                        // Only regular tasks remaining
+                        let all_tasks = std::mem::take(&mut exec_tasks);
+                        let results = futures::future::join_all(
+                            all_tasks
+                        ).await;
+                        for r in results {
+                            match r {
+                                Ok(result) => collected.push(result),
+                                Err(e) if e.is_cancelled() => {},
+                                Err(e) => {
+                                    tracing::warn!("tool task failed: {e}");
+                                }
+                            }
+                        }
+                        regular_done = true;
+                    } else if let Some(ref mut rx) = inbox {
+                        // Only sub-agent results pending
+                        match rx.recv().await {
+                            Some(OrchestratorMessage::SubAgentComplete { call_id, content, task_id: _ }) => {
+                                if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id) {
+                                    let ps = pending_spawns.remove(pos);
+                                    collected.push(ToolExecResult {
+                                        index: ps.index,
+                                        call_id,
+                                        result: ToolResult::success(content),
+                                    });
+                                }
+                            }
+                            Some(OrchestratorMessage::SubAgentError { call_id, error }) => {
+                                if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id) {
+                                    let ps = pending_spawns.remove(pos);
+                                    collected.push(ToolExecResult {
+                                        index: ps.index,
+                                        call_id,
+                                        result: ToolResult::error(error),
+                                    });
+                                }
+                            }
+                            Some(OrchestratorMessage::Cancelled) => break,
+                            None => break,
+                        }
+                    }
+
+                    if regular_done && pending_spawns.is_empty() {
+                        break;
+                    }
+                }
+
+                // Restore inbox_rx (now None since we took it)
+                ctx.inbox_rx = inbox;
+
+                collected
+            } else {
+                // Single-agent mode: original join_all
                 let mut exec_tasks = Some(exec_tasks);
                 tokio::select! {
                     biased;
@@ -1096,8 +1274,6 @@ pub async fn run_agent_loop(
                             Err(e) if e.is_cancelled() => None,
                             Err(e) => {
                                 tracing::warn!("tool task {} failed: {e}", idx);
-                                // Create an error result so every tool_call gets a corresponding
-                                // tool_result in history, preventing Anthropic 400 errors.
                                 let call_id = tool_ids.get(idx).cloned().unwrap_or_default();
                                 Some(ToolExecResult {
                                     index: idx,
