@@ -1424,9 +1424,12 @@ pub(crate) fn render_tool_guide(registry: &ToolRegistry) -> String {
         "\n\n## Available Tools".to_string(),
         "\n**IMPORTANT**: Prefer specialized tools over `bash` when possible: \
          use `read_file` to read files, `edit_file`/`write_file` to modify them, \
-         `grep`/`glob` to search files, and `codegraph_context`/`codegraph_trace`/`codegraph_impact` \
-         for code understanding. For complex tasks (e.g. reading code, reviewing changes), \
-         use the `task` tool to delegate to a dedicated sub-agent. \
+         `grep`/`glob` to search files. \
+         Use `codegraph_context`/`codegraph_trace`/`codegraph_impact` for quick symbol \
+         lookups and call-chain tracing. \
+         When the user asks you to read, understand, or analyze source code, \
+         use the `task` tool to delegate to `code_reader` sub-agent instead of \
+         doing it yourself. \
          Only use `bash` when no other tool fits \
          (e.g. running build commands, git operations, or multi-step shell scripts)."
             .to_string(),
@@ -1434,7 +1437,7 @@ pub(crate) fn render_tool_guide(registry: &ToolRegistry) -> String {
 
     // Code Understanding 独立分组（在 category 分组之前）
     if !cu_descs.is_empty() {
-        parts.push("\n## Code Understanding (prefer these first)".to_string());
+        parts.push("\n## Code Understanding (lightweight lookups)".to_string());
         for name in CODE_UNDERSTANDING_TOOLS {
             if let Some(desc) = cu_descs.get(name) {
                 parts.push(format!("  {name}  — {desc}"));

@@ -268,6 +268,20 @@ impl Orchestrator {
             }
         };
 
+        // Append agent-specific system prompt (from .visp/agents/*.md)
+        if !agent_def.system_prompt.is_empty() {
+            if let Err(e) = self
+                .session_mgr
+                .append_system_prompt_template(session_id, &agent_def.system_prompt)
+            {
+                tracing::warn!(
+                    session_id,
+                    error = %e,
+                    "failed to append agent system prompt"
+                );
+            }
+        }
+
         // Create inbox
         let (inbox_tx, inbox_rx) = mpsc::channel(64);
 
@@ -424,6 +438,20 @@ impl Orchestrator {
         };
         let sub_session_id = sub_session.id.clone();
 
+        // Append agent-specific system prompt (from .visp/agents/*.md)
+        if !agent_def.system_prompt.is_empty() {
+            if let Err(e) = self
+                .session_mgr
+                .append_system_prompt_template(&sub_session_id, &agent_def.system_prompt)
+            {
+                tracing::warn!(
+                    sub_session_id,
+                    error = %e,
+                    "failed to append agent system prompt"
+                );
+            }
+        }
+
         // 7. Create inbox + register active agent
         let (inbox_tx, inbox_rx) = mpsc::channel(64);
         self.active_agents.register(ActiveAgent {
@@ -579,8 +607,13 @@ impl Orchestrator {
         if let Some(agent) = self.active_agents.get(session_id) {
             agent.cancel_token.cancel();
         }
+        // 同时通过 session_mgr 取消 AgentLoopContext 使用的 token
+        // （ActiveAgent.cancel_token 与 AgentLoopContext.cancel_token 是两个不同的实例，
+        //  只取消前者对 run_agent_loop 无效）
+        self.session_mgr.cancel_agent(session_id);
         for child in self.active_agents.descendants_of(session_id) {
             child.cancel_token.cancel();
+            self.session_mgr.cancel_agent(&child.session_id);
         }
     }
 

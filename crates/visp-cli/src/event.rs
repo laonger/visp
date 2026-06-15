@@ -414,14 +414,12 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 return false;
             }
 
-            if app.confirm.is_some() {
-                // Ctrl+C 在确认模式下也能取消
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    if app.generating {
-                        if let Some(q) = app.confirm.take() {
-                            chat_handle.send_response(&q.query_id, 1, "");
-                        }
-                        app.stale_done_expected = true;
+            // Ctrl+C: 在任何模式下取消当前 LLM 推理（优先于所有其他按键处理）
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                if app.generating {
+                    // 如果确认框存在，先将其关闭（向 agent 回复一个拒绝响应）
+                    if let Some(q) = app.confirm.take() {
+                        chat_handle.send_response(&q.query_id, 1, "");
                         // 保留 assistant 已输出的消息，移除末尾的 [USER_QUERY] 标记
                         if let Some(close_pos) = app.streaming_text.rfind("[/USER_QUERY]")
                             && let Some(open_pos) =
@@ -429,14 +427,18 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                         {
                             app.streaming_text.truncate(open_pos);
                         }
-                        app.flush_streaming();
-                        app.pending_usage = None;
-                        app.current_request_id = None;
-                        app.generating = false;
-                        chat_handle.send_cancel();
                     }
-                    return false;
+                    app.stale_done_expected = true;
+                    app.flush_streaming();
+                    app.pending_usage = None;
+                    app.current_request_id = None;
+                    app.generating = false;
+                    chat_handle.send_cancel();
                 }
+                return false;
+            }
+
+            if app.confirm.is_some() {
                 match key.code {
                     KeyCode::Left => {
                         if let Some(ref mut confirm) = app.confirm {

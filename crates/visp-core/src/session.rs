@@ -210,6 +210,13 @@ const DEFAULT_SYSTEM_PROMPT: &str = concat!(
     "- When a tool requires approval, a confirmation bar will appear (Approve / Deny / Always Allow)\n",
     "- Wait for each tool to complete before proceeding, unless tools can run in parallel\n",
     "- When you need the user to make a choice, use the [USER_QUERY] marker (see detailed instructions at end of prompt)\n",
+    "\n",
+    "## Task Delegation\n",
+    "- Use the `task` tool to delegate specialized work to sub-agents:\n",
+    "  - `code_reader` — for reading, understanding, and analyzing source code\n",
+    "- When the user asks you to \"read\", \"review\", \"analyze\", or \"understand\" code,\n",
+    "  always delegate to `code_reader` via `task` instead of doing it yourself.\n",
+    "- Sub-agents have access to all necessary tools and return their results to you.\n",
 );
 
 /// 按优先级加载系统 prompt 模板：
@@ -320,12 +327,6 @@ fn load_skills_from_dir(dir: &Path, seen_names: &mut HashSet<String>, sections: 
         }
         sections.push(section);
     }
-}
-
-/// 构建 Agent 的系统提示词模板
-fn build_system_prompt(project_path: &Path, agent_name: &str) -> String {
-    let base = load_system_prompt_template(project_path);
-    format!("You are agent \"{agent_name}\" working on a project.\n\n{base}")
 }
 
 /// 返回用户的 home 目录路径
@@ -439,7 +440,9 @@ impl SessionManager {
         let id = params
             .session_id
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let system_prompt_template = build_system_prompt(&params.project_path, &params.agent_name);
+        let base = load_system_prompt_template(&params.project_path);
+        let system_prompt_template =
+            format!("You are agent \"{}\" working on a project.\n\n{base}", params.agent_name);
 
         let session = Session {
             id,
@@ -581,6 +584,22 @@ impl SessionManager {
         let mut store = self.store.lock().unwrap();
         let mut session = store.get(id)?;
         session.config = config;
+        store.update(session)
+    }
+
+    /// 追加内容到会话的 system_prompt_template
+    pub fn append_system_prompt_template(
+        &self,
+        id: &str,
+        extra: &str,
+    ) -> Result<(), SessionError> {
+        if extra.is_empty() {
+            return Ok(());
+        }
+        let mut store = self.store.lock().unwrap();
+        let mut session = store.get(id)?;
+        session.system_prompt_template.push_str("\n\n");
+        session.system_prompt_template.push_str(extra);
         store.update(session)
     }
 

@@ -1,5 +1,3 @@
-#[allow(dead_code)]
-mod agent_loader;
 mod command;
 mod config;
 mod server;
@@ -280,7 +278,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 8.6. Load agent definitions
-    let agent_registry = Arc::new(agent_loader::load_agents(&cwd));
+    let agent_registry = Arc::new(visp_agent::agent_loader::load_agents(&cwd));
 
     // 8.7. Create orchestration channels
     let (global_tx, global_rx) = mpsc::channel(256);
