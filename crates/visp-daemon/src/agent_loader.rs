@@ -21,6 +21,19 @@ pub fn load_agents(project_path: &Path) -> AgentRegistry {
     };
     registry.register(default_agent).ok();
 
+    // Register built-in code_reader subagent (for reading and understanding code)
+    let code_reader = AgentDefinition {
+        name: "code_reader".to_string(),
+        description: "代码阅读分析子 Agent，擅长阅读、理解和解释源代码，可被 task 工具调用".to_string(),
+        mode: AgentMode::Subagent,
+        model: None,
+        temperature: None,
+        steps: None,
+        permission: Vec::new(),
+        system_prompt: String::new(),
+    };
+    registry.register(code_reader).ok();
+
     // Scan .visp/agents/*.md
     let agents_dir = project_path.join(".visp/agents/");
     if !agents_dir.exists() {
@@ -289,7 +302,8 @@ You search.
 
         let registry = load_agents(&dir);
         assert!(registry.get("default").is_some());
-        assert_eq!(registry.list().len(), 1);
+        assert!(registry.get("code_reader").is_some());
+        assert_eq!(registry.list().len(), 2);
     }
 
     #[test]
@@ -298,7 +312,8 @@ You search.
 
         let registry = load_agents(&dir);
         assert!(registry.get("default").is_some());
-        assert_eq!(registry.list().len(), 1);
+        assert!(registry.get("code_reader").is_some());
+        assert_eq!(registry.list().len(), 2);
     }
 
     #[test]
@@ -321,8 +336,9 @@ mode: all
 
         let registry = load_agents(&dir);
         assert!(registry.get("default").is_some());
+        assert!(registry.get("code_reader").is_some());
         assert!(registry.get("valid").is_some());
-        // Invalid file should not produce an entry (only default + valid)
-        assert_eq!(registry.list().len(), 2);
+        // Invalid file should not produce an entry (only default + code_reader + valid)
+        assert_eq!(registry.list().len(), 3);
     }
 }

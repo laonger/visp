@@ -13,6 +13,7 @@ use visp_codegraph::CodeGraph;
 use visp_core::{
     agent::{AgentConfig, AgentEvent, UserQueryResult},
     context::ContextTrimmer,
+    message::{MessageType, Role},
     provider::{LlmConfig, LlmProvider},
     rules::RuleEngine,
     session::{SessionManager, SessionStatus},
@@ -351,6 +352,7 @@ impl CoderDaemon for CoderDaemonService {
         // Clone channels for the two forwarding tasks
         let client_tx = self.client_tx.clone();
         let response_tx = tx.clone();
+        let session_mgr = self.session_mgr.clone();
 
         // Shared pending user queries: maps query_id → respond sender
         // Used to route UserResponse from CLI back to the agent loop that's waiting
@@ -361,6 +363,7 @@ impl CoderDaemon for CoderDaemonService {
 
         // ── Inbound: CLI → Orchestrator / Pending Queries ──
         let pending_inbound = pending_queries.clone();
+        let response_tx_inbound = response_tx.clone();
         tokio::spawn(async move {
             while let Some(msg_result) = in_stream.next().await {
                 let msg = match msg_result {
@@ -414,6 +417,125 @@ impl CoderDaemon for CoderDaemonService {
                         };
                         if client_tx.send(cli_msg).await.is_err() {
                             break;
+                        }
+                    }
+                    Some(proto::client_message::Payload::JoinSession(join)) => {
+                        let session_id = join.session_id;
+                        let user_inputs: Vec<String> = match session_mgr.get(&session_id) {
+                            Ok(session) => session
+                                .history
+                                .iter()
+                                .filter(|m| m.role == Role::User)
+                                .map(|m| m.content.clone())
+                                .collect(),
+                            Err(_) => vec![],
+                        };
+
+                        // ── Step 1: Send StatusUpdate with user inputs ──
+                        {
+                            let msg = proto::ServerMessage {
+                                payload: Some(proto::server_message::Payload::StatusUpdate(
+                                    proto::StatusUpdate {
+                                        session_id: session_id.clone(),
+                                        message: format!(
+                                            "Joined session {}",
+                                            &session_id[..session_id.len().min(8)]
+                                        ),
+                                        user_inputs,
+                                    },
+                                )),
+                            };
+                            let _ = response_tx_inbound.send(Ok(msg)).await;
+                        }
+
+                        // ── Step 2: Replay full conversation history ──
+                        if let Ok(session) = session_mgr.get(&session_id) {
+                            for msg in &session.history {
+                                match msg.role {
+                                    Role::Assistant => {
+                                        // Send text content
+                                        if !msg.content.is_empty() {
+                                            let td_msg = proto::ServerMessage {
+                                                payload: Some(
+                                                    proto::server_message::Payload::TextDelta(
+                                                        proto::TextDelta {
+                                                            delta: msg.content.clone(),
+                                                            session_id: session_id.clone(),
+                                                        },
+                                                    ),
+                                                ),
+                                            };
+                                            if response_tx_inbound
+                                                .send(Ok(td_msg))
+                                                .await
+                                                .is_err()
+                                            {
+                                                break;
+                                            }
+                                        }
+                                        // Send tool calls
+                                        if let Some(tool_calls) = &msg.tool_calls {
+                                            for tc in tool_calls {
+                                                let tc_msg = proto::ServerMessage {
+                                                    payload: Some(
+                                                        proto::server_message::Payload::ToolCall(
+                                                            proto::ToolCall {
+                                                                call_id: tc.id.clone(),
+                                                                tool_name: tc.name.clone(),
+                                                                arguments: tc.arguments.clone(),
+                                                                session_id: session_id.clone(),
+                                                            },
+                                                        ),
+                                                    ),
+                                                };
+                                                if response_tx_inbound
+                                                    .send(Ok(tc_msg))
+                                                    .await
+                                                    .is_err()
+                                                {
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Role::Tool => {
+                                        let tr_msg = proto::ServerMessage {
+                                            payload: Some(
+                                                proto::server_message::Payload::ToolResult(
+                                                    proto::ToolResult {
+                                                        call_id: msg
+                                                            .tool_call_id
+                                                            .clone()
+                                                            .unwrap_or_default(),
+                                                        tool_name: String::new(),
+                                                        content: msg.content.clone(),
+                                                        is_error: msg.kind == MessageType::Error,
+                                                        session_id: session_id.clone(),
+                                                    },
+                                                ),
+                                            ),
+                                        };
+                                        if response_tx_inbound
+                                            .send(Ok(tr_msg))
+                                            .await
+                                            .is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            // Send Done to flush streaming text
+                            let done_msg = proto::ServerMessage {
+                                payload: Some(proto::server_message::Payload::Done(
+                                    proto::Done {
+                                        session_id: session_id.clone(),
+                                    },
+                                )),
+                            };
+                            let _ = response_tx_inbound.send(Ok(done_msg)).await;
                         }
                     }
                     _ => {}

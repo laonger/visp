@@ -29,6 +29,7 @@ use visp_tools::{
     fetch::WebFetch,
     file::{EditFile, ReadFile, WriteFile},
     search::{Glob, Grep},
+    task::TaskTool,
 };
 
 use crate::config::{DaemonConfig, LlmModelConfig};
@@ -169,6 +170,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.tool.get("codegraph_impact"),
         )))
         .map_err(|e| format!("register codegraph_impact: {e}"))?;
+
+    // ── 子 Agent 委派工具 ──
+    tool_registry
+        .register(Arc::new(TaskTool))
+        .map_err(|e| format!("register task: {e}"))?;
+
     let tool_registry = Arc::new(tool_registry);
 
     // ── 锁定核心工具（MCP 工具不能覆盖这些名称）──

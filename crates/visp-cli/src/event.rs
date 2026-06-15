@@ -264,11 +264,12 @@ pub async fn run(
                     let full_id = session.session_id.clone();
                     let model = session.model.clone();
                     let model_key = session.model_key.clone();
-                    let short: String = full_id.chars().take(8).collect();
+                    let _short: String = full_id.chars().take(8).collect();
                     chat_handle.session_id = full_id.clone();
                     app.reset_for_new_session(full_id, model, model_key);
+                    app.pending_switch_session = None;
                     chat_handle.send_join();
-                    app.add_message(LineType::Status, format!("Switched to session {short}"));
+                    app.needs_render = true;
                 }
                 Err(e) => {
                     app.add_message(LineType::Error, format!("Session not found: {e}"));
@@ -770,13 +771,16 @@ fn handle_grpc_message(
         Some(server_message::Payload::StatusUpdate(su)) => {
             app.add_message(LineType::Status, su.message);
             // 加载 session 历史中的用户输入到 input_history（↑↓ 翻找历史提问）
+            // 并在聊天面板中显示为用户消息
             if !su.user_inputs.is_empty() {
                 for input in &su.user_inputs {
                     if !app.input_history.contains(input) {
                         app.input_history.push(input.clone());
                     }
+                    app.add_message(LineType::User, input.clone());
                 }
             }
+            app.needs_render = true;
         }
         Some(server_message::Payload::UserQuery(uq)) => {
             app.confirm = Some(ConfirmState {

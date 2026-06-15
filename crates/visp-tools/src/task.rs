@@ -3,9 +3,9 @@ use serde_json::json;
 
 use visp_core::tool::{Tool, ToolContext, ToolResult};
 
-/// Task 工具：启动一个子 Agent 处理复杂任务。
-/// 实际执行由 agent loop 拦截（通过检查 tool name == "task"），
-/// 此处的 `execute()` 不会在正常运行流程中被调用。
+/// Task tool: delegate a complex task to a sub-agent.
+/// Actual execution is intercepted by the agent loop (via tool name == "task" check),
+/// so this `execute()` is never called in normal flow.
 pub struct TaskTool;
 
 #[async_trait]
@@ -15,7 +15,9 @@ impl Tool for TaskTool {
     }
 
     fn description(&self) -> &str {
-        "启动一个子 Agent 处理复杂任务。当任务适合某个专门的 Agent 时使用。"
+        "Delegate a complex or specialized task to a dedicated sub-agent. \
+         Use this when the task requires focused expertise (e.g. reading code, \
+         reviewing changes, testing) and can benefit from a separate agent."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -24,15 +26,15 @@ impl Tool for TaskTool {
             "properties": {
                 "subagent_type": {
                     "type": "string",
-                    "description": "子 Agent 的类型名称"
+                    "description": "Name of the sub-agent to invoke (e.g. \"code_reader\", \"code_reviewer\")"
                 },
                 "description": {
                     "type": "string",
-                    "description": "任务的详细描述"
+                    "description": "Detailed description of the task to delegate"
                 },
                 "task_id": {
                     "type": "string",
-                    "description": "任务 ID（可选，用于追踪）"
+                    "description": "Optional task ID for tracking"
                 }
             },
             "required": ["subagent_type", "description"]

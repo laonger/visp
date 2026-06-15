@@ -1425,7 +1425,9 @@ pub(crate) fn render_tool_guide(registry: &ToolRegistry) -> String {
         "\n**IMPORTANT**: Prefer specialized tools over `bash` when possible: \
          use `read_file` to read files, `edit_file`/`write_file` to modify them, \
          `grep`/`glob` to search files, and `codegraph_context`/`codegraph_trace`/`codegraph_impact` \
-         for code understanding. Only use `bash` when no other tool fits \
+         for code understanding. For complex tasks (e.g. reading code, reviewing changes), \
+         use the `task` tool to delegate to a dedicated sub-agent. \
+         Only use `bash` when no other tool fits \
          (e.g. running build commands, git operations, or multi-step shell scripts)."
             .to_string(),
     ];
