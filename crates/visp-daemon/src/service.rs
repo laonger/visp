@@ -6,14 +6,13 @@ use std::sync::RwLock as StdRwLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
-use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
+use tokio::sync::{RwLock, mpsc};
 use tonic::{Request, Response, Status, Streaming};
 
 use visp_codegraph::CodeGraph;
 use visp_core::{
-    agent::{AgentConfig, AgentEvent, UserQueryResult, run_agent_loop},
+    agent::{AgentConfig, AgentEvent},
     context::ContextTrimmer,
-    message::{Message, Role},
     provider::{LlmConfig, LlmProvider},
     rules::RuleEngine,
     session::{SessionManager, SessionStatus},
@@ -74,10 +73,13 @@ fn create_llm_provider(config: &LlmModelConfig) -> Result<Arc<dyn LlmProvider>, 
 }
 
 pub struct CoderDaemonService {
+    #[allow(dead_code)]
     provider: Arc<StdRwLock<Arc<dyn LlmProvider>>>,
     tool_registry: Arc<ToolRegistry>,
+    #[allow(dead_code)]
     rule_engine: Arc<RuleEngine>,
     session_mgr: Arc<SessionManager>,
+    #[allow(dead_code)]
     agent_config: AgentConfig,
     start_time: Instant,
     /// Phase 5: lazy-loaded CodeGraph instances per project path
@@ -85,6 +87,7 @@ pub struct CoderDaemonService {
     /// 默认 LLM 配置（来自 daemon.toml），create_session 时与客户端配置合并
     default_llm_config: LlmConfig,
     /// 上下文裁剪器
+    #[allow(dead_code)]
     context_trimmer: Arc<dyn ContextTrimmer + Send + Sync>,
     /// MCP 服务器管理器
     mcp_manager: Arc<McpManager>,
@@ -94,6 +97,14 @@ pub struct CoderDaemonService {
     model_configs: Vec<LlmModelConfig>,
     /// 模型 key 列表（格式 "{provider}.{name}"，用于 proto Session.model_keys）
     model_config_keys: Vec<String>,
+    // ── 多 Agent Orchestrator 通道 ──
+    /// 向 Orchestrator 发送取消信号
+    #[allow(dead_code)]
+    cancel_tx: mpsc::Sender<visp_agent::orchestrator::CancelSignal>,
+    /// 从 Orchestrator 接收 AgentEvent（转发给 CLI），用 Mutex<Option> 允许 take
+    orchestrator_grpc_rx: std::sync::Mutex<Option<mpsc::Receiver<visp_core::agent::AgentEvent>>>,
+    /// 向 Orchestrator 发送 ClientMessage（CLI 输入）
+    client_tx: mpsc::Sender<visp_agent::orchestrator::ClientMessage>,
 }
 
 impl CoderDaemonService {
@@ -101,13 +112,16 @@ impl CoderDaemonService {
     pub fn new(
         model_configs: Vec<LlmModelConfig>,
         tool_registry: Arc<ToolRegistry>,
-        rule_engine: Arc<RuleEngine>,
+        #[allow(dead_code)] rule_engine: Arc<RuleEngine>,
         session_mgr: Arc<SessionManager>,
-        agent_config: AgentConfig,
+        #[allow(dead_code)] agent_config: AgentConfig,
         llm_section: LlmSection,
-        context_trimmer: Arc<dyn ContextTrimmer + Send + Sync>,
+        #[allow(dead_code)] context_trimmer: Arc<dyn ContextTrimmer + Send + Sync>,
         mcp_manager: Arc<McpManager>,
         available_models: Vec<String>,
+        cancel_tx: mpsc::Sender<visp_agent::orchestrator::CancelSignal>,
+        orchestrator_grpc_rx: mpsc::Receiver<visp_core::agent::AgentEvent>,
+        client_tx: mpsc::Sender<visp_agent::orchestrator::ClientMessage>,
     ) -> Self {
         let mut extra = std::collections::HashMap::new();
         if let Some(budget) = llm_section.thinking_budget_tokens {
@@ -150,6 +164,9 @@ impl CoderDaemonService {
             available_models,
             model_configs,
             model_config_keys,
+            cancel_tx,
+            orchestrator_grpc_rx: std::sync::Mutex::new(Some(orchestrator_grpc_rx)),
+            client_tx,
         }
     }
 
@@ -323,412 +340,69 @@ impl CoderDaemon for CoderDaemonService {
         let mut in_stream = request.into_inner();
         let (tx, rx) = mpsc::channel::<Result<proto::ServerMessage, Status>>(128);
 
-        let tool_registry = self.tool_registry.clone();
-        let rule_engine = self.rule_engine.clone();
-        let session_mgr = self.session_mgr.clone();
-        let agent_config = self.agent_config.clone();
-        let context_trimmer = self.context_trimmer.clone();
-        let model_configs = self.model_configs.clone();
-        let provider_ref = self.provider.clone();
+        // Take the orchestrator receiver (one per connection)
+        let mut orchestrator_rx = self
+            .orchestrator_grpc_rx
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(|| Status::internal("orchestrator receiver already taken"))?;
 
+        // Clone channels for the two forwarding tasks
+        let client_tx = self.client_tx.clone();
+        let response_tx = tx.clone();
+
+        // ── Inbound: CLI → Orchestrator ──
         tokio::spawn(async move {
-            let pending_queries: Arc<
-                Mutex<HashMap<String, (String, oneshot::Sender<UserQueryResult>)>>,
-            > = Arc::new(Mutex::new(HashMap::new()));
-            let mut running_sessions: Vec<String> = Vec::new();
-
             while let Some(msg_result) = in_stream.next().await {
                 let msg = match msg_result {
                     Ok(m) => m,
-                    Err(e) => {
-                        let _ = tx.send(Err(Status::internal(e.to_string()))).await;
-                        break;
-                    }
+                    Err(_) => break,
                 };
-
                 match msg.payload {
                     Some(proto::client_message::Payload::UserInput(input)) => {
-                        let session_id = input.session_id;
-                        let text = input.text;
-                        tracing::info!(session_id = %session_id, text = %text, "[DAEMON] received UserInput");
-
-                        // Validate session exists and is Idle
-                        let session = match session_mgr.get(&session_id) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                let _ = tx
-                                    .send(Ok(session_error_msg(
-                                        "SessionNotFound",
-                                        &e.to_string(),
-                                        &session_id,
-                                    )))
-                                    .await;
-                                continue;
-                            }
+                        let cli_msg = visp_agent::orchestrator::ClientMessage::UserInput {
+                            session_id: input.session_id,
+                            text: input.text,
                         };
-
-                        if session.status != SessionStatus::Idle {
-                            let _ = tx
-                                .send(Ok(session_error_msg(
-                                    "SessionBusy",
-                                    "Session is not idle",
-                                    &session_id,
-                                )))
-                                .await;
-                            continue;
-                        }
-
-                        // Start agent loop
-                        let text = if text.trim().starts_with("/init") {
-                            match crate::command::init::prepare(&session.project_path, &text).await
-                            {
-                                Ok((init_msg, statuses)) => {
-                                    for s in &statuses {
-                                        let _ = tx
-                                            .send(Ok(proto::ServerMessage {
-                                                payload: Some(
-                                                    proto::server_message::Payload::StatusUpdate(
-                                                        proto::StatusUpdate {
-                                                            message: s.clone(),
-                                                            session_id: session_id.clone(),
-                                                            user_inputs: vec![],
-                                                        },
-                                                    ),
-                                                ),
-                                            }))
-                                            .await;
-                                    }
-                                    init_msg.content
-                                }
-                                Err(e) => {
-                                    let _ = tx
-                                        .send(Ok(session_error_msg("InitError", &e, &session_id)))
-                                        .await;
-                                    continue;
-                                }
-                            }
-                        } else {
-                            text
-                        };
-
-                        let ctx = match session_mgr.start_loop(&session_id, &context_trimmer) {
-                            Ok(c) => c,
-                            Err(e) => {
-                                let _ = tx
-                                    .send(Ok(session_error_msg(
-                                        "InternalError",
-                                        &e.to_string(),
-                                        &session_id,
-                                    )))
-                                    .await;
-                                continue;
-                            }
-                        };
-
-                        // User message will be appended by run_agent_loop
-                        let user_msg = Message::user(&text);
-
-                        // 每次 agent loop 从 RwLock 读取当前 provider（可能已被 ConfigUpdate 切换）
-                        let p = provider_ref.read().unwrap().clone();
-                        let tr = tool_registry.clone();
-                        let re = rule_engine.clone();
-                        let sm = session_mgr.clone();
-                        let ac = agent_config.clone();
-
-                        let (agent_tx, mut agent_rx) = mpsc::channel(64);
-                        let tx_events = tx.clone();
-                        let sid = session_id.clone();
-                        let pq = pending_queries.clone();
-
-                        running_sessions.push(session_id.clone());
-
-                        let sid2 = sid.clone();
-                        tokio::spawn(async move {
-                            tracing::info!(session_id = %sid, "[DAEMON] agent loop started");
-                            run_agent_loop(p, tr, re, sm, ctx, &ac, user_msg, agent_tx).await;
-                            tracing::info!(session_id = %sid, "[DAEMON] agent loop finished");
-                        });
-
-                        tokio::spawn(async move {
-                            while let Some(event) = agent_rx.recv().await {
-                                let is_done = matches!(event, AgentEvent::Done);
-                                if is_done {
-                                    tracing::info!(session_id = %sid2, "[DAEMON] forwarding Done to client");
-                                }
-                                if matches!(&event, AgentEvent::TextDelta(d) if d.is_empty()) {
-                                    tracing::warn!(session_id = %sid2, "[DAEMON] forwarding empty TextDelta");
-                                }
-                                let msg = match event {
-                                    AgentEvent::UserQuery {
-                                        query_id,
-                                        message,
-                                        options,
-                                        allow_other,
-                                        respond,
-                                    } => {
-                                        pq.lock()
-                                            .await
-                                            .insert(query_id.clone(), (sid2.clone(), respond));
-                                        proto::ServerMessage {
-                                            payload: Some(
-                                                proto::server_message::Payload::UserQuery(
-                                                    proto::UserQuery {
-                                                        query_id,
-                                                        message,
-                                                        session_id: sid2.clone(),
-                                                        options,
-                                                        allow_other,
-                                                    },
-                                                ),
-                                            ),
-                                        }
-                                    }
-                                    _ => agent_event_to_server_message(event, &sid2),
-                                };
-                                if tx_events.send(Ok(msg)).await.is_err() {
-                                    break;
-                                }
-                            }
-                        });
-                    }
-                    Some(proto::client_message::Payload::JoinSession(join)) => {
-                        let session_id = join.session_id;
-                        if let Ok(session) = session_mgr.get(&session_id) {
-                            // 切换 provider 以匹配 session 的模型配置
-                            if let Some(model_config) = model_configs
-                                .iter()
-                                .find(|mc| mc.model == session.config.model)
-                            {
-                                match create_llm_provider(model_config) {
-                                    Ok(new_provider) => {
-                                        *provider_ref.write().unwrap() = new_provider;
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            session_id = %session_id,
-                                            model = %session.config.model,
-                                            error = %e,
-                                            "failed to create provider for session model"
-                                        );
-                                    }
-                                }
-                            }
-
-                            if session.history.is_empty() {
-                                // no-op: new session, no history to show
-                            } else {
-                                // 收集用户输入，供 CLI 填充 input_history（↑↓ 翻找历史提问）
-                                let user_inputs: Vec<String> = session
-                                    .history
-                                    .iter()
-                                    .filter(|m| m.role == Role::User)
-                                    .map(|m| m.content.clone())
-                                    .collect();
-                                // 发送摘要头（含 user_inputs 用于恢复输入历史）
-                                let _ = tx
-                                    .send(Ok(proto::ServerMessage {
-                                        payload: Some(
-                                            proto::server_message::Payload::StatusUpdate(
-                                                proto::StatusUpdate {
-                                                    message: format!(
-                                                        "═══ Resumed session ({} previous messages) ═══",
-                                                        session.history.len()
-                                                    ),
-                                                    session_id: session_id.clone(),
-                                                    user_inputs,
-                                                },
-                                            ),
-                                        ),
-                                    }))
-                                    .await;
-                                // 逐条发送完整的历史消息（不再截断为 120 字符预览）
-                                for msg in &session.history {
-                                    let role_label = match msg.role {
-                                        Role::User => "User",
-                                        Role::Assistant => "Assistant",
-                                        Role::Tool => "  Tool",
-                                        _ => continue,
-                                    };
-                                    let _ = tx
-                                        .send(Ok(proto::ServerMessage {
-                                            payload: Some(
-                                                proto::server_message::Payload::StatusUpdate(
-                                                    proto::StatusUpdate {
-                                                        message: format!(
-                                                            "{role_label}: {}",
-                                                            msg.content
-                                                        ),
-                                                        session_id: session_id.clone(),
-                                                        user_inputs: vec![],
-                                                    },
-                                                ),
-                                            ),
-                                        }))
-                                        .await;
-                                }
-                                // 结束标记
-                                let _ = tx
-                                    .send(Ok(proto::ServerMessage {
-                                        payload: Some(
-                                            proto::server_message::Payload::StatusUpdate(
-                                                proto::StatusUpdate {
-                                                    message:
-                                                        "══════════════════════════════════════"
-                                                            .into(),
-                                                    session_id: session_id.clone(),
-                                                    user_inputs: vec![],
-                                                },
-                                            ),
-                                        ),
-                                    }))
-                                    .await;
-                            }
-                        }
-                    }
-                    Some(proto::client_message::Payload::ConfigUpdate(update)) => {
-                        let session_id = update.session_id;
-
-                        let session = match session_mgr.get(&session_id) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                let _ = tx
-                                    .send(Ok(session_error_msg(
-                                        "SessionNotFound",
-                                        &e.to_string(),
-                                        &session_id,
-                                    )))
-                                    .await;
-                                continue;
-                            }
-                        };
-
-                        if session.status != SessionStatus::Idle {
-                            let _ = tx
-                                .send(Ok(session_error_msg(
-                                    "SessionBusy",
-                                    "Cannot update config while session is running",
-                                    &session_id,
-                                )))
-                                .await;
-                            continue;
-                        }
-
-                        let mut config = session.config.clone();
-                        if let Some(update_config) = &update.config {
-                            // model_key 优先匹配，然后 model（API model key 或 key 格式）作为回退
-                            let matched = update_config
-                                .model_key
-                                .as_ref()
-                                .and_then(|mk| model_configs.iter().find(|mc| mc.key() == *mk))
-                                .or_else(|| {
-                                    update_config.model.as_ref().and_then(|m| {
-                                        model_configs.iter().find(|mc| mc.model == *m)
-                                    })
-                                });
-
-                            if let Some(model_config) = matched {
-                                match create_llm_provider(model_config) {
-                                    Ok(new_provider) => {
-                                        *provider_ref.write().unwrap() = new_provider;
-                                        config.model = model_config.model.clone();
-                                        if let Some(temp) = model_config.temperature {
-                                            config.temperature = temp;
-                                        }
-                                        if let Some(tokens) = model_config.max_tokens {
-                                            config.max_tokens = tokens;
-                                        }
-                                        if let Some(ctx) = model_config.max_context_tokens {
-                                            config.max_context_tokens = ctx;
-                                        }
-                                        if !model_config.extra.is_empty() {
-                                            config.extra.extend(model_config.extra.clone());
-                                        }
-                                    }
-                                    Err(e) => {
-                                        let _ = tx
-                                            .send(Ok(session_error_msg(
-                                                "ProviderError",
-                                                &e,
-                                                &session_id,
-                                            )))
-                                            .await;
-                                        continue;
-                                    }
-                                }
-                            } else if let Some(model) = &update_config.model {
-                                // 未匹配到配置，直接使用（兼容旧行为）
-                                config.model = model.clone();
-                            }
-                            if let Some(temp) = update_config.temperature {
-                                config.temperature = temp;
-                            }
-                            if let Some(tokens) = update_config.max_tokens {
-                                config.max_tokens = tokens;
-                            }
-                            if !update_config.extra.is_empty() {
-                                config.extra.extend(update_config.extra.clone());
-                            }
-                        }
-
-                        if let Err(e) = session_mgr.update_config(&session_id, config) {
-                            let _ = tx
-                                .send(Ok(session_error_msg(
-                                    "InternalError",
-                                    &e.to_string(),
-                                    &session_id,
-                                )))
-                                .await;
+                        if client_tx.send(cli_msg).await.is_err() {
+                            break;
                         }
                     }
                     Some(proto::client_message::Payload::UserResponse(resp)) => {
-                        let sender = pending_queries.lock().await.remove(&resp.query_id);
-                        if let Some((_sid, sender)) = sender {
-                            let _ = sender.send(UserQueryResult {
-                                selected_index: resp.selected_index,
-                                text: resp.text,
-                            });
+                        let cli_msg = visp_agent::orchestrator::ClientMessage::UserQueryResponse {
+                            query_id: resp.query_id,
+                            selected_index: resp.selected_index,
+                            text: resp.text,
+                        };
+                        if client_tx.send(cli_msg).await.is_err() {
+                            break;
                         }
                     }
-                    Some(proto::client_message::Payload::Cancel(cancel)) => {
-                        let sid = &cancel.session_id;
-                        match session_mgr.get(sid) {
-                            Ok(s) if s.status == SessionStatus::Running => {
-                                session_mgr.cancel_agent(sid);
-                                running_sessions.retain(|id| id != sid);
-                                // 清理该会话的所有 pending queries，双重保险
-                                let mut pq = pending_queries.lock().await;
-                                pq.retain(|_, (sess_id, _)| sess_id != sid);
-                            }
-                            _ => {
-                                // 不存在或非 Running 状态 → 静默忽略
-                            }
-                        }
-                    }
-                    Some(proto::client_message::Payload::Ack(ack)) => {
-                        tracing::info!(request_id = %ack.request_id, "[DAEMON] received client Ack");
-                        // 后续可据此清理 request 级状态
-                    }
-                    None => {}
+                    _ => {}
                 }
             }
+        });
 
-            // 客户端断开 → 取消此连接上所有运行中的 agent loop
-            for sid in &running_sessions {
-                session_mgr.cancel_agent(sid);
-            }
-            if !running_sessions.is_empty() {
-                tracing::info!(
-                    "[DAEMON] client disconnected, cancelled {} sessions",
-                    running_sessions.len()
-                );
+        // ── Outbound: Orchestrator → CLI ──
+        tokio::spawn(async move {
+            while let Some(event) = orchestrator_rx.recv().await {
+                let proto_msg = agent_event_to_server_message(event, "");
+                if let Some(payload) = proto_msg.payload
+                    && response_tx
+                        .send(Ok(proto::ServerMessage {
+                            payload: Some(payload),
+                        }))
+                        .await
+                        .is_err()
+                {
+                    break;
+                }
             }
         });
 
-        let out_stream = futures::stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|item| (item, rx))
-        });
-
-        Ok(Response::new(Box::pin(out_stream)))
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream) as Self::ChatStream))
     }
 
     async fn read_file(
@@ -927,6 +601,7 @@ fn map_llm_config(proto: &proto::LlmConfig) -> LlmConfig {
     config
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn session_error_msg(code: &str, message: &str, session_id: &str) -> proto::ServerMessage {
     proto::ServerMessage {
         payload: Some(proto::server_message::Payload::Error(proto::Error {
@@ -1019,10 +694,23 @@ fn agent_event_to_server_message(event: AgentEvent, session_id: &str) -> proto::
                 },
             )),
         },
-        AgentEvent::UserQuery { .. } => {
-            // Handled separately in the chat handler (sender extraction)
-            proto::ServerMessage { payload: None }
-        }
+        AgentEvent::UserQuery {
+            query_id,
+            message,
+            options,
+            allow_other,
+            respond: _,
+        } => proto::ServerMessage {
+            payload: Some(proto::server_message::Payload::UserQuery(
+                proto::UserQuery {
+                    query_id: query_id.clone(),
+                    message: message.clone(),
+                    options: options.clone(),
+                    allow_other,
+                    session_id: sid,
+                },
+            )),
+        },
         AgentEvent::Error { code, message } => proto::ServerMessage {
             payload: Some(proto::server_message::Payload::Error(proto::Error {
                 code: code.to_string(),
@@ -1054,6 +742,9 @@ mod tests {
     // ── Helpers ─────────────────────────────────────────────────────────────
 
     fn make_service(mgr: StdArc<SessionManager>) -> CoderDaemonService {
+        let (cancel_tx, _cancel_rx) = mpsc::channel(16);
+        let (_grpc_tx, orchestrator_grpc_rx) = mpsc::channel(256);
+        let (client_tx, _client_rx) = mpsc::channel(64);
         CoderDaemonService {
             provider: Arc::new(StdRwLock::new(
                 Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>
@@ -1070,6 +761,9 @@ mod tests {
             available_models: vec![],
             model_configs: vec![],
             model_config_keys: vec![],
+            cancel_tx,
+            orchestrator_grpc_rx: std::sync::Mutex::new(Some(orchestrator_grpc_rx)),
+            client_tx,
         }
     }
 
@@ -1315,6 +1009,9 @@ mod tests {
             max_context_tokens: 200_000,
             ..LlmConfig::default()
         };
+        let (cancel_tx, _cancel_rx) = mpsc::channel(16);
+        let (_grpc_tx, orchestrator_grpc_rx) = mpsc::channel(256);
+        let (client_tx, _client_rx) = mpsc::channel(64);
         let service = CoderDaemonService {
             provider: Arc::new(StdRwLock::new(
                 Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>
@@ -1331,6 +1028,9 @@ mod tests {
             available_models: vec![],
             model_configs: vec![],
             model_config_keys: vec![],
+            cancel_tx,
+            orchestrator_grpc_rx: std::sync::Mutex::new(Some(orchestrator_grpc_rx)),
+            client_tx,
         };
 
         let request = tonic::Request::new(proto::CreateSessionRequest {
@@ -1358,6 +1058,9 @@ mod tests {
             max_context_tokens: 200_000,
             ..LlmConfig::default()
         };
+        let (cancel_tx, _cancel_rx) = mpsc::channel(16);
+        let (_grpc_tx, orchestrator_grpc_rx) = mpsc::channel(256);
+        let (client_tx, _client_rx) = mpsc::channel(64);
         let service = CoderDaemonService {
             provider: Arc::new(StdRwLock::new(
                 Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>
@@ -1374,6 +1077,9 @@ mod tests {
             available_models: vec![],
             model_configs: vec![],
             model_config_keys: vec![],
+            cancel_tx,
+            orchestrator_grpc_rx: std::sync::Mutex::new(Some(orchestrator_grpc_rx)),
+            client_tx,
         };
 
         let request = tonic::Request::new(proto::CreateSessionRequest {
@@ -1530,16 +1236,25 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_event_to_server_message_user_query_skipped() {
-        let (tx, _rx) = oneshot::channel::<UserQueryResult>();
+    fn test_agent_event_to_server_message_user_query() {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
         let event = AgentEvent::UserQuery {
             query_id: "q-1".into(),
             message: "confirm?".into(),
-            options: vec![],
-            allow_other: false,
+            options: vec!["yes".into(), "no".into()],
+            allow_other: true,
             respond: tx,
         };
         let msg = agent_event_to_server_message(event, "sess-1");
-        assert!(msg.payload.is_none());
+        match msg.payload {
+            Some(proto::server_message::Payload::UserQuery(query)) => {
+                assert_eq!(query.query_id, "q-1");
+                assert_eq!(query.message, "confirm?");
+                assert_eq!(query.options, vec!["yes", "no"]);
+                assert!(query.allow_other);
+                assert_eq!(query.session_id, "sess-1");
+            }
+            _ => panic!("expected UserQuery payload"),
+        }
     }
 }

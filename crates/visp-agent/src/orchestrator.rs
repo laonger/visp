@@ -13,10 +13,11 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tracing;
 
+use visp_core::agent::run_agent_loop;
 use visp_core::agent::{
     AgentConfig, AgentEvent, AgentMessage, Envelope, OrchestratorMessage, UserQueryResult,
 };
-use visp_core::agent_definition::{merge_permissions, AgentDefinition};
+use visp_core::agent_definition::{AgentDefinition, merge_permissions};
 use visp_core::agent_registry::AgentRegistry;
 use visp_core::context::ContextTrimmer;
 use visp_core::error::SessionError;
@@ -25,7 +26,6 @@ use visp_core::provider::LlmProvider;
 use visp_core::rules::RuleEngine;
 use visp_core::session::{SessionManager, SessionStatus, SubSessionParams};
 use visp_core::tool_registry::ToolRegistry;
-use visp_core::agent::run_agent_loop;
 
 use crate::active_agent::{ActiveAgent, ActiveAgentRegistry};
 
@@ -35,8 +35,15 @@ pub struct CancelSignal;
 /// CLI → 服务器的消息
 #[derive(Debug, Clone)]
 pub enum ClientMessage {
-    UserInput { session_id: String, text: String },
-    UserQueryResponse { query_id: String, selected_index: i32, text: String },
+    UserInput {
+        session_id: String,
+        text: String,
+    },
+    UserQueryResponse {
+        query_id: String,
+        selected_index: i32,
+        text: String,
+    },
 }
 
 /// Orchestrator 错误
@@ -150,8 +157,23 @@ impl Orchestrator {
             AgentMessage::ThinkingBlock(_) => {
                 // Thinking blocks are not forwarded to CLI in V1
             }
-            AgentMessage::UsageInfo { input_tokens, output_tokens, tool_calls, cache_creation_input_tokens, cache_read_input_tokens } => {
-                let _ = self.grpc_tx.send(AgentEvent::UsageInfo { input_tokens, output_tokens, tool_calls, cache_creation_input_tokens, cache_read_input_tokens }).await;
+            AgentMessage::UsageInfo {
+                input_tokens,
+                output_tokens,
+                tool_calls,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+            } => {
+                let _ = self
+                    .grpc_tx
+                    .send(AgentEvent::UsageInfo {
+                        input_tokens,
+                        output_tokens,
+                        tool_calls,
+                        cache_creation_input_tokens,
+                        cache_read_input_tokens,
+                    })
+                    .await;
             }
             AgentMessage::StatusUpdate(content) => {
                 let _ = self.grpc_tx.send(AgentEvent::StatusUpdate(content)).await;
@@ -160,24 +182,70 @@ impl Orchestrator {
                 let _ = self.grpc_tx.send(AgentEvent::Error { code, message }).await;
                 self.handle_done(&session_id).await;
             }
-            AgentMessage::ToolCallRequest { call_id, tool_name, arguments } => {
-                let _ = self.grpc_tx.send(AgentEvent::ToolCallRequest { call_id, tool_name, arguments }).await;
+            AgentMessage::ToolCallRequest {
+                call_id,
+                tool_name,
+                arguments,
+            } => {
+                let _ = self
+                    .grpc_tx
+                    .send(AgentEvent::ToolCallRequest {
+                        call_id,
+                        tool_name,
+                        arguments,
+                    })
+                    .await;
             }
-            AgentMessage::ToolCallResult { call_id, tool_name, content, is_error } => {
-                let _ = self.grpc_tx.send(AgentEvent::ToolCallResult { call_id, tool_name, content, is_error }).await;
+            AgentMessage::ToolCallResult {
+                call_id,
+                tool_name,
+                content,
+                is_error,
+            } => {
+                let _ = self
+                    .grpc_tx
+                    .send(AgentEvent::ToolCallResult {
+                        call_id,
+                        tool_name,
+                        content,
+                        is_error,
+                    })
+                    .await;
             }
-            AgentMessage::UserQuery { query_id, message, options, allow_other, respond } => {
-                self.pending_queries.insert(query_id.clone(), (session_id.clone(), respond));
-                let _ = self.grpc_tx.send(AgentEvent::UserQuery {
-                    query_id,
-                    message,
-                    options,
-                    allow_other,
-                    respond: oneshot::channel().0, // placeholder, real one stored in pending_queries
-                }).await;
+            AgentMessage::UserQuery {
+                query_id,
+                message,
+                options,
+                allow_other,
+                respond,
+            } => {
+                self.pending_queries
+                    .insert(query_id.clone(), (session_id.clone(), respond));
+                let _ = self
+                    .grpc_tx
+                    .send(AgentEvent::UserQuery {
+                        query_id,
+                        message,
+                        options,
+                        allow_other,
+                        respond: oneshot::channel().0, // placeholder, real one stored in pending_queries
+                    })
+                    .await;
             }
-            AgentMessage::SpawnRequest { call_id, subagent_type, description, task_id } => {
-                self.spawn_sub_agent(&envelope.session_id, &call_id, &subagent_type, &description, task_id.as_deref()).await;
+            AgentMessage::SpawnRequest {
+                call_id,
+                subagent_type,
+                description,
+                task_id,
+            } => {
+                self.spawn_sub_agent(
+                    &envelope.session_id,
+                    &call_id,
+                    &subagent_type,
+                    &description,
+                    task_id.as_deref(),
+                )
+                .await;
             }
             AgentMessage::Done => {
                 self.handle_done(&session_id).await;
@@ -189,13 +257,22 @@ impl Orchestrator {
     pub async fn handle_client_message(&mut self, msg: ClientMessage) {
         match msg {
             ClientMessage::UserInput { session_id, text } => {
-                if let Ok(session) = self.session_mgr.get(&session_id) && session.status == SessionStatus::Idle {
+                if let Ok(session) = self.session_mgr.get(&session_id)
+                    && session.status == SessionStatus::Idle
+                {
                     self.start_main_agent(&session_id, &text).await;
                 }
             }
-            ClientMessage::UserQueryResponse { query_id, selected_index, text } => {
+            ClientMessage::UserQueryResponse {
+                query_id,
+                selected_index,
+                text,
+            } => {
                 if let Some((_session_id, respond)) = self.pending_queries.remove(&query_id) {
-                    let _ = respond.send(UserQueryResult { selected_index, text });
+                    let _ = respond.send(UserQueryResult {
+                        selected_index,
+                        text,
+                    });
                 }
             }
         }
@@ -281,7 +358,8 @@ impl Orchestrator {
                 &config,
                 msg,
                 tx,
-            ).await;
+            )
+            .await;
         });
     }
 
@@ -297,8 +375,14 @@ impl Orchestrator {
         // 1. Depth check
         let depth = self.active_agents.compute_depth(parent_session_id);
         if depth >= self.agent_config.max_depth {
-            tracing::warn!(parent_session_id, depth, max = self.agent_config.max_depth, "max depth exceeded");
-            self.send_sub_agent_error(parent_session_id, call_id, "Max depth exceeded").await;
+            tracing::warn!(
+                parent_session_id,
+                depth,
+                max = self.agent_config.max_depth,
+                "max depth exceeded"
+            );
+            self.send_sub_agent_error(parent_session_id, call_id, "Max depth exceeded")
+                .await;
             return;
         }
 
@@ -307,7 +391,12 @@ impl Orchestrator {
             Some(a) => a.clone(),
             None => {
                 tracing::error!(subagent_type, "subagent definition not found");
-                self.send_sub_agent_error(parent_session_id, call_id, &format!("Unknown subagent type: {subagent_type}")).await;
+                self.send_sub_agent_error(
+                    parent_session_id,
+                    call_id,
+                    &format!("Unknown subagent type: {subagent_type}"),
+                )
+                .await;
                 return;
             }
         };
@@ -323,7 +412,9 @@ impl Orchestrator {
 
         // 4. Merge permissions: parent session deny → parent agent deny → subagent rules
         let parent_agent_def = self.agent_registry.get(&parent_session.agent_name);
-        let parent_agent_permission = parent_agent_def.map(|a| a.permission.as_slice()).unwrap_or(&[]);
+        let parent_agent_permission = parent_agent_def
+            .map(|a| a.permission.as_slice())
+            .unwrap_or(&[]);
         let merged_rules = merge_permissions(
             &parent_session.permission,
             parent_agent_permission,
@@ -333,7 +424,11 @@ impl Orchestrator {
         // 5. Generate session ID
         let sub_session_id = format!(
             "{parent_session_id}/{subagent_type}/{}",
-            uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0000")
+            uuid::Uuid::new_v4()
+                .to_string()
+                .split('-')
+                .next()
+                .unwrap_or("0000")
         );
 
         // 6. Create sub session
@@ -348,7 +443,12 @@ impl Orchestrator {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(error = %e, "create_sub failed");
-                self.send_sub_agent_error(parent_session_id, call_id, "Failed to create sub session").await;
+                self.send_sub_agent_error(
+                    parent_session_id,
+                    call_id,
+                    "Failed to create sub session",
+                )
+                .await;
                 return;
             }
         };
@@ -378,7 +478,12 @@ impl Orchestrator {
             Err(e) => {
                 tracing::error!(session_id = sub_session_id, error = %e, "start_loop_v2 failed for sub agent");
                 self.active_agents.remove(&sub_session_id);
-                self.send_sub_agent_error(parent_session_id, call_id, "Failed to start sub agent loop").await;
+                self.send_sub_agent_error(
+                    parent_session_id,
+                    call_id,
+                    "Failed to start sub agent loop",
+                )
+                .await;
                 return;
             }
         };
@@ -389,7 +494,8 @@ impl Orchestrator {
             None => {
                 tracing::error!(subagent_type, "no provider available");
                 self.active_agents.remove(&sub_session_id);
-                self.send_sub_agent_error(parent_session_id, call_id, "No provider available").await;
+                self.send_sub_agent_error(parent_session_id, call_id, "No provider available")
+                    .await;
                 return;
             }
         };
@@ -414,7 +520,8 @@ impl Orchestrator {
                 &config,
                 msg,
                 tx,
-            ).await;
+            )
+            .await;
         });
 
         tracing::info!(
@@ -445,7 +552,9 @@ impl Orchestrator {
         self.active_agents.remove(session_id);
 
         // Finish the session
-        let _ = self.session_mgr.finish_loop(session_id, SessionStatus::Idle);
+        let _ = self
+            .session_mgr
+            .finish_loop(session_id, SessionStatus::Idle);
 
         // Send result to parent if this is a sub-agent
         if let Some(ref parent_id) = parent_id {
@@ -453,11 +562,13 @@ impl Orchestrator {
             let call_id = pending_call_id.unwrap_or_default();
 
             if let Some(parent) = self.active_agents.get(parent_id) {
-                match parent.inbox.try_send(OrchestratorMessage::SubAgentComplete {
-                    call_id,
-                    content,
-                    task_id: String::new(),
-                }) {
+                match parent
+                    .inbox
+                    .try_send(OrchestratorMessage::SubAgentComplete {
+                        call_id,
+                        content,
+                        task_id: String::new(),
+                    }) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(msg)) => {
                         let inbox = parent.inbox.clone();
@@ -470,7 +581,10 @@ impl Orchestrator {
                     }
                 }
             } else {
-                tracing::warn!(parent_id, "parent agent no longer active, sub result dropped");
+                tracing::warn!(
+                    parent_id,
+                    "parent agent no longer active, sub result dropped"
+                );
             }
         } else {
             // Root agent done — notify CLI
@@ -519,7 +633,10 @@ impl Orchestrator {
         session_id: &str,
     ) -> Option<Arc<dyn LlmProvider>> {
         // Try agent's model key first
-        if let Some(agent) = agent && let Some(ref model_key) = agent.model && let Some(provider) = self.providers.get(model_key) {
+        if let Some(agent) = agent
+            && let Some(ref model_key) = agent.model
+            && let Some(provider) = self.providers.get(model_key)
+        {
             return Some(provider.clone());
         }
 
@@ -539,11 +656,16 @@ impl Orchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use visp_core::context::{ContextTrimmer, NoopTrimmer};
     use visp_core::session::InMemorySessionStore;
-    use std::path::PathBuf;
 
-    fn make_orchestrator() -> (Orchestrator, mpsc::Sender<Envelope>, mpsc::Sender<ClientMessage>, mpsc::Receiver<AgentEvent>) {
+    fn make_orchestrator() -> (
+        Orchestrator,
+        mpsc::Sender<Envelope>,
+        mpsc::Sender<ClientMessage>,
+        mpsc::Receiver<AgentEvent>,
+    ) {
         let (_cancel_tx, cancel_rx) = mpsc::channel(16);
         let (global_tx, global_rx) = mpsc::channel(256);
         let (grpc_tx, grpc_rx) = mpsc::channel(256);
@@ -552,7 +674,8 @@ mod tests {
         let global_tx_for_orch = global_tx.clone();
         let global_tx_for_test = global_tx;
 
-        let store: Box<dyn visp_core::session::SessionStore> = Box::new(InMemorySessionStore::new());
+        let store: Box<dyn visp_core::session::SessionStore> =
+            Box::new(InMemorySessionStore::new());
         let session_mgr = Arc::new(SessionManager::new(store));
         let agent_registry = Arc::new(AgentRegistry::new());
         let tool_registry = Arc::new(ToolRegistry::new());
@@ -584,10 +707,13 @@ mod tests {
         let (mut orch, global_tx, _client_tx, mut grpc_rx) = make_orchestrator();
 
         // Send TextDelta via global_tx
-        global_tx.send(Envelope {
-            session_id: "s-1".to_string(),
-            message: AgentMessage::TextDelta("hello".to_string()),
-        }).await.unwrap();
+        global_tx
+            .send(Envelope {
+                session_id: "s-1".to_string(),
+                message: AgentMessage::TextDelta("hello".to_string()),
+            })
+            .await
+            .unwrap();
 
         // Process it
         if let Some(envelope) = orch.global_rx.try_recv().ok() {
@@ -618,7 +744,8 @@ mod tests {
                 allow_other: false,
                 respond,
             },
-        }).await;
+        })
+        .await;
 
         // Verify it was stored
         assert!(orch.pending_queries.contains_key("q-1"));

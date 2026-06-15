@@ -152,9 +152,7 @@ impl Migrator {
                     .map(|c| c > 0)
                     .unwrap_or(false);
                 if !has_column {
-                    conn.execute_batch(&format!(
-                        "ALTER TABLE session ADD COLUMN {col} {def};"
-                    ))?;
+                    conn.execute_batch(&format!("ALTER TABLE session ADD COLUMN {col} {def};"))?;
                 }
             }
         }
@@ -469,7 +467,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(agent_name, "default", "existing rows should default to 'default'");
+        assert_eq!(
+            agent_name, "default",
+            "existing rows should default to 'default'"
+        );
 
         let parent_id: Option<String> = conn
             .query_row(
@@ -478,7 +479,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(parent_id.is_none(), "existing rows should have NULL parent_id");
+        assert!(
+            parent_id.is_none(),
+            "existing rows should have NULL parent_id"
+        );
 
         let permission_json: String = conn
             .query_row(
@@ -487,7 +491,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(permission_json, "[]", "existing rows should default to '[]'");
+        assert_eq!(
+            permission_json, "[]",
+            "existing rows should default to '[]'"
+        );
     }
 
     #[test]

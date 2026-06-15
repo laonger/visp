@@ -7,14 +7,18 @@ mod service;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
+
 use visp_core::{
     agent::AgentConfig,
     context::ContextTrimmer,
+    provider::LlmProvider,
     rules::RuleEngine,
     session::{InMemorySessionStore, SessionManager, SessionStore},
     tool_registry::ToolRegistry,
 };
 
+use visp_agent::orchestrator::{CancelSignal, Orchestrator};
 use visp_mcp::manager::McpManager;
 use visp_tools::{
     bash::Bash,
@@ -27,8 +31,52 @@ use visp_tools::{
     search::{Glob, Grep},
 };
 
-use crate::config::DaemonConfig;
+use crate::config::{DaemonConfig, LlmModelConfig};
 use crate::service::CoderDaemonService;
+
+/// Create an LLM provider from a model config.
+fn create_llm_provider(config: &LlmModelConfig) -> Result<Arc<dyn LlmProvider>, String> {
+    match config.protocol.as_str() {
+        "openai" => {
+            let api_key = config
+                .api_key
+                .clone()
+                .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+                .ok_or_else(|| {
+                    "OPENAI_API_KEY not set (configure api_key or set env)".to_string()
+                })?;
+            if let Some(ref base_url) = config.base_url {
+                Ok(Arc::new(visp_llm::openai::OpenAiProvider::with_base_url(
+                    api_key,
+                    base_url.clone(),
+                )))
+            } else {
+                Ok(Arc::new(visp_llm::openai::OpenAiProvider::new(api_key)))
+            }
+        }
+        _ => {
+            let api_key = config
+                .api_key
+                .clone()
+                .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+                .ok_or_else(|| {
+                    "ANTHROPIC_API_KEY not set (configure api_key or set env)".to_string()
+                })?;
+            if let Some(ref base_url) = config.base_url {
+                Ok(Arc::new(
+                    visp_llm::anthropic::AnthropicProvider::with_base_url(
+                        api_key,
+                        base_url.clone(),
+                    ),
+                ))
+            } else {
+                Ok(Arc::new(visp_llm::anthropic::AnthropicProvider::new(
+                    api_key,
+                )))
+            }
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -207,6 +255,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_depth: config.agent.max_depth,
     };
 
+    // 8.5. Create provider HashMap
+    let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
+    let default_model_key = model_configs
+        .first()
+        .map(|mc| mc.key())
+        .unwrap_or_else(|| "default".to_string());
+    for mc in &model_configs {
+        match create_llm_provider(mc) {
+            Ok(provider) => {
+                providers.insert(mc.key(), provider);
+            }
+            Err(e) => {
+                tracing::warn!(model_key = %mc.key(), error = %e, "failed to create provider");
+            }
+        }
+    }
+
+    // 8.6. Load agent definitions
+    let agent_registry = Arc::new(agent_loader::load_agents(&cwd));
+
+    // 8.7. Create orchestration channels
+    let (global_tx, global_rx) = mpsc::channel(256);
+    let (cancel_tx, cancel_rx) = mpsc::channel::<CancelSignal>(16);
+    let (orchestrator_grpc_tx, orchestrator_grpc_rx) = mpsc::channel(256);
+    let (client_tx, client_rx) = mpsc::channel(64);
+
+    // 8.8. Create and start Orchestrator
+    let mut orchestrator = Orchestrator::new(
+        cancel_rx,
+        global_rx,
+        global_tx.clone(),
+        client_rx,
+        orchestrator_grpc_tx.clone(),
+        session_mgr.clone(),
+        agent_registry.clone(),
+        tool_registry.clone(),
+        rule_engine.clone(),
+        agent_config.clone(),
+        context_trimmer.clone(),
+        providers,
+        default_model_key,
+    );
+    tokio::spawn(async move {
+        orchestrator.run().await;
+    });
+
     // 9. Assemble service
     let mcp_shutdown = mcp_manager.clone();
     let service = CoderDaemonService::new(
@@ -219,6 +313,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         context_trimmer,
         mcp_manager,
         available_models,
+        cancel_tx,
+        orchestrator_grpc_rx,
+        client_tx,
     );
 
     // 10. Start gRPC server

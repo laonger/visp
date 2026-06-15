@@ -66,6 +66,7 @@ pub struct LlmModelConfig {
     #[serde(default)]
     pub max_context_tokens: Option<u32>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub extra: std::collections::HashMap<String, String>,
 }
 

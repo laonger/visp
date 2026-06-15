@@ -77,7 +77,10 @@ pub fn merge_permissions(
     result.extend(subagent_permission.iter().cloned());
 
     // 4. 兜底 *: deny（如果没有显式 *: deny）
-    if !result.iter().any(|r| r.permission == "*" && r.pattern == "*" && r.action == PermissionAction::Deny) {
+    if !result
+        .iter()
+        .any(|r| r.permission == "*" && r.pattern == "*" && r.action == PermissionAction::Deny)
+    {
         result.push(PermissionRule {
             permission: "*".to_string(),
             pattern: "*".to_string(),
@@ -100,9 +103,7 @@ pub fn check_permission(
 
     // 第一轮：精确匹配 permission
     for rule in rules {
-        if rule.permission == name
-            && (rule.pattern == "*" || args_str.contains(&rule.pattern))
-        {
+        if rule.permission == name && (rule.pattern == "*" || args_str.contains(&rule.pattern)) {
             match rule.action {
                 PermissionAction::Allow => return PermissionDecision::Allowed,
                 PermissionAction::Deny => {
@@ -117,9 +118,7 @@ pub fn check_permission(
 
     // 第二轮：通配匹配 permission="*"
     for rule in rules {
-        if rule.permission == "*"
-            && (rule.pattern == "*" || args_str.contains(&rule.pattern))
-        {
+        if rule.permission == "*" && (rule.pattern == "*" || args_str.contains(&rule.pattern)) {
             match rule.action {
                 PermissionAction::Allow => return PermissionDecision::Allowed,
                 PermissionAction::Deny => {
@@ -159,7 +158,11 @@ mod tests {
             action: PermissionAction::Deny,
         }];
         let result = merge_permissions(&session_rules, &[], &[]);
-        assert!(result.iter().any(|r| r.permission == "edit" && r.action == PermissionAction::Deny));
+        assert!(
+            result
+                .iter()
+                .any(|r| r.permission == "edit" && r.action == PermissionAction::Deny)
+        );
     }
 
     #[test]
@@ -170,7 +173,11 @@ mod tests {
             action: PermissionAction::Deny,
         }];
         let result = merge_permissions(&[], &agent_rules, &[]);
-        assert!(result.iter().any(|r| r.permission == "bash" && r.action == PermissionAction::Deny));
+        assert!(
+            result
+                .iter()
+                .any(|r| r.permission == "bash" && r.action == PermissionAction::Deny)
+        );
     }
 
     #[test]
@@ -182,8 +189,16 @@ mod tests {
         }];
         let result = merge_permissions(&[], &[], &sub_rules);
         // Should have both the allow rule and the fallback deny-all
-        assert!(result.iter().any(|r| r.permission == "read" && r.action == PermissionAction::Allow));
-        assert!(result.iter().any(|r| r.permission == "*" && r.action == PermissionAction::Deny));
+        assert!(
+            result
+                .iter()
+                .any(|r| r.permission == "read" && r.action == PermissionAction::Allow)
+        );
+        assert!(
+            result
+                .iter()
+                .any(|r| r.permission == "*" && r.action == PermissionAction::Deny)
+        );
     }
 
     #[test]
@@ -194,7 +209,12 @@ mod tests {
             action: PermissionAction::Deny,
         }];
         let result = merge_permissions(&[], &[], &sub_rules);
-        let deny_all_count = result.iter().filter(|r| r.permission == "*" && r.pattern == "*" && r.action == PermissionAction::Deny).count();
+        let deny_all_count = result
+            .iter()
+            .filter(|r| {
+                r.permission == "*" && r.pattern == "*" && r.action == PermissionAction::Deny
+            })
+            .count();
         assert_eq!(deny_all_count, 1);
     }
 
@@ -206,7 +226,9 @@ mod tests {
             action: PermissionAction::Deny,
         }];
         let result = merge_permissions(&[], &[], &sub_rules);
-        assert!(result.iter().any(|r| r.permission == "*" && r.pattern == "*" && r.action == PermissionAction::Deny));
+        assert!(result.iter().any(|r| r.permission == "*"
+            && r.pattern == "*"
+            && r.action == PermissionAction::Deny));
     }
 
     // ── check_permission ─────────────────────────────────────────────────
@@ -218,7 +240,10 @@ mod tests {
             pattern: "*".into(),
             action: PermissionAction::Allow,
         }];
-        assert_eq!(check_permission("edit", &serde_json::json!({}), &rules), PermissionDecision::Allowed);
+        assert_eq!(
+            check_permission("edit", &serde_json::json!({}), &rules),
+            PermissionDecision::Allowed
+        );
     }
 
     #[test]
@@ -228,7 +253,10 @@ mod tests {
             pattern: "*".into(),
             action: PermissionAction::Deny,
         }];
-        assert!(matches!(check_permission("bash", &serde_json::json!({}), &rules), PermissionDecision::Denied(_)));
+        assert!(matches!(
+            check_permission("bash", &serde_json::json!({}), &rules),
+            PermissionDecision::Denied(_)
+        ));
     }
 
     #[test]
@@ -238,7 +266,10 @@ mod tests {
             pattern: "*".into(),
             action: PermissionAction::Allow,
         }];
-        assert_eq!(check_permission("any_tool", &serde_json::json!({}), &rules), PermissionDecision::Allowed);
+        assert_eq!(
+            check_permission("any_tool", &serde_json::json!({}), &rules),
+            PermissionDecision::Allowed
+        );
     }
 
     #[test]
@@ -255,8 +286,14 @@ mod tests {
                 action: PermissionAction::Deny,
             },
         ];
-        assert!(matches!(check_permission("danger", &serde_json::json!({}), &rules), PermissionDecision::Denied(_)));
-        assert_eq!(check_permission("safe", &serde_json::json!({}), &rules), PermissionDecision::Allowed);
+        assert!(matches!(
+            check_permission("danger", &serde_json::json!({}), &rules),
+            PermissionDecision::Denied(_)
+        ));
+        assert_eq!(
+            check_permission("safe", &serde_json::json!({}), &rules),
+            PermissionDecision::Allowed
+        );
     }
 
     #[test]
@@ -266,6 +303,9 @@ mod tests {
             pattern: "*".into(),
             action: PermissionAction::Deny,
         }];
-        assert_eq!(check_permission("unknown_tool", &serde_json::json!({}), &rules), PermissionDecision::Allowed);
+        assert_eq!(
+            check_permission("unknown_tool", &serde_json::json!({}), &rules),
+            PermissionDecision::Allowed
+        );
     }
 }

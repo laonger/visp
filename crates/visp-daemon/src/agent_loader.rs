@@ -30,9 +30,7 @@ pub fn load_agents(project_path: &Path) -> AgentRegistry {
     if let Ok(dir) = std::fs::read_dir(&agents_dir) {
         for entry in dir.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("md")
-                && path.is_file()
-            {
+            if path.extension().and_then(|e| e.to_str()) == Some("md") && path.is_file() {
                 match parse_agent_file(&path) {
                     Ok(def) => {
                         // Use register_or_replace so file agents overwrite built-in defaults
@@ -81,9 +79,9 @@ fn parse_agent_file(path: &Path) -> Result<AgentDefinition, String> {
     }
     let content = &content[3..].trim_start();
 
-    let end = content.find("\n---").ok_or_else(|| {
-        "missing closing --- in YAML frontmatter".to_string()
-    })?;
+    let end = content
+        .find("\n---")
+        .ok_or_else(|| "missing closing --- in YAML frontmatter".to_string())?;
 
     let yaml_text = &content[..end];
     let body = content[end + 4..].trim().to_string();
@@ -132,7 +130,9 @@ fn parse_agent_file(path: &Path) -> Result<AgentDefinition, String> {
         Some("subagent") => AgentMode::Subagent,
         None | Some("") => AgentMode::All,
         Some(other) => {
-            return Err(format!("invalid mode '{other}'; expected all|primary|subagent"));
+            return Err(format!(
+                "invalid mode '{other}'; expected all|primary|subagent"
+            ));
         }
     };
 
@@ -247,18 +247,26 @@ mode: invalid_mode
         std::fs::create_dir_all(&agents_dir).unwrap();
 
         // Write two agent files
-        write_agent_file(&agents_dir, "coder.md", r#"---
+        write_agent_file(
+            &agents_dir,
+            "coder.md",
+            r#"---
 name: coder
 mode: all
 ---
 You are a coder.
-"#);
-        write_agent_file(&agents_dir, "searcher.md", r#"---
+"#,
+        );
+        write_agent_file(
+            &agents_dir,
+            "searcher.md",
+            r#"---
 name: searcher
 mode: subagent
 ---
 You search.
-"#);
+"#,
+        );
 
         let registry = load_agents(&dir);
 
@@ -300,10 +308,14 @@ You search.
         std::fs::create_dir_all(&agents_dir).unwrap();
 
         // Valid file
-        write_agent_file(&agents_dir, "valid.md", r#"---
+        write_agent_file(
+            &agents_dir,
+            "valid.md",
+            r#"---
 name: valid
 mode: all
----"#);
+---"#,
+        );
         // Invalid file (no frontmatter)
         write_agent_file(&agents_dir, "invalid.md", "Just plain text content.");
 
