@@ -363,6 +363,204 @@ async fn collect_stream_events(
     })
 }
 
+/// Decision after handling stream result
+enum StreamDecision {
+    Done,
+    UserQuery {
+        response_rx: oneshot::Receiver<UserQueryResult>,
+    },
+    Continue,
+}
+
+/// f. Handle stream result: check [USER_QUERY] marker or return Done/Continue
+/// On error, sends error events via send_event and returns Err(()).
+async fn handle_stream_result(
+    output: &StreamOutput,
+    total_tool_calls: u32,
+    ctx: &mut AgentLoopContext,
+    sm: &SessionManager,
+    sid: &str,
+    tx: &mpsc::Sender<AgentEvent>,
+) -> Result<StreamDecision, ()> {
+    let text_buffer = &output.text_buffer;
+    let tool_calls = &output.tool_calls;
+    let thinking_blocks = &output.thinking_blocks;
+    let input_tokens = output.input_tokens;
+    let output_tokens = output.output_tokens;
+    let cache_creation_input_tokens = output.cache_creation_input_tokens;
+    let cache_read_input_tokens = output.cache_read_input_tokens;
+
+    if tool_calls.is_empty() {
+        // Check [USER_QUERY] marker
+        if let Some(marker) = parse_user_query_marker(text_buffer) {
+            let clean_text = strip_user_query_marker(text_buffer);
+            let thinking_text = extract_thinking_text(thinking_blocks);
+
+            // Save thinking as a separate message if present
+            if let Some(ref thinking) = thinking_text {
+                let mut thinking_msg = Message::thinking(thinking.clone());
+                thinking_msg.estimated_tokens = estimate_message_tokens(&thinking_msg);
+                ctx.history.push(thinking_msg.clone());
+                if let Err(e) = sm.append_message(sid, thinking_msg) {
+                    send_event(
+                        tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                        AgentEvent::Error {
+                            code: AgentErrorCode::Internal,
+                            message: format!("Failed to append thinking message: {e}"),
+                        },
+                    )
+                    .await?;
+                    let _ = sm.finish_loop(sid, SessionStatus::Error);
+                    return Err(());
+                }
+            }
+
+            // Save text message if present
+            if !clean_text.is_empty() {
+                let mut text_msg = Message::assistant(clean_text.clone());
+                text_msg.extra_blocks = if thinking_blocks.is_empty() {
+                    None
+                } else {
+                    Some(thinking_blocks.clone())
+                };
+                text_msg.estimated_tokens = estimate_message_tokens(&text_msg);
+                ctx.history.push(text_msg.clone());
+                if let Err(e) = sm.append_message(sid, text_msg) {
+                    send_event(
+                        tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                        AgentEvent::Error {
+                            code: AgentErrorCode::Internal,
+                            message: format!("Failed to append assistant message: {e}"),
+                        },
+                    )
+                    .await?;
+                    let _ = sm.finish_loop(sid, SessionStatus::Error);
+                    return Err(());
+                }
+            }
+
+            // Send UserQuery event
+            let (resp_tx, resp_rx) = oneshot::channel::<UserQueryResult>();
+            send_event(
+                tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                AgentEvent::UserQuery {
+                    query_id: format!("query-{}", ctx.history.len()),
+                    message: marker.message.clone(),
+                    options: marker.options.clone(),
+                    allow_other: marker.allow_other,
+                    respond: resp_tx,
+                },
+            )
+            .await?;
+
+            return Ok(StreamDecision::UserQuery { response_rx: resp_rx });
+        }
+
+        // No [USER_QUERY] marker: done
+        if text_buffer.is_empty() && tool_calls.is_empty() && thinking_blocks.is_empty() {
+            if output_tokens > 0 {
+                tracing::error!(
+                    session_id = %sid,
+                    input_tokens,
+                    output_tokens,
+                    "LLM returned empty response after consuming output tokens"
+                );
+                send_event(
+                    tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                    AgentEvent::Error {
+                        code: AgentErrorCode::Internal,
+                        message: format!(
+                            "LLM returned empty response after consuming {output_tokens} output tokens. \
+                         If thinking mode is enabled, the thinking may have been redacted or \
+                         the output budget exhausted. Try increasing budget_tokens or max_tokens."
+                        ),
+                    },
+                )
+                .await?;
+                let _ = sm.finish_loop(sid, SessionStatus::Error);
+                return Err(());
+            }
+            tracing::warn!(
+                session_id = %sid,
+                input_tokens,
+                output_tokens,
+                "LLM returned empty stream (no text, no tool calls, no thinking)"
+            );
+        } else if text_buffer.is_empty() {
+            tracing::info!(
+                session_id = %sid,
+                tool_calls = tool_calls.len(),
+                thinking_blocks = thinking_blocks.len(),
+                "LLM returned response with no text (only tool_calls/thinking)"
+            );
+        }
+        let thinking_text = extract_thinking_text(thinking_blocks);
+
+        if let Some(ref thinking) = thinking_text {
+            let mut thinking_msg = Message::thinking(thinking.clone());
+            thinking_msg.estimated_tokens = estimate_message_tokens(&thinking_msg);
+            ctx.history.push(thinking_msg.clone());
+            if let Err(e) = sm.append_message(sid, thinking_msg) {
+                send_event(
+                    tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                    AgentEvent::Error {
+                        code: AgentErrorCode::Internal,
+                        message: format!("Failed to append thinking message: {e}"),
+                    },
+                )
+                .await?;
+                let _ = sm.finish_loop(sid, SessionStatus::Error);
+                return Err(());
+            }
+        }
+
+        if !text_buffer.is_empty() {
+            let mut text_msg = Message::assistant(text_buffer.clone());
+            text_msg.extra_blocks = if thinking_blocks.is_empty() {
+                None
+            } else {
+                Some(thinking_blocks.clone())
+            };
+            text_msg.estimated_tokens = estimate_message_tokens(&text_msg);
+            ctx.history.push(text_msg.clone());
+            if let Err(e) = sm.append_message(sid, text_msg) {
+                send_event(
+                    tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                    AgentEvent::Error {
+                        code: AgentErrorCode::Internal,
+                        message: format!("Failed to append assistant message: {e}"),
+                    },
+                )
+                .await?;
+                let _ = sm.finish_loop(sid, SessionStatus::Error);
+                return Err(());
+            }
+        }
+
+        // Send usage info and Done
+        send_event(
+            tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+            AgentEvent::UsageInfo {
+                input_tokens,
+                output_tokens,
+                tool_calls: total_tool_calls,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+            },
+        )
+        .await?;
+        send_event(
+            tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+            AgentEvent::Done,
+        )
+        .await?;
+        let _ = sm.finish_loop(sid, SessionStatus::Completed);
+        return Ok(StreamDecision::Done);
+    }
+
+    Ok(StreamDecision::Continue)
+}
+
 // ── Agent loop ───────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -495,70 +693,20 @@ pub async fn run_agent_loop(
                 None => return,
             };
 
-            // Destructure for backward-compatible variable names
-            let text_buffer = output.text_buffer;
-            let tool_calls = output.tool_calls;
-            let thinking_blocks = output.thinking_blocks;
-            let input_tokens = output.input_tokens;
-            let output_tokens = output.output_tokens;
-            let cache_creation_input_tokens = output.cache_creation_input_tokens;
-            let cache_read_input_tokens = output.cache_read_input_tokens;
-
-            // f. Decide: no tool calls → check [USER_QUERY] marker or done
-            if tool_calls.is_empty() {
-                // Check [USER_QUERY] marker
-                if let Some(marker) = parse_user_query_marker(&text_buffer) {
-                    let clean_text = strip_user_query_marker(&text_buffer);
-                    let thinking_text = extract_thinking_text(&thinking_blocks);
-
-                    // Save thinking as a separate message if present
-                    if let Some(ref thinking) = thinking_text {
-                        let mut thinking_msg = Message::thinking(thinking.clone());
-                        thinking_msg.estimated_tokens = estimate_message_tokens(&thinking_msg);
-                        ctx.history.push(thinking_msg.clone());
-                        if let Err(e) = sm.append_message(&sid, thinking_msg) {
-                            try_send!(AgentEvent::Error {
-                                code: AgentErrorCode::Internal,
-                                message: format!("Failed to append thinking message: {e}"),
-                            });
-                            let _ = sm.finish_loop(&sid, SessionStatus::Error);
-                            return;
-                        }
-                    }
-
-                    // Save text message if present (keep extra_blocks for provider round-trip compat)
-                    if !clean_text.is_empty() {
-                        let mut text_msg = Message::assistant(clean_text.clone());
-                        text_msg.extra_blocks = if thinking_blocks.is_empty() {
-                            None
-                        } else {
-                            Some(thinking_blocks.clone())
-                        };
-                        text_msg.estimated_tokens = estimate_message_tokens(&text_msg);
-                        ctx.history.push(text_msg.clone());
-                        if let Err(e) = sm.append_message(&sid, text_msg) {
-                            try_send!(AgentEvent::Error {
-                                code: AgentErrorCode::Internal,
-                                message: format!("Failed to append assistant message: {e}"),
-                            });
-                            let _ = sm.finish_loop(&sid, SessionStatus::Error);
-                            return;
-                        }
-                    }
-
-                    // Send UserQuery event
-                    let (resp_tx, resp_rx) = oneshot::channel::<UserQueryResult>();
-                    try_send!(AgentEvent::UserQuery {
-                        query_id: format!("query-{}", ctx.history.len()),
-                        message: marker.message.clone(),
-                        options: marker.options.clone(),
-                        allow_other: marker.allow_other,
-                        respond: resp_tx,
-                    });
-
-                    let query_result = resp_rx.await.unwrap_or_default();
+            // f. Handle stream result (check USER_QUERY marker or done)
+            match handle_stream_result(
+                &output, total_tool_calls, &mut ctx, &sm, &sid, &tx,
+            )
+            .await
+            {
+                Ok(StreamDecision::Done) => {
+                    return;
+                }
+                Ok(StreamDecision::UserQuery { response_rx }) => {
+                    let query_result = response_rx.await.unwrap_or_default();
 
                     // Build user message from result
+                    let marker = parse_user_query_marker(&output.text_buffer).unwrap();
                     let user_msg = if query_result.selected_index >= 0
                         && (query_result.selected_index as usize) < marker.options.len()
                     {
@@ -576,99 +724,16 @@ pub async fn run_agent_loop(
                         let _ = sm.finish_loop(&sid, SessionStatus::Error);
                         return;
                     }
-
-                    // Continue to next iteration
                     continue;
                 }
-
-                // No [USER_QUERY] marker: done
-                if text_buffer.is_empty() && tool_calls.is_empty() && thinking_blocks.is_empty() {
-                    if output_tokens > 0 {
-                        // LLM consumed output tokens but produced nothing useful.
-                        // This can happen when thinking mode is enabled and the thinking
-                        // is redacted by the API (exceeds budget), or the output budget
-                        // is entirely exhausted without producing usable content.
-                        tracing::error!(
-                            session_id = %sid,
-                            input_tokens,
-                            output_tokens,
-                            "LLM returned empty response after consuming output tokens"
-                        );
-                        try_send!(AgentEvent::Error {
-                            code: AgentErrorCode::Internal,
-                            message: format!(
-                                "LLM returned empty response after consuming {output_tokens} output tokens. \
-                             If thinking mode is enabled, the thinking may have been redacted or \
-                             the output budget exhausted. Try increasing budget_tokens or max_tokens."
-                            ),
-                        });
-                        let _ = sm.finish_loop(&sid, SessionStatus::Error);
-                        return;
-                    }
-                    // output_tokens == 0: no tokens consumed — likely a provider
-                    // returned an empty stream, just warn and return normally
-                    tracing::warn!(
-                        session_id = %sid,
-                        input_tokens,
-                        output_tokens,
-                        "LLM returned empty stream (no text, no tool calls, no thinking)"
-                    );
-                } else if text_buffer.is_empty() {
-                    tracing::info!(
-                        session_id = %sid,
-                        tool_calls = tool_calls.len(),
-                        thinking_blocks = thinking_blocks.len(),
-                        "LLM returned response with no text (only tool_calls/thinking)"
-                    );
-                }
-                let thinking_text = extract_thinking_text(&thinking_blocks);
-
-                // Save thinking as a separate message if present
-                if let Some(ref thinking) = thinking_text {
-                    let mut thinking_msg = Message::thinking(thinking.clone());
-                    thinking_msg.estimated_tokens = estimate_message_tokens(&thinking_msg);
-                    ctx.history.push(thinking_msg.clone());
-                    if let Err(e) = sm.append_message(&sid, thinking_msg) {
-                        try_send!(AgentEvent::Error {
-                            code: AgentErrorCode::Internal,
-                            message: format!("Failed to append thinking message: {e}"),
-                        });
-                        let _ = sm.finish_loop(&sid, SessionStatus::Error);
-                        return;
-                    }
-                }
-
-                // Save text message if present (keep extra_blocks for provider round-trip compat)
-                if !text_buffer.is_empty() {
-                    let mut text_msg = Message::assistant(text_buffer.clone());
-                    text_msg.extra_blocks = if thinking_blocks.is_empty() {
-                        None
-                    } else {
-                        Some(thinking_blocks.clone())
-                    };
-                    text_msg.estimated_tokens = estimate_message_tokens(&text_msg);
-                    ctx.history.push(text_msg.clone());
-                    if let Err(e) = sm.append_message(&sid, text_msg) {
-                        try_send!(AgentEvent::Error {
-                            code: AgentErrorCode::Internal,
-                            message: format!("Failed to append assistant message: {e}"),
-                        });
-                        let _ = sm.finish_loop(&sid, SessionStatus::Error);
-                        return;
-                    }
-                }
-                // 发送用量统计后再发送 Done
-                try_send!(AgentEvent::UsageInfo {
-                    input_tokens,
-                    output_tokens,
-                    tool_calls: total_tool_calls,
-                    cache_creation_input_tokens,
-                    cache_read_input_tokens,
-                });
-                try_send!(AgentEvent::Done);
-                let _ = sm.finish_loop(&sid, SessionStatus::Completed);
-                return;
+                Ok(StreamDecision::Continue) => {}
+                Err(()) => return,
             }
+
+            // Destructure output for tool-call processing code
+            let text_buffer = output.text_buffer;
+            let tool_calls = output.tool_calls;
+            let thinking_blocks = output.thinking_blocks;
 
             // Has tool calls: append assistant message with tool_calls
             total_tool_calls += tool_calls.len() as u32;
