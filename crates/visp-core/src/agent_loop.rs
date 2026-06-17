@@ -11,8 +11,9 @@ use crate::agent::{
 use crate::error::AgentErrorCode;
 use crate::error::LlmError;
 use crate::message::{
-    estimate_message_tokens, Message, MessageType, Role, ToolCallRequest,
+    estimate_message_tokens, Message, MessageType, Role, ToolCallRequest, ToolDefinition,
 };
+use crate::session::Session;
 use crate::prompt::PromptBuilder;
 use crate::provider::ChatEvent;
 use crate::provider::LlmConfig;
@@ -29,6 +30,163 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Convert AgentEvent to AgentMessage for global_tx forwarding
+fn event_to_msg(event: &AgentEvent) -> Option<AgentMessage> {
+    match event {
+        AgentEvent::TextDelta(s) => Some(AgentMessage::TextDelta(s.clone())),
+        AgentEvent::ThinkingBlock(v) => Some(AgentMessage::ThinkingBlock(v.clone())),
+        AgentEvent::UsageInfo { input_tokens, output_tokens, tool_calls, cache_creation_input_tokens, cache_read_input_tokens } => {
+            Some(AgentMessage::UsageInfo { input_tokens: *input_tokens, output_tokens: *output_tokens, tool_calls: *tool_calls, cache_creation_input_tokens: *cache_creation_input_tokens, cache_read_input_tokens: *cache_read_input_tokens })
+        }
+        AgentEvent::StatusUpdate(s) => Some(AgentMessage::StatusUpdate(s.clone())),
+        AgentEvent::Error { code, message } => Some(AgentMessage::Error { code: code.clone(), message: message.clone() }),
+        AgentEvent::ToolCallRequest { call_id, tool_name, arguments } => {
+            Some(AgentMessage::ToolCallRequest { call_id: call_id.clone(), tool_name: tool_name.clone(), arguments: arguments.clone() })
+        }
+        AgentEvent::ToolCallResult { call_id, tool_name, content, is_error } => {
+            Some(AgentMessage::ToolCallResult { call_id: call_id.clone(), tool_name: tool_name.clone(), content: content.clone(), is_error: *is_error })
+        }
+        AgentEvent::UserQuery { .. } => None, // oneshot not clonable
+        AgentEvent::Done => Some(AgentMessage::Done),
+    }
+}
+
+/// Send event to tx and optionally forward to global_tx.
+/// On tx send failure, finishes session and returns Err(()).
+async fn send_event(
+    tx: &mpsc::Sender<AgentEvent>,
+    sm: &SessionManager,
+    sid: &str,
+    global_tx: &Option<mpsc::Sender<Envelope>>,
+    session_id: &str,
+    event: AgentEvent,
+) -> Result<(), ()> {
+    // Forward to global_tx (for orchestrator)
+    if let Some(gtx) = global_tx {
+        if let Some(msg) = event_to_msg(&event) {
+            let _ = gtx.send(Envelope {
+                session_id: session_id.to_string(),
+                message: msg,
+            }).await;
+        }
+    }
+    // Send to tx (for CLI)
+    if tx.send(event).await.is_err() {
+        let _ = sm.finish_loop(sid, SessionStatus::Error);
+        return Err(());
+    }
+    Ok(())
+}
+
+/// Iteration context produced by setup_iteration
+struct IterationContext {
+    messages: Vec<Message>,
+    tools: Vec<ToolDefinition>,
+}
+
+/// a. Cancellation check  b. Limits check  c. Prompt + tools build
+async fn setup_iteration(
+    iteration: u32,
+    ctx: &mut AgentLoopContext,
+    sm: &SessionManager,
+    tool_registry: &ToolRegistry,
+    rule_engine: &RuleEngine,
+    cfg: &AgentConfig,
+    sid: &str,
+    tx: &mpsc::Sender<AgentEvent>,
+) -> Result<IterationContext, ()> {
+    // a. Cancellation check
+    if ctx.cancel_token.is_cancelled() {
+        send_event(
+            tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+            AgentEvent::Error {
+                code: AgentErrorCode::Cancelled,
+                message: "Agent loop cancelled".into(),
+            },
+        ).await?;
+        let _ = sm.finish_loop(sid, SessionStatus::Error);
+        return Err(());
+    }
+
+    // b. Limits check
+    if iteration >= cfg.hard_limit {
+        send_event(
+            tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+            AgentEvent::Error {
+                code: AgentErrorCode::MaxIterations,
+                message: format!("Agent loop reached hard limit ({})", cfg.hard_limit),
+            },
+        ).await?;
+        let _ = sm.finish_loop(sid, SessionStatus::Error);
+        return Err(());
+    }
+
+    // c. Build prompt
+    let session = match sm.get(sid) {
+        Ok(s) => s,
+        Err(e) => {
+            send_event(
+                tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                AgentEvent::Error {
+                    code: AgentErrorCode::Internal,
+                    message: format!("Failed to get session: {e}"),
+                },
+            ).await?;
+            let _ = sm.finish_loop(sid, SessionStatus::Error);
+            return Err(());
+        }
+    };
+    let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+    let tool_guide = render_tool_guide(tool_registry);
+    let mut enriched_template = if tool_guide.is_empty() {
+        session.system_prompt_template.clone()
+    } else {
+        format!("{}{}", session.system_prompt_template, tool_guide)
+    };
+
+    // Soft limit check
+    if cfg.soft_limit > 0 && iteration >= cfg.soft_limit {
+        enriched_template.push_str(
+            "\n\n[System: You have reached the maximum number of iterations. \
+         Please immediately complete all remaining work in your next response. \
+         If all work is done, respond without making any tool calls.]",
+        );
+    }
+    let mut messages = PromptBuilder::build(
+        &enriched_template,
+        &rule_engine.get_active_rules(),
+        &ctx.history,
+        &ctx.working_dir,
+        &date_str,
+        Some(ctx.config.max_context_tokens),
+        ctx.config.max_tokens,
+        ctx.context_trimmer.as_ref(),
+    );
+
+    cleanup_orphan_tool_uses(&mut messages);
+    messages.retain(|m| !m.skip_context);
+
+    let tools = tool_registry.definitions();
+
+    let total_estimated: u32 = messages
+        .iter()
+        .map(crate::message::estimate_message_tokens)
+        .sum();
+    tracing::info!(
+        session_id = %sid,
+        messages = messages.len(),
+        budget = ctx.config.max_context_tokens,
+        estimated_tokens = total_estimated,
+        max_output_tokens = ctx.config.max_tokens,
+        "prompt built, calling LLM"
+    );
+
+    Ok(IterationContext { messages, tools })
+}
 
 // ── Agent loop ───────────────────────────────────────────────────────────────
 
@@ -130,95 +288,17 @@ pub async fn run_agent_loop(
         let mut doom_loop_window: Vec<Vec<(String, serde_json::Value)>> = Vec::new();
         let mut doom_loop_warned = false;
         loop {
-            // a. Cancellation check
-            if ctx.cancel_token.is_cancelled() {
-                try_send!(AgentEvent::Error {
-                    code: AgentErrorCode::Cancelled,
-                    message: "Agent loop cancelled".into(),
-                });
-                let _ = sm.finish_loop(&sid, SessionStatus::Error);
-                return;
-            }
-
-            // b. Limits check（在 LLM 调用之前）
-            if iteration >= cfg.hard_limit {
-                try_send!(AgentEvent::Error {
-                    code: AgentErrorCode::MaxIterations,
-                    message: format!(
-                        "Agent loop reached hard limit ({})",
-                        cfg.hard_limit
-                    ),
-                });
-                let _ = sm.finish_loop(&sid, SessionStatus::Error);
-                return;
-            }
-            // c. Build prompt
-
-            let session = match sm.get(&sid) {
-                Ok(s) => s,
-                Err(e) => {
-                    try_send!(AgentEvent::Error {
-                        code: AgentErrorCode::Internal,
-                        message: format!("Failed to get session: {e}"),
-                    });
-                    let _ = sm.finish_loop(&sid, SessionStatus::Error);
-                    return;
-                }
+            // a/b/c: Build prompt + boundary checks
+            let ic = match setup_iteration(
+                iteration, &mut ctx, &sm, &tool_registry, &rule_engine, &cfg, &sid, &tx,
+            )
+            .await
+            {
+                Ok(ic) => ic,
+                Err(()) => return,
             };
-            // 生成日期字符串
-            let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
-
-            // 渲染动态工具指南并追加到 system prompt
-            let tool_guide = render_tool_guide(&tool_registry);
-            let mut enriched_template = if tool_guide.is_empty() {
-                session.system_prompt_template.clone()
-            } else {
-                format!("{}{}", session.system_prompt_template, tool_guide)
-            };
-
-            // Soft limit check: 注入收尾提示
-            if cfg.soft_limit > 0 && iteration >= cfg.soft_limit {
-                enriched_template.push_str(
-                    "\n\n[System: You have reached the maximum number of iterations. \
-                 Please immediately complete all remaining work in your next response. \
-                 If all work is done, respond without making any tool calls.]",
-                );
-            }
-            let mut messages = PromptBuilder::build(
-                &enriched_template,
-                &rule_engine.get_active_rules(),
-                &ctx.history,
-                &ctx.working_dir,
-                &date_str,
-                Some(ctx.config.max_context_tokens),
-                ctx.config.max_tokens,
-                ctx.context_trimmer.as_ref(),
-            );
-
-            // 防御性清理：确保 tool_calls/tool_result 配对完整，
-            // 防止因上下文裁剪导致 orphan tool_calls 被发送到 LLM 引发 400 错误。
-            cleanup_orphan_tool_uses(&mut messages);
-            messages.retain(|m| !m.skip_context);
-
-            // c. Get tool definitions
-            let tools = tool_registry.definitions();
-
-            // 记录上下文大小
-            let total_estimated: u32 = messages
-                .iter()
-                .map(crate::message::estimate_message_tokens)
-                .sum();
-            tracing::info!(
-                session_id = %sid,
-                messages = messages.len(),
-                budget = ctx.config.max_context_tokens,
-                estimated_tokens = total_estimated,
-                max_output_tokens = ctx.config.max_tokens,
-                "prompt built, calling LLM"
-            );
-
-            // 调试：取消注释下方行，将完整 prompt（messages + tools）保存到 .visp/last-prompt.json
-            // dump_prompt_to_file(&ctx.working_dir, &messages, &tools);
+            let messages = ic.messages;
+            let tools = ic.tools;
 
             // d. Call LLM with retry
             let stream = {
