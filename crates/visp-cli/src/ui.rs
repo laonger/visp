@@ -40,12 +40,15 @@ fn tab_label_line(tab: &TabEntry) -> Line<'static> {
     };
     Line::from(vec![
         Span::styled(symbol, Style::default().fg(color)),
-        Span::raw(tab.agent_name.clone()),
+        Span::styled(tab.agent_name.clone(), Style::default().fg(theme::TAB_FG)),
     ])
 }
 
 /// 渲染顶部 Tab 栏
 fn render_tab_bar(tab_bar: &mut crate::app::TabBar, f: &mut Frame, area: Rect) {
+    // 整条 tab bar 先铺底色（深紫黑），与对话区无缝连贯
+    f.render_widget(Block::default().style(Style::default().bg(theme::BG)), area);
+
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Fill(1), Constraint::Length(8)])
@@ -63,9 +66,18 @@ fn render_tab_bar(tab_bar: &mut crate::app::TabBar, f: &mut Frame, area: Rect) {
     }
 
     let tabs = Tabs::new(visible)
+        .style(Style::default().bg(theme::BG))
         .select(tab_bar.select_idx_for_current_page(area.width).unwrap_or(0))
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-        .divider("|")
+        .highlight_style(
+            Style::default()
+                .bg(theme::TAB_ACTIVE_BG)
+                .fg(theme::TAB_ACTIVE_FG)
+                .add_modifier(Modifier::BOLD),
+        )
+        .divider(Span::styled(
+            "│",
+            Style::default().fg(theme::TAB_DIVIDER_FG),
+        ))
         .padding(" ", " ");
     f.render_widget(tabs, chunks[0]);
 
@@ -78,7 +90,7 @@ fn render_tab_bar(tab_bar: &mut crate::app::TabBar, f: &mut Frame, area: Rect) {
         String::new()
     };
     let p = Paragraph::new(page_label)
-        .style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().bg(theme::BG).fg(theme::TAB_PAGE_FG))
         .alignment(Alignment::Right);
     f.render_widget(p, chunks[1]);
 }

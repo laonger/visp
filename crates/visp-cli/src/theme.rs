@@ -75,6 +75,21 @@ pub const CONFIRM_OPTION_LABEL_FG: Color = Color::Cyan;
 pub const CONFIRM_OPTION_FG: Color = Color::White;
 
 // ════════════════════════════════════════════════════════════════
+// Tab Bar
+// ════════════════════════════════════════════════════════════════
+
+/// Tab 普通文字（与 visp 整体次要文字一致）
+pub const TAB_FG: Color = Color::Gray;
+/// 选中 tab 的底色（与 USER_BG 同源的深蓝，跟整体协调）
+pub const TAB_ACTIVE_BG: Color = USER_BG;
+/// 选中 tab 的文字色（Cyan，visp 标志性强调色）
+pub const TAB_ACTIVE_FG: Color = Color::Cyan;
+/// Tab 之间的分隔符颜色
+pub const TAB_DIVIDER_FG: Color = Color::DarkGray;
+/// 页码指示器 [N/M] 颜色
+pub const TAB_PAGE_FG: Color = Color::DarkGray;
+
+// ════════════════════════════════════════════════════════════════
 // Help Popup
 // ════════════════════════════════════════════════════════════════
 
