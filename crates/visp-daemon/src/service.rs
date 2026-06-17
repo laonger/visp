@@ -465,11 +465,7 @@ impl CoderDaemon for CoderDaemonService {
                                                     ),
                                                 ),
                                             };
-                                            if response_tx_inbound
-                                                .send(Ok(td_msg))
-                                                .await
-                                                .is_err()
-                                            {
+                                            if response_tx_inbound.send(Ok(td_msg)).await.is_err() {
                                                 break;
                                             }
                                         }
@@ -515,11 +511,7 @@ impl CoderDaemon for CoderDaemonService {
                                                 ),
                                             ),
                                         };
-                                        if response_tx_inbound
-                                            .send(Ok(tr_msg))
-                                            .await
-                                            .is_err()
-                                        {
+                                        if response_tx_inbound.send(Ok(tr_msg)).await.is_err() {
                                             break;
                                         }
                                     }
@@ -529,11 +521,9 @@ impl CoderDaemon for CoderDaemonService {
 
                             // Send Done to flush streaming text
                             let done_msg = proto::ServerMessage {
-                                payload: Some(proto::server_message::Payload::Done(
-                                    proto::Done {
-                                        session_id: session_id.clone(),
-                                    },
-                                )),
+                                payload: Some(proto::server_message::Payload::Done(proto::Done {
+                                    session_id: session_id.clone(),
+                                })),
                             };
                             let _ = response_tx_inbound.send(Ok(done_msg)).await;
                         }

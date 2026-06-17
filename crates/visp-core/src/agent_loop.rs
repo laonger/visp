@@ -4,20 +4,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::agent::{
-    cleanup_orphan_tool_uses, dump_prompt_to_file, extract_thinking_text, format_tool_args,
-    llm_error_to_code, parse_user_query_marker, render_tool_guide, strip_user_query_marker,
     AgentConfig, AgentEvent, AgentLoopContext, AgentMessage, Envelope, OrchestratorMessage,
-    PendingSpawn, ToolExecResult, UserQueryResult,
+    PendingSpawn, ToolExecResult, UserQueryResult, cleanup_orphan_tool_uses, extract_thinking_text,
+    format_tool_args, llm_error_to_code, parse_user_query_marker, render_tool_guide,
+    strip_user_query_marker,
 };
 use crate::error::AgentErrorCode;
 use crate::error::LlmError;
 use crate::message::{
-    estimate_message_tokens, Message, MessageType, Role, ToolCallRequest, ToolDefinition,
+    Message, MessageType, Role, ToolCallRequest, ToolDefinition, estimate_message_tokens,
 };
-use crate::session::Session;
 use crate::prompt::PromptBuilder;
 use crate::provider::ChatEvent;
-use crate::provider::LlmConfig;
 use crate::provider::LlmProvider;
 use crate::rules::RuleEngine;
 use crate::session::SessionManager;
@@ -31,7 +29,6 @@ use futures::Stream;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tokio_util::sync::CancellationToken;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -40,17 +37,44 @@ fn event_to_msg(event: &AgentEvent) -> Option<AgentMessage> {
     match event {
         AgentEvent::TextDelta(s) => Some(AgentMessage::TextDelta(s.clone())),
         AgentEvent::ThinkingBlock(v) => Some(AgentMessage::ThinkingBlock(v.clone())),
-        AgentEvent::UsageInfo { input_tokens, output_tokens, tool_calls, cache_creation_input_tokens, cache_read_input_tokens } => {
-            Some(AgentMessage::UsageInfo { input_tokens: *input_tokens, output_tokens: *output_tokens, tool_calls: *tool_calls, cache_creation_input_tokens: *cache_creation_input_tokens, cache_read_input_tokens: *cache_read_input_tokens })
-        }
+        AgentEvent::UsageInfo {
+            input_tokens,
+            output_tokens,
+            tool_calls,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        } => Some(AgentMessage::UsageInfo {
+            input_tokens: *input_tokens,
+            output_tokens: *output_tokens,
+            tool_calls: *tool_calls,
+            cache_creation_input_tokens: *cache_creation_input_tokens,
+            cache_read_input_tokens: *cache_read_input_tokens,
+        }),
         AgentEvent::StatusUpdate(s) => Some(AgentMessage::StatusUpdate(s.clone())),
-        AgentEvent::Error { code, message } => Some(AgentMessage::Error { code: code.clone(), message: message.clone() }),
-        AgentEvent::ToolCallRequest { call_id, tool_name, arguments } => {
-            Some(AgentMessage::ToolCallRequest { call_id: call_id.clone(), tool_name: tool_name.clone(), arguments: arguments.clone() })
-        }
-        AgentEvent::ToolCallResult { call_id, tool_name, content, is_error } => {
-            Some(AgentMessage::ToolCallResult { call_id: call_id.clone(), tool_name: tool_name.clone(), content: content.clone(), is_error: *is_error })
-        }
+        AgentEvent::Error { code, message } => Some(AgentMessage::Error {
+            code: code.clone(),
+            message: message.clone(),
+        }),
+        AgentEvent::ToolCallRequest {
+            call_id,
+            tool_name,
+            arguments,
+        } => Some(AgentMessage::ToolCallRequest {
+            call_id: call_id.clone(),
+            tool_name: tool_name.clone(),
+            arguments: arguments.clone(),
+        }),
+        AgentEvent::ToolCallResult {
+            call_id,
+            tool_name,
+            content,
+            is_error,
+        } => Some(AgentMessage::ToolCallResult {
+            call_id: call_id.clone(),
+            tool_name: tool_name.clone(),
+            content: content.clone(),
+            is_error: *is_error,
+        }),
         AgentEvent::UserQuery { .. } => None, // oneshot not clonable
         AgentEvent::Done => Some(AgentMessage::Done),
     }
@@ -67,13 +91,15 @@ async fn send_event(
     event: AgentEvent,
 ) -> Result<(), ()> {
     // Forward to global_tx (for orchestrator)
-    if let Some(gtx) = global_tx {
-        if let Some(msg) = event_to_msg(&event) {
-            let _ = gtx.send(Envelope {
+    if let Some(gtx) = global_tx
+        && let Some(msg) = event_to_msg(&event)
+    {
+        let _ = gtx
+            .send(Envelope {
                 session_id: session_id.to_string(),
                 message: msg,
-            }).await;
-        }
+            })
+            .await;
     }
     // Send to tx (for CLI)
     if tx.send(event).await.is_err() {
@@ -90,6 +116,7 @@ struct IterationContext {
 }
 
 /// a. Cancellation check  b. Limits check  c. Prompt + tools build
+#[allow(clippy::too_many_arguments)]
 async fn setup_iteration(
     iteration: u32,
     ctx: &mut AgentLoopContext,
@@ -103,12 +130,17 @@ async fn setup_iteration(
     // a. Cancellation check
     if ctx.cancel_token.is_cancelled() {
         send_event(
-            tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+            tx,
+            sm,
+            sid,
+            &ctx.global_tx,
+            &ctx.session_id,
             AgentEvent::Error {
                 code: AgentErrorCode::Cancelled,
                 message: "Agent loop cancelled".into(),
             },
-        ).await?;
+        )
+        .await?;
         let _ = sm.finish_loop(sid, SessionStatus::Error);
         return Err(());
     }
@@ -116,12 +148,17 @@ async fn setup_iteration(
     // b. Limits check
     if iteration >= cfg.hard_limit {
         send_event(
-            tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+            tx,
+            sm,
+            sid,
+            &ctx.global_tx,
+            &ctx.session_id,
             AgentEvent::Error {
                 code: AgentErrorCode::MaxIterations,
                 message: format!("Agent loop reached hard limit ({})", cfg.hard_limit),
             },
-        ).await?;
+        )
+        .await?;
         let _ = sm.finish_loop(sid, SessionStatus::Error);
         return Err(());
     }
@@ -131,12 +168,17 @@ async fn setup_iteration(
         Ok(s) => s,
         Err(e) => {
             send_event(
-                tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                tx,
+                sm,
+                sid,
+                &ctx.global_tx,
+                &ctx.session_id,
                 AgentEvent::Error {
                     code: AgentErrorCode::Internal,
                     message: format!("Failed to get session: {e}"),
                 },
-            ).await?;
+            )
+            .await?;
             let _ = sm.finish_loop(sid, SessionStatus::Error);
             return Err(());
         }
@@ -191,6 +233,7 @@ async fn setup_iteration(
 }
 
 /// d. LLM call with retry for RateLimit/Network errors
+#[allow(clippy::too_many_arguments)]
 async fn call_llm_with_retry(
     provider: &dyn LlmProvider,
     messages: &[Message],
@@ -216,7 +259,11 @@ async fn call_llm_with_retry(
                         "LLM provider error after retries exhausted"
                     );
                     send_event(
-                        tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                        tx,
+                        sm,
+                        sid,
+                        &ctx.global_tx,
+                        &ctx.session_id,
                         AgentEvent::Error { code, message: msg },
                     )
                     .await?;
@@ -236,7 +283,11 @@ async fn call_llm_with_retry(
                     "LLM provider error"
                 );
                 send_event(
-                    tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                    tx,
+                    sm,
+                    sid,
+                    &ctx.global_tx,
+                    &ctx.session_id,
                     AgentEvent::Error { code, message: msg },
                 )
                 .await?;
@@ -403,7 +454,11 @@ async fn handle_stream_result(
                 ctx.history.push(thinking_msg.clone());
                 if let Err(e) = sm.append_message(sid, thinking_msg) {
                     send_event(
-                        tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                        tx,
+                        sm,
+                        sid,
+                        &ctx.global_tx,
+                        &ctx.session_id,
                         AgentEvent::Error {
                             code: AgentErrorCode::Internal,
                             message: format!("Failed to append thinking message: {e}"),
@@ -427,7 +482,11 @@ async fn handle_stream_result(
                 ctx.history.push(text_msg.clone());
                 if let Err(e) = sm.append_message(sid, text_msg) {
                     send_event(
-                        tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                        tx,
+                        sm,
+                        sid,
+                        &ctx.global_tx,
+                        &ctx.session_id,
                         AgentEvent::Error {
                             code: AgentErrorCode::Internal,
                             message: format!("Failed to append assistant message: {e}"),
@@ -442,7 +501,11 @@ async fn handle_stream_result(
             // Send UserQuery event
             let (resp_tx, resp_rx) = oneshot::channel::<UserQueryResult>();
             send_event(
-                tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                tx,
+                sm,
+                sid,
+                &ctx.global_tx,
+                &ctx.session_id,
                 AgentEvent::UserQuery {
                     query_id: format!("query-{}", ctx.history.len()),
                     message: marker.message.clone(),
@@ -453,7 +516,9 @@ async fn handle_stream_result(
             )
             .await?;
 
-            return Ok(StreamDecision::UserQuery { response_rx: resp_rx });
+            return Ok(StreamDecision::UserQuery {
+                response_rx: resp_rx,
+            });
         }
 
         // No [USER_QUERY] marker: done
@@ -502,7 +567,11 @@ async fn handle_stream_result(
             ctx.history.push(thinking_msg.clone());
             if let Err(e) = sm.append_message(sid, thinking_msg) {
                 send_event(
-                    tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                    tx,
+                    sm,
+                    sid,
+                    &ctx.global_tx,
+                    &ctx.session_id,
                     AgentEvent::Error {
                         code: AgentErrorCode::Internal,
                         message: format!("Failed to append thinking message: {e}"),
@@ -525,7 +594,11 @@ async fn handle_stream_result(
             ctx.history.push(text_msg.clone());
             if let Err(e) = sm.append_message(sid, text_msg) {
                 send_event(
-                    tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                    tx,
+                    sm,
+                    sid,
+                    &ctx.global_tx,
+                    &ctx.session_id,
                     AgentEvent::Error {
                         code: AgentErrorCode::Internal,
                         message: format!("Failed to append assistant message: {e}"),
@@ -539,7 +612,11 @@ async fn handle_stream_result(
 
         // Send usage info and Done
         send_event(
-            tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+            tx,
+            sm,
+            sid,
+            &ctx.global_tx,
+            &ctx.session_id,
             AgentEvent::UsageInfo {
                 input_tokens,
                 output_tokens,
@@ -550,7 +627,11 @@ async fn handle_stream_result(
         )
         .await?;
         send_event(
-            tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+            tx,
+            sm,
+            sid,
+            &ctx.global_tx,
+            &ctx.session_id,
             AgentEvent::Done,
         )
         .await?;
@@ -564,6 +645,7 @@ async fn handle_stream_result(
 /// g+h: Doom loop detection, execute tools in parallel, collect results,
 /// and append tool results to history.
 /// Returns true if the agent loop should return (fatal error), false to continue.
+#[allow(clippy::too_many_arguments)]
 async fn execute_tool_calls(
     tool_calls: &[ToolCallRequest],
     text_buffer: String,
@@ -607,8 +689,12 @@ async fn execute_tool_calls(
     assistant_msg.estimated_tokens = estimate_message_tokens(&assistant_msg);
     ctx.history.push(assistant_msg.clone());
     if let Err(e) = sm.append_message(sid, assistant_msg) {
-        send_event(
-            tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+        let _ = send_event(
+            tx,
+            sm,
+            sid,
+            &ctx.global_tx,
+            &ctx.session_id,
             AgentEvent::Error {
                 code: AgentErrorCode::Internal,
                 message: format!("Failed to append assistant message: {e}"),
@@ -640,8 +726,12 @@ async fn execute_tool_calls(
             let all_same = doom_loop_window.iter().all(|sig| sig == first);
             if all_same {
                 if *doom_loop_warned {
-                    send_event(
-                        tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                    let _ = send_event(
+                        tx,
+                        sm,
+                        sid,
+                        &ctx.global_tx,
+                        &ctx.session_id,
                         AgentEvent::Error {
                             code: AgentErrorCode::StuckInLoop,
                             message: "Agent stuck in repeated tool call loop after warning".into(),
@@ -653,10 +743,14 @@ async fn execute_tool_calls(
                 }
                 *doom_loop_warned = true;
                 doom_loop_window.clear();
-                send_event(
-                    tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                let _ = send_event(
+                    tx,
+                    sm,
+                    sid,
+                    &ctx.global_tx,
+                    &ctx.session_id,
                     AgentEvent::StatusUpdate(
-                        "Agent appears stuck in a loop of repeated tool calls".into()
+                        "Agent appears stuck in a loop of repeated tool calls".into(),
                     ),
                 )
                 .await;
@@ -914,7 +1008,9 @@ async fn execute_tool_calls(
 
         loop {
             if ctx.cancel_token.is_cancelled() {
-                for h in &exec_tasks { h.abort(); }
+                for h in &exec_tasks {
+                    h.abort();
+                }
                 break;
             }
 
@@ -928,9 +1024,7 @@ async fn execute_tool_calls(
             if has_tasks && inbox.is_some() && has_pending {
                 let all_tasks = std::mem::take(&mut exec_tasks);
                 let join_fut = futures::future::join_all(all_tasks);
-                let recv_fut = async {
-                    inbox.as_mut().unwrap().recv().await
-                };
+                let recv_fut = async { inbox.as_mut().unwrap().recv().await };
 
                 tokio::select! {
                     biased;
@@ -979,7 +1073,7 @@ async fn execute_tool_calls(
                 for r in results {
                     match r {
                         Ok(result) => collected.push(result),
-                        Err(e) if e.is_cancelled() => {},
+                        Err(e) if e.is_cancelled() => {}
                         Err(e) => {
                             tracing::warn!("tool task failed: {e}");
                         }
@@ -988,8 +1082,13 @@ async fn execute_tool_calls(
                 regular_done = true;
             } else if let Some(ref mut rx) = inbox {
                 match rx.recv().await {
-                    Some(OrchestratorMessage::SubAgentComplete { call_id, content, task_id: _ }) => {
-                        if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id) {
+                    Some(OrchestratorMessage::SubAgentComplete {
+                        call_id,
+                        content,
+                        task_id: _,
+                    }) => {
+                        if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id)
+                        {
                             let ps = pending_spawns.remove(pos);
                             collected.push(ToolExecResult {
                                 index: ps.index,
@@ -999,7 +1098,8 @@ async fn execute_tool_calls(
                         }
                     }
                     Some(OrchestratorMessage::SubAgentError { call_id, error }) => {
-                        if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id) {
+                        if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id)
+                        {
                             let ps = pending_spawns.remove(pos);
                             collected.push(ToolExecResult {
                                 index: ps.index,
@@ -1058,8 +1158,12 @@ async fn execute_tool_calls(
         let tool_msg = Message::tool(tr.result.content, &tr.call_id);
         ctx.history.push(tool_msg.clone());
         if let Err(e) = sm.append_message(sid, tool_msg) {
-            send_event(
-                tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+            let _ = send_event(
+                tx,
+                sm,
+                sid,
+                &ctx.global_tx,
+                &ctx.session_id,
                 AgentEvent::Error {
                     code: AgentErrorCode::Internal,
                     message: format!("Failed to append tool result: {e}"),
@@ -1098,72 +1202,41 @@ pub async fn run_agent_loop(
     // Wrap entire body in catch_unwind for panic safety.
     // On panic, session is reset to Idle before re-raising.
     let result = AssertUnwindSafe(async move {
-        // Helper: convert AgentEvent to AgentMessage for global_tx forwarding
-        fn event_to_msg(event: &AgentEvent) -> Option<AgentMessage> {
-            match event {
-                AgentEvent::TextDelta(s) => Some(AgentMessage::TextDelta(s.clone())),
-                AgentEvent::ThinkingBlock(v) => Some(AgentMessage::ThinkingBlock(v.clone())),
-                AgentEvent::UsageInfo { input_tokens, output_tokens, tool_calls, cache_creation_input_tokens, cache_read_input_tokens } => {
-                    Some(AgentMessage::UsageInfo { input_tokens: *input_tokens, output_tokens: *output_tokens, tool_calls: *tool_calls, cache_creation_input_tokens: *cache_creation_input_tokens, cache_read_input_tokens: *cache_read_input_tokens })
-                }
-                AgentEvent::StatusUpdate(s) => Some(AgentMessage::StatusUpdate(s.clone())),
-                AgentEvent::Error { code, message } => Some(AgentMessage::Error { code: code.clone(), message: message.clone() }),
-                AgentEvent::ToolCallRequest { call_id, tool_name, arguments } => {
-                    Some(AgentMessage::ToolCallRequest { call_id: call_id.clone(), tool_name: tool_name.clone(), arguments: arguments.clone() })
-                }
-                AgentEvent::ToolCallResult { call_id, tool_name, content, is_error } => {
-                    Some(AgentMessage::ToolCallResult { call_id: call_id.clone(), tool_name: tool_name.clone(), content: content.clone(), is_error: *is_error })
-                }
-                AgentEvent::UserQuery { .. } => None, // oneshot not clonable
-                AgentEvent::Done => Some(AgentMessage::Done),
-            }
-        }
-
-        // Helper: send event, return false if receiver dropped
-        macro_rules! try_send {
-            ($event:expr) => {{
-                let event = $event;
-                // Forward to global_tx (for orchestrator)
-                if let Some(ref gtx) = ctx.global_tx {
-                    if let Some(msg) = event_to_msg(&event) {
-                        let _ = gtx.send(Envelope {
-                            session_id: ctx.session_id.clone(),
-                            message: msg,
-                        }).await;
-                    }
-                }
-                // Send to tx (for CLI)
-                if tx.send(event).await.is_err() {
-                    let _ = sm.finish_loop(&sid, SessionStatus::Error);
-                    return;
-                }
-            }};
-        }
-
         // Early cancellation check before appending
         if ctx.cancel_token.is_cancelled() {
-            try_send!(AgentEvent::Error {
-                code: AgentErrorCode::Cancelled,
-                message: "Agent loop cancelled".into(),
-            });
+            let _ = send_event(
+                &tx,
+                &sm,
+                &sid,
+                &ctx.global_tx,
+                &ctx.session_id,
+                AgentEvent::Error {
+                    code: AgentErrorCode::Cancelled,
+                    message: "Agent loop cancelled".into(),
+                },
+            )
+            .await;
             let _ = sm.finish_loop(&sid, SessionStatus::Error);
             return;
         }
 
         // Clean up orphan tool_uses from previous cancelled runs.
-        // If the last assistant message has tool_calls but no corresponding
-        // tool_result messages follow it, strip the tool_calls to prevent
-        // Anthropic API 400 errors (tool_use without tool_result).
         cleanup_orphan_tool_uses(&mut ctx.history);
 
         // 1. Append user message to session store and local history
         if let Err(e) = sm.append_message(&sid, user_message.clone()) {
-            let _ = tx
-                .send(AgentEvent::Error {
+            let _ = send_event(
+                &tx,
+                &sm,
+                &sid,
+                &ctx.global_tx,
+                &ctx.session_id,
+                AgentEvent::Error {
                     code: AgentErrorCode::Internal,
                     message: format!("Failed to append user message: {e}"),
-                })
-                .await;
+                },
+            )
+            .await;
             let _ = sm.finish_loop(&sid, SessionStatus::Error);
             return;
         }
@@ -1176,7 +1249,14 @@ pub async fn run_agent_loop(
         loop {
             // a/b/c: Build prompt + boundary checks
             let ic = match setup_iteration(
-                iteration, &mut ctx, &sm, &tool_registry, &rule_engine, &cfg, &sid, &tx,
+                iteration,
+                &mut ctx,
+                &sm,
+                &tool_registry,
+                &rule_engine,
+                &cfg,
+                &sid,
+                &tx,
             )
             .await
             {
@@ -1188,7 +1268,14 @@ pub async fn run_agent_loop(
 
             // d. Call LLM with retry
             let stream = match call_llm_with_retry(
-                provider.as_ref(), &messages, &tools, &ctx, &cfg, &sid, &tx, &sm,
+                provider.as_ref(),
+                &messages,
+                &tools,
+                &ctx,
+                &cfg,
+                &sid,
+                &tx,
+                &sm,
             )
             .await
             {
@@ -1197,21 +1284,13 @@ pub async fn run_agent_loop(
             };
 
             // e. Collect stream events
-            let output = match collect_stream_events(
-                stream, &mut ctx, &sid, &tx, &sm,
-            )
-            .await
-            {
+            let output = match collect_stream_events(stream, &mut ctx, &sid, &tx, &sm).await {
                 Some(o) => o,
                 None => return,
             };
 
             // f. Handle stream result (check USER_QUERY marker or done)
-            match handle_stream_result(
-                &output, total_tool_calls, &mut ctx, &sm, &sid, &tx,
-            )
-            .await
-            {
+            match handle_stream_result(&output, total_tool_calls, &mut ctx, &sm, &sid, &tx).await {
                 Ok(StreamDecision::Done) => {
                     return;
                 }
@@ -1223,17 +1302,26 @@ pub async fn run_agent_loop(
                     let user_msg = if query_result.selected_index >= 0
                         && (query_result.selected_index as usize) < marker.options.len()
                     {
-                        let option_text = marker.options[query_result.selected_index as usize].clone();
+                        let option_text =
+                            marker.options[query_result.selected_index as usize].clone();
                         Message::user(option_text)
                     } else {
                         Message::user(query_result.text)
                     };
                     ctx.history.push(user_msg.clone());
                     if let Err(e) = sm.append_message(&sid, user_msg) {
-                        try_send!(AgentEvent::Error {
-                            code: AgentErrorCode::Internal,
-                            message: format!("Failed to append user message: {e}"),
-                        });
+                        let _ = send_event(
+                            &tx,
+                            &sm,
+                            &sid,
+                            &ctx.global_tx,
+                            &ctx.session_id,
+                            AgentEvent::Error {
+                                code: AgentErrorCode::Internal,
+                                message: format!("Failed to append user message: {e}"),
+                            },
+                        )
+                        .await;
                         let _ = sm.finish_loop(&sid, SessionStatus::Error);
                         return;
                     }

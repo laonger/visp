@@ -24,7 +24,8 @@ pub fn load_agents(project_path: &Path) -> AgentRegistry {
     // Register built-in code_reader subagent (for reading and understanding code)
     let code_reader = AgentDefinition {
         name: "code_reader".to_string(),
-        description: "代码阅读分析子 Agent，擅长阅读、理解和解释源代码，可被 task 工具调用".to_string(),
+        description: "代码阅读分析子 Agent，擅长阅读、理解和解释源代码，可被 task 工具调用"
+            .to_string(),
         mode: AgentMode::Subagent,
         model: None,
         temperature: None,

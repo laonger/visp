@@ -441,8 +441,10 @@ impl SessionManager {
             .session_id
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         let base = load_system_prompt_template(&params.project_path);
-        let system_prompt_template =
-            format!("You are agent \"{}\" working on a project.\n\n{base}", params.agent_name);
+        let system_prompt_template = format!(
+            "You are agent \"{}\" working on a project.\n\n{base}",
+            params.agent_name
+        );
 
         let session = Session {
             id,
@@ -588,11 +590,7 @@ impl SessionManager {
     }
 
     /// 追加内容到会话的 system_prompt_template
-    pub fn append_system_prompt_template(
-        &self,
-        id: &str,
-        extra: &str,
-    ) -> Result<(), SessionError> {
+    pub fn append_system_prompt_template(&self, id: &str, extra: &str) -> Result<(), SessionError> {
         if extra.is_empty() {
             return Ok(());
         }

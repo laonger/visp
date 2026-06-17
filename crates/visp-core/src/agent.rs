@@ -1,4 +1,6 @@
-use std::panic::AssertUnwindSafe;
+// Allow unused imports — they are consumed by test module via `use super::*`
+#![allow(unused_imports)]
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,7 +9,6 @@ use crate::agent_definition::PermissionRule;
 use crate::error::AgentErrorCode;
 use crate::error::LlmError;
 use crate::message::Message;
-use crate::message::MessageType;
 use crate::message::Role;
 use crate::message::ToolCallRequest;
 use crate::message::estimate_message_tokens;
@@ -21,8 +22,6 @@ use crate::session::SessionStatus;
 use crate::tool::{ToolContext, ToolResult};
 use crate::tool_registry::ToolRegistry;
 
-use futures::FutureExt;
-use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -331,10 +330,8 @@ pub(crate) fn extract_thinking_text(blocks: &[serde_json::Value]) -> Option<Stri
     })
 }
 
-
 // Re-export run_agent_loop from agent_loop module
 pub use crate::agent_loop::run_agent_loop;
-
 
 /// 清理历史中残留的 orphan tool_uses。
 /// 如果一条 assistant 消息包含 tool_calls，但没有对应的 tool_result
