@@ -187,18 +187,22 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
 // ════════════════════════════════════════════════════════════════
 
 /// 计算 block 在视窗中的可见范围。不可见返回 None。
+///
+/// 返回 `(rel_y, visible_h)`：
+/// - `rel_y`：相对于视窗顶部的偏移（0 表示视窗第一行）
+/// - `visible_h`：在视窗内可见的高度
 fn viewport_intersect(
     y: u16,
     h: u16,
     scroll: u16,
     visible: u16,
-    area_bottom: u16,
+    _area_bottom: u16,
 ) -> Option<(u16, u16)> {
     if y + h <= scroll || y >= scroll + visible {
         return None;
     }
     let rel_y = y.saturating_sub(scroll);
-    let max_h = h.min(area_bottom.saturating_sub(rel_y));
+    let max_h = h.min(visible.saturating_sub(rel_y));
     if max_h == 0 {
         None
     } else {
@@ -372,7 +376,7 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                         style,
                         &cache.lines[start..end],
                         visible_lines,
-                        rel_y,
+                        area.y + rel_y,
                     );
                 }
             }
@@ -408,7 +412,7 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                         text_style,
                     ));
                 }
-                render_block(f, area, bs, &text_lines, visible_lines, rel_y);
+                render_block(f, area, bs, &text_lines, visible_lines, area.y + rel_y);
             }
         }
     }
