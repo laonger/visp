@@ -1310,6 +1310,12 @@ impl AppState {
         let idx = if session_id.is_empty() || session_id == self.main_session_id {
             0
         } else if let Some(i) = self.tab_bar.find_index_by_session(&session_id) {
+            // 升级 fallback "agent" 名字为真实 agent_name
+            // 首帧可能是 UsageInfo/ThinkingBlock 等无 agent_name 字段的 payload，
+            // 导致 tab 创建时名字退化为 "agent"；后续带 agent_name 的帧来时升级
+            if !agent_name.is_empty() && self.tab_bar.tabs[i].agent_name == "agent" {
+                self.tab_bar.tabs[i].agent_name = agent_name.clone();
+            }
             i
         } else {
             let title = if agent_name.is_empty() {
@@ -2439,6 +2445,21 @@ mod tests {
         assert_eq!(app.tab_bar.tabs.len(), 3);
         assert_eq!(app.tab_bar.tabs[1].session_id, "other-sid");
         assert_eq!(app.tab_bar.tabs[1].agent_name, "agent");
+    }
+
+    #[test]
+    fn test_route_frame_upgrades_fallback_agent_name() {
+        // 首帧 agent_name 为空 → tab 创建为 fallback "agent"
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let f1 = make_text_delta_frame("sub-sid", "", "first");
+        app.route_frame(f1);
+        assert_eq!(app.tab_bar.tabs[1].agent_name, "agent");
+
+        // 后续帧带真实 agent_name → 升级 fallback "agent" 为真名
+        let f2 = make_text_delta_frame("sub-sid", "code_reader", "second");
+        app.route_frame(f2);
+        assert_eq!(app.tab_bar.tabs[1].agent_name, "code_reader");
+        assert_eq!(app.tab_bar.tabs[1].frames.len(), 2);
     }
 
     #[test]

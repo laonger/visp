@@ -44,21 +44,35 @@ fn tab_label_line(tab: &TabEntry) -> Line<'static> {
     ])
 }
 
-/// 渲染顶部 Tab 栏
+/// 渲染顶部 Tab 栏（3 行：1 行 tab 内容 + 1 行阴影 + 1 行 BG 间隔）
 fn render_tab_bar(tab_bar: &mut crate::app::TabBar, f: &mut Frame, area: Rect) {
     // 整条 tab bar 先铺底色（深紫黑），与对话区无缝连贯
     f.render_widget(Block::default().style(Style::default().bg(theme::BG)), area);
 
+    // 3 行布局：tab 内容(1) + 阴影(1) + 间隔(1)
+    let tab_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // tab 内容
+            Constraint::Length(1), // 阴影
+            Constraint::Length(1), // BG 间隔
+        ])
+        .split(area);
+
+    let content_area = tab_rows[0];
+    let shadow_area = tab_rows[1];
+    // tab_rows[2] 保持 BG 底色（已铺）
+
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Fill(1), Constraint::Length(8)])
-        .split(area);
+        .split(content_area);
 
     // 写入终端宽度供 event.rs 翻页按键使用
-    tab_bar.last_term_width = area.width;
-    tab_bar.ensure_active_visible(area.width);
+    tab_bar.last_term_width = content_area.width;
+    tab_bar.ensure_active_visible(content_area.width);
 
-    let range = tab_bar.current_page_subs(area.width);
+    let range = tab_bar.current_page_subs(content_area.width);
     // 所有 visible titles: [default] + 当前页的 sub
     let mut visible: Vec<Line<'static>> = vec![tab_label_line(&tab_bar.tabs[0])];
     for i in range.clone() {
@@ -67,7 +81,11 @@ fn render_tab_bar(tab_bar: &mut crate::app::TabBar, f: &mut Frame, area: Rect) {
 
     let tabs = Tabs::new(visible)
         .style(Style::default().bg(theme::BG))
-        .select(tab_bar.select_idx_for_current_page(area.width).unwrap_or(0))
+        .select(
+            tab_bar
+                .select_idx_for_current_page(content_area.width)
+                .unwrap_or(0),
+        )
         .highlight_style(
             Style::default()
                 .bg(theme::TAB_ACTIVE_BG)
@@ -78,11 +96,17 @@ fn render_tab_bar(tab_bar: &mut crate::app::TabBar, f: &mut Frame, area: Rect) {
             "│",
             Style::default().fg(theme::TAB_DIVIDER_FG),
         ))
-        .padding(" ", " ");
+        .padding("", " ");
     f.render_widget(tabs, chunks[0]);
 
+    // 阴影行：整行 SHADOW 底色，营造 tab bar 悬浮感
+    f.render_widget(
+        Block::default().style(Style::default().bg(theme::SHADOW)),
+        shadow_area,
+    );
+
     // 页码指示器 [N/M]，多页时显示
-    let pages = tab_bar.layout_pages(area.width);
+    let pages = tab_bar.layout_pages(content_area.width);
     let page_label = if pages.len() > 1 {
         let current = tab_bar.current_page().min(pages.len().saturating_sub(1)) + 1;
         format!("[{}/{}]", current, pages.len())
@@ -128,13 +152,13 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
     let input_area_height = calc_input_height(&app.textarea, area.width);
     let bottom_chunks_height = input_area_height + (if app.confirm.is_some() { 5 } else { 4 });
 
-    // 纵向分割：Tab栏(1) | 对话区 | 分隔线 | 底部区域
+    // 纵向分割：Tab栏(3) | 对话区 | 分隔线 | 底部区域
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),                    // Tab bar
-            Constraint::Min(1),                       // 对话区（占满剩余）
-            Constraint::Length(1),                    // 分隔线
+            Constraint::Length(3), // Tab bar（1 行内容 + 1 行阴影 + 1 行间隔）
+            Constraint::Min(1),    // 对话区（占满剩余）
+            Constraint::Length(1), // 分隔线
             Constraint::Length(bottom_chunks_height), // 底部：确认栏/输入区/状态栏
         ])
         .split(area);
