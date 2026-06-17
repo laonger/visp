@@ -331,7 +331,12 @@ impl TabEntry {
         }
     }
 
-    fn push_chat_line(&mut self, line_type: LineType, content: String, call_id: Option<String>) {
+    pub fn push_chat_line(
+        &mut self,
+        line_type: LineType,
+        content: String,
+        call_id: Option<String>,
+    ) {
         let id = self.next_message_id;
         self.next_message_id += 1;
         self.messages.push(ChatLine {
@@ -343,14 +348,14 @@ impl TabEntry {
         });
     }
 
-    fn flush_streaming(&mut self) {
+    pub fn flush_streaming(&mut self) {
         if !self.streaming_text.is_empty() {
             let text = std::mem::take(&mut self.streaming_text);
             self.push_chat_line(LineType::Assistant, text, None);
         }
     }
 
-    fn update_thinking(&mut self, content: String) {
+    pub fn update_thinking(&mut self, content: String) {
         if let Some(last) = self.messages.last_mut()
             && matches!(last.line_type, LineType::Thinking)
         {
@@ -358,6 +363,35 @@ impl TabEntry {
             last.version += 1;
         } else {
             self.push_chat_line(LineType::Thinking, content, None);
+        }
+    }
+
+    /// 查找与指定 call_id 匹配的 ToolCall 消息，在其后追加结果内容。
+    /// 若未找到匹配的 ToolCall，则创建一个新的 ToolCall 消息。
+    pub fn insert_tool_result(&mut self, call_id: &str, content: String) {
+        if let Some(msg) = self.messages.iter_mut().find(|m| {
+            matches!(m.line_type, LineType::ToolCall { .. })
+                && m.call_id.as_deref() == Some(call_id)
+        }) {
+            msg.content.push('\n');
+            msg.content.push_str(&content);
+            msg.version += 1;
+        } else {
+            self.push_chat_line(
+                LineType::ToolCall {
+                    name: String::new(),
+                },
+                content,
+                Some(call_id.to_string()),
+            );
+        }
+    }
+
+    /// 按 id 查找消息并更新内容，版本号 +1。
+    pub fn update_message(&mut self, id: u64, content: String) {
+        if let Some(msg) = self.messages.iter_mut().find(|m| m.id == id) {
+            msg.content = content;
+            msg.version += 1;
         }
     }
 
@@ -811,10 +845,11 @@ pub struct ModelSelectState {
 }
 
 pub struct AppState {
-    // 对话
-    pub messages: Vec<ChatLine>,
+    pub tab_bar: TabBar,
+    pub main_session_id: String,
+    /// 当前请求的 token 用量 (input, output, cache_create, cache_read)
+    pub current_request_usage: (u32, u32, u32, u32),
     pub message_caches: Vec<MessageCache>,
-    pub streaming_text: String,
     pub scroll_following: bool,
     pub scroll_state: ScrollState,
     pub cache_width: u16,
@@ -825,7 +860,6 @@ pub struct AppState {
     pub history_index: Option<usize>,
 
     // 状态
-    pub generating: bool,
     /// generating 期间的 spinner 帧序号，由主循环 tick 递增
     pub spinner_frame: usize,
     pub stale_done_expected: bool,
@@ -834,13 +868,11 @@ pub struct AppState {
     pub needs_render: bool,
     pub last_scroll_time: Option<std::time::Instant>,
     pub last_stream_render: Option<std::time::Instant>,
-    pub next_message_id: u64,
     pub confirm: Option<ConfirmState>,
     pub model: String,
     pub model_key: String,
     pub session_id: String,
     pub should_quit: bool,
-    pub pending_usage: Option<(u32, u32, u32, u32, u32)>,
     /// 当前 session 累计 token 数（input + output），用于状态栏显示
     pub total_input_tokens: u32,
     pub total_output_tokens: u32,
@@ -871,30 +903,29 @@ impl AppState {
     pub fn new(session_id: String, model: String, model_key: String) -> Self {
         let mut textarea = Self::new_textarea();
         textarea.set_placeholder_text("Type your message...");
+        let main_session_id = session_id.clone();
         Self {
-            messages: Vec::new(),
+            tab_bar: TabBar::new(main_session_id.clone()),
+            main_session_id,
+            current_request_usage: (0, 0, 0, 0),
             message_caches: Vec::new(),
-            streaming_text: String::new(),
             scroll_following: true,
             scroll_state: ScrollState::default(),
             cache_width: 0,
             textarea,
             input_history: Vec::new(),
             history_index: None,
-            generating: false,
             spinner_frame: 0,
             stale_done_expected: false,
             current_request_id: None,
             needs_render: true,
             last_scroll_time: None,
             last_stream_render: None,
-            next_message_id: 0,
             confirm: None,
             model,
             model_key,
             session_id,
             should_quit: false,
-            pending_usage: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
             total_cache_creation_input_tokens: 0,
@@ -920,63 +951,53 @@ impl AppState {
         ta
     }
 
+    // ── Tab 访问方法 ────────────────────────────────────────
+    pub fn active_tab(&self) -> &TabEntry {
+        &self.tab_bar.tabs[self.tab_bar.active]
+    }
+
+    pub fn active_tab_mut(&mut self) -> &mut TabEntry {
+        let idx = self.tab_bar.active;
+        &mut self.tab_bar.tabs[idx]
+    }
+
+    pub fn active_messages(&self) -> &[ChatLine] {
+        &self.active_tab().messages
+    }
+
+    // ── 消息操作（代理到 active_tab）─────────────────────────
+
     pub fn add_message(&mut self, line_type: LineType, content: String) {
-        let id = self.next_message_id;
-        self.next_message_id += 1;
-        self.messages.push(ChatLine {
-            id,
-            version: 0,
-            line_type,
-            content,
-            call_id: None,
-        });
+        self.active_tab_mut()
+            .push_chat_line(line_type, content, None);
     }
 
     pub fn add_tool_line(&mut self, line_type: LineType, content: String, call_id: &str) {
-        let id = self.next_message_id;
-        self.next_message_id += 1;
-        self.messages.push(ChatLine {
-            id,
-            version: 0,
-            line_type,
-            content,
-            call_id: Some(call_id.to_string()),
-        });
+        self.active_tab_mut()
+            .push_chat_line(line_type, content, Some(call_id.to_string()));
     }
 
     pub fn insert_tool_result(&mut self, call_id: &str, content: String) {
-        if let Some(msg) = self.messages.iter_mut().find(|m| {
-            matches!(m.line_type, LineType::ToolCall { .. })
-                && m.call_id.as_deref() == Some(call_id)
-        }) {
-            msg.content.push('\n');
-            msg.content.push_str(&content);
-            msg.version += 1;
-        } else {
-            let id = self.next_message_id;
-            self.next_message_id += 1;
-            self.messages.push(ChatLine {
-                id,
-                version: 0,
-                line_type: LineType::ToolCall {
-                    name: String::new(),
-                },
-                content,
-                call_id: Some(call_id.to_string()),
-            });
-        }
+        self.active_tab_mut().insert_tool_result(call_id, content);
     }
 
     pub fn append_streaming(&mut self, delta: &str) {
-        self.streaming_text.push_str(delta);
+        self.active_tab_mut().streaming_text.push_str(delta);
     }
 
     pub fn flush_streaming(&mut self) {
-        if !self.streaming_text.is_empty() {
-            let text = std::mem::take(&mut self.streaming_text);
-            self.add_message(LineType::Assistant, text);
-        }
+        self.active_tab_mut().flush_streaming();
     }
+
+    pub fn update_thinking(&mut self, content: String) {
+        self.active_tab_mut().update_thinking(content);
+    }
+
+    pub fn update_message(&mut self, id: u64, content: String) {
+        self.active_tab_mut().update_message(id, content);
+    }
+
+    // ── 其他原有方法 ─────────────────────────────────────────
 
     pub fn try_begin_scroll(&mut self) -> bool {
         const COOLDOWN_MS: u128 = 30;
@@ -1013,103 +1034,91 @@ impl AppState {
         true
     }
 
-    pub fn update_message(&mut self, id: u64, content: String) {
-        if let Some(msg) = self.messages.iter_mut().find(|m| m.id == id) {
-            msg.content = content;
-            msg.version += 1;
-        }
-    }
-
-    /// 原地更新最后一条 thinking 消息，用于流式 reasoning 显示。
-    /// 如果最后一条不是 Thinking 则新增一行。
-    pub fn update_thinking(&mut self, content: String) {
-        if let Some(last) = self.messages.last_mut()
-            && matches!(last.line_type, LineType::Thinking)
-        {
-            last.content = content;
-            last.version += 1;
-        } else {
-            self.add_message(LineType::Thinking, content);
-        }
-    }
-
     // ════════════════════════════════════════════════════════════
-    // Zero-ref shim API — 这些 shim 方法代理到旧字段（临时保留）
-    // 后续 Commit 2 将删除旧字段，访问全部通过方法。
+    // Shim API — 代理到 active_tab() / active_tab_mut()
     // ════════════════════════════════════════════════════════════
 
     // --- 读取（getter）---
     pub fn messages(&self) -> &[ChatLine] {
-        &self.messages
+        &self.active_tab().messages
     }
     pub fn streaming_text(&self) -> &str {
-        &self.streaming_text
+        &self.active_tab().streaming_text
     }
     pub fn streaming_is_empty(&self) -> bool {
-        self.streaming_text.is_empty()
+        self.active_tab().streaming_text.is_empty()
     }
     pub fn streaming_lines_count(&self) -> usize {
-        self.streaming_text.lines().count()
+        self.active_tab().streaming_text.lines().count()
     }
     pub fn generating(&self) -> bool {
-        self.generating
+        self.active_tab().generating
     }
     pub fn has_pending_usage(&self) -> bool {
-        self.pending_usage.is_some()
+        self.active_tab().pending_usage.is_some()
     }
 
     // --- 写入（操作型）---
     pub fn set_generating(&mut self, v: bool) {
-        self.generating = v;
+        self.active_tab_mut().generating = v;
     }
     pub fn clear_streaming(&mut self) {
-        self.streaming_text.clear();
+        self.active_tab_mut().streaming_text.clear();
     }
     pub fn append_streaming_text(&mut self, s: &str) {
-        self.streaming_text.push_str(s);
+        self.active_tab_mut().streaming_text.push_str(s);
     }
     pub fn truncate_streaming(&mut self, n: usize) {
-        self.streaming_text.truncate(n);
+        self.active_tab_mut().streaming_text.truncate(n);
     }
     pub fn streaming_rfind(&self, needle: &str) -> Option<usize> {
-        self.streaming_text.rfind(needle)
+        self.active_tab().streaming_text.rfind(needle)
     }
 
     pub fn set_pending_usage(&mut self, v: Option<(u32, u32, u32, u32, u32)>) {
-        self.pending_usage = v;
+        self.active_tab_mut().pending_usage = v;
     }
     pub fn take_pending_usage(&mut self) -> Option<(u32, u32, u32, u32, u32)> {
-        self.pending_usage.take()
+        self.active_tab_mut().pending_usage.take()
     }
     pub fn clear_pending_usage(&mut self) {
-        self.pending_usage = None;
+        self.active_tab_mut().pending_usage = None;
     }
 
     // --- 用于 ui.rs 的迭代访问（消息存在性查询）---
     pub fn has_message_with_id(&self, id: u64) -> bool {
-        self.messages.iter().any(|m| m.id == id)
+        self.active_tab().messages.iter().any(|m| m.id == id)
     }
 
     pub fn clear_messages(&mut self) {
-        self.messages.clear();
+        self.active_tab_mut().messages.clear();
         self.message_caches.clear();
     }
 
     /// 重置为新 session 的状态（保留 mouse 设置和 textarea 内容）
     pub fn reset_for_new_session(&mut self, session_id: String, model: String, model_key: String) {
-        self.messages.clear();
+        // 重置 active tab 的内容状态（msg/streaming/generating/usage）
+        let tab = self.active_tab_mut();
+        tab.messages.clear();
+        tab.streaming_text.clear();
+        tab.generating = false;
+        tab.pending_usage = None;
+        tab.next_message_id = 0;
+        tab.scroll = 0;
+        tab.rendered_up_to = 0;
+        tab.status = AgentStatus::Running;
+        // 更新 tab 的 session_id
+        tab.session_id = session_id.clone();
+
         self.message_caches.clear();
-        self.streaming_text.clear();
-        self.generating = false;
         self.stale_done_expected = false;
         self.current_request_id = None;
-        self.next_message_id = 0;
         self.confirm = None;
-        self.pending_usage = None;
         self.total_input_tokens = 0;
         self.total_output_tokens = 0;
         self.total_cache_creation_input_tokens = 0;
         self.total_cache_read_input_tokens = 0;
+        self.current_request_usage = (0, 0, 0, 0);
         self.pending_new_session = false;
         self.pending_list_sessions = false;
         self.pending_switch_session = None;

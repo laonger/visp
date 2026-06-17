@@ -228,9 +228,7 @@ fn ensure_all_caches(app: &mut AppState, width: u16) {
     for (i, cache) in app.message_caches.iter().enumerate() {
         cache_map.insert(cache.msg_id, i);
     }
-    // Clone to avoid borrow conflict: app.messages() borrows all of &self,
-    // while &app.messages was field-level.  Once old fields are removed
-    // (Commit 2) this clone can be removed by inlining the internal data.
+    // Clone to avoid borrow conflict: app.messages() borrows all of &self.
     let msgs = app.messages().to_vec();
     for msg in &msgs {
         if let Some(&idx) = cache_map.get(&msg.id) {
@@ -262,7 +260,7 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
 
     // ── 计算总高度 + 滚动 ────────────────────────────────
     let total: u16 = app
-        .messages
+        .messages()
         .iter()
         .map(|m| {
             let style = theme::style_for(m.line_type.clone());
