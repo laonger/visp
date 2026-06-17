@@ -2909,4 +2909,158 @@ mod tests {
         assert_eq!(app.tab_bar.tabs.len(), 2);
         assert_eq!(app.tab_bar.tabs[1].session_id, "sub-1");
     }
+
+    // ════════════════════════════════════════════════════════════
+    // Step 12: end-to-end integration tests
+    // ════════════════════════════════════════════════════════════
+
+    fn make_error_frame(sid: &str, agent_name: &str, code: &str, message: &str) -> ServerMessage {
+        ServerMessage {
+            payload: Some(server_message::Payload::Error(visp_proto::visp::Error {
+                code: code.into(),
+                message: message.into(),
+                session_id: sid.into(),
+                agent_name: agent_name.into(),
+            })),
+        }
+    }
+
+    #[test]
+    fn test_e2e_spawn_subagent_creates_tab() {
+        let mut app = AppState::new("main".into(), "m".into(), "".into());
+        let frame = make_text_delta_frame("sub1", "explorer", "hello");
+        app.route_frame(frame);
+        assert_eq!(app.tab_bar.tabs.len(), 2);
+        assert_eq!(app.tab_bar.tabs[1].session_id, "sub1");
+        assert_eq!(app.tab_bar.tabs[1].agent_name, "explorer");
+        assert_eq!(app.tab_bar.active, 0);
+    }
+
+    #[test]
+    fn test_e2e_subagent_done_changes_status_color() {
+        let mut app = AppState::new("main".into(), "m".into(), "".into());
+        app.tab_bar.insert_sub_agent("sub1", "agentA");
+        assert_eq!(app.tab_bar.tabs[1].status, AgentStatus::Running);
+        // Tab must be active for route_frame to auto-render the Done frame
+        app.tab_bar.active = 1;
+        let frame = make_done_frame("sub1");
+        app.route_frame(frame);
+        assert_eq!(app.tab_bar.tabs[1].status, AgentStatus::Done);
+    }
+
+    #[test]
+    fn test_e2e_subagent_error_status_guards_done() {
+        let mut app = AppState::new("main".into(), "m".into(), "".into());
+        app.tab_bar.insert_sub_agent("sub1", "agentA");
+        app.tab_bar.active = 1;
+        // Error frame changes status to Error
+        let err_frame = make_error_frame("sub1", "agentA", "ERR", "oops");
+        app.route_frame(err_frame);
+        assert_eq!(app.tab_bar.tabs[1].status, AgentStatus::Error);
+        // Done frame should NOT override Error status (guard: only Running → Done)
+        let done_frame = make_done_frame("sub1");
+        app.route_frame(done_frame);
+        assert_eq!(app.tab_bar.tabs[1].status, AgentStatus::Error);
+    }
+
+    #[test]
+    fn test_e2e_subagent_inactive_does_not_pollute_default() {
+        let mut app = AppState::new("main".into(), "m".into(), "".into());
+        // active defaults to 0; sub frames should go to sub tab, not default
+        let f1 = make_text_delta_frame("sub1", "agentA", "hello");
+        let f2 = make_tool_call_frame("sub1", "agentA", "c1", "bash", "{}");
+        app.route_frame(f1);
+        app.route_frame(f2);
+        // Default tab untouched
+        assert_eq!(app.tab_bar.tabs[0].frames.len(), 0);
+        // Sub tab has accumulated frames
+        assert_eq!(app.tab_bar.tabs[1].frames.len(), 2);
+    }
+
+    #[test]
+    fn test_e2e_switch_to_sub_renders_accumulated() {
+        let mut app = AppState::new("main".into(), "m".into(), "".into());
+        // Accumulate 4 TextDelta + 1 ToolCall (ToolCall creates a message)
+        for i in 0..4 {
+            let frame = make_text_delta_frame("sub1", "agentA", &format!("delta{}", i));
+            app.route_frame(frame);
+        }
+        let tc = make_tool_call_frame("sub1", "agentA", "c1", "bash", "{}");
+        app.route_frame(tc);
+        // Before activation: lazy, no messages rendered
+        assert_eq!(app.tab_bar.tabs[1].messages.len(), 0);
+        assert_eq!(app.tab_bar.tabs[1].frames.len(), 5);
+        // Switch to sub tab → auto renders all pending frames
+        app.tab_bar.activate(1);
+        // After rendering: messages populated, all frames processed
+        assert!(!app.tab_bar.tabs[1].messages.is_empty());
+        assert_eq!(app.tab_bar.tabs[1].rendered_up_to, 5);
+    }
+
+    #[test]
+    fn test_e2e_token_l1_displayed_per_sub_done() {
+        let mut app = AppState::new("main".into(), "m".into(), "".into());
+        app.tab_bar.insert_sub_agent("sub1", "agentA");
+        // Route UsageInfo for sub (L1)
+        app.apply_usage_info("sub1", 100, 200, 5, 10, 20);
+        assert_eq!(
+            app.tab_bar.tabs[1].pending_usage,
+            Some((100, 200, 5, 10, 20))
+        );
+        // Route Done for sub → L1 taken, token line added
+        app.apply_done_token_settlement("sub1");
+        // L1 taken
+        assert!(app.tab_bar.tabs[1].pending_usage.is_none());
+        // Token line contains input count
+        assert!(!app.tab_bar.tabs[1].messages.is_empty());
+        assert!(app.tab_bar.tabs[1].messages[0].content.contains("100"));
+        // L2 still accumulated (sub Done does NOT clear L2)
+        assert_eq!(app.current_request_usage, (100, 200, 10, 20));
+        // L3 unchanged (sub Done does NOT modify L3)
+        assert_eq!(app.total_input_tokens, 0);
+        assert_eq!(app.total_output_tokens, 0);
+    }
+
+    #[test]
+    fn test_e2e_token_l2_l3_only_on_default_done() {
+        let mut app = AppState::new("main".into(), "m".into(), "".into());
+        // Two UsageInfo frames for main session
+        app.apply_usage_info("main", 50, 80, 2, 5, 10);
+        app.apply_usage_info("main", 30, 40, 1, 3, 5);
+        // L2 accumulated (input, output, cache_create, cache_read)
+        assert_eq!(app.current_request_usage, (80, 120, 8, 15));
+        // Done for main → L2 cleared, L3 updated
+        app.apply_done_token_settlement("main");
+        // L2 cleared
+        assert_eq!(app.current_request_usage, (0, 0, 0, 0));
+        // L3 accumulated
+        assert_eq!(app.total_input_tokens, 80);
+        assert_eq!(app.total_output_tokens, 120);
+        assert_eq!(app.total_cache_creation_input_tokens, 8);
+        assert_eq!(app.total_cache_read_input_tokens, 15);
+        // Token line in default tab
+        assert!(!app.tab_bar.tabs[0].messages.is_empty());
+        assert!(
+            app.tab_bar.tabs[0].messages[0]
+                .content
+                .contains("Tokens: 80 in / 120 out")
+        );
+    }
+
+    #[test]
+    fn test_e2e_no_sub_prefix_in_messages() {
+        let mut app = AppState::new("main".into(), "m".into(), "".into());
+        let frame = make_text_delta_frame("sub1", "agentA", "hello world");
+        app.route_frame(frame);
+        // Switch to sub tab to render
+        app.tab_bar.activate(1);
+        // No message should contain the "[sub:" prefix (removed in Step 3)
+        for msg in &app.tab_bar.tabs[1].messages {
+            assert!(
+                !msg.content.contains("[sub:"),
+                "Message content should not contain [sub: prefix, got: {}",
+                msg.content
+            );
+        }
+    }
 }
