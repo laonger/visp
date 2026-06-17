@@ -742,23 +742,15 @@ impl AppState {
         self.streaming_text.push_str(delta);
     }
 
-    /// 如果 session_id 是子 agent 格式，首次出现时添加 [sub: agent_name] 前缀消息。
-    /// 返回 true 表示已添加前缀（后续显示的消息属于子 agent）。
-    pub fn maybe_add_sub_agent_prefix(&mut self, session_id: &str) -> bool {
-        if session_id.is_empty() || self.sub_prefix_shown.contains(session_id) {
+    /// 如果 agent_name 非空且是首次出现，添加 [sub: agent_name] 前缀消息。
+    /// 返回 true 表示已添加前缀。
+    pub fn maybe_add_sub_agent_prefix(&mut self, session_id: &str, agent_name: &str) -> bool {
+        if agent_name.is_empty() || self.sub_prefix_shown.contains(session_id) {
             return false;
         }
-        // 子 agent session_id 格式: {parent_session_id}/{agent_name}/{uuid}
-        let parts: Vec<&str> = session_id.split('/').collect();
-        if parts.len() >= 3 {
-            let agent_name = parts[parts.len() - 2];
-            if !agent_name.is_empty() {
-                self.sub_prefix_shown.insert(session_id.to_string());
-                self.add_message(LineType::Status, format!("[sub: {}]", agent_name));
-                return true;
-            }
-        }
-        false
+        self.sub_prefix_shown.insert(session_id.to_string());
+        self.add_message(LineType::Status, format!("[sub: {}]", agent_name));
+        true
     }
 
     pub fn flush_streaming(&mut self) {

@@ -711,12 +711,12 @@ fn handle_grpc_message(
     app.needs_render = true;
     match msg.payload {
         Some(server_message::Payload::TextDelta(delta)) => {
-            app.maybe_add_sub_agent_prefix(&delta.session_id);
+            app.maybe_add_sub_agent_prefix(&delta.session_id, &delta.agent_name);
             app.append_streaming(&delta.delta);
         }
         Some(server_message::Payload::ToolCall(tc)) => {
             app.flush_streaming();
-            app.maybe_add_sub_agent_prefix(&tc.session_id);
+            app.maybe_add_sub_agent_prefix(&tc.session_id, &tc.agent_name);
             let args_display = tc_display(&tc);
             app.add_tool_line(
                 LineType::ToolCall {
@@ -728,7 +728,7 @@ fn handle_grpc_message(
         }
         Some(server_message::Payload::ToolResult(tr)) => {
             app.flush_streaming();
-            app.maybe_add_sub_agent_prefix(&tr.session_id);
+            app.maybe_add_sub_agent_prefix(&tr.session_id, &tr.agent_name);
             // 查找 tool_name：优先从 proto 取，fallback 找匹配的 ToolCall
             let tool_name = if !tr.tool_name.is_empty() {
                 tr.tool_name.clone()
@@ -800,7 +800,7 @@ fn handle_grpc_message(
             });
         }
         Some(server_message::Payload::Error(err)) => {
-            app.maybe_add_sub_agent_prefix(&err.session_id);
+            app.maybe_add_sub_agent_prefix(&err.session_id, &err.agent_name);
             // Skip stale Error from cancelled request (cancel sends Error, not Done)
             if app.stale_done_expected {
                 app.stale_done_expected = false;

@@ -443,6 +443,7 @@ impl CoderDaemon for CoderDaemonService {
                                             &session_id[..session_id.len().min(8)]
                                         ),
                                         user_inputs,
+                                        agent_name: String::new(),
                                     },
                                 )),
                             };
@@ -462,6 +463,7 @@ impl CoderDaemon for CoderDaemonService {
                                                         proto::TextDelta {
                                                             delta: msg.content.clone(),
                                                             session_id: session_id.clone(),
+                                                            agent_name: String::new(),
                                                         },
                                                     ),
                                                 ),
@@ -481,6 +483,7 @@ impl CoderDaemon for CoderDaemonService {
                                                                 tool_name: tc.name.clone(),
                                                                 arguments: tc.arguments.clone(),
                                                                 session_id: session_id.clone(),
+                                                                agent_name: String::new(),
                                                             },
                                                         ),
                                                     ),
@@ -508,6 +511,7 @@ impl CoderDaemon for CoderDaemonService {
                                                         content: msg.content.clone(),
                                                         is_error: msg.kind == MessageType::Error,
                                                         session_id: session_id.clone(),
+                                                        agent_name: String::new(),
                                                     },
                                                 ),
                                             ),
@@ -569,7 +573,8 @@ impl CoderDaemon for CoderDaemonService {
                         }
                     }
                     _ => {
-                        let proto_msg = agent_event_to_server_message(frame.event, &sid);
+                        let proto_msg =
+                            agent_event_to_server_message(frame.event, &sid, &frame.agent_name);
                         if let Some(payload) = proto_msg.payload
                             && response_tx
                                 .send(Ok(proto::ServerMessage {
@@ -792,18 +797,25 @@ fn session_error_msg(code: &str, message: &str, session_id: &str) -> proto::Serv
             code: code.to_owned(),
             message: message.to_owned(),
             session_id: session_id.to_owned(),
+            agent_name: String::new(),
         })),
     }
 }
 
-fn agent_event_to_server_message(event: AgentEvent, session_id: &str) -> proto::ServerMessage {
+fn agent_event_to_server_message(
+    event: AgentEvent,
+    session_id: &str,
+    agent_name: &str,
+) -> proto::ServerMessage {
     let sid = session_id.to_owned();
+    let aname = agent_name.to_owned();
     match event {
         AgentEvent::TextDelta(delta) => proto::ServerMessage {
             payload: Some(proto::server_message::Payload::TextDelta(
                 proto::TextDelta {
                     delta,
                     session_id: sid,
+                    agent_name: aname,
                 },
             )),
         },
@@ -817,6 +829,7 @@ fn agent_event_to_server_message(event: AgentEvent, session_id: &str) -> proto::
                 tool_name,
                 arguments,
                 session_id: sid,
+                agent_name: aname,
             })),
         },
         AgentEvent::ToolCallResult {
@@ -832,6 +845,7 @@ fn agent_event_to_server_message(event: AgentEvent, session_id: &str) -> proto::
                     is_error,
                     tool_name,
                     session_id: sid,
+                    agent_name: aname,
                 },
             )),
         },
@@ -875,6 +889,7 @@ fn agent_event_to_server_message(event: AgentEvent, session_id: &str) -> proto::
                     message,
                     session_id: sid,
                     user_inputs: vec![],
+                    agent_name: aname,
                 },
             )),
         },
@@ -900,6 +915,7 @@ fn agent_event_to_server_message(event: AgentEvent, session_id: &str) -> proto::
                 code: code.to_string(),
                 message,
                 session_id: sid,
+                agent_name: aname,
             })),
         },
         AgentEvent::Done => proto::ServerMessage {
@@ -1362,7 +1378,8 @@ mod tests {
 
     #[test]
     fn test_agent_event_to_server_message_text_delta() {
-        let msg = agent_event_to_server_message(AgentEvent::TextDelta("hello".into()), "sess-1");
+        let msg =
+            agent_event_to_server_message(AgentEvent::TextDelta("hello".into()), "sess-1", "");
         match msg.payload {
             Some(proto::server_message::Payload::TextDelta(t)) => {
                 assert_eq!(t.delta, "hello");
@@ -1379,7 +1396,7 @@ mod tests {
             tool_name: "bash".into(),
             arguments: r#"{"cmd":"ls"}"#.into(),
         };
-        let msg = agent_event_to_server_message(event, "sess-1");
+        let msg = agent_event_to_server_message(event, "sess-1", "");
         match msg.payload {
             Some(proto::server_message::Payload::ToolCall(t)) => {
                 assert_eq!(t.call_id, "call-1");
@@ -1393,7 +1410,7 @@ mod tests {
 
     #[test]
     fn test_agent_event_to_server_message_done() {
-        let msg = agent_event_to_server_message(AgentEvent::Done, "sess-1");
+        let msg = agent_event_to_server_message(AgentEvent::Done, "sess-1", "");
         match msg.payload {
             Some(proto::server_message::Payload::Done(d)) => {
                 assert_eq!(d.session_id, "sess-1");
@@ -1408,7 +1425,7 @@ mod tests {
             code: visp_core::error::AgentErrorCode::MaxIterations,
             message: "max reached".into(),
         };
-        let msg = agent_event_to_server_message(event, "sess-1");
+        let msg = agent_event_to_server_message(event, "sess-1", "");
         match msg.payload {
             Some(proto::server_message::Payload::Error(e)) => {
                 assert_eq!(e.code, "Maximum iterations reached");
@@ -1429,7 +1446,7 @@ mod tests {
             allow_other: true,
             respond: tx,
         };
-        let msg = agent_event_to_server_message(event, "sess-1");
+        let msg = agent_event_to_server_message(event, "sess-1", "");
         match msg.payload {
             Some(proto::server_message::Payload::UserQuery(query)) => {
                 assert_eq!(query.query_id, "q-1");
