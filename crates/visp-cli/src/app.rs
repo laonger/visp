@@ -480,7 +480,8 @@ impl TabEntry {
 pub struct TabBar {
     pub tabs: Vec<TabEntry>,
     pub active: usize,
-    pub tab_page: usize,
+    pub page_start: usize,
+    pub last_term_width: u16,
 }
 
 impl TabBar {
@@ -488,7 +489,8 @@ impl TabBar {
         Self {
             tabs: vec![TabEntry::new(main_session_id, "default")],
             active: 0,
-            tab_page: 0,
+            page_start: 0,
+            last_term_width: 0,
         }
     }
 
@@ -523,6 +525,91 @@ impl TabBar {
         }
         // Create new
         self.insert_sub_agent(session_id, agent_name)
+    }
+
+    /// 计算每页的 sub 索引范围（不含 default）。
+    /// 每页固定 4 个 sub tab。
+    pub fn layout_pages(&self, _term_width: u16) -> Vec<std::ops::Range<usize>> {
+        let sub_count = self.tabs.len().saturating_sub(1);
+        if sub_count == 0 {
+            #[allow(clippy::single_range_in_vec_init)]
+            return vec![1..1]; // 空范围
+        }
+        const PER_PAGE: usize = 4;
+        let total_pages = sub_count.div_ceil(PER_PAGE);
+        (0..total_pages)
+            .map(|p| {
+                let start = 1 + p * PER_PAGE;
+                let end = (start + PER_PAGE).min(self.tabs.len());
+                start..end
+            })
+            .collect()
+    }
+
+    /// 当前页号（从 0 开始）
+    pub fn current_page(&self) -> usize {
+        self.page_start
+    }
+
+    /// 当前页的 sub 范围
+    pub fn current_page_subs(&self, term_width: u16) -> std::ops::Range<usize> {
+        let pages = self.layout_pages(term_width);
+        if pages.is_empty() {
+            return 0..0;
+        }
+        let p = self.page_start.min(pages.len() - 1);
+        pages[p].clone()
+    }
+
+    /// active tab 在当前页可见 titles 中的索引。
+    /// 仅当 active 在当前页可见时返回 Some。
+    pub fn select_idx_for_current_page(&self, term_width: u16) -> Option<usize> {
+        if self.active == 0 {
+            return Some(0);
+        }
+        let range = self.current_page_subs(term_width);
+        if range.contains(&self.active) {
+            // visible titles = [default, sub_range[0], sub_range[1], ...]
+            Some(1 + (self.active - range.start))
+        } else {
+            None
+        }
+    }
+
+    /// 翻到下一页（边界停止）。
+    pub fn next_page(&mut self, term_width: u16) -> bool {
+        let pages = self.layout_pages(term_width);
+        if self.page_start + 1 < pages.len() {
+            self.page_start += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 翻到上一页（边界停止）。
+    pub fn prev_page(&mut self) -> bool {
+        if self.page_start > 0 {
+            self.page_start -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 确保 active tab 在当前页可见。
+    /// 如果 active 不在可见范围，翻到包含它的那一页。
+    pub fn ensure_active_visible(&mut self, term_width: u16) {
+        if self.active == 0 {
+            return; // default 永远可见
+        }
+        let pages = self.layout_pages(term_width);
+        for (i, range) in pages.iter().enumerate() {
+            if range.contains(&self.active) {
+                self.page_start = i;
+                return;
+            }
+        }
     }
 
     /// Activate the tab at the given index and render its pending frames.
@@ -1807,7 +1894,13 @@ mod tests {
         assert_eq!(bar.tabs[0].agent_name, "default");
         assert_eq!(bar.tabs[0].session_id, "main-sid");
         assert_eq!(bar.active, 0);
-        assert_eq!(bar.tab_page, 0);
+        assert_eq!(bar.page_start, 0);
+    }
+
+    #[test]
+    fn test_tabbar_new_has_last_term_width_zero() {
+        let bar = TabBar::new("main-sid".into());
+        assert_eq!(bar.last_term_width, 0);
     }
 
     #[test]
@@ -2581,5 +2674,92 @@ mod tests {
         assert_eq!(app.total_input_tokens, 0);
         // L2 unchanged
         assert_eq!(app.current_request_usage, (100, 50, 20, 10));
+    }
+
+    // ── TabBar pagination tests ─────────────────────────────────────
+
+    fn make_tab_bar_with_subs(n: usize) -> TabBar {
+        let mut tb = TabBar::new("main".into());
+        for i in 0..n {
+            tb.insert_sub_agent(format!("sub-{}", i), format!("agent{}", i));
+        }
+        tb
+    }
+
+    #[test]
+    fn test_layout_pages_default_always_first() {
+        let tb = make_tab_bar_with_subs(10);
+        let pages = tb.layout_pages(80);
+        for range in &pages {
+            assert!(
+                !range.contains(&0),
+                "Page {:?} contains default tab 0",
+                range
+            );
+        }
+    }
+
+    #[test]
+    fn test_layout_pages_single_page_when_fits() {
+        let tb = make_tab_bar_with_subs(2);
+        let pages = tb.layout_pages(80);
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0], 1..3); // subs at indices 1,2
+    }
+
+    #[test]
+    fn test_layout_pages_multi_page_when_overflow() {
+        let tb = make_tab_bar_with_subs(10);
+        let pages = tb.layout_pages(80);
+        assert_eq!(pages.len(), 3); // 4+4+2
+        assert_eq!(pages[0], 1..5);
+        assert_eq!(pages[1], 5..9);
+        assert_eq!(pages[2], 9..11);
+    }
+
+    #[test]
+    fn test_alt_shift_right_advances_page() {
+        let mut tb = make_tab_bar_with_subs(10);
+        assert_eq!(tb.page_start, 0);
+        let result = tb.next_page(80);
+        assert!(result);
+        assert_eq!(tb.page_start, 1);
+    }
+
+    #[test]
+    fn test_alt_shift_left_at_zero_stops() {
+        let mut tb = make_tab_bar_with_subs(10);
+        tb.page_start = 0;
+        let result = tb.prev_page();
+        assert!(!result);
+        assert_eq!(tb.page_start, 0);
+    }
+
+    #[test]
+    fn test_alt_shift_right_at_last_stops() {
+        let mut tb = make_tab_bar_with_subs(10);
+        tb.page_start = 2; // last page (0-indexed, 3 pages total)
+        let result = tb.next_page(80);
+        assert!(!result);
+        assert_eq!(tb.page_start, 2);
+    }
+
+    #[test]
+    fn test_select_idx_in_visible_when_active_in_page() {
+        let mut tb = make_tab_bar_with_subs(8);
+        tb.page_start = 0; // subs 1-4 visible
+        tb.active = 2; // "sub-6" at index 2
+        let idx = tb.select_idx_for_current_page(80);
+        // visible = [default, sub[1], sub[2]] → idx = 1 + (2-1) = 2
+        assert_eq!(idx, Some(2));
+    }
+
+    #[test]
+    fn test_active_tab_change_auto_scrolls_to_visible_page() {
+        let mut tb = make_tab_bar_with_subs(8);
+        tb.active = 6; // on page 1 (subs 5-8)
+        tb.page_start = 0; // wrong page
+        tb.ensure_active_visible(80);
+        assert_eq!(tb.page_start, 1); // page containing index 6
     }
 }

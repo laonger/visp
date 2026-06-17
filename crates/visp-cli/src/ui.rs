@@ -45,25 +45,42 @@ fn tab_label_line(tab: &TabEntry) -> Line<'static> {
 }
 
 /// 渲染顶部 Tab 栏
-fn render_tab_bar(tab_bar: &crate::app::TabBar, f: &mut Frame, area: Rect) {
+fn render_tab_bar(tab_bar: &mut crate::app::TabBar, f: &mut Frame, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Fill(1), Constraint::Length(8)])
         .split(area);
 
-    let titles: Vec<Line<'static>> = tab_bar.tabs.iter().map(tab_label_line).collect();
-    let tabs = Tabs::new(titles)
-        .select(tab_bar.active)
+    // 写入终端宽度供 event.rs 翻页按键使用
+    tab_bar.last_term_width = area.width;
+    tab_bar.ensure_active_visible(area.width);
+
+    let range = tab_bar.current_page_subs(area.width);
+    // 所有 visible titles: [default] + 当前页的 sub
+    let mut visible: Vec<Line<'static>> = vec![tab_label_line(&tab_bar.tabs[0])];
+    for i in range.clone() {
+        visible.push(tab_label_line(&tab_bar.tabs[i]));
+    }
+
+    let tabs = Tabs::new(visible)
+        .select(tab_bar.select_idx_for_current_page(area.width).unwrap_or(0))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .divider("|")
         .padding(" ", " ");
     f.render_widget(tabs, chunks[0]);
 
-    // 页码区（Step 10 前留空，暂时显示 1/1）
-    let page_label = Paragraph::new("1/1")
+    // 页码指示器 [N/M]，多页时显示
+    let pages = tab_bar.layout_pages(area.width);
+    let page_label = if pages.len() > 1 {
+        let current = tab_bar.current_page().min(pages.len().saturating_sub(1)) + 1;
+        format!("[{}/{}]", current, pages.len())
+    } else {
+        String::new()
+    };
+    let p = Paragraph::new(page_label)
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Right);
-    f.render_widget(page_label, chunks[1]);
+    f.render_widget(p, chunks[1]);
 }
 
 /// 分隔线颜色
@@ -110,7 +127,7 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
         ])
         .split(area);
 
-    render_tab_bar(&app.tab_bar, f, main_chunks[0]);
+    render_tab_bar(&mut app.tab_bar, f, main_chunks[0]);
     render_chat_area(app, f, main_chunks[1]);
 
     // 分隔线
