@@ -573,6 +573,8 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 if text.starts_with('/') {
                     handle_command(&text, app, chat_handle);
                 } else {
+                    // 新用户输入清零 L2（上一轮 request 的 token 统计）
+                    app.current_request_usage = (0, 0, 0, 0);
                     app.add_message(LineType::User, text.clone());
                     app.input_history.push(text.clone());
                     app.history_index = None;
@@ -722,17 +724,14 @@ fn handle_grpc_message(
     // Phase 1: 控制流副作用（只保留非渲染逻辑）
     match &msg.payload {
         Some(server_message::Payload::UsageInfo(ui)) => {
-            app.set_pending_usage(Some((
+            app.apply_usage_info(
+                &ui.session_id,
                 ui.input_tokens,
                 ui.output_tokens,
                 ui.tool_calls,
                 ui.cache_creation_input_tokens,
                 ui.cache_read_input_tokens,
-            )));
-            app.total_input_tokens += ui.input_tokens;
-            app.total_output_tokens += ui.output_tokens;
-            app.total_cache_creation_input_tokens += ui.cache_creation_input_tokens;
-            app.total_cache_read_input_tokens += ui.cache_read_input_tokens;
+            );
         }
         Some(server_message::Payload::UserQuery(uq)) => {
             app.confirm = Some(ConfirmState {
@@ -764,12 +763,13 @@ fn handle_grpc_message(
             app.set_generating(false);
             app.current_request_id = None;
         }
-        Some(server_message::Payload::Done(_)) => {
+        Some(server_message::Payload::Done(d)) => {
             if app.stale_done_expected {
                 app.stale_done_expected = false;
                 return;
             }
             app.set_generating(false);
+            app.apply_done_token_settlement(&d.session_id);
             if let Some(rid) = app.current_request_id.take() {
                 chat_handle.send_ack(&rid);
             }
@@ -817,6 +817,7 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
             app.add_message(LineType::Status, "Creating new session...".into());
         }
         "/init" => {
+            app.current_request_usage = (0, 0, 0, 0);
             app.add_message(LineType::User, text.to_string());
             app.set_generating(true);
             app.scroll_following = true;

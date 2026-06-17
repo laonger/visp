@@ -463,21 +463,6 @@ impl TabEntry {
                     self.status = AgentStatus::Error;
                 }
                 Some(server_message::Payload::Done(_)) => {
-                    if let Some((it, ot, tc, ccit, crit)) = self.pending_usage.take() {
-                        let time = chrono::Local::now().format("%H:%M:%S");
-                        let usage = if ccit > 0 || crit > 0 {
-                            format!(
-                                "\n\n[{} | Tokens: {} in / {} out | Cache: {} create / {} read | Tools: {}]",
-                                time, it, ot, ccit, crit, tc
-                            )
-                        } else {
-                            format!(
-                                "\n\n[{} | Tokens: {} in / {} out | Tools: {}]",
-                                time, it, ot, tc
-                            )
-                        };
-                        self.streaming_text.push_str(&usage);
-                    }
                     self.flush_streaming();
                     self.generating = false;
                     if self.status == AgentStatus::Running {
@@ -1234,6 +1219,105 @@ impl AppState {
 
         if idx == active {
             self.tab_bar.tabs[idx].render_pending();
+        }
+    }
+
+    /// Token 三层路由 — L1: tab.pending_usage, L2: current_request_usage
+    ///
+    /// 按 session_id 路由 UsageInfo 到对应 tab 的 pending_usage（L1），
+    /// 同时累加到 current_request_usage（L2）。
+    /// 不直接修改 total_*_tokens（L3）——L3 由 Done 时 apply_done_token_settlement 处理。
+    pub fn apply_usage_info(
+        &mut self,
+        session_id: &str,
+        input: u32,
+        output: u32,
+        tool_calls: u32,
+        cache_create: u32,
+        cache_read: u32,
+    ) {
+        // 按 session_id 路由：空 ID 或主 session → default tab
+        let idx = if session_id.is_empty() || session_id == self.main_session_id {
+            0
+        } else if let Some(i) = self.tab_bar.find_index_by_session(session_id) {
+            i
+        } else {
+            self.tab_bar
+                .insert_sub_agent(session_id.to_string(), "agent")
+        };
+        // L1: 写入 tab.pending_usage
+        self.tab_bar.tabs[idx].pending_usage =
+            Some((input, output, tool_calls, cache_create, cache_read));
+        // L2: 累加到 current_request_usage（仅 input/output/cache_create/cache_read）
+        self.current_request_usage.0 += input;
+        self.current_request_usage.1 += output;
+        self.current_request_usage.2 += cache_create;
+        self.current_request_usage.3 += cache_read;
+    }
+
+    /// Token 三层路由 — Done 结算
+    ///
+    /// - default tab（idx == 0）：显示 L2 → 累加 L3 → 清零 L2
+    /// - sub tab（idx != 0）：显示 L1（take pending_usage）→ 不动 L2/L3
+    /// - 状态守卫：仅 Running 状态的 tab 执行结算；Error/Done 跳過
+    pub fn apply_done_token_settlement(&mut self, session_id: &str) {
+        let idx = if session_id.is_empty() || session_id == self.main_session_id {
+            0
+        } else if let Some(i) = self.tab_bar.find_index_by_session(session_id) {
+            i
+        } else {
+            return; // Unknown session, skip
+        };
+
+        // 状态守卫：仅 Running 状态的 tab 执行 token 结算
+        if self.tab_bar.tabs[idx].status != AgentStatus::Running {
+            return;
+        }
+
+        let time = chrono::Local::now().format("%H:%M:%S");
+
+        if idx == 0 {
+            // ── default tab Done ──
+            let (input, output, cache_create, cache_read) = self.current_request_usage;
+            if input == 0 && output == 0 {
+                return; // No usage to report
+            }
+            let usage = if cache_create > 0 || cache_read > 0 {
+                format!(
+                    "[{} | Tokens: {} in / {} out | Cache: {} create / {} read]",
+                    time, input, output, cache_create, cache_read
+                )
+            } else {
+                format!("[{} | Tokens: {} in / {} out]", time, input, output)
+            };
+            self.add_message(LineType::Usage, usage);
+
+            // L3: 累加 total tokens
+            self.total_input_tokens += input;
+            self.total_output_tokens += output;
+            self.total_cache_creation_input_tokens += cache_create;
+            self.total_cache_read_input_tokens += cache_read;
+
+            // 清零 L2
+            self.current_request_usage = (0, 0, 0, 0);
+        } else {
+            // ── sub tab Done ──
+            if let Some((it, ot, tc, ccit, crit)) = self.tab_bar.tabs[idx].pending_usage.take() {
+                let usage = if ccit > 0 || crit > 0 {
+                    format!(
+                        "[{} | Tokens: {} in / {} out | Cache: {} create / {} read | Tools: {}]",
+                        time, it, ot, ccit, crit, tc
+                    )
+                } else {
+                    format!(
+                        "[{} | Tokens: {} in / {} out | Tools: {}]",
+                        time, it, ot, tc
+                    )
+                };
+                let sid = self.tab_bar.tabs[idx].session_id.clone();
+                self.add_message_to_session(&sid, LineType::Usage, usage);
+            }
+            // L2/L3 不变
         }
     }
 
@@ -2352,5 +2436,150 @@ mod tests {
                 name: "bash".into()
             }
         );
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // Step 8: Token three-layer routing (L1 / L2 / L3)
+    // ════════════════════════════════════════════════════════════
+
+    fn make_usage_info_frame(
+        sid: &str,
+        input: u32,
+        output: u32,
+        tool_calls: u32,
+        cache_create: u32,
+        cache_read: u32,
+    ) -> ServerMessage {
+        ServerMessage {
+            payload: Some(server_message::Payload::UsageInfo(
+                visp_proto::visp::UsageInfo {
+                    input_tokens: input,
+                    output_tokens: output,
+                    tool_calls,
+                    session_id: sid.into(),
+                    cache_creation_input_tokens: cache_create,
+                    cache_read_input_tokens: cache_read,
+                },
+            )),
+        }
+    }
+
+    #[test]
+    fn test_usage_routed_to_tab_pending_usage() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        app.tab_bar.insert_sub_agent("sub-1", "agentA");
+        app.apply_usage_info("sub-1", 100, 20, 3, 10, 5);
+        // L1: sub tab pending_usage is set
+        assert_eq!(app.tab_bar.tabs[1].pending_usage, Some((100, 20, 3, 10, 5)));
+        // Default tab unchanged
+        assert!(app.tab_bar.tabs[0].pending_usage.is_none());
+    }
+
+    #[test]
+    fn test_usage_accumulates_to_current_request_usage() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        app.apply_usage_info("main-sid", 50, 10, 0, 5, 2);
+        app.apply_usage_info("main-sid", 30, 8, 0, 3, 1);
+        // L2 = cumulative sum
+        assert_eq!(app.current_request_usage, (80, 18, 8, 3));
+    }
+
+    #[test]
+    fn test_usage_does_not_directly_modify_total_tokens() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        app.apply_usage_info("main-sid", 50, 10, 0, 5, 2);
+        // L3 remains 0 after UsageInfo
+        assert_eq!(app.total_input_tokens, 0);
+        assert_eq!(app.total_output_tokens, 0);
+        assert_eq!(app.total_cache_creation_input_tokens, 0);
+        assert_eq!(app.total_cache_read_input_tokens, 0);
+    }
+
+    #[test]
+    fn test_done_default_displays_l2_and_clears() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        app.current_request_usage = (100, 50, 20, 10);
+        app.apply_done_token_settlement("main-sid");
+        // L2 is cleared
+        assert_eq!(app.current_request_usage, (0, 0, 0, 0));
+        // Default tab should have a Usage message
+        assert_eq!(app.tab_bar.tabs[0].messages.len(), 1);
+        assert_eq!(app.tab_bar.tabs[0].messages[0].line_type, LineType::Usage);
+        assert!(
+            app.tab_bar.tabs[0].messages[0]
+                .content
+                .contains("Tokens: 100 in / 50 out")
+        );
+    }
+
+    #[test]
+    fn test_done_default_accumulates_to_total_tokens() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        app.current_request_usage = (100, 50, 20, 10);
+        app.apply_done_token_settlement("main-sid");
+        // L3 equals previous L2 values
+        assert_eq!(app.total_input_tokens, 100);
+        assert_eq!(app.total_output_tokens, 50);
+        assert_eq!(app.total_cache_creation_input_tokens, 20);
+        assert_eq!(app.total_cache_read_input_tokens, 10);
+    }
+
+    #[test]
+    fn test_done_sub_displays_l1_only() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        app.tab_bar.insert_sub_agent("sub-1", "agentA");
+        app.tab_bar.tabs[1].pending_usage = Some((200, 30, 5, 15, 8));
+        app.current_request_usage = (999, 999, 999, 999); // arbitrary L2
+        app.apply_done_token_settlement("sub-1");
+        // Sub tab has Usage message
+        assert_eq!(app.tab_bar.tabs[1].messages.len(), 1);
+        assert_eq!(app.tab_bar.tabs[1].messages[0].line_type, LineType::Usage);
+        assert!(
+            app.tab_bar.tabs[1].messages[0]
+                .content
+                .contains("Tokens: 200 in / 30 out")
+        );
+        assert!(app.tab_bar.tabs[1].messages[0].content.contains("Tools: 5"));
+        // L1 taken
+        assert!(app.tab_bar.tabs[1].pending_usage.is_none());
+        // L2 unchanged
+        assert_eq!(app.current_request_usage, (999, 999, 999, 999));
+        // L3 unchanged
+        assert_eq!(app.total_input_tokens, 0);
+    }
+
+    #[test]
+    fn test_done_sub_does_not_clear_l2() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        app.tab_bar.insert_sub_agent("sub-1", "agentA");
+        app.tab_bar.tabs[1].pending_usage = Some((10, 5, 1, 2, 3));
+        app.current_request_usage = (50, 25, 10, 5);
+        app.apply_done_token_settlement("sub-1");
+        // L2 preserved
+        assert_eq!(app.current_request_usage, (50, 25, 10, 5));
+    }
+
+    #[test]
+    fn test_user_input_clears_current_request_usage() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        app.apply_usage_info("main-sid", 100, 50, 0, 20, 10);
+        assert_eq!(app.current_request_usage, (100, 50, 20, 10));
+        // Simulate user input clearing L2
+        app.current_request_usage = (0, 0, 0, 0);
+        assert_eq!(app.current_request_usage, (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn test_done_status_guard_blocks_token_settlement() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        app.tab_bar.tabs[0].status = AgentStatus::Error;
+        app.current_request_usage = (100, 50, 20, 10);
+        app.apply_done_token_settlement("main-sid");
+        // No token line added
+        assert!(app.tab_bar.tabs[0].messages.is_empty());
+        // L3 unchanged
+        assert_eq!(app.total_input_tokens, 0);
+        // L2 unchanged
+        assert_eq!(app.current_request_usage, (100, 50, 20, 10));
     }
 }
