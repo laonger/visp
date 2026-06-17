@@ -3,12 +3,12 @@
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs},
 };
 
-use crate::app::{AppState, MessageCache, pad_to_width};
+use crate::app::{AgentStatus, AppState, MessageCache, TabEntry, pad_to_width};
 use crate::debug_log;
 
 /// 将数字格式化为千位分隔符形式，如 `1234567` → `1,234,567`
@@ -26,6 +26,45 @@ fn format_number(n: u32) -> String {
 
 use crate::theme;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+// ════════════════════════════════════════════════════════════════
+// Tab Bar 渲染
+// ════════════════════════════════════════════════════════════════
+
+/// 为单个 TabEntry 生成标签行：状态符号 + agent_name
+fn tab_label_line(tab: &TabEntry) -> Line<'static> {
+    let (symbol, color) = match tab.status {
+        AgentStatus::Running => ("▶ ", Color::Yellow),
+        AgentStatus::Done => ("✓ ", Color::Green),
+        AgentStatus::Error => ("✗ ", Color::Red),
+    };
+    Line::from(vec![
+        Span::styled(symbol, Style::default().fg(color)),
+        Span::raw(tab.agent_name.clone()),
+    ])
+}
+
+/// 渲染顶部 Tab 栏
+fn render_tab_bar(tab_bar: &crate::app::TabBar, f: &mut Frame, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Fill(1), Constraint::Length(8)])
+        .split(area);
+
+    let titles: Vec<Line<'static>> = tab_bar.tabs.iter().map(tab_label_line).collect();
+    let tabs = Tabs::new(titles)
+        .select(tab_bar.active)
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .divider("|")
+        .padding(" ", " ");
+    f.render_widget(tabs, chunks[0]);
+
+    // 页码区（Step 10 前留空，暂时显示 1/1）
+    let page_label = Paragraph::new("1/1")
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(Alignment::Right);
+    f.render_widget(page_label, chunks[1]);
+}
 
 /// 分隔线颜色
 const SEP_FG: Color = Color::DarkGray;
@@ -60,27 +99,29 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
     let input_area_height = calc_input_height(&app.textarea, area.width);
     let bottom_chunks_height = input_area_height + (if app.confirm.is_some() { 5 } else { 4 });
 
-    // 纵向分割：对话区 | 分隔线 | 底部区域
+    // 纵向分割：Tab栏(1) | 对话区 | 分隔线 | 底部区域
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1),                    // Tab bar
             Constraint::Min(1),                       // 对话区（占满剩余）
             Constraint::Length(1),                    // 分隔线
             Constraint::Length(bottom_chunks_height), // 底部：确认栏/输入区/状态栏
         ])
         .split(area);
 
-    render_chat_area(app, f, main_chunks[0]);
+    render_tab_bar(&app.tab_bar, f, main_chunks[0]);
+    render_chat_area(app, f, main_chunks[1]);
 
     // 分隔线
-    let sep_line = "─".repeat(main_chunks[1].width as usize);
+    let sep_line = "─".repeat(main_chunks[2].width as usize);
     f.render_widget(
         Paragraph::new(sep_line).style(Style::default().fg(SEP_FG)),
-        main_chunks[1],
+        main_chunks[2],
     );
 
     // 底部区域内部再分割：确认栏(可选) → 输入区 → 状态栏
-    let bottom_area = main_chunks[2];
+    let bottom_area = main_chunks[3];
     let bottom_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if app.confirm.is_some() {
@@ -522,11 +563,16 @@ fn render_input_area(app: &mut AppState, f: &mut Frame, area: Rect) {
         _total_chars
     );
 
-    // 直接在 app.textarea 上设 style/block，再通过 Widget::render 设置内部 area。
-    // 这样后续事件处理中 screen_map_load 使用正确宽度，使折行和上下键导航正常。
+    // 非 default tab 时输入框视觉禁用（行为禁用在 event.rs TODO Step 11）
+    let input_disabled = app.tab_bar.active != 0;
+
     let is_other_mode = app.confirm.as_ref().is_some_and(|c| c.other_active);
 
-    if is_other_mode {
+    if input_disabled {
+        // 非 default tab：显示灰色提示
+        app.textarea.set_style(Style::default().fg(Color::DarkGray));
+        app.textarea.set_placeholder_text("切回 default tab 输入");
+    } else if is_other_mode {
         app.textarea.set_style(Style::default().fg(theme::INPUT_FG));
         app.textarea
             .set_placeholder_text("Type your custom input...");
@@ -942,5 +988,52 @@ mod tests {
             s,
             "abcdefgh | deepseek-v4-flash(ollama) | Idle | [Select] | /help = help"
         );
+    }
+
+    // ── tab_label_line 测试 ──────────────────────────────
+
+    #[test]
+    fn test_tab_label_running_shows_yellow_arrow() {
+        let tab = TabEntry::new("sid".to_string(), "agentA");
+        // 默认状态为 Running
+        assert_eq!(tab.status, AgentStatus::Running);
+        let line = tab_label_line(&tab);
+        assert_eq!(line.spans[0].content, "▶ ");
+        assert_eq!(line.spans[0].style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn test_tab_label_done_shows_green_check() {
+        let mut tab = TabEntry::new("sid".to_string(), "agentB");
+        tab.status = AgentStatus::Done;
+        let line = tab_label_line(&tab);
+        assert_eq!(line.spans[0].content, "✓ ");
+        assert_eq!(line.spans[0].style.fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn test_tab_label_error_shows_red_cross() {
+        let mut tab = TabEntry::new("sid".to_string(), "agentC");
+        tab.status = AgentStatus::Error;
+        let line = tab_label_line(&tab);
+        assert_eq!(line.spans[0].content, "✗ ");
+        assert_eq!(line.spans[0].style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn test_tab_label_contains_agent_name() {
+        let tab = TabEntry::new("sid".to_string(), "my-agent");
+        let line = tab_label_line(&tab);
+        assert_eq!(line.spans[1].content, "my-agent");
+    }
+
+    #[test]
+    fn test_default_tab_also_shows_status() {
+        let tab = TabEntry::new("main-sid".to_string(), "default");
+        assert_eq!(tab.status, AgentStatus::Running);
+        let line = tab_label_line(&tab);
+        assert_eq!(line.spans[0].content, "▶ ");
+        assert_eq!(line.spans[0].style.fg, Some(Color::Yellow));
+        assert_eq!(line.spans[1].content, "default");
     }
 }
