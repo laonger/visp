@@ -569,6 +569,16 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 return false;
             }
 
+            // Ctrl+W: 关闭 sub-agent tab（仅 Done/Error 状态允许）
+            if (key.code == KeyCode::Char('w') || key.code == KeyCode::Char('W'))
+                && key.modifiers == KeyModifiers::CONTROL
+            {
+                if app.tab_bar.close_active() {
+                    app.needs_render = true;
+                }
+                return false;
+            }
+
             // F2 已在键盘线程处理，此处不再需要
             if app.generating() {
                 return false;

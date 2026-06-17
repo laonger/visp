@@ -642,6 +642,25 @@ impl TabBar {
         };
         self.activate(prev);
     }
+
+    /// Close the active sub-agent tab.
+    /// Only allowed when active > 0 and the tab's status is Done or Error.
+    /// Returns true if the tab was closed; false otherwise.
+    pub fn close_active(&mut self) -> bool {
+        if self.active == 0 {
+            return false;
+        }
+        if self.tabs[self.active].status == AgentStatus::Running {
+            return false;
+        }
+        self.tabs.remove(self.active);
+        if self.active > 0 {
+            self.active -= 1;
+        }
+        self.tabs[self.active].render_pending();
+        self.ensure_active_visible(self.last_term_width);
+        true
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2761,5 +2780,133 @@ mod tests {
         tb.page_start = 0; // wrong page
         tb.ensure_active_visible(80);
         assert_eq!(tb.page_start, 1); // page containing index 6
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // Step 11: Ctrl+W close sub-agent tab
+    // ════════════════════════════════════════════════════════════
+
+    fn make_tab_bar_with_done_subs(n: usize) -> TabBar {
+        let mut tb = TabBar::new("main".into());
+        for i in 0..n {
+            tb.insert_sub_agent(format!("sub-{}", i), format!("agent{}", i));
+        }
+        for tab in tb.tabs.iter_mut().skip(1) {
+            tab.status = AgentStatus::Done;
+        }
+        tb
+    }
+
+    #[test]
+    fn test_ctrl_w_on_default_is_noop() {
+        let mut tb = TabBar::new("main".into());
+        tb.insert_sub_agent("sub-1", "agentA");
+        // active is 0 (default)
+        assert!(!tb.close_active());
+        assert_eq!(tb.tabs.len(), 2);
+        assert_eq!(tb.active, 0);
+    }
+
+    #[test]
+    fn test_ctrl_w_on_running_sub_is_noop() {
+        let mut tb = TabBar::new("main".into());
+        tb.insert_sub_agent("sub-1", "agentA");
+        tb.active = 1;
+        // status defaults to Running
+        assert_eq!(tb.tabs[1].status, AgentStatus::Running);
+        assert!(!tb.close_active());
+        assert_eq!(tb.tabs.len(), 2);
+    }
+
+    #[test]
+    fn test_ctrl_w_on_done_sub_removes_tab() {
+        let mut tb = make_tab_bar_with_done_subs(1);
+        tb.active = 1;
+        assert!(tb.close_active());
+        assert_eq!(tb.tabs.len(), 1); // only default remains
+        assert_eq!(tb.active, 0);
+    }
+
+    #[test]
+    fn test_ctrl_w_on_error_sub_removes_tab() {
+        let mut tb = TabBar::new("main".into());
+        tb.insert_sub_agent("sub-1", "agentA");
+        tb.tabs[1].status = AgentStatus::Error;
+        tb.active = 1;
+        assert!(tb.close_active());
+        assert_eq!(tb.tabs.len(), 1);
+    }
+
+    #[test]
+    fn test_ctrl_w_activates_previous_tab() {
+        let mut tb = make_tab_bar_with_done_subs(3);
+        // tabs: [default, sub-2(Done), sub-1(Done), sub-0(Done)]
+        tb.active = 2; // sub-1 (index 2)
+        assert!(tb.close_active());
+        // After remove: [default, sub-2, sub-0]; active decrements to 1 → sub-2
+        assert_eq!(tb.active, 1);
+        assert_eq!(tb.tabs[tb.active].session_id, "sub-2");
+    }
+
+    #[test]
+    fn test_ctrl_w_at_last_sub_falls_back_to_default() {
+        let mut tb = make_tab_bar_with_done_subs(1);
+        tb.active = 1;
+        assert!(tb.close_active());
+        assert_eq!(tb.tabs.len(), 1);
+        assert_eq!(tb.active, 0);
+    }
+
+    #[test]
+    fn test_ctrl_w_renders_pending_for_new_active() {
+        let mut tb = make_tab_bar_with_done_subs(2);
+        // tabs: [default, sub-1(Done), sub-0(Done)]
+        tb.active = 2; // sub-0
+        // Push a frame to sub-1 (index 1) — will become active after close
+        tb.tabs[1].frames.push(tool_call("bash", "c1", r#"{}"#));
+        assert!(tb.close_active());
+        // After close: active=1 → sub-1, render_pending was called
+        assert!(!tb.tabs[1].messages.is_empty());
+        assert_eq!(
+            tb.tabs[1].messages[0].line_type,
+            LineType::ToolCall {
+                name: "bash".into()
+            }
+        );
+    }
+
+    #[test]
+    fn test_ctrl_w_adjusts_tab_page() {
+        // 5 subs → 2 pages (PER_PAGE=4): page 0 = indices 1-4, page 1 = index 5
+        let mut tb = make_tab_bar_with_done_subs(5);
+        tb.active = 5; // last sub, on page 1
+        tb.page_start = 1;
+        tb.last_term_width = 80;
+        assert!(tb.close_active());
+        // After close: active=4, which falls in page 0 (indices 1-4)
+        assert_eq!(tb.page_start, 0);
+        assert_eq!(tb.active, 4);
+        assert_eq!(tb.tabs.len(), 5); // default + 4 subs
+    }
+
+    #[test]
+    fn test_ctrl_w_closed_session_can_reopen_on_new_event() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        // Route a frame to create a sub tab
+        let frame = make_text_delta_frame("sub-1", "agentA", "hello");
+        app.route_frame(frame);
+        assert_eq!(app.tab_bar.tabs.len(), 2);
+
+        // Set sub to Done and close it
+        app.tab_bar.tabs[1].status = AgentStatus::Done;
+        app.tab_bar.active = 1;
+        assert!(app.tab_bar.close_active());
+        assert_eq!(app.tab_bar.tabs.len(), 1);
+
+        // Route another frame with same session_id — should re-create tab
+        let frame2 = make_text_delta_frame("sub-1", "agentA", "world");
+        app.route_frame(frame2);
+        assert_eq!(app.tab_bar.tabs.len(), 2);
+        assert_eq!(app.tab_bar.tabs[1].session_id, "sub-1");
     }
 }
