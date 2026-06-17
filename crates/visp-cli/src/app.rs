@@ -310,6 +310,7 @@ pub struct TabEntry {
     pub streaming_text: String,
     pub generating: bool,
     pub pending_usage: Option<(u32, u32, u32, u32, u32)>,
+    pub next_message_id: u64,
     pub scroll: usize,
 }
 
@@ -325,7 +326,133 @@ impl TabEntry {
             streaming_text: String::new(),
             generating: false,
             pending_usage: None,
+            next_message_id: 0,
             scroll: 0,
+        }
+    }
+
+    fn push_chat_line(&mut self, line_type: LineType, content: String, call_id: Option<String>) {
+        let id = self.next_message_id;
+        self.next_message_id += 1;
+        self.messages.push(ChatLine {
+            id,
+            version: 0,
+            line_type,
+            content,
+            call_id,
+        });
+    }
+
+    fn flush_streaming(&mut self) {
+        if !self.streaming_text.is_empty() {
+            let text = std::mem::take(&mut self.streaming_text);
+            self.push_chat_line(LineType::Assistant, text, None);
+        }
+    }
+
+    fn update_thinking(&mut self, content: String) {
+        if let Some(last) = self.messages.last_mut()
+            && matches!(last.line_type, LineType::Thinking)
+        {
+            last.content = content;
+            last.version += 1;
+        } else {
+            self.push_chat_line(LineType::Thinking, content, None);
+        }
+    }
+
+    /// 处理 self.frames 中尚未渲染的消息（从 rendered_up_to 开始）。
+    /// 将 frames 中的 ServerMessage 转化为 ChatLine 追加到 self.messages。
+    pub fn render_pending(&mut self) {
+        use visp_proto::visp::server_message;
+
+        while self.rendered_up_to < self.frames.len() {
+            let msg = self.frames[self.rendered_up_to].clone();
+            match msg.payload {
+                Some(server_message::Payload::TextDelta(delta)) => {
+                    self.streaming_text.push_str(&delta.delta);
+                }
+                Some(server_message::Payload::ToolCall(tc)) => {
+                    self.flush_streaming();
+                    self.push_chat_line(
+                        LineType::ToolCall { name: tc.tool_name },
+                        tc.arguments,
+                        Some(tc.call_id),
+                    );
+                }
+                Some(server_message::Payload::ToolResult(tr)) => {
+                    self.flush_streaming();
+                    let tool_name = if !tr.tool_name.is_empty() {
+                        tr.tool_name
+                    } else {
+                        self.messages
+                            .iter()
+                            .find(|m| {
+                                matches!(&m.line_type, LineType::ToolCall { .. })
+                                    && m.call_id.as_deref() == Some(&tr.call_id)
+                            })
+                            .and_then(|m| {
+                                if let LineType::ToolCall { name } = &m.line_type {
+                                    Some(name.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_default()
+                    };
+                    self.push_chat_line(
+                        if tr.is_error {
+                            LineType::ToolError { name: tool_name }
+                        } else {
+                            LineType::ToolResult { name: tool_name }
+                        },
+                        tr.content,
+                        Some(tr.call_id),
+                    );
+                }
+                Some(server_message::Payload::ThinkingBlock(tb)) => {
+                    let text = format!("[Thinking] {}", tb.thinking);
+                    self.update_thinking(text);
+                }
+                Some(server_message::Payload::StatusUpdate(su)) => {
+                    // NOTE: user_inputs handling deferred to later step
+                    self.push_chat_line(LineType::Status, su.message, None);
+                }
+                Some(server_message::Payload::Error(err)) => {
+                    self.flush_streaming();
+                    self.push_chat_line(
+                        LineType::Error,
+                        format!("{}: {}", err.code, err.message),
+                        None,
+                    );
+                    self.generating = false;
+                    self.status = AgentStatus::Error;
+                }
+                Some(server_message::Payload::Done(_)) => {
+                    if let Some((it, ot, tc, ccit, crit)) = self.pending_usage.take() {
+                        let time = chrono::Local::now().format("%H:%M:%S");
+                        let usage = if ccit > 0 || crit > 0 {
+                            format!(
+                                "\n\n[{} | Tokens: {} in / {} out | Cache: {} create / {} read | Tools: {}]",
+                                time, it, ot, ccit, crit, tc
+                            )
+                        } else {
+                            format!(
+                                "\n\n[{} | Tokens: {} in / {} out | Tools: {}]",
+                                time, it, ot, tc
+                            )
+                        };
+                        self.streaming_text.push_str(&usage);
+                    }
+                    self.flush_streaming();
+                    self.generating = false;
+                    if self.status == AgentStatus::Running {
+                        self.status = AgentStatus::Done;
+                    }
+                }
+                _ => {}
+            }
+            self.rendered_up_to += 1;
         }
     }
 }
@@ -1454,5 +1581,224 @@ mod tests {
         let idx = bar.find_or_insert("sub1", "A");
         assert_eq!(idx, 1);
         assert_eq!(bar.tabs.len(), len_before);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // TabEntry::render_pending 测试
+    // ════════════════════════════════════════════════════════════
+
+    fn td(delta: &str) -> visp_proto::visp::ServerMessage {
+        visp_proto::visp::ServerMessage {
+            payload: Some(visp_proto::visp::server_message::Payload::TextDelta(
+                visp_proto::visp::TextDelta {
+                    delta: delta.into(),
+                    session_id: String::new(),
+                    agent_name: String::new(),
+                },
+            )),
+        }
+    }
+
+    fn tool_call(name: &str, call_id: &str, args: &str) -> visp_proto::visp::ServerMessage {
+        visp_proto::visp::ServerMessage {
+            payload: Some(visp_proto::visp::server_message::Payload::ToolCall(
+                visp_proto::visp::ToolCall {
+                    tool_name: name.into(),
+                    call_id: call_id.into(),
+                    arguments: args.into(),
+                    session_id: String::new(),
+                    agent_name: String::new(),
+                },
+            )),
+        }
+    }
+
+    fn tool_result(
+        call_id: &str,
+        tool_name: &str,
+        content: &str,
+        is_error: bool,
+    ) -> visp_proto::visp::ServerMessage {
+        visp_proto::visp::ServerMessage {
+            payload: Some(visp_proto::visp::server_message::Payload::ToolResult(
+                visp_proto::visp::ToolResult {
+                    call_id: call_id.into(),
+                    tool_name: tool_name.into(),
+                    content: content.into(),
+                    is_error,
+                    session_id: String::new(),
+                    agent_name: String::new(),
+                },
+            )),
+        }
+    }
+
+    fn done_msg() -> visp_proto::visp::ServerMessage {
+        visp_proto::visp::ServerMessage {
+            payload: Some(visp_proto::visp::server_message::Payload::Done(
+                visp_proto::visp::Done {
+                    session_id: String::new(),
+                },
+            )),
+        }
+    }
+
+    fn error_msg(code: &str, message: &str) -> visp_proto::visp::ServerMessage {
+        visp_proto::visp::ServerMessage {
+            payload: Some(visp_proto::visp::server_message::Payload::Error(
+                visp_proto::visp::Error {
+                    code: code.into(),
+                    message: message.into(),
+                    session_id: String::new(),
+                    agent_name: String::new(),
+                },
+            )),
+        }
+    }
+
+    #[test]
+    fn test_render_pending_empty_frames_noop() {
+        let mut tab = TabEntry::new("sid", "agent");
+        tab.render_pending();
+        assert_eq!(tab.rendered_up_to, 0);
+        assert!(tab.messages.is_empty());
+    }
+
+    #[test]
+    fn test_render_pending_text_delta_appends_streaming() {
+        let mut tab = TabEntry::new("sid", "agent");
+        tab.frames.push(td("hello"));
+        tab.frames.push(td(" world"));
+        tab.render_pending();
+        assert_eq!(tab.streaming_text, "hello world");
+        assert!(tab.messages.is_empty());
+        assert_eq!(tab.rendered_up_to, 2);
+    }
+
+    #[test]
+    fn test_render_pending_tool_call_flushes_streaming() {
+        let mut tab = TabEntry::new("sid", "agent");
+        tab.frames.push(td("hi"));
+        tab.frames.push(tool_call("bash", "c1", r#"{}"#));
+        tab.render_pending();
+        // streaming flushed
+        assert!(tab.streaming_text.is_empty());
+        // 2 messages: Assistant("hi") + ToolCall
+        assert_eq!(tab.messages.len(), 2);
+        assert_eq!(tab.messages[0].line_type, LineType::Assistant);
+        assert_eq!(tab.messages[0].content, "hi");
+        assert_eq!(
+            tab.messages[1].line_type,
+            LineType::ToolCall {
+                name: "bash".into()
+            }
+        );
+        assert_eq!(tab.messages[1].call_id.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn test_render_pending_tool_result_finds_tool_name_within_tab() {
+        let mut tab = TabEntry::new("sid", "agent");
+        tab.frames.push(tool_call("bash", "c1", r#"{}"#));
+        tab.frames.push(tool_result("c1", "", "ok", false));
+        tab.render_pending();
+        assert_eq!(tab.messages.len(), 2);
+        assert_eq!(
+            tab.messages[0].line_type,
+            LineType::ToolCall {
+                name: "bash".into()
+            }
+        );
+        assert_eq!(
+            tab.messages[1].line_type,
+            LineType::ToolResult {
+                name: "bash".into()
+            }
+        );
+    }
+
+    #[test]
+    fn test_render_pending_idempotent() {
+        let mut tab = TabEntry::new("sid", "agent");
+        tab.frames.push(td("hello"));
+        tab.render_pending();
+        assert_eq!(tab.streaming_text, "hello");
+        assert_eq!(tab.rendered_up_to, 1);
+        // second call: no new frames, should be noop
+        tab.render_pending();
+        assert_eq!(tab.streaming_text, "hello");
+        assert_eq!(tab.rendered_up_to, 1);
+    }
+
+    #[test]
+    fn test_render_pending_increments_rendered_up_to() {
+        let mut tab = TabEntry::new("sid", "agent");
+        tab.frames.push(td("a"));
+        tab.frames.push(td("b"));
+        tab.frames.push(td("c"));
+        tab.render_pending();
+        assert_eq!(tab.rendered_up_to, 3);
+    }
+
+    #[test]
+    fn test_render_pending_done_running_to_done() {
+        let mut tab = TabEntry::new("sid", "agent");
+        tab.generating = true;
+        tab.frames.push(done_msg());
+        tab.render_pending();
+        assert_eq!(tab.status, AgentStatus::Done);
+        assert!(!tab.generating);
+    }
+
+    #[test]
+    fn test_render_pending_done_does_not_overwrite_error() {
+        let mut tab = TabEntry::new("sid", "agent");
+        tab.status = AgentStatus::Error;
+        tab.generating = true;
+        tab.frames.push(done_msg());
+        tab.render_pending();
+        assert_eq!(tab.status, AgentStatus::Error);
+        assert!(!tab.generating);
+    }
+
+    #[test]
+    fn test_render_pending_done_does_not_overwrite_done() {
+        let mut tab = TabEntry::new("sid", "agent");
+        tab.status = AgentStatus::Done;
+        tab.frames.push(done_msg());
+        tab.render_pending();
+        assert_eq!(tab.status, AgentStatus::Done);
+    }
+
+    #[test]
+    fn test_render_pending_error_event_updates_status_to_error() {
+        let mut tab = TabEntry::new("sid", "agent");
+        tab.generating = true;
+        tab.frames.push(error_msg("X", "boom"));
+        tab.render_pending();
+        assert_eq!(tab.status, AgentStatus::Error);
+        assert!(!tab.generating);
+        assert_eq!(tab.messages.len(), 1);
+        assert_eq!(tab.messages[0].line_type, LineType::Error);
+    }
+
+    #[test]
+    fn test_render_pending_error_then_done_status_remains_error() {
+        let mut tab = TabEntry::new("sid", "agent");
+        tab.frames.push(error_msg("X", "boom"));
+        tab.frames.push(done_msg());
+        tab.render_pending();
+        assert_eq!(tab.status, AgentStatus::Error);
+        assert!(!tab.generating);
+    }
+
+    #[test]
+    fn test_render_pending_done_clears_generating() {
+        let mut tab = TabEntry::new("sid", "agent");
+        tab.generating = true;
+        tab.frames.push(done_msg());
+        tab.render_pending();
+        assert!(!tab.generating);
+        assert_eq!(tab.status, AgentStatus::Done);
     }
 }
