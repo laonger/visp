@@ -561,6 +561,519 @@ async fn handle_stream_result(
     Ok(StreamDecision::Continue)
 }
 
+/// g+h: Doom loop detection, execute tools in parallel, collect results,
+/// and append tool results to history.
+/// Returns true if the agent loop should return (fatal error), false to continue.
+async fn execute_tool_calls(
+    tool_calls: &[ToolCallRequest],
+    text_buffer: String,
+    thinking_blocks: Vec<serde_json::Value>,
+    total_tool_calls: &mut u32,
+    ctx: &mut AgentLoopContext,
+    sm: &Arc<SessionManager>,
+    tool_registry: &Arc<ToolRegistry>,
+    sid: &str,
+    tx: &mpsc::Sender<AgentEvent>,
+    cfg: &AgentConfig,
+    doom_loop_window: &mut Vec<Vec<(String, serde_json::Value)>>,
+    doom_loop_warned: &mut bool,
+) -> bool {
+    // Append assistant message with tool_calls
+    *total_tool_calls += tool_calls.len() as u32;
+    let mut assistant_msg = Message {
+        role: Role::Assistant,
+        kind: MessageType::ToolCall,
+        content: text_buffer,
+        tool_call_id: None,
+        tool_calls: Some(tool_calls.to_vec()),
+        skip_context: false,
+        extra_blocks: if thinking_blocks.is_empty() {
+            None
+        } else {
+            Some(thinking_blocks)
+        },
+        estimated_tokens: 0,
+        actual_tokens_input: None,
+        actual_tokens_output: None,
+        actual_cache_read: None,
+        actual_cache_write: None,
+        actual_cost: None,
+        provider_metadata: None,
+        tool_call_count: Some(tool_calls.len() as u32),
+        tool_result_is_error: None,
+        tool_result_duration_ms: None,
+        created_at: None,
+    };
+    assistant_msg.estimated_tokens = estimate_message_tokens(&assistant_msg);
+    ctx.history.push(assistant_msg.clone());
+    if let Err(e) = sm.append_message(sid, assistant_msg) {
+        send_event(
+            tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+            AgentEvent::Error {
+                code: AgentErrorCode::Internal,
+                message: format!("Failed to append assistant message: {e}"),
+            },
+        )
+        .await;
+        // Send failure is acceptable here (best-effort), but mark error
+        let _ = sm.finish_loop(sid, SessionStatus::Error);
+        return true; // fatal
+    }
+
+    // g. Doom loop detection
+    if cfg.doom_loop_threshold > 0 {
+        let round_sig: Vec<(String, serde_json::Value)> = tool_calls
+            .iter()
+            .map(|tc| {
+                let args: serde_json::Value =
+                    serde_json::from_str(&tc.arguments).unwrap_or_default();
+                (tc.name.clone(), args)
+            })
+            .collect();
+        doom_loop_window.push(round_sig);
+        let threshold = cfg.doom_loop_threshold as usize;
+        if doom_loop_window.len() > threshold {
+            doom_loop_window.remove(0);
+        }
+        if doom_loop_window.len() == threshold {
+            let first = &(*doom_loop_window)[0];
+            let all_same = doom_loop_window.iter().all(|sig| sig == first);
+            if all_same {
+                if *doom_loop_warned {
+                    send_event(
+                        tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                        AgentEvent::Error {
+                            code: AgentErrorCode::StuckInLoop,
+                            message: "Agent stuck in repeated tool call loop after warning".into(),
+                        },
+                    )
+                    .await;
+                    let _ = sm.finish_loop(sid, SessionStatus::Error);
+                    return true; // fatal
+                }
+                *doom_loop_warned = true;
+                doom_loop_window.clear();
+                send_event(
+                    tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                    AgentEvent::StatusUpdate(
+                        "Agent appears stuck in a loop of repeated tool calls".into()
+                    ),
+                )
+                .await;
+                ctx.history.push(Message::system(
+                    "You appear to be repeating the same tool calls. \
+                     Please change your approach or summarize the current progress.",
+                ));
+            }
+        }
+    }
+
+    // h. Execute tools in parallel (Phase 1: dispatch)
+    let num_tools = tool_calls.len();
+    let mut exec_tasks = Vec::with_capacity(num_tools);
+    let mut pending_spawns: Vec<PendingSpawn> = Vec::new();
+    let tool_ids: Vec<String> = tool_calls.iter().map(|tc| tc.id.clone()).collect();
+    let is_multi_agent = ctx.global_tx.is_some() && ctx.inbox_rx.is_some();
+
+    for (i, tc) in tool_calls.iter().enumerate() {
+        // Multi-agent: intercept "task" tool calls
+        if is_multi_agent && tc.name == "task" {
+            let task_args: serde_json::Value =
+                serde_json::from_str(&tc.arguments).unwrap_or_default();
+            let subagent_type = task_args
+                .get("subagent_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("default")
+                .to_string();
+            let description = task_args
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let task_id = task_args
+                .get("task_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            if let Some(ref gtx) = ctx.global_tx {
+                let _ = gtx.try_send(Envelope {
+                    session_id: ctx.session_id.clone(),
+                    message: AgentMessage::SpawnRequest {
+                        call_id: tc.id.clone(),
+                        subagent_type: subagent_type.clone(),
+                        description: description.clone(),
+                        task_id: task_id.clone(),
+                    },
+                });
+            }
+
+            pending_spawns.push(PendingSpawn {
+                index: i,
+                call_id: tc.id.clone(),
+                subagent_type,
+            });
+            continue;
+        }
+
+        // Regular tool execution (original spawn logic)
+        let tx = tx.clone();
+        let global_tx = ctx.global_tx.clone();
+        let cancel = ctx.cancel_token.clone();
+        let registry = tool_registry.clone();
+        let session_id = sid.to_string();
+        let working_dir = ctx.working_dir.clone();
+        let tc = tc.clone();
+        let sm = sm.clone();
+        let permissions = ctx.permission_rules.clone();
+        let sid2 = sid.to_string();
+
+        exec_tasks.push(tokio::spawn(async move {
+            // Helper: forward AgentMessage to global_tx
+            macro_rules! forward_global {
+                ($msg:expr) => {
+                    if let Some(ref gtx) = global_tx {
+                        let _ = gtx.try_send(Envelope {
+                            session_id: sid2.clone(),
+                            message: $msg,
+                        });
+                    }
+                };
+            }
+
+            // Cancellation check
+            if cancel.is_cancelled() {
+                let result = ToolExecResult {
+                    index: i,
+                    call_id: tc.id.clone(),
+                    result: ToolResult::error("Cancelled"),
+                };
+                forward_global!(AgentMessage::ToolCallResult {
+                    call_id: tc.id.clone(),
+                    tool_name: tc.name.clone(),
+                    content: "Cancelled".into(),
+                    is_error: true,
+                });
+                let _ = tx
+                    .send(AgentEvent::ToolCallResult {
+                        call_id: tc.id.clone(),
+                        tool_name: tc.name.clone(),
+                        content: "Cancelled".into(),
+                        is_error: true,
+                    })
+                    .await;
+                return result;
+            }
+
+            // Send ToolCallRequest
+            forward_global!(AgentMessage::ToolCallRequest {
+                call_id: tc.id.clone(),
+                tool_name: tc.name.clone(),
+                arguments: tc.arguments.clone(),
+            });
+            let _ = tx
+                .send(AgentEvent::ToolCallRequest {
+                    call_id: tc.id.clone(),
+                    tool_name: tc.name.clone(),
+                    arguments: tc.arguments.clone(),
+                })
+                .await;
+
+            // Check if tool requires approval (with arguments)
+            let args_value: serde_json::Value =
+                serde_json::from_str(&tc.arguments).unwrap_or_default();
+            let requires_approval = registry
+                .get(&tc.name)
+                .map(|t| t.requires_approval_for(&args_value))
+                .unwrap_or(false);
+
+            let already_approved = sm.is_tool_approved(&session_id, &tc.name);
+
+            if requires_approval && !already_approved {
+                let (resp_tx, resp_rx) = oneshot::channel::<UserQueryResult>();
+                let args_display = format_tool_args(&tc.arguments);
+                let _ = tx
+                    .send(AgentEvent::UserQuery {
+                        query_id: tc.id.clone(),
+                        message: format!("Allow tool: {}({})?", tc.name, args_display),
+                        options: Vec::new(),
+                        allow_other: false,
+                        respond: resp_tx,
+                    })
+                    .await;
+
+                let result = resp_rx.await.unwrap_or_default();
+                match result.selected_index {
+                    0 => {}
+                    2 => {
+                        let _ = sm.add_approved_tool(&session_id, &tc.name);
+                    }
+                    _ => {
+                        let result = ToolResult::error("User denied");
+                        forward_global!(AgentMessage::ToolCallResult {
+                            call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            content: result.content.clone(),
+                            is_error: result.is_error,
+                        });
+                        let _ = tx
+                            .send(AgentEvent::ToolCallResult {
+                                call_id: tc.id.clone(),
+                                tool_name: tc.name.clone(),
+                                content: result.content.clone(),
+                                is_error: result.is_error,
+                            })
+                            .await;
+                        return ToolExecResult {
+                            index: i,
+                            call_id: tc.id,
+                            result,
+                        };
+                    }
+                }
+            }
+
+            // Parse arguments and execute
+            let args = match serde_json::from_str(&tc.arguments) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        tool = %tc.name,
+                        args_len = tc.arguments.len(),
+                        error = %e,
+                        "tool call arguments truncated or malformed (likely max_output_tokens exceeded)"
+                    );
+                    let result = ToolResult::error(format!(
+                        "[TRUNCATED] Tool call arguments incomplete ({} bytes, parse: {}). \
+                         The content exceeded max_output_tokens.\n\
+                         To fix this, split the content into smaller parts:\n\
+                         - Use multiple smaller write_file or edit_file calls\n\
+                         - Or use edit_file to incrementally build the file\n\
+                         - Do NOT retry the same large write_file call — it will fail again.",
+                        tc.arguments.len(), e
+                    ));
+                    forward_global!(AgentMessage::ToolCallResult {
+                        call_id: tc.id.clone(),
+                        tool_name: tc.name.clone(),
+                        content: result.content.clone(),
+                        is_error: result.is_error,
+                    });
+                    let _ = tx
+                        .send(AgentEvent::ToolCallResult {
+                            call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            content: result.content.clone(),
+                            is_error: result.is_error,
+                        })
+                        .await;
+                    return ToolExecResult {
+                        index: i,
+                        call_id: tc.id,
+                        result,
+                    };
+                }
+            };
+            let tool_ctx = ToolContext {
+                working_dir: working_dir.clone(),
+                session_id: Some(session_id),
+                permission_rules: permissions.clone(),
+            };
+
+            let result = registry
+                .execute(&tc.name, args, &tool_ctx)
+                .await
+                .unwrap_or_else(|| ToolResult::error("Tool not found in registry"));
+
+            forward_global!(AgentMessage::ToolCallResult {
+                call_id: tc.id.clone(),
+                tool_name: tc.name.clone(),
+                content: result.content.clone(),
+                is_error: result.is_error,
+            });
+            let _ = tx
+                .send(AgentEvent::ToolCallResult {
+                    call_id: tc.id.clone(),
+                    tool_name: tc.name.clone(),
+                    content: result.content.clone(),
+                    is_error: result.is_error,
+                })
+                .await;
+
+            ToolExecResult {
+                index: i,
+                call_id: tc.id,
+                result,
+            }
+        }));
+    }
+
+    // Phase 2: Collect results
+    let task_results = if is_multi_agent {
+        let mut collected: Vec<ToolExecResult> = Vec::new();
+        let mut regular_done = exec_tasks.is_empty();
+        let mut inbox = ctx.inbox_rx.take();
+
+        loop {
+            if ctx.cancel_token.is_cancelled() {
+                for h in &exec_tasks { h.abort(); }
+                break;
+            }
+
+            let has_tasks = !exec_tasks.is_empty();
+            let has_pending = !pending_spawns.is_empty();
+
+            if !has_tasks && !has_pending {
+                break;
+            }
+
+            if has_tasks && inbox.is_some() && has_pending {
+                let all_tasks = std::mem::take(&mut exec_tasks);
+                let join_fut = futures::future::join_all(all_tasks);
+                let recv_fut = async {
+                    inbox.as_mut().unwrap().recv().await
+                };
+
+                tokio::select! {
+                    biased;
+                    results = join_fut => {
+                        for r in results {
+                            match r {
+                                Ok(result) => collected.push(result),
+                                Err(e) if e.is_cancelled() => {},
+                                Err(e) => {
+                                    tracing::warn!("tool task failed: {e}");
+                                }
+                            }
+                        }
+                        regular_done = true;
+                    }
+                    msg = recv_fut => {
+                        match msg {
+                            Some(OrchestratorMessage::SubAgentComplete { call_id, content, task_id: _ }) => {
+                                if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id) {
+                                    let ps = pending_spawns.remove(pos);
+                                    collected.push(ToolExecResult {
+                                        index: ps.index,
+                                        call_id,
+                                        result: ToolResult::success(content),
+                                    });
+                                }
+                            }
+                            Some(OrchestratorMessage::SubAgentError { call_id, error }) => {
+                                if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id) {
+                                    let ps = pending_spawns.remove(pos);
+                                    collected.push(ToolExecResult {
+                                        index: ps.index,
+                                        call_id,
+                                        result: ToolResult::error(error),
+                                    });
+                                }
+                            }
+                            Some(OrchestratorMessage::Cancelled) => break,
+                            None => {}
+                        }
+                    }
+                }
+            } else if has_tasks {
+                let all_tasks = std::mem::take(&mut exec_tasks);
+                let results = futures::future::join_all(all_tasks).await;
+                for r in results {
+                    match r {
+                        Ok(result) => collected.push(result),
+                        Err(e) if e.is_cancelled() => {},
+                        Err(e) => {
+                            tracing::warn!("tool task failed: {e}");
+                        }
+                    }
+                }
+                regular_done = true;
+            } else if let Some(ref mut rx) = inbox {
+                match rx.recv().await {
+                    Some(OrchestratorMessage::SubAgentComplete { call_id, content, task_id: _ }) => {
+                        if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id) {
+                            let ps = pending_spawns.remove(pos);
+                            collected.push(ToolExecResult {
+                                index: ps.index,
+                                call_id,
+                                result: ToolResult::success(content),
+                            });
+                        }
+                    }
+                    Some(OrchestratorMessage::SubAgentError { call_id, error }) => {
+                        if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id) {
+                            let ps = pending_spawns.remove(pos);
+                            collected.push(ToolExecResult {
+                                index: ps.index,
+                                call_id,
+                                result: ToolResult::error(error),
+                            });
+                        }
+                    }
+                    Some(OrchestratorMessage::Cancelled) => break,
+                    None => break,
+                }
+            }
+
+            if regular_done && pending_spawns.is_empty() {
+                break;
+            }
+        }
+
+        ctx.inbox_rx = inbox;
+        collected
+    } else {
+        let mut exec_tasks = Some(exec_tasks);
+        tokio::select! {
+            biased;
+            _ = ctx.cancel_token.cancelled() => {
+                if let Some(tasks) = exec_tasks.take() {
+                    for h in &tasks { h.abort(); }
+                }
+                Vec::new()
+            }
+            results = futures::future::join_all(
+                exec_tasks.take().unwrap()
+            ) => {
+                results.into_iter().enumerate().filter_map(|(idx, r)| match r {
+                    Ok(result) => Some(result),
+                    Err(e) if e.is_cancelled() => None,
+                    Err(e) => {
+                        tracing::warn!("tool task {} failed: {e}", idx);
+                        let call_id = tool_ids.get(idx).cloned().unwrap_or_default();
+                        Some(ToolExecResult {
+                            index: idx,
+                            call_id,
+                            result: ToolResult::error(format!("Tool execution panicked: {e}")),
+                        })
+                    }
+                }).collect()
+            }
+        }
+    };
+
+    // Append tool results to history (in original order)
+    let mut sorted_results: Vec<ToolExecResult> = task_results;
+    sorted_results.sort_by_key(|r| r.index);
+
+    for tr in sorted_results {
+        let tool_msg = Message::tool(tr.result.content, &tr.call_id);
+        ctx.history.push(tool_msg.clone());
+        if let Err(e) = sm.append_message(sid, tool_msg) {
+            send_event(
+                tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                AgentEvent::Error {
+                    code: AgentErrorCode::Internal,
+                    message: format!("Failed to append tool result: {e}"),
+                },
+            )
+            .await;
+            let _ = sm.finish_loop(sid, SessionStatus::Error);
+            return true; // fatal
+        }
+    }
+
+    false // continue loop
+}
+
 // ── Agent loop ───────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -730,508 +1243,26 @@ pub async fn run_agent_loop(
                 Err(()) => return,
             }
 
-            // Destructure output for tool-call processing code
-            let text_buffer = output.text_buffer;
-            let tool_calls = output.tool_calls;
-            let thinking_blocks = output.thinking_blocks;
-
-            // Has tool calls: append assistant message with tool_calls
-            total_tool_calls += tool_calls.len() as u32;
-            let mut assistant_msg = Message {
-                role: Role::Assistant,
-                kind: MessageType::ToolCall,
-                content: text_buffer,
-                tool_call_id: None,
-                tool_calls: Some(tool_calls.clone()),
-                skip_context: false,
-                extra_blocks: if thinking_blocks.is_empty() {
-                    None
-                } else {
-                    Some(thinking_blocks.clone())
-                },
-                estimated_tokens: 0,
-                actual_tokens_input: None,
-                actual_tokens_output: None,
-                actual_cache_read: None,
-                actual_cache_write: None,
-                actual_cost: None,
-                provider_metadata: None,
-                tool_call_count: Some(tool_calls.len() as u32),
-                tool_result_is_error: None,
-                tool_result_duration_ms: None,
-                created_at: None,
-            };
-            assistant_msg.estimated_tokens = estimate_message_tokens(&assistant_msg);
-            ctx.history.push(assistant_msg.clone());
-            if let Err(e) = sm.append_message(&sid, assistant_msg) {
-                try_send!(AgentEvent::Error {
-                    code: AgentErrorCode::Internal,
-                    message: format!("Failed to append assistant message: {e}"),
-                });
-                let _ = sm.finish_loop(&sid, SessionStatus::Error);
-                return;
+            // g+h: Execute tool calls, collect results, append to history
+            if execute_tool_calls(
+                &output.tool_calls,
+                output.text_buffer,
+                output.thinking_blocks,
+                &mut total_tool_calls,
+                &mut ctx,
+                &sm,
+                &tool_registry,
+                &sid,
+                &tx,
+                &cfg,
+                &mut doom_loop_window,
+                &mut doom_loop_warned,
+            )
+            .await
+            {
+                return; // fatal error
             }
 
-            // g. Doom loop detection
-            if cfg.doom_loop_threshold > 0 {
-                let round_sig: Vec<(String, serde_json::Value)> = tool_calls
-                    .iter()
-                    .map(|tc| {
-                        let args: serde_json::Value =
-                            serde_json::from_str(&tc.arguments).unwrap_or_default();
-                        (tc.name.clone(), args)
-                    })
-                    .collect();
-                doom_loop_window.push(round_sig);
-                let threshold = cfg.doom_loop_threshold as usize;
-                if doom_loop_window.len() > threshold {
-                    doom_loop_window.remove(0);
-                }
-                if doom_loop_window.len() == threshold {
-                    let first = &doom_loop_window[0];
-                    let all_same = doom_loop_window.iter().all(|sig| sig == first);
-                    if all_same {
-                        if doom_loop_warned {
-                            try_send!(AgentEvent::Error {
-                                code: AgentErrorCode::StuckInLoop,
-                                message: "Agent stuck in repeated tool call loop after warning".into(),
-                            });
-                            let _ = sm.finish_loop(&sid, SessionStatus::Error);
-                            return;
-                        }
-                        doom_loop_warned = true;
-                        doom_loop_window.clear();
-                        try_send!(AgentEvent::StatusUpdate(
-                            "Agent appears stuck in a loop of repeated tool calls".into()
-                        ));
-                        ctx.history.push(Message::system(
-                            "You appear to be repeating the same tool calls. \
-                             Please change your approach or summarize the current progress.",
-                        ));
-                    }
-                }
-            }
-
-            // h. Execute tools in parallel (Phase 1: dispatch)
-            let num_tools = tool_calls.len();
-            let mut exec_tasks = Vec::with_capacity(num_tools);
-            let mut pending_spawns: Vec<PendingSpawn> = Vec::new();
-            // Store tool IDs indexed by spawn order, for error recovery when a task panics.
-            let tool_ids: Vec<String> = tool_calls.iter().map(|tc| tc.id.clone()).collect();
-            let is_multi_agent = ctx.global_tx.is_some() && ctx.inbox_rx.is_some();
-
-            for (i, tc) in tool_calls.iter().enumerate() {
-                // Multi-agent: intercept "task" tool calls
-                if is_multi_agent && tc.name == "task" {
-                    let task_args: serde_json::Value =
-                        serde_json::from_str(&tc.arguments).unwrap_or_default();
-                    let subagent_type = task_args
-                        .get("subagent_type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("default")
-                        .to_string();
-                    let description = task_args
-                        .get("description")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let task_id = task_args
-                        .get("task_id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-
-                    // Send SpawnRequest via global_tx
-                    if let Some(ref gtx) = ctx.global_tx {
-                        let _ = gtx.try_send(Envelope {
-                            session_id: ctx.session_id.clone(),
-                            message: AgentMessage::SpawnRequest {
-                                call_id: tc.id.clone(),
-                                subagent_type: subagent_type.clone(),
-                                description: description.clone(),
-                                task_id: task_id.clone(),
-                            },
-                        });
-                    }
-
-                    pending_spawns.push(PendingSpawn {
-                        index: i,
-                        call_id: tc.id.clone(),
-                        subagent_type,
-                    });
-                    continue;
-                }
-
-                // Regular tool execution (original spawn logic)
-                let tx = tx.clone();
-                let global_tx = ctx.global_tx.clone();
-                let cancel = ctx.cancel_token.clone();
-                let registry = tool_registry.clone();
-                let session_id = sid.clone();
-                let working_dir = ctx.working_dir.clone();
-                let tc = tc.clone();
-                let sm = sm.clone();
-                let permissions = ctx.permission_rules.clone();
-                let sid2 = sid.clone();
-
-                exec_tasks.push(tokio::spawn(async move {
-                    // Helper: forward AgentMessage to global_tx
-                    macro_rules! forward_global {
-                        ($msg:expr) => {
-                            if let Some(ref gtx) = global_tx {
-                                let _ = gtx.try_send(Envelope {
-                                    session_id: sid2.clone(),
-                                    message: $msg,
-                                });
-                            }
-                        };
-                    }
-
-                    // Cancellation check
-                    if cancel.is_cancelled() {
-                        let result = ToolExecResult {
-                            index: i,
-                            call_id: tc.id.clone(),
-                            result: ToolResult::error("Cancelled"),
-                        };
-                        // Forward to global_tx before sending to tx
-                        forward_global!(AgentMessage::ToolCallResult {
-                            call_id: tc.id.clone(),
-                            tool_name: tc.name.clone(),
-                            content: "Cancelled".into(),
-                            is_error: true,
-                        });
-                        let _ = tx
-                            .send(AgentEvent::ToolCallResult {
-                                call_id: tc.id.clone(),
-                                tool_name: tc.name.clone(),
-                                content: "Cancelled".into(),
-                                is_error: true,
-                            })
-                            .await;
-                        return result;
-                    }
-
-                    // Send ToolCallRequest
-                    forward_global!(AgentMessage::ToolCallRequest {
-                        call_id: tc.id.clone(),
-                        tool_name: tc.name.clone(),
-                        arguments: tc.arguments.clone(),
-                    });
-                    let _ = tx
-                        .send(AgentEvent::ToolCallRequest {
-                            call_id: tc.id.clone(),
-                            tool_name: tc.name.clone(),
-                            arguments: tc.arguments.clone(),
-                        })
-                        .await;
-
-                    // Check if tool requires approval (with arguments)
-                    let args_value: serde_json::Value =
-                        serde_json::from_str(&tc.arguments).unwrap_or_default();
-                    let requires_approval = registry
-                        .get(&tc.name)
-                        .map(|t| t.requires_approval_for(&args_value))
-                        .unwrap_or(false);
-
-                    // Check if tool is already approved (Always Allow)
-                    let already_approved = sm.is_tool_approved(&session_id, &tc.name);
-
-                    if requires_approval && !already_approved {
-                        let (resp_tx, resp_rx) = oneshot::channel::<UserQueryResult>();
-                        let args_display = format_tool_args(&tc.arguments);
-                        let _ = tx
-                            .send(AgentEvent::UserQuery {
-                                query_id: tc.id.clone(),
-                                message: format!("Allow tool: {}({})?", tc.name, args_display),
-                                options: Vec::new(),
-                                allow_other: false,
-                                respond: resp_tx,
-                            })
-                            .await;
-
-                        let result = resp_rx.await.unwrap_or_default();
-                        match result.selected_index {
-                            0 => {
-                                // Approve - continue
-                            }
-                            2 => {
-                                // Always Allow
-                                let _ = sm.add_approved_tool(&session_id, &tc.name);
-                            }
-                            _ => {
-                                let result = ToolResult::error("User denied");
-                                forward_global!(AgentMessage::ToolCallResult {
-                                    call_id: tc.id.clone(),
-                                    tool_name: tc.name.clone(),
-                                    content: result.content.clone(),
-                                    is_error: result.is_error,
-                                });
-                                let _ = tx
-                                    .send(AgentEvent::ToolCallResult {
-                                        call_id: tc.id.clone(),
-                                        tool_name: tc.name.clone(),
-                                        content: result.content.clone(),
-                                        is_error: result.is_error,
-                                    })
-                                    .await;
-                                return ToolExecResult {
-                                    index: i,
-                                    call_id: tc.id,
-                                    result,
-                                };
-                            }
-                        }
-                    }
-
-                    // Parse arguments and execute
-                    let args = match serde_json::from_str(&tc.arguments) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::warn!(
-                                tool = %tc.name,
-                                args_len = tc.arguments.len(),
-                                error = %e,
-                                "tool call arguments truncated or malformed (likely max_output_tokens exceeded)"
-                            );
-                            let result = ToolResult::error(format!(
-                                "[TRUNCATED] Tool call arguments incomplete ({} bytes, parse: {}). \
-                                 The content exceeded max_output_tokens.\n\
-                                 To fix this, split the content into smaller parts:\n\
-                                 - Use multiple smaller write_file or edit_file calls\n\
-                                 - Or use edit_file to incrementally build the file\n\
-                                 - Do NOT retry the same large write_file call — it will fail again.",
-                                tc.arguments.len(), e
-                            ));
-                            forward_global!(AgentMessage::ToolCallResult {
-                                call_id: tc.id.clone(),
-                                tool_name: tc.name.clone(),
-                                content: result.content.clone(),
-                                is_error: result.is_error,
-                            });
-                            let _ = tx
-                                .send(AgentEvent::ToolCallResult {
-                                    call_id: tc.id.clone(),
-                                    tool_name: tc.name.clone(),
-                                    content: result.content.clone(),
-                                    is_error: result.is_error,
-                                })
-                                .await;
-                            return ToolExecResult {
-                                index: i,
-                                call_id: tc.id,
-                                result,
-                            };
-                        }
-                    };
-                    let tool_ctx = ToolContext {
-                        working_dir: working_dir.clone(),
-                        session_id: Some(session_id),
-                        permission_rules: permissions.clone(),
-                    };
-
-                    let result = registry
-                        .execute(&tc.name, args, &tool_ctx)
-                        .await
-                        .unwrap_or_else(|| ToolResult::error("Tool not found in registry"));
-
-                    // Send result
-                    forward_global!(AgentMessage::ToolCallResult {
-                        call_id: tc.id.clone(),
-                        tool_name: tc.name.clone(),
-                        content: result.content.clone(),
-                        is_error: result.is_error,
-                    });
-                    let _ = tx
-                        .send(AgentEvent::ToolCallResult {
-                            call_id: tc.id.clone(),
-                            tool_name: tc.name.clone(),
-                            content: result.content.clone(),
-                            is_error: result.is_error,
-                        })
-                        .await;
-
-                    ToolExecResult {
-                        index: i,
-                        call_id: tc.id,
-                        result,
-                    }
-                }));
-            }
-
-            // Phase 2: Collect results (select! with support for inbox_rx)
-            let task_results = if is_multi_agent {
-                let mut collected: Vec<ToolExecResult> = Vec::new();
-                let mut regular_done = exec_tasks.is_empty();
-                let mut inbox = ctx.inbox_rx.take();
-
-                loop {
-                    // Check cancellation first
-                    if ctx.cancel_token.is_cancelled() {
-                        for h in &exec_tasks { h.abort(); }
-                        break;
-                    }
-
-                    let has_tasks = !exec_tasks.is_empty();
-                    let has_pending = !pending_spawns.is_empty();
-
-                    if !has_tasks && !has_pending {
-                        break;
-                    }
-
-                    if has_tasks && inbox.is_some() && has_pending {
-                        // Both regular tasks and sub-agent results pending: select!
-                        let all_tasks = std::mem::take(&mut exec_tasks);
-                        let join_fut = futures::future::join_all(
-                            all_tasks
-                        );
-                        let recv_fut = async {
-                            // SAFETY: guarded by inbox.is_some() above
-                            inbox.as_mut().unwrap().recv().await
-                        };
-
-                        tokio::select! {
-                            biased;
-                            results = join_fut => {
-                                for r in results {
-                                    match r {
-                                        Ok(result) => collected.push(result),
-                                        Err(e) if e.is_cancelled() => {},
-                                        Err(e) => {
-                                            tracing::warn!("tool task failed: {e}");
-                                        }
-                                    }
-                                }
-                                regular_done = true;
-                            }
-                            msg = recv_fut => {
-                                match msg {
-                                    Some(OrchestratorMessage::SubAgentComplete { call_id, content, task_id: _ }) => {
-                                        if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id) {
-                                            let ps = pending_spawns.remove(pos);
-                                            collected.push(ToolExecResult {
-                                                index: ps.index,
-                                                call_id,
-                                                result: ToolResult::success(content),
-                                            });
-                                        }
-                                    }
-                                    Some(OrchestratorMessage::SubAgentError { call_id, error }) => {
-                                        if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id) {
-                                            let ps = pending_spawns.remove(pos);
-                                            collected.push(ToolExecResult {
-                                                index: ps.index,
-                                                call_id,
-                                                result: ToolResult::error(error),
-                                            });
-                                        }
-                                    }
-                                    Some(OrchestratorMessage::Cancelled) => {
-                                        break;
-                                    }
-                                    None => {}
-                                }
-                            }
-                        }
-                    } else if has_tasks {
-                        // Only regular tasks remaining
-                        let all_tasks = std::mem::take(&mut exec_tasks);
-                        let results = futures::future::join_all(
-                            all_tasks
-                        ).await;
-                        for r in results {
-                            match r {
-                                Ok(result) => collected.push(result),
-                                Err(e) if e.is_cancelled() => {},
-                                Err(e) => {
-                                    tracing::warn!("tool task failed: {e}");
-                                }
-                            }
-                        }
-                        regular_done = true;
-                    } else if let Some(ref mut rx) = inbox {
-                        // Only sub-agent results pending
-                        match rx.recv().await {
-                            Some(OrchestratorMessage::SubAgentComplete { call_id, content, task_id: _ }) => {
-                                if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id) {
-                                    let ps = pending_spawns.remove(pos);
-                                    collected.push(ToolExecResult {
-                                        index: ps.index,
-                                        call_id,
-                                        result: ToolResult::success(content),
-                                    });
-                                }
-                            }
-                            Some(OrchestratorMessage::SubAgentError { call_id, error }) => {
-                                if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id) {
-                                    let ps = pending_spawns.remove(pos);
-                                    collected.push(ToolExecResult {
-                                        index: ps.index,
-                                        call_id,
-                                        result: ToolResult::error(error),
-                                    });
-                                }
-                            }
-                            Some(OrchestratorMessage::Cancelled) => break,
-                            None => break,
-                        }
-                    }
-
-                    if regular_done && pending_spawns.is_empty() {
-                        break;
-                    }
-                }
-
-                // Restore inbox_rx (now None since we took it)
-                ctx.inbox_rx = inbox;
-
-                collected
-            } else {
-                // Single-agent mode: original join_all
-                let mut exec_tasks = Some(exec_tasks);
-                tokio::select! {
-                    biased;
-                    _ = ctx.cancel_token.cancelled() => {
-                        if let Some(tasks) = exec_tasks.take() {
-                            for h in &tasks { h.abort(); }
-                        }
-                        Vec::new()
-                    }
-                    results = futures::future::join_all(
-                        exec_tasks.take().unwrap()
-                    ) => {
-                        results.into_iter().enumerate().filter_map(|(idx, r)| match r {
-                            Ok(result) => Some(result),
-                            Err(e) if e.is_cancelled() => None,
-                            Err(e) => {
-                                tracing::warn!("tool task {} failed: {e}", idx);
-                                let call_id = tool_ids.get(idx).cloned().unwrap_or_default();
-                                Some(ToolExecResult {
-                                    index: idx,
-                                    call_id,
-                                    result: ToolResult::error(format!("Tool execution panicked: {e}")),
-                                })
-                            }
-                        }).collect()
-                    }
-                }
-            };
-
-            // h. Append tool results to history (in original order)
-            let mut sorted_results: Vec<ToolExecResult> = task_results;
-            sorted_results.sort_by_key(|r| r.index);
-
-            for tr in sorted_results {
-                let tool_msg = Message::tool(tr.result.content, &tr.call_id);
-                ctx.history.push(tool_msg.clone());
-                if let Err(e) = sm.append_message(&sid, tool_msg) {
-                    try_send!(AgentEvent::Error {
-                        code: AgentErrorCode::Internal,
-                        message: format!("Failed to append tool result: {e}"),
-                    });
-                    let _ = sm.finish_loop(&sid, SessionStatus::Error);
-                    return;
-                }
-            }
             // i. Increment iteration
             iteration += 1;
         }
