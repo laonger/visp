@@ -557,13 +557,13 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 return false;
             }
 
-            // Alt+Left / Alt+Right: 循环切换 tab（精确匹配 ALT，排除 Alt+Shift）
-            if key.code == KeyCode::Right && key.modifiers == KeyModifiers::ALT {
+            // Alt+] / Alt+[: 循环切换 tab（精确匹配 ALT，排除 Alt+Shift）
+            if key.code == KeyCode::Char(']') && key.modifiers == KeyModifiers::ALT {
                 app.tab_bar.activate_next();
                 app.scroll_following = true;
                 return false;
             }
-            if key.code == KeyCode::Left && key.modifiers == KeyModifiers::ALT {
+            if key.code == KeyCode::Char('[') && key.modifiers == KeyModifiers::ALT {
                 app.tab_bar.activate_prev();
                 app.scroll_following = true;
                 return false;
