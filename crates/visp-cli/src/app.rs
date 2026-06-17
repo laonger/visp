@@ -539,6 +539,37 @@ impl TabBar {
         // Create new
         self.insert_sub_agent(session_id, agent_name)
     }
+
+    /// Activate the tab at the given index and render its pending frames.
+    pub fn activate(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        self.active = index;
+        self.tabs[index].render_pending();
+    }
+
+    /// Activate the next tab (circular). No-op if empty.
+    pub fn activate_next(&mut self) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        let next = (self.active + 1) % self.tabs.len();
+        self.activate(next);
+    }
+
+    /// Activate the previous tab (circular). No-op if empty.
+    pub fn activate_prev(&mut self) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        let prev = if self.active == 0 {
+            self.tabs.len() - 1
+        } else {
+            self.active - 1
+        };
+        self.activate(prev);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2258,5 +2289,68 @@ mod tests {
         app.route_frame(frame);
         assert_eq!(app.tab_bar.tabs[0].frames.len(), 1);
         assert_eq!(app.tab_bar.tabs[0].streaming_text, "hello");
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // Step 7: Tab navigation (Alt+←/→)
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_tabbar_activate_next_advances() {
+        let mut bar = TabBar::new("main".into());
+        bar.insert_sub_agent("sub1", "A");
+        bar.insert_sub_agent("sub2", "B");
+        assert_eq!(bar.active, 0);
+        bar.activate_next();
+        assert_eq!(bar.active, 1);
+    }
+
+    #[test]
+    fn test_tabbar_activate_next_at_last_wraps_to_zero() {
+        let mut bar = TabBar::new("main".into());
+        bar.insert_sub_agent("sub1", "A");
+        bar.insert_sub_agent("sub2", "B");
+        bar.active = 2;
+        bar.activate_next();
+        assert_eq!(bar.active, 0);
+    }
+
+    #[test]
+    fn test_tabbar_activate_prev_at_zero_wraps_to_last() {
+        let mut bar = TabBar::new("main".into());
+        bar.insert_sub_agent("sub1", "A");
+        bar.insert_sub_agent("sub2", "B");
+        assert_eq!(bar.active, 0);
+        bar.activate_prev();
+        assert_eq!(bar.active, 2);
+    }
+
+    #[test]
+    fn test_tabbar_activate_prev_decrements() {
+        let mut bar = TabBar::new("main".into());
+        bar.insert_sub_agent("sub1", "A");
+        bar.insert_sub_agent("sub2", "B");
+        bar.active = 2;
+        bar.activate_prev();
+        assert_eq!(bar.active, 1);
+    }
+
+    #[test]
+    fn test_tabbar_activate_calls_render_pending_on_target() {
+        let mut bar = TabBar::new("main".into());
+        bar.insert_sub_agent("sub1", "A");
+        bar.insert_sub_agent("sub2", "B");
+        // Push a ToolCall frame to tabs[1] — TextDelta only fills streaming_text,
+        // so we use ToolCall to verify render_pending was indeed called (messages != empty)
+        bar.tabs[1].frames.push(tool_call("bash", "c1", r#"{}"#));
+        bar.activate(1);
+        // After activate, render_pending was called, so messages should have content
+        assert!(!bar.tabs[1].messages.is_empty());
+        assert_eq!(
+            bar.tabs[1].messages[0].line_type,
+            LineType::ToolCall {
+                name: "bash".into()
+            }
+        );
     }
 }
