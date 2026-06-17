@@ -10,6 +10,7 @@ use ratatui_textarea::WrapMode;
 use unicode_width::UnicodeWidthChar;
 
 use crate::theme;
+use visp_proto::visp::ServerMessage;
 
 /// 检测内容是否为 diff 格式（git diff, diff -u 等输出）
 fn detect_diff(content: &str) -> Option<()> {
@@ -289,6 +290,94 @@ pub struct ChatLine {
     pub line_type: LineType,
     pub content: String,
     pub call_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentStatus {
+    Running,
+    Done,
+    Error,
+}
+
+#[derive(Debug, Clone)]
+pub struct TabEntry {
+    pub session_id: String,
+    pub agent_name: String,
+    pub status: AgentStatus,
+    pub frames: Vec<ServerMessage>,
+    pub messages: Vec<ChatLine>,
+    pub rendered_up_to: usize,
+    pub streaming_text: String,
+    pub generating: bool,
+    pub pending_usage: Option<(u32, u32, u32, u32, u32)>,
+    pub scroll: usize,
+}
+
+impl TabEntry {
+    pub fn new(session_id: impl Into<String>, agent_name: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            agent_name: agent_name.into(),
+            status: AgentStatus::Running,
+            frames: Vec::new(),
+            messages: Vec::new(),
+            rendered_up_to: 0,
+            streaming_text: String::new(),
+            generating: false,
+            pending_usage: None,
+            scroll: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TabBar {
+    pub tabs: Vec<TabEntry>,
+    pub active: usize,
+    pub tab_page: usize,
+}
+
+impl TabBar {
+    pub fn new(main_session_id: String) -> Self {
+        Self {
+            tabs: vec![TabEntry::new(main_session_id, "default")],
+            active: 0,
+            tab_page: 0,
+        }
+    }
+
+    /// 在 index=1 处插入新的子 agent tab。
+    /// 若 active >= 1，自动将 active 加 1 以保持指向同一 tab。
+    /// 返回新 tab 的索引。
+    pub fn insert_sub_agent(
+        &mut self,
+        session_id: impl Into<String>,
+        agent_name: impl Into<String>,
+    ) -> usize {
+        let entry = TabEntry::new(session_id, agent_name);
+        self.tabs.insert(1, entry);
+        if self.active >= 1 {
+            self.active += 1;
+        }
+        1
+    }
+
+    pub fn find_index_by_session(&self, session_id: &str) -> Option<usize> {
+        self.tabs.iter().position(|t| t.session_id == session_id)
+    }
+
+    pub fn find_or_insert(&mut self, session_id: &str, agent_name: &str) -> usize {
+        // Default tab matches — return 0
+        if session_id == self.tabs[0].session_id {
+            return 0;
+        }
+        // Already exists
+        if let Some(idx) = self.find_index_by_session(session_id) {
+            return idx;
+        }
+        // Create new
+        self.insert_sub_agent(session_id, agent_name)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1270,5 +1359,114 @@ mod tests {
         // selected_index 指向 "Other"（index == options.len()）
         cs.selected_index = cs.options.len();
         assert_eq!(cs.selected_index, 2);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // AgentStatus / TabEntry / TabBar 测试
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_agent_status_default_is_running() {
+        let tab = TabEntry::new("sid", "agent");
+        assert_eq!(tab.status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn test_tab_entry_new_with_session_and_name() {
+        let tab = TabEntry::new("sid-1", "agent-A");
+        assert_eq!(tab.session_id, "sid-1");
+        assert_eq!(tab.agent_name, "agent-A");
+    }
+
+    #[test]
+    fn test_tab_entry_initial_empty() {
+        let tab = TabEntry::new("sid", "agent");
+        assert!(tab.frames.is_empty());
+        assert!(tab.messages.is_empty());
+        assert!(tab.streaming_text.is_empty());
+        assert_eq!(tab.rendered_up_to, 0);
+    }
+
+    #[test]
+    fn test_tab_entry_default_per_tab_state() {
+        let tab = TabEntry::new("sid", "agent");
+        assert!(!tab.generating);
+        assert!(tab.pending_usage.is_none());
+        assert_eq!(tab.scroll, 0);
+    }
+
+    #[test]
+    fn test_tabbar_new_creates_default_tab() {
+        let bar = TabBar::new("main-sid".into());
+        assert_eq!(bar.tabs.len(), 1);
+        assert_eq!(bar.tabs[0].agent_name, "default");
+        assert_eq!(bar.tabs[0].session_id, "main-sid");
+        assert_eq!(bar.active, 0);
+        assert_eq!(bar.tab_page, 0);
+    }
+
+    #[test]
+    fn test_tabbar_insert_sub_agent_at_index_1() {
+        let mut bar = TabBar::new("main".into());
+        bar.insert_sub_agent("sub1", "agentA");
+        assert_eq!(bar.tabs.len(), 2);
+        assert_eq!(bar.tabs[1].session_id, "sub1");
+    }
+
+    #[test]
+    fn test_tabbar_insert_two_sub_agents_newer_first() {
+        let mut bar = TabBar::new("main".into());
+        bar.insert_sub_agent("sub1", "A");
+        bar.insert_sub_agent("sub2", "B");
+        assert_eq!(bar.tabs.len(), 3);
+        assert_eq!(bar.tabs[1].session_id, "sub2");
+        assert_eq!(bar.tabs[2].session_id, "sub1");
+    }
+
+    #[test]
+    fn test_tabbar_insert_does_not_change_active() {
+        let mut bar = TabBar::new("main".into());
+        assert_eq!(bar.active, 0);
+        bar.insert_sub_agent("sub1", "A");
+        assert_eq!(bar.active, 0);
+    }
+
+    #[test]
+    fn test_tabbar_insert_when_active_geq_1_shifts_active_plus_1() {
+        let mut bar = TabBar::new("main".into());
+        bar.insert_sub_agent("sub1", "A");
+        bar.active = 1;
+        bar.insert_sub_agent("sub2", "B");
+        assert_eq!(bar.active, 2);
+        // Still pointing to sub1 (now at index 2)
+        assert_eq!(bar.tabs[bar.active].session_id, "sub1");
+    }
+
+    #[test]
+    fn test_tabbar_find_index_by_session() {
+        let mut bar = TabBar::new("main".into());
+        bar.insert_sub_agent("sub1", "A");
+        bar.insert_sub_agent("sub2", "B");
+        assert_eq!(bar.find_index_by_session("sub1"), Some(2));
+        assert_eq!(bar.find_index_by_session("sub2"), Some(1));
+        assert_eq!(bar.find_index_by_session("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_tabbar_find_or_insert_creates_when_missing() {
+        let mut bar = TabBar::new("main".into());
+        let idx = bar.find_or_insert("new-sid", "agentX");
+        assert_eq!(idx, 1);
+        assert_eq!(bar.tabs.len(), 2);
+    }
+
+    #[test]
+    fn test_tabbar_find_or_insert_returns_existing() {
+        let mut bar = TabBar::new("main".into());
+        bar.insert_sub_agent("sub1", "A");
+        let len_before = bar.tabs.len();
+        let idx = bar.find_or_insert("sub1", "A");
+        assert_eq!(idx, 1);
+        assert_eq!(bar.tabs.len(), len_before);
     }
 }
