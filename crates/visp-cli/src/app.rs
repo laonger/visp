@@ -965,32 +965,96 @@ impl AppState {
         &self.active_tab().messages
     }
 
-    // ── 消息操作（代理到 active_tab）─────────────────────────
+    // ── 消息操作 ────────────────────────────────────────────
+    //
+    // 设计约定（Step 5）：
+    // - 类型 A（本地 UI 反馈/用户输入）：永远写 default tab（tabs[0]）
+    // - 类型 B（agent 事件）：按 session_id 路由到对应 tab
 
+    /// 类型 A：永远写 default tab（tabs[0]）
     pub fn add_message(&mut self, line_type: LineType, content: String) {
-        self.active_tab_mut()
+        self.tab_bar.tabs[0].push_chat_line(line_type, content, None);
+    }
+
+    /// 类型 B：按 session_id 路由
+    pub fn add_message_to_session(
+        &mut self,
+        session_id: &str,
+        line_type: LineType,
+        content: String,
+    ) {
+        self.tab_mut_by_session(session_id)
             .push_chat_line(line_type, content, None);
     }
 
-    pub fn add_tool_line(&mut self, line_type: LineType, content: String, call_id: &str) {
-        self.active_tab_mut()
-            .push_chat_line(line_type, content, Some(call_id.to_string()));
+    /// 类型 B：按 session_id 路由的 tool_line
+    pub fn add_tool_line_to_session(
+        &mut self,
+        session_id: &str,
+        line_type: LineType,
+        content: String,
+        call_id: &str,
+    ) {
+        self.tab_mut_by_session(session_id).push_chat_line(
+            line_type,
+            content,
+            Some(call_id.to_string()),
+        );
     }
+
+    /// 类型 B：按 session_id 路由的 update_thinking
+    pub fn update_thinking_to_session(&mut self, session_id: &str, content: String) {
+        self.tab_mut_by_session(session_id).update_thinking(content);
+    }
+
+    /// 类型 B：按 session_id 路由的 append_streaming
+    pub fn append_streaming_to_session(&mut self, session_id: &str, delta: &str) {
+        self.tab_mut_by_session(session_id)
+            .streaming_text
+            .push_str(delta);
+    }
+
+    /// 类型 B：按 session_id 路由的 flush_streaming
+    pub fn flush_streaming_to_session(&mut self, session_id: &str) {
+        self.tab_mut_by_session(session_id).flush_streaming();
+    }
+
+    /// 内部：按 session_id 找 tab，未知 ID 回退到 default（tabs[0]）
+    fn tab_mut_by_session(&mut self, session_id: &str) -> &mut TabEntry {
+        let idx = self.tab_bar.find_index_by_session(session_id).unwrap_or(0);
+        &mut self.tab_bar.tabs[idx]
+    }
+
+    // ── 兼容 shim（旧签名，路由到 main_session_id）─────────────
+
+    /// 兼容 shim：路由到 main_session_id 对应 tab
+    pub fn add_tool_line(&mut self, line_type: LineType, content: String, call_id: &str) {
+        let main_sid = self.main_session_id.clone();
+        self.add_tool_line_to_session(&main_sid, line_type, content, call_id);
+    }
+
+    /// 兼容 shim：路由到 main_session_id 对应 tab
+    pub fn append_streaming(&mut self, delta: &str) {
+        let main_sid = self.main_session_id.clone();
+        self.append_streaming_to_session(&main_sid, delta);
+    }
+
+    /// 兼容 shim：路由到 main_session_id 对应 tab
+    pub fn flush_streaming(&mut self) {
+        let main_sid = self.main_session_id.clone();
+        self.flush_streaming_to_session(&main_sid);
+    }
+
+    /// 兼容 shim：路由到 main_session_id 对应 tab
+    pub fn update_thinking(&mut self, content: String) {
+        let main_sid = self.main_session_id.clone();
+        self.update_thinking_to_session(&main_sid, content);
+    }
+
+    // ── 保留（非 session 路由，仍操作 active tab）──────────────
 
     pub fn insert_tool_result(&mut self, call_id: &str, content: String) {
         self.active_tab_mut().insert_tool_result(call_id, content);
-    }
-
-    pub fn append_streaming(&mut self, delta: &str) {
-        self.active_tab_mut().streaming_text.push_str(delta);
-    }
-
-    pub fn flush_streaming(&mut self) {
-        self.active_tab_mut().flush_streaming();
-    }
-
-    pub fn update_thinking(&mut self, content: String) {
-        self.active_tab_mut().update_thinking(content);
     }
 
     pub fn update_message(&mut self, id: u64, content: String) {
@@ -1866,5 +1930,124 @@ mod tests {
         tab.render_pending();
         assert!(!tab.generating);
         assert_eq!(tab.status, AgentStatus::Done);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // Step 5: Message API 重构 — 类型 A（default tab）vs 类型 B（session 路由）
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_add_message_writes_to_default_tab() {
+        let mut app = AppState::new("sid".into(), "m".into(), "".into());
+        app.tab_bar.insert_sub_agent("sub-1", "agentA");
+        app.add_message(LineType::User, "hi".into());
+        assert_eq!(app.tab_bar.tabs[0].messages.len(), 1);
+        assert_eq!(app.tab_bar.tabs[1].messages.len(), 0);
+        assert_eq!(app.tab_bar.tabs[0].messages[0].content, "hi");
+    }
+
+    #[test]
+    fn test_add_message_writes_to_default_when_active_is_sub() {
+        let mut app = AppState::new("sid".into(), "m".into(), "".into());
+        app.tab_bar.insert_sub_agent("sub-1", "agentA");
+        // Switch active to sub tab
+        app.tab_bar.active = 1;
+        app.add_message(LineType::User, "hello".into());
+        // Default tab gets the message
+        assert_eq!(app.tab_bar.tabs[0].messages.len(), 1);
+        assert_eq!(app.tab_bar.tabs[0].messages[0].content, "hello");
+        // Sub tab remains empty
+        assert_eq!(app.tab_bar.tabs[1].messages.len(), 0);
+    }
+
+    #[test]
+    fn test_add_message_to_session_routes_to_correct_tab() {
+        let mut app = AppState::new("sid".into(), "m".into(), "".into());
+        app.tab_bar.insert_sub_agent("sub-1", "agentA");
+        app.tab_bar.insert_sub_agent("sub-2", "agentB");
+        app.add_message_to_session("sub-1", LineType::Assistant, "from agent".into());
+        // sub-2 at index 1 (newest first), sub-1 at index 2
+        assert_eq!(app.tab_bar.tabs[0].messages.len(), 0);
+        assert_eq!(app.tab_bar.tabs[1].messages.len(), 0);
+        assert_eq!(app.tab_bar.tabs[2].messages.len(), 1);
+        assert_eq!(app.tab_bar.tabs[2].messages[0].content, "from agent");
+    }
+
+    #[test]
+    fn test_add_message_to_session_unknown_falls_back_to_default() {
+        let mut app = AppState::new("sid".into(), "m".into(), "".into());
+        app.tab_bar.insert_sub_agent("sub-1", "agentA");
+        app.add_message_to_session("unknown-sid", LineType::Status, "fallback".into());
+        // Default tab gets the fallback
+        assert_eq!(app.tab_bar.tabs[0].messages.len(), 1);
+        assert_eq!(app.tab_bar.tabs[0].messages[0].content, "fallback");
+        // Sub tab unchanged
+        assert_eq!(app.tab_bar.tabs[1].messages.len(), 0);
+    }
+
+    #[test]
+    fn test_add_tool_line_to_session_routes_by_session_id() {
+        let mut app = AppState::new("sid".into(), "m".into(), "".into());
+        app.tab_bar.insert_sub_agent("sub-1", "agentA");
+        app.add_tool_line_to_session(
+            "sub-1",
+            LineType::ToolCall {
+                name: "bash".into(),
+            },
+            "echo hi".into(),
+            "tc_1",
+        );
+        assert_eq!(app.tab_bar.tabs[0].messages.len(), 0);
+        assert_eq!(app.tab_bar.tabs[1].messages.len(), 1);
+        assert_eq!(
+            app.tab_bar.tabs[1].messages[0].call_id.as_deref(),
+            Some("tc_1")
+        );
+    }
+
+    #[test]
+    fn test_update_thinking_to_session_routes_by_session_id() {
+        let mut app = AppState::new("sid".into(), "m".into(), "".into());
+        app.tab_bar.insert_sub_agent("sub-1", "agentA");
+        app.update_thinking_to_session("sub-1", "thinking...".into());
+        assert_eq!(app.tab_bar.tabs[0].messages.len(), 0);
+        assert_eq!(app.tab_bar.tabs[1].messages.len(), 1);
+        assert_eq!(
+            app.tab_bar.tabs[1].messages[0].line_type,
+            LineType::Thinking
+        );
+        assert_eq!(app.tab_bar.tabs[1].messages[0].content, "thinking...");
+        // Update existing thinking
+        app.update_thinking_to_session("sub-1", "updated thinking".into());
+        assert_eq!(app.tab_bar.tabs[1].messages.len(), 1);
+        assert_eq!(app.tab_bar.tabs[1].messages[0].content, "updated thinking");
+    }
+
+    #[test]
+    fn test_append_streaming_to_session_routes_by_session_id() {
+        let mut app = AppState::new("sid".into(), "m".into(), "".into());
+        app.tab_bar.insert_sub_agent("sub-1", "agentA");
+        app.append_streaming_to_session("sub-1", "Hello ");
+        app.append_streaming_to_session("sub-1", "world");
+        assert_eq!(app.tab_bar.tabs[0].streaming_text, "");
+        assert_eq!(app.tab_bar.tabs[1].streaming_text, "Hello world");
+    }
+
+    #[test]
+    fn test_flush_streaming_to_session_routes_by_session_id() {
+        let mut app = AppState::new("sid".into(), "m".into(), "".into());
+        app.tab_bar.insert_sub_agent("sub-1", "agentA");
+        app.append_streaming_to_session("sub-1", "Hello world");
+        app.flush_streaming_to_session("sub-1");
+        // After flush, streaming_text is cleared and a message is added
+        assert_eq!(app.tab_bar.tabs[0].streaming_text, "");
+        assert_eq!(app.tab_bar.tabs[0].messages.len(), 0);
+        assert_eq!(app.tab_bar.tabs[1].streaming_text, "");
+        assert_eq!(app.tab_bar.tabs[1].messages.len(), 1);
+        assert_eq!(
+            app.tab_bar.tabs[1].messages[0].line_type,
+            LineType::Assistant
+        );
+        assert_eq!(app.tab_bar.tabs[1].messages[0].content, "Hello world");
     }
 }
