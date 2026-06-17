@@ -1,4 +1,5 @@
 use std::panic::AssertUnwindSafe;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,6 +27,7 @@ use crate::tool::ToolResult;
 use crate::tool_registry::ToolRegistry;
 
 use futures::FutureExt;
+use futures::Stream;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -188,6 +190,63 @@ async fn setup_iteration(
     Ok(IterationContext { messages, tools })
 }
 
+/// d. LLM call with retry for RateLimit/Network errors
+async fn call_llm_with_retry(
+    provider: &dyn LlmProvider,
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    ctx: &AgentLoopContext,
+    cfg: &AgentConfig,
+    sid: &str,
+    tx: &mpsc::Sender<AgentEvent>,
+    sm: &SessionManager,
+) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, ()> {
+    let mut attempt = 0u32;
+    loop {
+        match provider.chat_stream(messages, tools, &ctx.config).await {
+            Ok(s) => break Ok(Box::pin(s)),
+            Err(e @ (LlmError::RateLimit { .. } | LlmError::Network(_))) => {
+                if attempt >= cfg.llm_retry_attempts {
+                    let (code, msg) = llm_error_to_code(&e);
+                    tracing::error!(
+                        session_id = %sid,
+                        error_code = ?code,
+                        error_msg = %msg,
+                        attempts = attempt + 1,
+                        "LLM provider error after retries exhausted"
+                    );
+                    send_event(
+                        tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                        AgentEvent::Error { code, message: msg },
+                    )
+                    .await?;
+                    let _ = sm.finish_loop(sid, SessionStatus::Error);
+                    return Err(());
+                }
+                let delay = cfg.llm_retry_base_delay_ms * (1u64 << attempt);
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                attempt += 1;
+            }
+            Err(e) => {
+                let (code, msg) = llm_error_to_code(&e);
+                tracing::error!(
+                    session_id = %sid,
+                    error_code = ?code,
+                    error_msg = %msg,
+                    "LLM provider error"
+                );
+                send_event(
+                    tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                    AgentEvent::Error { code, message: msg },
+                )
+                .await?;
+                let _ = sm.finish_loop(sid, SessionStatus::Error);
+                return Err(());
+            }
+        }
+    }
+}
+
 // ── Agent loop ───────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -301,43 +360,13 @@ pub async fn run_agent_loop(
             let tools = ic.tools;
 
             // d. Call LLM with retry
-            let stream = {
-                let mut attempt = 0u32;
-                loop {
-                    match provider.chat_stream(&messages, &tools, &ctx.config).await {
-                        Ok(s) => break s,
-                        Err(e @ (LlmError::RateLimit { .. } | LlmError::Network(_))) => {
-                            if attempt >= cfg.llm_retry_attempts {
-                                let (code, msg) = llm_error_to_code(&e);
-                                tracing::error!(
-                                    session_id = %sid,
-                                    error_code = ?code,
-                                    error_msg = %msg,
-                                    attempts = attempt + 1,
-                                    "LLM provider error after retries exhausted"
-                                );
-                                try_send!(AgentEvent::Error { code, message: msg });
-                                let _ = sm.finish_loop(&sid, SessionStatus::Error);
-                                return;
-                            }
-                            let delay = cfg.llm_retry_base_delay_ms * (1u64 << attempt);
-                            tokio::time::sleep(Duration::from_millis(delay)).await;
-                            attempt += 1;
-                        }
-                        Err(e) => {
-                            let (code, msg) = llm_error_to_code(&e);
-                            tracing::error!(
-                                session_id = %sid,
-                                error_code = ?code,
-                                error_msg = %msg,
-                                "LLM provider error"
-                            );
-                            try_send!(AgentEvent::Error { code, message: msg });
-                            let _ = sm.finish_loop(&sid, SessionStatus::Error);
-                            return;
-                        }
-                    }
-                }
+            let stream = match call_llm_with_retry(
+                provider.as_ref(), &messages, &tools, &ctx, &cfg, &sid, &tx, &sm,
+            )
+            .await
+            {
+                Ok(s) => s,
+                Err(()) => return,
             };
 
             // e. Collect events
