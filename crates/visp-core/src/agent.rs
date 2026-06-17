@@ -79,6 +79,16 @@ pub enum AgentEvent {
     },
 }
 
+/// Agent 事件帧：AgentEvent 及其来源上下文。
+/// 用于标识事件来自哪个 agent，支持 CLI 显示 agent 名称前缀。
+pub struct AgentEventFrame {
+    pub event: AgentEvent,
+    pub session_id: String,
+    pub agent_name: String,
+    pub parent_session_id: Option<String>,
+    pub parent_session_name: Option<String>,
+}
+
 /// Agent → Orchestrator 消息（通过全局事件总线）
 pub enum AgentMessage {
     TextDelta(String),
@@ -511,6 +521,10 @@ pub(crate) fn dump_prompt_to_file(
         let _ = std::fs::write(&path, json);
     }
 }
+
+// ----------------------  test ------------------------//
+// ----------------------  test ------------------------//
+// ----------------------  test ------------------------//
 
 #[cfg(test)]
 mod tests {

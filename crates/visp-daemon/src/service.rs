@@ -102,8 +102,9 @@ pub struct CoderDaemonService {
     /// 向 Orchestrator 发送取消信号
     #[allow(dead_code)]
     cancel_tx: mpsc::Sender<visp_agent::orchestrator::CancelSignal>,
-    /// 从 Orchestrator 接收 AgentEvent（转发给 CLI），用 Mutex<Option> 允许 take
-    orchestrator_grpc_rx: std::sync::Mutex<Option<mpsc::Receiver<visp_core::agent::AgentEvent>>>,
+    /// 从 Orchestrator 接收 AgentEventFrame（转发给 CLI），用 Mutex<Option> 允许 take
+    orchestrator_grpc_rx:
+        std::sync::Mutex<Option<mpsc::Receiver<visp_core::agent::AgentEventFrame>>>,
     /// 向 Orchestrator 发送 ClientMessage（CLI 输入）
     client_tx: mpsc::Sender<visp_agent::orchestrator::ClientMessage>,
 }
@@ -121,7 +122,7 @@ impl CoderDaemonService {
         mcp_manager: Arc<McpManager>,
         available_models: Vec<String>,
         cancel_tx: mpsc::Sender<visp_agent::orchestrator::CancelSignal>,
-        orchestrator_grpc_rx: mpsc::Receiver<visp_core::agent::AgentEvent>,
+        orchestrator_grpc_rx: mpsc::Receiver<visp_core::agent::AgentEventFrame>,
         client_tx: mpsc::Sender<visp_agent::orchestrator::ClientMessage>,
     ) -> Self {
         let mut extra = std::collections::HashMap::new();
@@ -536,8 +537,9 @@ impl CoderDaemon for CoderDaemonService {
         // ── Outbound: Orchestrator → CLI ──
         let pending_outbound = pending_queries.clone();
         tokio::spawn(async move {
-            while let Some(event) = orchestrator_rx.recv().await {
-                match event {
+            while let Some(frame) = orchestrator_rx.recv().await {
+                let sid = frame.session_id.clone();
+                match frame.event {
                     AgentEvent::UserQuery {
                         query_id,
                         message,
@@ -558,7 +560,7 @@ impl CoderDaemon for CoderDaemonService {
                                     message,
                                     options,
                                     allow_other,
-                                    session_id: String::new(),
+                                    session_id: sid,
                                 },
                             )),
                         };
@@ -567,7 +569,7 @@ impl CoderDaemon for CoderDaemonService {
                         }
                     }
                     _ => {
-                        let proto_msg = agent_event_to_server_message(event, "");
+                        let proto_msg = agent_event_to_server_message(frame.event, &sid);
                         if let Some(payload) = proto_msg.payload
                             && response_tx
                                 .send(Ok(proto::ServerMessage {

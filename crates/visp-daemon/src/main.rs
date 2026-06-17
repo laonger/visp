@@ -283,7 +283,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 8.7. Create orchestration channels
     let (global_tx, global_rx) = mpsc::channel(256);
     let (cancel_tx, cancel_rx) = mpsc::channel::<CancelSignal>(16);
-    let (orchestrator_grpc_tx, orchestrator_grpc_rx) = mpsc::channel(256);
+    let (orchestrator_grpc_tx, orchestrator_grpc_rx) =
+        mpsc::channel::<visp_core::agent::AgentEventFrame>(256);
     let (client_tx, client_rx) = mpsc::channel(64);
 
     // 8.8. Create and start Orchestrator

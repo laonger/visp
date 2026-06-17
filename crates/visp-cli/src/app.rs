@@ -633,6 +633,8 @@ pub struct AppState {
     pub pending_model_select: bool,
     /// 模型选择器弹出面板（/model 无参触发）
     pub model_select: Option<ModelSelectState>,
+    /// 已显示过前缀的子 agent session_id 集合
+    pub sub_prefix_shown: std::collections::HashSet<String>,
 }
 
 impl AppState {
@@ -677,6 +679,7 @@ impl AppState {
             model_keys: Vec::new(),
             pending_model_select: false,
             model_select: None,
+            sub_prefix_shown: std::collections::HashSet::new(),
         }
     }
 
@@ -737,6 +740,25 @@ impl AppState {
 
     pub fn append_streaming(&mut self, delta: &str) {
         self.streaming_text.push_str(delta);
+    }
+
+    /// 如果 session_id 是子 agent 格式，首次出现时添加 [sub: agent_name] 前缀消息。
+    /// 返回 true 表示已添加前缀（后续显示的消息属于子 agent）。
+    pub fn maybe_add_sub_agent_prefix(&mut self, session_id: &str) -> bool {
+        if session_id.is_empty() || self.sub_prefix_shown.contains(session_id) {
+            return false;
+        }
+        // 子 agent session_id 格式: {parent_session_id}/{agent_name}/{uuid}
+        let parts: Vec<&str> = session_id.split('/').collect();
+        if parts.len() >= 3 {
+            let agent_name = parts[parts.len() - 2];
+            if !agent_name.is_empty() {
+                self.sub_prefix_shown.insert(session_id.to_string());
+                self.add_message(LineType::Status, format!("[sub: {}]", agent_name));
+                return true;
+            }
+        }
+        false
     }
 
     pub fn flush_streaming(&mut self) {

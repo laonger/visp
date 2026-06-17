@@ -15,7 +15,8 @@ use tracing;
 
 use visp_core::agent::run_agent_loop;
 use visp_core::agent::{
-    AgentConfig, AgentEvent, AgentMessage, Envelope, OrchestratorMessage, UserQueryResult,
+    AgentConfig, AgentEvent, AgentEventFrame, AgentMessage, Envelope, OrchestratorMessage,
+    UserQueryResult,
 };
 use visp_core::agent_definition::{AgentDefinition, merge_permissions};
 use visp_core::agent_registry::AgentRegistry;
@@ -70,7 +71,7 @@ pub struct Orchestrator {
     global_rx: mpsc::Receiver<Envelope>,
     global_tx: mpsc::Sender<Envelope>,
     grpc_rx: mpsc::Receiver<ClientMessage>,
-    grpc_tx: mpsc::Sender<AgentEvent>,
+    grpc_tx: mpsc::Sender<AgentEventFrame>,
 
     // ── 状态 ─────────────────────────────────────────────────
     active_agents: ActiveAgentRegistry,
@@ -94,7 +95,7 @@ impl Orchestrator {
         global_rx: mpsc::Receiver<Envelope>,
         global_tx: mpsc::Sender<Envelope>,
         grpc_rx: mpsc::Receiver<ClientMessage>,
-        grpc_tx: mpsc::Sender<AgentEvent>,
+        grpc_tx: mpsc::Sender<AgentEventFrame>,
         session_mgr: Arc<SessionManager>,
         agent_registry: Arc<AgentRegistry>,
         tool_registry: Arc<ToolRegistry>,
@@ -187,14 +188,33 @@ impl Orchestrator {
             } => {
                 self.pending_queries
                     .insert(query_id.clone(), (session_id.clone(), respond));
+                // Look up agent context for the frame
+                let agent_name = self
+                    .active_agents
+                    .get(&session_id)
+                    .map(|a| a.agent_name.clone())
+                    .unwrap_or_default();
+                let parent_session_id = self
+                    .active_agents
+                    .get(&session_id)
+                    .and_then(|a| a.parent_session_id.clone());
+                let parent_session_name = parent_session_id
+                    .as_ref()
+                    .and_then(|pid| self.active_agents.get(pid).map(|a| a.agent_name.clone()));
                 let _ = self
                     .grpc_tx
-                    .send(AgentEvent::UserQuery {
-                        query_id,
-                        message,
-                        options,
-                        allow_other,
-                        respond: oneshot::channel().0, // placeholder, real one stored in pending_queries
+                    .send(AgentEventFrame {
+                        event: AgentEvent::UserQuery {
+                            query_id,
+                            message,
+                            options,
+                            allow_other,
+                            respond: oneshot::channel().0,
+                        },
+                        session_id: session_id.clone(),
+                        agent_name,
+                        parent_session_id,
+                        parent_session_name,
                     })
                     .await;
             }
@@ -269,17 +289,16 @@ impl Orchestrator {
         };
 
         // Append agent-specific system prompt (from .visp/agents/*.md)
-        if !agent_def.system_prompt.is_empty() {
-            if let Err(e) = self
+        if !agent_def.system_prompt.is_empty()
+            && let Err(e) = self
                 .session_mgr
                 .append_system_prompt_template(session_id, &agent_def.system_prompt)
-            {
-                tracing::warn!(
-                    session_id,
-                    error = %e,
-                    "failed to append agent system prompt"
-                );
-            }
+        {
+            tracing::warn!(
+                session_id,
+                error = %e,
+                "failed to append agent system prompt"
+            );
         }
 
         // Create inbox
@@ -324,7 +343,29 @@ impl Orchestrator {
         };
 
         let msg = Message::user(user_message);
-        let tx = self.grpc_tx.clone();
+
+        // Create forwarding task: agent_tx → grpc_tx with session context
+        let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
+        let grpc_tx = self.grpc_tx.clone();
+        let sid = session_id.to_string();
+        let agent_name = agent_name.clone();
+        tokio::spawn(async move {
+            while let Some(event) = agent_rx.recv().await {
+                if grpc_tx
+                    .send(AgentEventFrame {
+                        event,
+                        session_id: sid.clone(),
+                        agent_name: agent_name.clone(),
+                        parent_session_id: None,
+                        parent_session_name: None,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
 
         let provider = provider.clone();
         let tool_registry = self.tool_registry.clone();
@@ -341,7 +382,7 @@ impl Orchestrator {
                 ctx,
                 &config,
                 msg,
-                tx,
+                agent_tx,
             )
             .await;
         });
@@ -439,17 +480,16 @@ impl Orchestrator {
         let sub_session_id = sub_session.id.clone();
 
         // Append agent-specific system prompt (from .visp/agents/*.md)
-        if !agent_def.system_prompt.is_empty() {
-            if let Err(e) = self
+        if !agent_def.system_prompt.is_empty()
+            && let Err(e) = self
                 .session_mgr
                 .append_system_prompt_template(&sub_session_id, &agent_def.system_prompt)
-            {
-                tracing::warn!(
-                    sub_session_id,
-                    error = %e,
-                    "failed to append agent system prompt"
-                );
-            }
+        {
+            tracing::warn!(
+                sub_session_id,
+                error = %e,
+                "failed to append agent system prompt"
+            );
         }
 
         // 7. Create inbox + register active agent
@@ -501,12 +541,39 @@ impl Orchestrator {
         // 10. Send initial user message with the task description
         let msg = Message::user(description);
 
+        // Create forwarding task: agent_tx → grpc_tx with session context
+        let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
+        let grpc_tx = self.grpc_tx.clone();
+        let sid = sub_session_id.clone();
+        let agent_name = subagent_type.to_string();
+        let parent_sid = Some(parent_session_id.to_string());
+        let parent_name = self
+            .active_agents
+            .get(parent_session_id)
+            .map(|a| a.agent_name.clone());
+        tokio::spawn(async move {
+            while let Some(event) = agent_rx.recv().await {
+                if grpc_tx
+                    .send(AgentEventFrame {
+                        event,
+                        session_id: sid.clone(),
+                        agent_name: agent_name.clone(),
+                        parent_session_id: parent_sid.clone(),
+                        parent_session_name: parent_name.clone(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
         let provider = provider.clone();
         let tool_registry = self.tool_registry.clone();
         let rule_engine = self.rule_engine.clone();
         let session_mgr = self.session_mgr.clone();
         let config = self.agent_config.clone();
-        let tx = self.grpc_tx.clone();
 
         tokio::spawn(async move {
             run_agent_loop(
@@ -517,7 +584,7 @@ impl Orchestrator {
                 ctx,
                 &config,
                 msg,
-                tx,
+                agent_tx,
             )
             .await;
         });
@@ -532,11 +599,12 @@ impl Orchestrator {
 
     /// 处理 Agent 完成
     async fn handle_done(&mut self, session_id: &str) {
-        let agent = match self.active_agents.get(session_id) {
+        let agent_info = match self.active_agents.get(session_id) {
             Some(a) => {
                 let pending_call_id = a.pending_call_id.clone();
                 let parent_id = a.parent_session_id.clone();
-                (pending_call_id, parent_id)
+                let agent_name = a.agent_name.clone();
+                (pending_call_id, parent_id, agent_name)
             }
             None => {
                 tracing::warn!(session_id, "handle_done: agent not in registry, ignoring");
@@ -544,7 +612,7 @@ impl Orchestrator {
             }
         };
 
-        let (pending_call_id, parent_id) = agent;
+        let (pending_call_id, parent_id, agent_name) = agent_info;
 
         // Remove from registry
         self.active_agents.remove(session_id);
@@ -586,7 +654,16 @@ impl Orchestrator {
             }
         } else {
             // Root agent done — notify CLI
-            let _ = self.grpc_tx.send(AgentEvent::Done).await;
+            let _ = self
+                .grpc_tx
+                .send(AgentEventFrame {
+                    event: AgentEvent::Done,
+                    session_id: session_id.to_string(),
+                    agent_name,
+                    parent_session_id: None,
+                    parent_session_name: None,
+                })
+                .await;
         }
     }
 
@@ -667,11 +744,11 @@ mod tests {
         Orchestrator,
         mpsc::Sender<Envelope>,
         mpsc::Sender<ClientMessage>,
-        mpsc::Receiver<AgentEvent>,
+        mpsc::Receiver<AgentEventFrame>,
     ) {
         let (_cancel_tx, cancel_rx) = mpsc::channel(16);
         let (global_tx, global_rx) = mpsc::channel(256);
-        let (grpc_tx, grpc_rx) = mpsc::channel(256);
+        let (grpc_tx, grpc_rx) = mpsc::channel::<AgentEventFrame>(256);
         let (client_tx, client_rx) = mpsc::channel(64);
 
         let global_tx_for_orch = global_tx.clone();
