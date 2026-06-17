@@ -579,6 +579,11 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 return false;
             }
 
+            // Sub-agent tab: 禁止键盘输入（仅 default tab 可输入；保证全局快捷键已在前方处理完毕）
+            if app.tab_bar.active != 0 {
+                return false;
+            }
+
             // F2 已在键盘线程处理，此处不再需要
             if app.generating() {
                 return false;
@@ -728,7 +733,9 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
             _ => {}
         },
         // 处理终端粘贴事件（bracketed paste）
-        Event::Paste(text) if app.confirm.as_ref().is_none_or(|c| c.other_active) => {
+        Event::Paste(text)
+            if app.tab_bar.active == 0 && app.confirm.as_ref().is_none_or(|c| c.other_active) =>
+        {
             debug_log!("paste event received: len={}", text.len());
             paste_text(&mut app.textarea, &text);
         }
