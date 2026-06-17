@@ -160,7 +160,7 @@ pub async fn run(
             }
             _ = spinner_tick.tick() => {
                 // 仅 generating 期间推进 spinner 帧并请求重绘
-                if app.generating {
+                if app.generating() {
                     app.spinner_frame = app.spinner_frame.wrapping_add(1);
                     app.needs_render = true;
                 }
@@ -280,7 +280,7 @@ pub async fn run(
 
         if app.needs_render {
             // 确认状态始终需要渲染，不受流节流影响
-            if app.generating && app.confirm.is_none() && !app.try_begin_stream_render() {
+            if app.generating() && app.confirm.is_none() && !app.try_begin_stream_render() {
                 app.needs_render = false;
             }
             if app.needs_render {
@@ -315,8 +315,8 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                     {
                         let target_id = ss.session_ids[idx].clone();
                         app.session_select = None;
-                        app.streaming_text.clear();
-                        app.generating = false;
+                        app.clear_streaming();
+                        app.set_generating(false);
                         app.stale_done_expected = false;
                         app.current_request_id = None;
                         app.confirm = None;
@@ -416,23 +416,23 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
 
             // Ctrl+C: 在任何模式下取消当前 LLM 推理（优先于所有其他按键处理）
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                if app.generating {
+                if app.generating() {
                     // 如果确认框存在，先将其关闭（向 agent 回复一个拒绝响应）
                     if let Some(q) = app.confirm.take() {
                         chat_handle.send_response(&q.query_id, 1, "");
                         // 保留 assistant 已输出的消息，移除末尾的 [USER_QUERY] 标记
-                        if let Some(close_pos) = app.streaming_text.rfind("[/USER_QUERY]")
+                        if let Some(close_pos) = app.streaming_text().rfind("[/USER_QUERY]")
                             && let Some(open_pos) =
-                                app.streaming_text[..close_pos].rfind("[USER_QUERY")
+                                app.streaming_text()[..close_pos].rfind("[USER_QUERY")
                         {
-                            app.streaming_text.truncate(open_pos);
+                            app.truncate_streaming(open_pos);
                         }
                     }
                     app.stale_done_expected = true;
                     app.flush_streaming();
-                    app.pending_usage = None;
+                    app.clear_pending_usage();
                     app.current_request_id = None;
-                    app.generating = false;
+                    app.set_generating(false);
                     chat_handle.send_cancel();
                 }
                 return false;
@@ -508,12 +508,12 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                             } else {
                                 let q = app.confirm.take().unwrap();
                                 chat_handle.send_response(&q.query_id, 1, "");
-                                if app.generating {
+                                if app.generating() {
                                     app.stale_done_expected = true;
-                                    app.streaming_text.clear();
-                                    app.pending_usage = None;
+                                    app.clear_streaming();
+                                    app.clear_pending_usage();
                                     app.current_request_id = None;
-                                    app.generating = false;
+                                    app.set_generating(false);
                                     chat_handle.send_cancel();
                                 }
                             }
@@ -533,18 +533,18 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
             }
             // Ctrl+C: 取消正在生成的请求
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                if app.generating {
+                if app.generating() {
                     app.stale_done_expected = true;
-                    app.streaming_text.clear();
-                    app.pending_usage = None;
+                    app.clear_streaming();
+                    app.clear_pending_usage();
                     app.current_request_id = None;
-                    app.generating = false;
+                    app.set_generating(false);
                     chat_handle.send_cancel();
                 }
                 return false;
             }
             // F2 已在键盘线程处理，此处不再需要
-            if app.generating {
+            if app.generating() {
                 return false;
             }
             if key.code == KeyCode::Enter {
@@ -563,7 +563,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                     app.add_message(LineType::User, text.clone());
                     app.input_history.push(text.clone());
                     app.history_index = None;
-                    app.generating = true;
+                    app.set_generating(true);
                     app.scroll_following = true;
                     let rid = chat_handle.send_input(&text);
                     app.current_request_id = Some(rid);
@@ -726,7 +726,7 @@ fn handle_grpc_message(
             let tool_name = if !tr.tool_name.is_empty() {
                 tr.tool_name.clone()
             } else {
-                app.messages
+                app.messages()
                     .iter()
                     .find(|m| {
                         matches!(&m.line_type, LineType::ToolCall { .. })
@@ -756,13 +756,13 @@ fn handle_grpc_message(
             app.update_thinking(text)
         }
         Some(server_message::Payload::UsageInfo(ui)) => {
-            app.pending_usage = Some((
+            app.set_pending_usage(Some((
                 ui.input_tokens,
                 ui.output_tokens,
                 ui.tool_calls,
                 ui.cache_creation_input_tokens,
                 ui.cache_read_input_tokens,
-            ));
+            )));
             app.total_input_tokens += ui.input_tokens;
             app.total_output_tokens += ui.output_tokens;
             app.total_cache_creation_input_tokens += ui.cache_creation_input_tokens;
@@ -799,7 +799,7 @@ fn handle_grpc_message(
                 return;
             }
             app.add_message(LineType::Error, format!("{}: {}", err.code, err.message));
-            app.generating = false;
+            app.set_generating(false);
             app.current_request_id = None;
         }
         Some(server_message::Payload::Done(_)) => {
@@ -807,7 +807,7 @@ fn handle_grpc_message(
                 app.stale_done_expected = false;
                 return;
             }
-            if let Some((it, ot, tc, ccit, crit)) = app.pending_usage.take() {
+            if let Some((it, ot, tc, ccit, crit)) = app.take_pending_usage() {
                 let time = chrono::Local::now().format("%H:%M:%S");
                 let usage = if ccit > 0 || crit > 0 {
                     format!(
@@ -820,10 +820,10 @@ fn handle_grpc_message(
                         time, it, ot, tc
                     )
                 };
-                app.streaming_text.push_str(&usage);
+                app.append_streaming_text(&usage);
             }
             app.flush_streaming();
-            app.generating = false;
+            app.set_generating(false);
             if let Some(rid) = app.current_request_id.take() {
                 chat_handle.send_ack(&rid);
             }
@@ -859,8 +859,8 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
         }
         "/new" => {
             // 标记需要创建新 session，主循环中处理（需要 async 调用 client.create_session）
-            app.streaming_text.clear();
-            app.generating = false;
+            app.clear_streaming();
+            app.set_generating(false);
             app.stale_done_expected = false;
             app.current_request_id = None;
             app.confirm = None;
@@ -869,7 +869,7 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
         }
         "/init" => {
             app.add_message(LineType::User, text.to_string());
-            app.generating = true;
+            app.set_generating(true);
             app.scroll_following = true;
             chat_handle.send_input(text);
         }
@@ -887,8 +887,8 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
                     LineType::Status,
                     format!("Switching to session {target}..."),
                 );
-                app.streaming_text.clear();
-                app.generating = false;
+                app.clear_streaming();
+                app.set_generating(false);
                 app.stale_done_expected = false;
                 app.current_request_id = None;
                 app.confirm = None;

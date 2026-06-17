@@ -228,7 +228,11 @@ fn ensure_all_caches(app: &mut AppState, width: u16) {
     for (i, cache) in app.message_caches.iter().enumerate() {
         cache_map.insert(cache.msg_id, i);
     }
-    for msg in &app.messages {
+    // Clone to avoid borrow conflict: app.messages() borrows all of &self,
+    // while &app.messages was field-level.  Once old fields are removed
+    // (Commit 2) this clone can be removed by inlining the internal data.
+    let msgs = app.messages().to_vec();
+    for msg in &msgs {
         if let Some(&idx) = cache_map.get(&msg.id) {
             if !app.message_caches[idx].matches(msg, width) {
                 app.message_caches[idx] = MessageCache::from_message(msg, width);
@@ -239,7 +243,7 @@ fn ensure_all_caches(app: &mut AppState, width: u16) {
         }
     }
     app.message_caches
-        .retain(|c| app.messages.iter().any(|m| m.id == c.msg_id));
+        .retain(|c| msgs.iter().any(|m| m.id == c.msg_id));
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -269,10 +273,10 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
         })
         .sum::<u16>();
 
-    let stream_lines = if app.streaming_text.is_empty() {
+    let stream_lines = if app.streaming_is_empty() {
         0
     } else {
-        theme::ASSISTANT_STYLE.total_height(app.streaming_text.lines().count() as u16)
+        theme::ASSISTANT_STYLE.total_height(app.streaming_lines_count() as u16)
     };
 
     let total_lines = total + stream_lines;
@@ -293,7 +297,7 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
 
     let mut y: u16 = CHAT_PAD;
 
-    for msg in &app.messages {
+    for msg in app.messages() {
         let style = theme::style_for(msg.line_type.clone());
         if let Some(cache) = app.message_caches.iter().find(|c| c.msg_id == msg.id) {
             let h = style.total_height(cache.line_count);
@@ -321,8 +325,12 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     }
 
     // 流式文本
-    if !app.streaming_text.is_empty() {
-        let lines: Vec<String> = app.streaming_text.lines().map(|s| s.to_string()).collect();
+    if !app.streaming_is_empty() {
+        let lines: Vec<String> = app
+            .streaming_text()
+            .lines()
+            .map(|s| s.to_string())
+            .collect();
         let line_count = lines.len() as u16;
         let h = theme::ASSISTANT_STYLE.total_height(line_count);
         if let Some((rel_y, visible_h)) = viewport_intersect(y, h, scroll_y, visible, area.bottom())
@@ -524,7 +532,7 @@ fn render_input_area(app: &mut AppState, f: &mut Frame, area: Rect) {
         app.textarea.set_style(Style::default().fg(theme::INPUT_FG));
         app.textarea
             .set_placeholder_text("Type your custom input...");
-    } else if app.generating {
+    } else if app.generating() {
         app.textarea
             .set_style(Style::default().fg(theme::INPUT_NOTICE_FG));
         app.textarea
@@ -614,7 +622,7 @@ fn render_status_bar(app: &AppState, f: &mut Frame, area: Rect) {
     let left_text = format_status_left(
         &app.session_id,
         &app.model_key,
-        app.generating,
+        app.generating(),
         app.mouse_captured,
     );
 

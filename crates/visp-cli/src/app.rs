@@ -1033,6 +1033,63 @@ impl AppState {
         }
     }
 
+    // ════════════════════════════════════════════════════════════
+    // Zero-ref shim API — 这些 shim 方法代理到旧字段（临时保留）
+    // 后续 Commit 2 将删除旧字段，访问全部通过方法。
+    // ════════════════════════════════════════════════════════════
+
+    // --- 读取（getter）---
+    pub fn messages(&self) -> &[ChatLine] {
+        &self.messages
+    }
+    pub fn streaming_text(&self) -> &str {
+        &self.streaming_text
+    }
+    pub fn streaming_is_empty(&self) -> bool {
+        self.streaming_text.is_empty()
+    }
+    pub fn streaming_lines_count(&self) -> usize {
+        self.streaming_text.lines().count()
+    }
+    pub fn generating(&self) -> bool {
+        self.generating
+    }
+    pub fn has_pending_usage(&self) -> bool {
+        self.pending_usage.is_some()
+    }
+
+    // --- 写入（操作型）---
+    pub fn set_generating(&mut self, v: bool) {
+        self.generating = v;
+    }
+    pub fn clear_streaming(&mut self) {
+        self.streaming_text.clear();
+    }
+    pub fn append_streaming_text(&mut self, s: &str) {
+        self.streaming_text.push_str(s);
+    }
+    pub fn truncate_streaming(&mut self, n: usize) {
+        self.streaming_text.truncate(n);
+    }
+    pub fn streaming_rfind(&self, needle: &str) -> Option<usize> {
+        self.streaming_text.rfind(needle)
+    }
+
+    pub fn set_pending_usage(&mut self, v: Option<(u32, u32, u32, u32, u32)>) {
+        self.pending_usage = v;
+    }
+    pub fn take_pending_usage(&mut self) -> Option<(u32, u32, u32, u32, u32)> {
+        self.pending_usage.take()
+    }
+    pub fn clear_pending_usage(&mut self) {
+        self.pending_usage = None;
+    }
+
+    // --- 用于 ui.rs 的迭代访问（消息存在性查询）---
+    pub fn has_message_with_id(&self, id: u64) -> bool {
+        self.messages.iter().any(|m| m.id == id)
+    }
+
     pub fn clear_messages(&mut self) {
         self.messages.clear();
         self.message_caches.clear();
@@ -1182,9 +1239,9 @@ mod tests {
         let app = AppState::new("test-session".into(), "deepseek-v4-flash".into(), "".into());
         assert_eq!(app.session_id, "test-session");
         assert_eq!(app.model, "deepseek-v4-flash");
-        assert!(app.messages.is_empty());
-        assert!(app.streaming_text.is_empty());
-        assert!(!app.generating);
+        assert!(app.messages().is_empty());
+        assert!(app.streaming_is_empty());
+        assert!(!app.generating());
         assert!(app.confirm.is_none());
         assert!(!app.should_quit);
         assert!(app.scroll_following);
@@ -1196,9 +1253,9 @@ mod tests {
     fn test_add_message() {
         let mut app = AppState::new("s".into(), "m".into(), "".into());
         app.add_message(LineType::User, "hello".into());
-        assert_eq!(app.messages.len(), 1);
-        assert_eq!(app.messages[0].content, "hello");
-        assert_eq!(app.messages[0].line_type, LineType::User);
+        assert_eq!(app.messages().len(), 1);
+        assert_eq!(app.messages()[0].content, "hello");
+        assert_eq!(app.messages()[0].line_type, LineType::User);
     }
 
     #[test]
@@ -1206,15 +1263,15 @@ mod tests {
         let mut app = AppState::new("s".into(), "m".into(), "".into());
         app.add_message(LineType::User, "a".into());
         app.add_message(LineType::Assistant, "b".into());
-        assert_eq!(app.messages[0].id, 0);
-        assert_eq!(app.messages[1].id, 1);
+        assert_eq!(app.messages()[0].id, 0);
+        assert_eq!(app.messages()[1].id, 1);
     }
 
     #[test]
     fn test_add_message_version_initial() {
         let mut app = AppState::new("s".into(), "m".into(), "".into());
         app.add_message(LineType::User, "hello".into());
-        assert_eq!(app.messages[0].version, 0);
+        assert_eq!(app.messages()[0].version, 0);
     }
 
     #[test]
@@ -1222,32 +1279,32 @@ mod tests {
         let mut app = AppState::new("s".into(), "m".into(), "".into());
         app.append_streaming("Hello ");
         app.append_streaming("world");
-        assert_eq!(app.streaming_text, "Hello world");
+        assert_eq!(app.streaming_text(), "Hello world");
         app.flush_streaming();
-        assert!(app.streaming_text.is_empty());
-        assert_eq!(app.messages.len(), 1);
-        assert_eq!(app.messages[0].line_type, LineType::Assistant);
-        assert_eq!(app.messages[0].content, "Hello world");
+        assert!(app.streaming_is_empty());
+        assert_eq!(app.messages().len(), 1);
+        assert_eq!(app.messages()[0].line_type, LineType::Assistant);
+        assert_eq!(app.messages()[0].content, "Hello world");
     }
 
     #[test]
     fn test_update_message_increments_version() {
         let mut app = AppState::new("s".into(), "m".into(), "".into());
         app.add_message(LineType::Assistant, "original".into());
-        let id = app.messages[0].id;
+        let id = app.messages()[0].id;
         app.update_message(id, "updated".into());
-        assert_eq!(app.messages[0].version, 1);
-        assert_eq!(app.messages[0].content, "updated");
+        assert_eq!(app.messages()[0].version, 1);
+        assert_eq!(app.messages()[0].content, "updated");
     }
 
     #[test]
     fn test_update_message_id_not_found_does_nothing() {
         let mut app = AppState::new("s".into(), "m".into(), "".into());
         app.add_message(LineType::Assistant, "original".into());
-        let original_version = app.messages[0].version;
+        let original_version = app.messages()[0].version;
         app.update_message(999, "nope".into());
-        assert_eq!(app.messages[0].version, original_version);
-        assert_eq!(app.messages[0].content, "original");
+        assert_eq!(app.messages()[0].version, original_version);
+        assert_eq!(app.messages()[0].content, "original");
     }
 
     #[test]
@@ -1255,9 +1312,9 @@ mod tests {
         let mut app = AppState::new("s".into(), "m".into(), "".into());
         app.add_message(LineType::User, "hello".into());
         app.add_message(LineType::Assistant, "world".into());
-        assert_eq!(app.messages.len(), 2);
+        assert_eq!(app.messages().len(), 2);
         app.clear_messages();
-        assert!(app.messages.is_empty());
+        assert!(app.messages().is_empty());
     }
 
     #[test]
@@ -1341,10 +1398,10 @@ mod tests {
         app.add_message(LineType::User, "hello".into());
         // 手动添加一个 cache 模拟渲染后的状态
         app.message_caches
-            .push(MessageCache::from_message(&app.messages[0], 80));
+            .push(MessageCache::from_message(&app.messages()[0], 80));
         assert_eq!(app.message_caches.len(), 1);
         app.clear_messages();
-        assert!(app.messages.is_empty());
+        assert!(app.messages().is_empty());
         assert!(app.message_caches.is_empty());
     }
 
@@ -1358,7 +1415,7 @@ mod tests {
             "cmd".into(),
             "tc_1",
         );
-        assert_eq!(app.messages[0].call_id.as_deref(), Some("tc_1"));
+        assert_eq!(app.messages()[0].call_id.as_deref(), Some("tc_1"));
     }
 
     #[test]
@@ -1380,10 +1437,10 @@ mod tests {
         );
         app.insert_tool_result("id1", "result1".into());
         // result 追加到匹配的 cmd1 后面
-        assert_eq!(app.messages[0].content, "cmd1\nresult1");
-        assert_eq!(app.messages[1].content, "cmd2");
+        assert_eq!(app.messages()[0].content, "cmd1\nresult1");
+        assert_eq!(app.messages()[1].content, "cmd2");
         assert!(matches!(
-            app.messages[1].line_type,
+            app.messages()[1].line_type,
             LineType::ToolCall { .. }
         ));
     }
@@ -1400,8 +1457,8 @@ mod tests {
         );
         app.insert_tool_result("nonexistent", "result".into());
         // 没有匹配的 call_id，作为新的 ToolCall 追加到末尾
-        assert_eq!(app.messages.len(), 2);
-        assert_eq!(app.messages[1].content, "result");
+        assert_eq!(app.messages().len(), 2);
+        assert_eq!(app.messages()[1].content, "result");
     }
 
     #[test]
@@ -1424,8 +1481,8 @@ mod tests {
         app.insert_tool_result("b", "result2".into());
         app.insert_tool_result("a", "result1".into());
         // result 追加到各自的 call 后面
-        assert_eq!(app.messages[0].content, "cmd1\nresult1");
-        assert_eq!(app.messages[1].content, "cmd2\nresult2");
+        assert_eq!(app.messages()[0].content, "cmd1\nresult1");
+        assert_eq!(app.messages()[1].content, "cmd2\nresult2");
     }
 
     #[test]
