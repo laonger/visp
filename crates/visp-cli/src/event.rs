@@ -557,13 +557,15 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 return false;
             }
 
-            // Alt+] / Alt+[: 循环切换 tab（精确匹配 ALT，排除 Alt+Shift）
-            if key.code == KeyCode::Char(']') && key.modifiers == KeyModifiers::ALT {
+            // Alt+. / Alt+,: 循环切换 tab（精确匹配 ALT，排除 Alt+Shift）
+            // 不使用 Alt+[/] 因为 ESC+[ 是 ANSI CSI 前缀，crossterm 需要等待
+            // 后续字节判断是否为转义序列，会造成数十毫秒的卡顿
+            if key.code == KeyCode::Char('.') && key.modifiers == KeyModifiers::ALT {
                 app.tab_bar.activate_next();
                 app.scroll_following = true;
                 return false;
             }
-            if key.code == KeyCode::Char('[') && key.modifiers == KeyModifiers::ALT {
+            if key.code == KeyCode::Char(',') && key.modifiers == KeyModifiers::ALT {
                 app.tab_bar.activate_prev();
                 app.scroll_following = true;
                 return false;
