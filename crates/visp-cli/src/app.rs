@@ -27,6 +27,22 @@ fn detect_diff(content: &str) -> Option<()> {
     None
 }
 
+/// 滚动状态（替代 tui-scrollview）
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScrollState {
+    pub x: u16,
+    pub y: u16,
+}
+
+impl ScrollState {
+    pub fn scroll_up(&mut self) {
+        self.y = self.y.saturating_sub(1);
+    }
+    pub fn scroll_down(&mut self) {
+        self.y = self.y.saturating_add(1);
+    }
+}
+
 /// 用 syntect 高亮代码块，返回 ratatui 行
 fn highlight_code_block(lang: &str, code: &str) -> Vec<Line<'static>> {
     use syntect::easy::HighlightLines;
@@ -584,7 +600,7 @@ pub struct AppState {
     pub message_caches: Vec<MessageCache>,
     pub streaming_text: String,
     pub scroll_following: bool,
-    pub scroll_state: tui_scrollview::ScrollViewState,
+    pub scroll_state: ScrollState,
     pub cache_width: u16,
 
     // 输入
@@ -646,7 +662,7 @@ impl AppState {
             message_caches: Vec::new(),
             streaming_text: String::new(),
             scroll_following: true,
-            scroll_state: tui_scrollview::ScrollViewState::default(),
+            scroll_state: ScrollState::default(),
             cache_width: 0,
             textarea,
             input_history: Vec::new(),
@@ -970,10 +986,8 @@ mod tests {
         assert!(app.confirm.is_none());
         assert!(!app.should_quit);
         assert!(app.scroll_following);
-        assert_eq!(
-            app.scroll_state.offset(),
-            ratatui::layout::Position::new(0, 0)
-        );
+        assert_eq!(app.scroll_state.x, 0);
+        assert_eq!(app.scroll_state.y, 0);
     }
 
     #[test]

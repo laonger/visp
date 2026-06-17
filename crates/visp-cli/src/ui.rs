@@ -280,10 +280,9 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     let max_scroll = total_lines.saturating_sub(visible);
 
     if app.scroll_following {
-        app.scroll_state
-            .set_offset(ratatui::layout::Position::new(0, max_scroll));
+        app.scroll_state.y = max_scroll;
     }
-    let scroll_y = app.scroll_state.offset().y.min(max_scroll);
+    let scroll_y = app.scroll_state.y.min(max_scroll);
 
     // ── 统一渲染循环 ──────────────────────────────────────
     let sep_style = Style::default().bg(theme::BG);

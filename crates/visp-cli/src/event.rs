@@ -629,15 +629,11 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                     }
                 }
                 KeyCode::PageUp => {
-                    let y = app.scroll_state.offset().y;
-                    app.scroll_state
-                        .set_offset(ratatui::layout::Position::new(0, y.saturating_sub(10)));
+                    app.scroll_state.y = app.scroll_state.y.saturating_sub(10);
                     app.scroll_following = false;
                 }
                 KeyCode::PageDown => {
-                    let y = app.scroll_state.offset().y;
-                    app.scroll_state
-                        .set_offset(ratatui::layout::Position::new(0, y.saturating_add(10)));
+                    app.scroll_state.y = app.scroll_state.y.saturating_add(10);
                 }
                 _ => {
                     let input = build_input_from_key(key);
