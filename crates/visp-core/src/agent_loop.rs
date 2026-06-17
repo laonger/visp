@@ -247,6 +247,122 @@ async fn call_llm_with_retry(
     }
 }
 
+/// Stream output produced by collect_stream_events
+struct StreamOutput {
+    text_buffer: String,
+    thinking_blocks: Vec<serde_json::Value>,
+    tool_calls: Vec<ToolCallRequest>,
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_creation_input_tokens: u32,
+    cache_read_input_tokens: u32,
+}
+
+/// e. Collect stream events (TextDelta, ThinkingBlock, ToolCall, UsageInfo)
+/// Returns None on error (stream dropped, cancelled, or LLM error).
+async fn collect_stream_events(
+    stream: Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>,
+    ctx: &mut AgentLoopContext,
+    sid: &str,
+    tx: &mpsc::Sender<AgentEvent>,
+    sm: &SessionManager,
+) -> Option<StreamOutput> {
+    let mut text_buffer = String::new();
+    let mut tool_calls: Vec<ToolCallRequest> = Vec::new();
+    let mut thinking_blocks: Vec<serde_json::Value> = Vec::new();
+    let mut input_tokens: u32 = 0;
+    let mut output_tokens: u32 = 0;
+    let mut cache_creation_input_tokens: u32 = 0;
+    let mut cache_read_input_tokens: u32 = 0;
+
+    let mut pin_stream = Box::pin(stream);
+    loop {
+        tokio::select! {
+            biased;
+            _ = ctx.cancel_token.cancelled() => {
+                send_event(
+                    tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                    AgentEvent::Error {
+                        code: AgentErrorCode::Cancelled,
+                        message: "Agent loop cancelled".into(),
+                    },
+                ).await.ok()?;
+                let _ = sm.finish_loop(sid, SessionStatus::Error);
+                return None;
+            }
+            event = pin_stream.next() => {
+                match event {
+                    Some(Ok(ChatEvent::TextDelta(delta))) => {
+                        text_buffer.push_str(&delta);
+                        send_event(
+                            tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                            AgentEvent::TextDelta(delta),
+                        ).await.ok()?;
+                    }
+                    Some(Ok(ChatEvent::ThinkingBlock(block))) => {
+                        thinking_blocks.clear();
+                        thinking_blocks.push(block.clone());
+                        send_event(
+                            tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                            AgentEvent::ThinkingBlock(block),
+                        ).await.ok()?;
+                    }
+                    Some(Ok(ChatEvent::UsageInfo { input_tokens: it, output_tokens: ot, cache_creation_input_tokens: ccit, cache_read_input_tokens: crit, .. })) => {
+                        input_tokens = it;
+                        output_tokens = ot;
+                        cache_creation_input_tokens = ccit;
+                        cache_read_input_tokens = crit;
+                    }
+                    Some(Ok(ChatEvent::ToolCall { id, name, arguments })) => {
+                        tool_calls.push(ToolCallRequest { id, name, arguments });
+                    }
+                    Some(Ok(ChatEvent::Done)) => break,
+                    Some(Err(e)) => {
+                        let (code, msg) = llm_error_to_code(&e);
+                        send_event(
+                            tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                            AgentEvent::Error { code, message: msg },
+                        ).await.ok()?;
+                        let _ = sm.finish_loop(sid, SessionStatus::Error);
+                        return None;
+                    }
+                    None => {
+                        let partial_len = text_buffer.len();
+                        let tool_count = tool_calls.len();
+                        let thinking_count = thinking_blocks.len();
+                        tracing::warn!(
+                            session_id = %sid,
+                            partial_response_len = partial_len,
+                            tool_calls_received = tool_count,
+                            thinking_blocks = thinking_count,
+                            "LLM stream ended without Done event — connection likely dropped"
+                        );
+                        send_event(
+                            tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                            AgentEvent::Error {
+                                code: AgentErrorCode::Internal,
+                                message: "LLM stream ended unexpectedly — the response may be incomplete, check API connection".into(),
+                            },
+                        ).await.ok()?;
+                        let _ = sm.finish_loop(sid, SessionStatus::Error);
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
+    Some(StreamOutput {
+        text_buffer,
+        tool_calls,
+        thinking_blocks,
+        input_tokens,
+        output_tokens,
+        cache_creation_input_tokens,
+        cache_read_input_tokens,
+    })
+}
+
 // ── Agent loop ───────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -369,80 +485,24 @@ pub async fn run_agent_loop(
                 Err(()) => return,
             };
 
-            // e. Collect events
-            let mut text_buffer = String::new();
-            let mut tool_calls: Vec<ToolCallRequest> = Vec::new();
-            let mut thinking_blocks: Vec<serde_json::Value> = Vec::new();
-            let mut input_tokens: u32 = 0;
-            let mut output_tokens: u32 = 0;
-            let mut cache_creation_input_tokens: u32 = 0;
-            let mut cache_read_input_tokens: u32 = 0;
+            // e. Collect stream events
+            let output = match collect_stream_events(
+                stream, &mut ctx, &sid, &tx, &sm,
+            )
+            .await
+            {
+                Some(o) => o,
+                None => return,
+            };
 
-            let mut pin_stream = Box::pin(stream);
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = ctx.cancel_token.cancelled() => {
-                        try_send!(AgentEvent::Error {
-                            code: AgentErrorCode::Cancelled,
-                            message: "Agent loop cancelled".into(),
-                        });
-                        let _ = sm.finish_loop(&sid, SessionStatus::Error);
-                        return;
-                    }
-                    event = pin_stream.next() => {
-                        match event {
-                            Some(Ok(ChatEvent::TextDelta(delta))) => {
-                                text_buffer.push_str(&delta);
-                                try_send!(AgentEvent::TextDelta(delta));
-                            }
-                            Some(Ok(ChatEvent::ThinkingBlock(block))) => {
-                                // 流式 thinking: 保留最新的完整 block（替换而非累积）
-                                thinking_blocks.clear();
-                                thinking_blocks.push(block.clone());
-                                try_send!(AgentEvent::ThinkingBlock(block));
-                            }
-                            Some(Ok(ChatEvent::UsageInfo { input_tokens: it, output_tokens: ot, cache_creation_input_tokens: ccit, cache_read_input_tokens: crit, .. })) => {
-                                input_tokens = it;
-                                output_tokens = ot;
-                                cache_creation_input_tokens = ccit;
-                                cache_read_input_tokens = crit;
-                            }
-                            Some(Ok(ChatEvent::ToolCall { id, name, arguments })) => {
-                                tool_calls.push(ToolCallRequest { id, name, arguments });
-                            }
-                            // Done 表示 stream 正常结束，byte_stream_to_chat_events
-                            // 始终在 stream 结束前发射 Done，后续 None 不会到达此分支
-                            Some(Ok(ChatEvent::Done)) => break,
-                            Some(Err(e)) => {
-                                let (code, msg) = llm_error_to_code(&e);
-                                try_send!(AgentEvent::Error { code, message: msg });
-                                let _ = sm.finish_loop(&sid, SessionStatus::Error);
-                                return;
-                            }
-                            // None 代表 stream 意外中断（API 超时断连等），未收到 Done 标记
-                            None => {
-                                let partial_len = text_buffer.len();
-                                let tool_count = tool_calls.len();
-                                let thinking_count = thinking_blocks.len();
-                                tracing::warn!(
-                                    session_id = %sid,
-                                    partial_response_len = partial_len,
-                                    tool_calls_received = tool_count,
-                                    thinking_blocks = thinking_count,
-                                    "LLM stream ended without Done event — connection likely dropped"
-                                );
-                                try_send!(AgentEvent::Error {
-                                    code: AgentErrorCode::Internal,
-                                    message: "LLM stream ended unexpectedly — the response may be incomplete, check API connection".into(),
-                                });
-                                let _ = sm.finish_loop(&sid, SessionStatus::Error);
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
+            // Destructure for backward-compatible variable names
+            let text_buffer = output.text_buffer;
+            let tool_calls = output.tool_calls;
+            let thinking_blocks = output.thinking_blocks;
+            let input_tokens = output.input_tokens;
+            let output_tokens = output.output_tokens;
+            let cache_creation_input_tokens = output.cache_creation_input_tokens;
+            let cache_read_input_tokens = output.cache_read_input_tokens;
 
             // f. Decide: no tool calls → check [USER_QUERY] marker or done
             if tool_calls.is_empty() {
