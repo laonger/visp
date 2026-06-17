@@ -705,56 +705,9 @@ fn handle_grpc_message(
     chat_handle: &ChatHandle,
 ) {
     app.needs_render = true;
-    match msg.payload {
-        Some(server_message::Payload::TextDelta(delta)) => {
-            app.append_streaming(&delta.delta);
-        }
-        Some(server_message::Payload::ToolCall(tc)) => {
-            app.flush_streaming();
-            let args_display = tc_display(&tc);
-            app.add_tool_line(
-                LineType::ToolCall {
-                    name: tc.tool_name.clone(),
-                },
-                args_display,
-                &tc.call_id,
-            );
-        }
-        Some(server_message::Payload::ToolResult(tr)) => {
-            app.flush_streaming();
-            // 查找 tool_name：优先从 proto 取，fallback 找匹配的 ToolCall
-            let tool_name = if !tr.tool_name.is_empty() {
-                tr.tool_name.clone()
-            } else {
-                app.messages()
-                    .iter()
-                    .find(|m| {
-                        matches!(&m.line_type, LineType::ToolCall { .. })
-                            && m.call_id.as_deref() == Some(&tr.call_id)
-                    })
-                    .and_then(|m| {
-                        if let LineType::ToolCall { name } = &m.line_type {
-                            Some(name.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_default()
-            };
-            app.add_tool_line(
-                if tr.is_error {
-                    LineType::ToolError { name: tool_name }
-                } else {
-                    LineType::ToolResult { name: tool_name }
-                },
-                tr.content,
-                &tr.call_id,
-            );
-        }
-        Some(server_message::Payload::ThinkingBlock(tb)) => {
-            let text = format!("[Thinking] {}", tb.thinking);
-            app.update_thinking(text)
-        }
+
+    // Phase 1: 控制流副作用（只保留非渲染逻辑）
+    match &msg.payload {
         Some(server_message::Payload::UsageInfo(ui)) => {
             app.set_pending_usage(Some((
                 ui.input_tokens,
@@ -768,37 +721,33 @@ fn handle_grpc_message(
             app.total_cache_creation_input_tokens += ui.cache_creation_input_tokens;
             app.total_cache_read_input_tokens += ui.cache_read_input_tokens;
         }
-        Some(server_message::Payload::StatusUpdate(su)) => {
-            app.add_message(LineType::Status, su.message);
-            // 加载 session 历史中的用户输入到 input_history（↑↓ 翻找历史提问）
-            // 并在聊天面板中显示为用户消息
-            if !su.user_inputs.is_empty() {
-                for input in &su.user_inputs {
-                    if !app.input_history.contains(input) {
-                        app.input_history.push(input.clone());
-                    }
-                    app.add_message(LineType::User, input.clone());
-                }
-            }
-            app.needs_render = true;
-        }
         Some(server_message::Payload::UserQuery(uq)) => {
             app.confirm = Some(ConfirmState {
-                query_id: uq.query_id,
-                message: uq.message,
-                options: uq.options,
+                query_id: uq.query_id.clone(),
+                message: uq.message.clone(),
+                options: uq.options.clone(),
                 allow_other: uq.allow_other,
                 selected_index: 0,
                 other_active: false,
             });
         }
-        Some(server_message::Payload::Error(err)) => {
+        Some(server_message::Payload::StatusUpdate(su)) => {
+            // 加载 session 历史中的用户输入到 input_history（↑↓ 翻找历史提问）
+            if !su.user_inputs.is_empty() {
+                for input in &su.user_inputs {
+                    if !app.input_history.contains(input) {
+                        app.input_history.push(input.clone());
+                    }
+                }
+            }
+            app.needs_render = true;
+        }
+        Some(server_message::Payload::Error(_)) => {
             // Skip stale Error from cancelled request (cancel sends Error, not Done)
             if app.stale_done_expected {
                 app.stale_done_expected = false;
                 return;
             }
-            app.add_message(LineType::Error, format!("{}: {}", err.code, err.message));
             app.set_generating(false);
             app.current_request_id = None;
         }
@@ -807,29 +756,16 @@ fn handle_grpc_message(
                 app.stale_done_expected = false;
                 return;
             }
-            if let Some((it, ot, tc, ccit, crit)) = app.take_pending_usage() {
-                let time = chrono::Local::now().format("%H:%M:%S");
-                let usage = if ccit > 0 || crit > 0 {
-                    format!(
-                        "\n\n[{} | Tokens: {} in / {} out | Cache: {} create / {} read | Tools: {}]",
-                        time, it, ot, ccit, crit, tc
-                    )
-                } else {
-                    format!(
-                        "\n\n[{} | Tokens: {} in / {} out | Tools: {}]",
-                        time, it, ot, tc
-                    )
-                };
-                app.append_streaming_text(&usage);
-            }
-            app.flush_streaming();
             app.set_generating(false);
             if let Some(rid) = app.current_request_id.take() {
                 chat_handle.send_ack(&rid);
             }
         }
-        None => {}
+        _ => {}
     }
+
+    // Phase 2: 路由 frame 到正确 tab 进行渲染
+    app.route_frame(msg);
 }
 
 /// 格式化工具调用参数显示

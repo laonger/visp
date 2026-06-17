@@ -10,7 +10,7 @@ use ratatui_textarea::WrapMode;
 use unicode_width::UnicodeWidthChar;
 
 use crate::theme;
-use visp_proto::visp::ServerMessage;
+use visp_proto::visp::{ServerMessage, server_message};
 
 /// 检测内容是否为 diff 格式（git diff, diff -u 等输出）
 fn detect_diff(content: &str) -> Option<()> {
@@ -844,6 +844,27 @@ pub struct ModelSelectState {
     pub state: ListState,
 }
 
+/// 从 ServerMessage 中提取 (session_id, agent_name)。
+/// 没有 agent_name 字段的 payload 返回空字符串。
+fn extract_session_and_agent(msg: &ServerMessage) -> (String, String) {
+    match &msg.payload {
+        Some(server_message::Payload::TextDelta(d)) => (d.session_id.clone(), d.agent_name.clone()),
+        Some(server_message::Payload::ToolCall(d)) => (d.session_id.clone(), d.agent_name.clone()),
+        Some(server_message::Payload::ToolResult(d)) => {
+            (d.session_id.clone(), d.agent_name.clone())
+        }
+        Some(server_message::Payload::StatusUpdate(d)) => {
+            (d.session_id.clone(), d.agent_name.clone())
+        }
+        Some(server_message::Payload::Error(d)) => (d.session_id.clone(), d.agent_name.clone()),
+        Some(server_message::Payload::Done(d)) => (d.session_id.clone(), String::new()),
+        Some(server_message::Payload::UserQuery(d)) => (d.session_id.clone(), String::new()),
+        Some(server_message::Payload::ThinkingBlock(d)) => (d.session_id.clone(), String::new()),
+        Some(server_message::Payload::UsageInfo(d)) => (d.session_id.clone(), String::new()),
+        None => (String::new(), String::new()),
+    }
+}
+
 pub struct AppState {
     pub tab_bar: TabBar,
     pub main_session_id: String,
@@ -1157,6 +1178,32 @@ impl AppState {
     pub fn clear_messages(&mut self) {
         self.active_tab_mut().messages.clear();
         self.message_caches.clear();
+    }
+
+    /// 根据 session_id 将 ServerMessage 路由到正确的 tab，
+    /// 如果是 active tab 则立即调用 render_pending()。
+    pub fn route_frame(&mut self, frame: ServerMessage) {
+        let (session_id, agent_name) = extract_session_and_agent(&frame);
+
+        let idx = if session_id.is_empty() || session_id == self.main_session_id {
+            0
+        } else if let Some(i) = self.tab_bar.find_index_by_session(&session_id) {
+            i
+        } else {
+            let title = if agent_name.is_empty() {
+                "agent".to_string()
+            } else {
+                agent_name.clone()
+            };
+            self.tab_bar.insert_sub_agent(session_id.clone(), title)
+        };
+
+        let active = self.tab_bar.active;
+        self.tab_bar.tabs[idx].frames.push(frame);
+
+        if idx == active {
+            self.tab_bar.tabs[idx].render_pending();
+        }
     }
 
     /// 重置为新 session 的状态（保留 mouse 设置和 textarea 内容）
@@ -2049,5 +2096,167 @@ mod tests {
             LineType::Assistant
         );
         assert_eq!(app.tab_bar.tabs[1].messages[0].content, "Hello world");
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // Step 6: route_frame tests
+    // ════════════════════════════════════════════════════════════
+
+    fn make_text_delta_frame(sid: &str, agent_name: &str, delta: &str) -> ServerMessage {
+        ServerMessage {
+            payload: Some(visp_proto::visp::server_message::Payload::TextDelta(
+                visp_proto::visp::TextDelta {
+                    delta: delta.into(),
+                    session_id: sid.into(),
+                    agent_name: agent_name.into(),
+                },
+            )),
+        }
+    }
+
+    fn make_tool_call_frame(
+        sid: &str,
+        agent_name: &str,
+        call_id: &str,
+        tool: &str,
+        args: &str,
+    ) -> ServerMessage {
+        ServerMessage {
+            payload: Some(visp_proto::visp::server_message::Payload::ToolCall(
+                visp_proto::visp::ToolCall {
+                    call_id: call_id.into(),
+                    tool_name: tool.into(),
+                    arguments: args.into(),
+                    session_id: sid.into(),
+                    agent_name: agent_name.into(),
+                },
+            )),
+        }
+    }
+
+    fn make_done_frame(sid: &str) -> ServerMessage {
+        ServerMessage {
+            payload: Some(visp_proto::visp::server_message::Payload::Done(
+                visp_proto::visp::Done {
+                    session_id: sid.into(),
+                },
+            )),
+        }
+    }
+
+    fn make_status_update_frame(sid: &str, agent_name: &str, msg: &str) -> ServerMessage {
+        ServerMessage {
+            payload: Some(visp_proto::visp::server_message::Payload::StatusUpdate(
+                visp_proto::visp::StatusUpdate {
+                    message: msg.into(),
+                    session_id: sid.into(),
+                    agent_name: agent_name.into(),
+                    user_inputs: vec![],
+                },
+            )),
+        }
+    }
+
+    #[test]
+    fn test_route_frame_text_delta_main_session() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let frame = make_text_delta_frame("main-sid", "", "hello");
+        app.route_frame(frame);
+        assert_eq!(app.tab_bar.tabs[0].frames.len(), 1);
+        assert_eq!(app.tab_bar.tabs[0].streaming_text, "hello");
+    }
+
+    #[test]
+    fn test_route_frame_text_delta_sub_session_creates_tab() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let frame = make_text_delta_frame("sub-1", "code_reader", "hello");
+        app.route_frame(frame);
+        assert_eq!(app.tab_bar.tabs.len(), 2);
+        assert_eq!(app.tab_bar.tabs[1].session_id, "sub-1");
+        assert_eq!(app.tab_bar.tabs[1].agent_name, "code_reader");
+        assert_eq!(app.tab_bar.tabs[1].frames.len(), 1);
+        assert!(app.tab_bar.tabs[1].messages.is_empty());
+    }
+
+    #[test]
+    fn test_route_frame_tool_call_routes() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        app.tab_bar.insert_sub_agent("sub-1", "agentA");
+        let frame = make_tool_call_frame("sub-1", "agentA", "c1", "bash", "{}");
+        app.route_frame(frame);
+        assert_eq!(app.tab_bar.tabs[0].frames.len(), 0);
+        assert_eq!(app.tab_bar.tabs[1].frames.len(), 1);
+    }
+
+    #[test]
+    fn test_route_frame_done_to_correct_tab() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        app.tab_bar.insert_sub_agent("sub-1", "agentA");
+        let frame = make_done_frame("sub-1");
+        app.route_frame(frame);
+        assert_eq!(app.tab_bar.tabs[0].frames.len(), 0);
+        assert_eq!(app.tab_bar.tabs[1].frames.len(), 1);
+    }
+
+    #[test]
+    fn test_route_frame_unknown_session_uses_agent_name_as_title() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let frame = make_text_delta_frame("new-sid", "X", "hi");
+        app.route_frame(frame);
+        assert_eq!(app.tab_bar.tabs.len(), 2);
+        assert_eq!(app.tab_bar.tabs[1].session_id, "new-sid");
+        assert_eq!(app.tab_bar.tabs[1].agent_name, "X");
+
+        let frame2 = make_text_delta_frame("other-sid", "", "there");
+        app.route_frame(frame2);
+        assert_eq!(app.tab_bar.tabs.len(), 3);
+        assert_eq!(app.tab_bar.tabs[1].session_id, "other-sid");
+        assert_eq!(app.tab_bar.tabs[1].agent_name, "agent");
+    }
+
+    #[test]
+    fn test_route_frame_active_tab_renders_immediately() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        app.tab_bar.insert_sub_agent("sub-1", "agentA");
+        app.tab_bar.active = 1;
+        let frame = make_tool_call_frame("sub-1", "agentA", "c1", "bash", "{}");
+        app.route_frame(frame);
+        assert_eq!(app.tab_bar.tabs[1].messages.len(), 1);
+        assert_eq!(
+            app.tab_bar.tabs[1].messages[0].line_type,
+            LineType::ToolCall {
+                name: "bash".into()
+            }
+        );
+    }
+
+    #[test]
+    fn test_route_frame_inactive_tab_accumulates_only() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        app.tab_bar.insert_sub_agent("sub-1", "agentA");
+        app.tab_bar.active = 1;
+        let frame = make_text_delta_frame("main-sid", "", "hello");
+        app.route_frame(frame);
+        assert_eq!(app.tab_bar.tabs[0].frames.len(), 1);
+        assert!(app.tab_bar.tabs[0].streaming_text.is_empty());
+    }
+
+    #[test]
+    fn test_route_frame_status_update_routes_by_session_id() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        app.tab_bar.insert_sub_agent("sub-1", "agentA");
+        let frame = make_status_update_frame("sub-1", "agentA", "working...");
+        app.route_frame(frame);
+        assert_eq!(app.tab_bar.tabs[0].frames.len(), 0);
+        assert_eq!(app.tab_bar.tabs[1].frames.len(), 1);
+    }
+
+    #[test]
+    fn test_route_frame_empty_session_id_falls_back_to_default() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let frame = make_text_delta_frame("", "", "hello");
+        app.route_frame(frame);
+        assert_eq!(app.tab_bar.tabs[0].frames.len(), 1);
+        assert_eq!(app.tab_bar.tabs[0].streaming_text, "hello");
     }
 }
