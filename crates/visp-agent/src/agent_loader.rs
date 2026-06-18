@@ -299,7 +299,7 @@ You search.
     #[test]
     fn test_load_agents_empty_directory() {
         let dir = std::env::temp_dir().join(format!("agent_test_{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir.join(".visp/agents/")).unwrap();
+        std::fs::create_dir_all(dir.join(".visp/agents/")).unwrap();
 
         let registry = load_agents(&dir);
         assert!(registry.get("default").is_some());

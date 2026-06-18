@@ -820,7 +820,7 @@ mod tests {
             .unwrap();
 
         // Process it
-        if let Some(envelope) = orch.global_rx.try_recv().ok() {
+        if let Ok(envelope) = orch.global_rx.try_recv() {
             orch.handle_agent_message(envelope).await;
         }
 
@@ -888,8 +888,7 @@ mod tests {
 
         // The orchestrator should attempt to spawn the sub-agent.
         // Since no parent session exists it should log an error,
-        // but we can verify it didn't panic.
-        assert!(true);
+        // but we can verify it didn't panic by reaching here.
     }
 
     #[tokio::test]
