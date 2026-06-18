@@ -233,7 +233,9 @@ async fn setup_iteration(
 }
 
 /// d. LLM call with retry for RateLimit/Network errors
-#[allow(clippy::too_many_arguments)]
+///
+/// 纯逻辑：监听 cancel_token、按配置重试，错误透传给调用方。
+/// 不发 AgentEvent::Error、不调 finish_loop——这些 side-effect 由调用方负责。
 async fn call_llm_with_retry(
     provider: &dyn LlmProvider,
     messages: &[Message],
@@ -241,11 +243,14 @@ async fn call_llm_with_retry(
     ctx: &AgentLoopContext,
     cfg: &AgentConfig,
     sid: &str,
-    tx: &mpsc::Sender<AgentEvent>,
-    sm: &SessionManager,
-) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, ()> {
+) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError> {
     let mut attempt = 0u32;
     loop {
+        // 循环顶部检查 cancel：首次进入或 sleep 后立即返回
+        if ctx.cancel_token.is_cancelled() {
+            return Err(LlmError::Cancelled);
+        }
+
         match provider
             .chat_stream(messages, tools, &ctx.config, &ctx.cancel_token)
             .await
@@ -261,20 +266,17 @@ async fn call_llm_with_retry(
                         attempts = attempt + 1,
                         "LLM provider error after retries exhausted"
                     );
-                    send_event(
-                        tx,
-                        sm,
-                        sid,
-                        &ctx.global_tx,
-                        &ctx.session_id,
-                        AgentEvent::Error { code, message: msg },
-                    )
-                    .await?;
-                    let _ = sm.finish_loop(sid, SessionStatus::Error);
-                    return Err(());
+                    return Err(e);
                 }
                 let delay = cfg.llm_retry_base_delay_ms * (1u64 << attempt);
-                tokio::time::sleep(Duration::from_millis(delay)).await;
+                // sleep 期间监听 cancel
+                tokio::select! {
+                    biased;
+                    _ = ctx.cancel_token.cancelled() => {
+                        return Err(LlmError::Cancelled);
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(delay)) => {}
+                }
                 attempt += 1;
             }
             Err(e) => {
@@ -285,17 +287,7 @@ async fn call_llm_with_retry(
                     error_msg = %msg,
                     "LLM provider error"
                 );
-                send_event(
-                    tx,
-                    sm,
-                    sid,
-                    &ctx.global_tx,
-                    &ctx.session_id,
-                    AgentEvent::Error { code, message: msg },
-                )
-                .await?;
-                let _ = sm.finish_loop(sid, SessionStatus::Error);
-                return Err(());
+                return Err(e);
             }
         }
     }
@@ -1309,21 +1301,44 @@ pub async fn run_agent_loop(
             let tools = ic.tools;
 
             // d. Call LLM with retry
-            let stream = match call_llm_with_retry(
-                provider.as_ref(),
-                &messages,
-                &tools,
-                &ctx,
-                &cfg,
-                &sid,
-                &tx,
-                &sm,
-            )
-            .await
-            {
-                Ok(s) => s,
-                Err(()) => return,
-            };
+            let stream =
+                match call_llm_with_retry(provider.as_ref(), &messages, &tools, &ctx, &cfg, &sid)
+                    .await
+                {
+                    Ok(s) => s,
+                    Err(LlmError::Cancelled) => {
+                        // retry 阶段被 cancel：还没拿到 stream，
+                        // 必须在此显式发 Cancelled 事件 + finish_loop（collect_stream_events 不会被调用）
+                        let _ = send_event(
+                            &tx,
+                            &sm,
+                            &sid,
+                            &ctx.global_tx,
+                            &ctx.session_id,
+                            AgentEvent::Error {
+                                code: AgentErrorCode::Cancelled,
+                                message: "agent cancelled".into(),
+                            },
+                        )
+                        .await;
+                        let _ = sm.finish_loop(&sid, SessionStatus::Error);
+                        return;
+                    }
+                    Err(e) => {
+                        let (code, msg) = llm_error_to_code(&e);
+                        let _ = send_event(
+                            &tx,
+                            &sm,
+                            &sid,
+                            &ctx.global_tx,
+                            &ctx.session_id,
+                            AgentEvent::Error { code, message: msg },
+                        )
+                        .await;
+                        let _ = sm.finish_loop(&sid, SessionStatus::Error);
+                        return;
+                    }
+                };
 
             // e. Collect stream events
             let output = match collect_stream_events(stream, &mut ctx, &sid, &tx, &sm).await {
@@ -1462,5 +1477,93 @@ pub async fn run_agent_loop(
         }
 
         std::panic::resume_unwind(panic);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::NoopTrimmer;
+    use crate::provider::LlmConfig;
+    use futures::stream;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// RateLimit mock: first `fail_attempts` calls return RateLimit, then Ok(Done)
+    struct RateLimitProvider {
+        call_count: AtomicUsize,
+        fail_attempts: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for RateLimitProvider {
+        async fn chat_stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _config: &LlmConfig,
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>
+        {
+            let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if count < self.fail_attempts {
+                return Err(LlmError::RateLimit {
+                    retry_after_secs: 10,
+                });
+            }
+            let s: Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>> =
+                Box::pin(stream::iter(vec![Ok(ChatEvent::Done)]));
+            Ok(s)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_call_llm_with_retry_cancels_during_sleep() {
+        let provider = Arc::new(RateLimitProvider {
+            call_count: AtomicUsize::new(0),
+            fail_attempts: 3,
+        });
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let ctx = AgentLoopContext {
+            session_id: "test".into(),
+            history: vec![],
+            working_dir: PathBuf::from("/tmp"),
+            config: LlmConfig::default(),
+            cancel_token: cancel.clone(),
+            context_trimmer: Arc::new(NoopTrimmer),
+            global_tx: None,
+            inbox_rx: None,
+            permission_rules: None,
+        };
+        let cfg = AgentConfig {
+            llm_retry_attempts: 5,
+            llm_retry_base_delay_ms: 1000,
+            ..Default::default()
+        };
+
+        let provider_clone = provider.clone();
+        let handle = tokio::spawn(async move {
+            call_llm_with_retry(provider_clone.as_ref(), &[], &[], &ctx, &cfg, "test").await
+        });
+
+        // 100ms 后取消，此时应在 retry sleep 中
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancel.cancel();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .expect("should complete within 1s")
+            .expect("join should not panic");
+
+        assert!(
+            matches!(result, Err(LlmError::Cancelled)),
+            "expected Err(LlmError::Cancelled)"
+        );
+        let count = provider.call_count.load(Ordering::SeqCst);
+        assert!(
+            count <= 3,
+            "expected at most 3 calls (cancelled during retry sleep), got {}",
+            count
+        );
     }
 }
