@@ -180,7 +180,7 @@ pub const THINKING_STYLE: BlockStyle = BlockStyle {
 
 /// 工具调用/结果的 fallback 样式（无底色）
 pub const TOOL_STYLE: BlockStyle = BlockStyle {
-    top_margin: 1,
+    top_margin: 0,
     margin_vertical: 1,
     margin_horizontal: 1,
     bg_fill: None,
