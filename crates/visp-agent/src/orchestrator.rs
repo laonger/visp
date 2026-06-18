@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tracing;
 
 use visp_core::agent::run_agent_loop;
@@ -76,6 +77,9 @@ pub struct Orchestrator {
     // ── 状态 ─────────────────────────────────────────────────
     active_agents: ActiveAgentRegistry,
     pending_queries: HashMap<String, (String, oneshot::Sender<UserQueryResult>)>,
+    /// 持有 sub-agent run_agent_loop 的 JoinHandle，便于诊断与未来扩展（如 abort）。
+    /// key = sub session_id；handle 仅作引用持有，drop 不会 abort。
+    sub_agent_handles: HashMap<String, JoinHandle<()>>,
 
     // ── 共享依赖 ─────────────────────────────────────────────
     session_mgr: Arc<SessionManager>,
@@ -113,6 +117,7 @@ impl Orchestrator {
             grpc_tx,
             active_agents: ActiveAgentRegistry::new(),
             pending_queries: HashMap::new(),
+            sub_agent_handles: HashMap::new(),
             session_mgr,
             agent_registry,
             tool_registry,
@@ -575,7 +580,7 @@ impl Orchestrator {
         let session_mgr = self.session_mgr.clone();
         let config = self.agent_config.clone();
 
-        tokio::spawn(async move {
+        let loop_handle = tokio::spawn(async move {
             run_agent_loop(
                 provider,
                 tool_registry,
@@ -588,6 +593,8 @@ impl Orchestrator {
             )
             .await;
         });
+        self.sub_agent_handles
+            .insert(sub_session_id.clone(), loop_handle);
 
         tracing::info!(
             parent = parent_session_id,
@@ -622,6 +629,7 @@ impl Orchestrator {
 
         // Remove from registry
         self.active_agents.remove(session_id);
+        self.sub_agent_handles.remove(session_id);
 
         // Finish the session
         let _ = self
@@ -1005,6 +1013,58 @@ mod tests {
         assert_eq!(child_session.agent_name, "reviewer");
         // Verify permission was set on child session
         assert!(!child_session.permission.is_empty());
+    }
+
+    // ── W3: Orchestrator 持有 sub-agent JoinHandle ───────────────────────
+
+    #[tokio::test]
+    async fn test_orchestrator_tracks_sub_agent_join_handles() {
+        let (mut orch, _global_tx, _client_tx, _grpc_rx) = make_orchestrator();
+
+        // 初始 map 为空
+        assert!(
+            orch.sub_agent_handles.is_empty(),
+            "新建 Orchestrator 的 sub_agent_handles 应为空"
+        );
+
+        // 模拟 spawn：插入一个长跑的 task handle
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        orch.sub_agent_handles.insert("child-1".to_string(), handle);
+
+        assert_eq!(orch.sub_agent_handles.len(), 1);
+        assert!(orch.sub_agent_handles.contains_key("child-1"));
+
+        // 注册对应 active agent，便于 handle_done 走通常路径
+        let cancel = CancellationToken::new();
+        let (parent_inbox_tx, _parent_inbox_rx) = mpsc::channel(16);
+        orch.active_agents.register(ActiveAgent {
+            session_id: "parent-1".to_string(),
+            parent_session_id: None,
+            agent_name: "root".to_string(),
+            cancel_token: cancel.clone(),
+            inbox: parent_inbox_tx,
+            pending_call_id: None,
+            started_at: Instant::now(),
+        });
+        orch.active_agents.register(ActiveAgent {
+            session_id: "child-1".to_string(),
+            parent_session_id: Some("parent-1".to_string()),
+            agent_name: "sub-agent".to_string(),
+            cancel_token: cancel.clone(),
+            inbox: mpsc::channel(16).0,
+            pending_call_id: Some("call-1".to_string()),
+            started_at: Instant::now(),
+        });
+
+        // handle_done 后应从 map 中移除
+        orch.handle_done("child-1").await;
+
+        assert!(
+            !orch.sub_agent_handles.contains_key("child-1"),
+            "handle_done 后 sub_agent_handles 应移除该 session"
+        );
     }
 
     // ── W1: Sub-agent lifecycle observability ─────────────────────────────
