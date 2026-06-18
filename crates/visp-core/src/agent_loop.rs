@@ -418,6 +418,19 @@ enum StreamDecision {
     Continue,
 }
 
+/// Drain pending sub-agent spawns into error ToolExecResults.
+/// Used on cancel/inbox-close paths to prevent orphan tool_uses.
+fn drain_pending_spawns(pending: &mut Vec<PendingSpawn>, reason: &str) -> Vec<ToolExecResult> {
+    pending
+        .drain(..)
+        .map(|ps| ToolExecResult {
+            index: ps.index,
+            call_id: ps.call_id,
+            result: ToolResult::error(reason),
+        })
+        .collect()
+}
+
 /// f. Handle stream result: check [USER_QUERY] marker or return Done/Continue
 /// On error, sends error events via send_event and returns Err(()).
 async fn handle_stream_result(
@@ -1006,6 +1019,7 @@ async fn execute_tool_calls(
                 for h in &exec_tasks {
                     h.abort();
                 }
+                collected.extend(drain_pending_spawns(&mut pending_spawns, "agent cancelled"));
                 break;
             }
 
@@ -1057,24 +1071,25 @@ async fn execute_tool_calls(
                                     });
                                 }
                             }
-                            Some(OrchestratorMessage::Cancelled) => break,
+                            Some(OrchestratorMessage::Cancelled) => {
+                                collected.extend(drain_pending_spawns(
+                                    &mut pending_spawns,
+                                    "agent cancelled",
+                                ));
+                                break;
+                            }
                             None => {
-                                // W2: inbox 关闭兜底——orchestrator 已断开，
+                                // inbox 关闭兜底——orchestrator 已断开，
                                 // 把所有未完成的 pending_spawns 合成失败 ToolResult，
                                 // 避免父 agent 死等 + 下一轮 LLM 调用因缺失 tool_result 而 400。
                                 tracing::error!(
                                     pending_count = pending_spawns.len(),
                                     "sub-agent inbox closed before all spawns completed; synthesizing error ToolResults"
                                 );
-                                for ps in pending_spawns.drain(..) {
-                                    collected.push(ToolExecResult {
-                                        index: ps.index,
-                                        call_id: ps.call_id,
-                                        result: ToolResult::error(
-                                            "sub-agent inbox closed before completing",
-                                        ),
-                                    });
-                                }
+                                collected.extend(drain_pending_spawns(
+                                    &mut pending_spawns,
+                                    "sub-agent inbox closed before completing",
+                                ));
                                 inbox = None;
                                 break;
                             }
@@ -1095,51 +1110,66 @@ async fn execute_tool_calls(
                 }
                 regular_done = true;
             } else if let Some(ref mut rx) = inbox {
-                match rx.recv().await {
-                    Some(OrchestratorMessage::SubAgentComplete {
-                        call_id,
-                        content,
-                        task_id: _,
-                    }) => {
-                        if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id)
-                        {
-                            let ps = pending_spawns.remove(pos);
-                            collected.push(ToolExecResult {
-                                index: ps.index,
-                                call_id,
-                                result: ToolResult::success(content),
-                            });
-                        }
-                    }
-                    Some(OrchestratorMessage::SubAgentError { call_id, error }) => {
-                        if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id)
-                        {
-                            let ps = pending_spawns.remove(pos);
-                            collected.push(ToolExecResult {
-                                index: ps.index,
-                                call_id,
-                                result: ToolResult::error(error),
-                            });
-                        }
-                    }
-                    Some(OrchestratorMessage::Cancelled) => break,
-                    None => {
-                        // W2: 同上，inbox 关闭时合成失败 ToolResult，避免父 agent 死等。
-                        tracing::error!(
-                            pending_count = pending_spawns.len(),
-                            "sub-agent inbox closed before all spawns completed (no tasks branch); synthesizing error ToolResults"
-                        );
-                        for ps in pending_spawns.drain(..) {
-                            collected.push(ToolExecResult {
-                                index: ps.index,
-                                call_id: ps.call_id,
-                                result: ToolResult::error(
-                                    "sub-agent inbox closed before completing",
-                                ),
-                            });
-                        }
-                        inbox = None;
+                tokio::select! {
+                    biased;
+                    _ = ctx.cancel_token.cancelled() => {
+                        for h in &exec_tasks { h.abort(); }
+                        collected.extend(drain_pending_spawns(
+                            &mut pending_spawns,
+                            "agent cancelled",
+                        ));
                         break;
+                    }
+                    msg = rx.recv() => {
+                        match msg {
+                            Some(OrchestratorMessage::SubAgentComplete {
+                                call_id,
+                                content,
+                                task_id: _,
+                            }) => {
+                                if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id)
+                                {
+                                    let ps = pending_spawns.remove(pos);
+                                    collected.push(ToolExecResult {
+                                        index: ps.index,
+                                        call_id,
+                                        result: ToolResult::success(content),
+                                    });
+                                }
+                            }
+                            Some(OrchestratorMessage::SubAgentError { call_id, error }) => {
+                                if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id)
+                                {
+                                    let ps = pending_spawns.remove(pos);
+                                    collected.push(ToolExecResult {
+                                        index: ps.index,
+                                        call_id,
+                                        result: ToolResult::error(error),
+                                    });
+                                }
+                            }
+                            Some(OrchestratorMessage::Cancelled) => {
+                                collected.extend(drain_pending_spawns(
+                                    &mut pending_spawns,
+                                    "agent cancelled",
+                                ));
+                                break;
+                            }
+                            None => {
+                                // inbox 关闭兜底——orchestrator 已断开，
+                                // 把所有未完成的 pending_spawns 合成失败 ToolResult。
+                                tracing::error!(
+                                    pending_count = pending_spawns.len(),
+                                    "sub-agent inbox closed before all spawns completed (no tasks branch); synthesizing error ToolResults"
+                                );
+                                collected.extend(drain_pending_spawns(
+                                    &mut pending_spawns,
+                                    "sub-agent inbox closed before completing",
+                                ));
+                                inbox = None;
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -1565,5 +1595,140 @@ mod tests {
             "expected at most 3 calls (cancelled during retry sleep), got {}",
             count
         );
+    }
+
+    #[test]
+    fn test_drain_pending_spawns_returns_error_results() {
+        let mut pending = vec![
+            PendingSpawn {
+                index: 0,
+                call_id: "call_1".into(),
+                subagent_type: "test".into(),
+            },
+            PendingSpawn {
+                index: 1,
+                call_id: "call_2".into(),
+                subagent_type: "test".into(),
+            },
+        ];
+
+        let results = drain_pending_spawns(&mut pending, "test reason");
+        assert_eq!(results.len(), 2, "should drain all pending spawns");
+        assert!(pending.is_empty(), "pending should be empty after drain");
+        assert_eq!(results[0].index, 0);
+        assert_eq!(results[0].call_id, "call_1");
+        assert!(results[0].result.is_error);
+        assert_eq!(results[1].index, 1);
+        assert_eq!(results[1].call_id, "call_2");
+        assert!(results[1].result.is_error);
+    }
+
+    struct Phase2MockTrimmer;
+    impl crate::context::ContextTrimmer for Phase2MockTrimmer {
+        fn trim(&self, h: &[Message], _: u32, _: u32, _: u32) -> Vec<Message> {
+            h.to_vec()
+        }
+    }
+
+    /// Provider that returns a single tool_use on first call, then Done on subsequent.
+    struct Phase2ToolProvider {
+        call_count: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for Phase2ToolProvider {
+        async fn chat_stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _config: &LlmConfig,
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>
+        {
+            let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if count == 0 {
+                // First call: return a tool_use to trigger sub-agent spawn
+                let events: Vec<Result<ChatEvent, LlmError>> = vec![
+                    Ok(ChatEvent::ToolCall {
+                        id: "call_1".into(),
+                        name: "task".into(),
+                        arguments: r#"{"subagent_type": "general", "description": "test"}"#.into(),
+                    }),
+                    Ok(ChatEvent::Done),
+                ];
+                Ok(Box::pin(stream::iter(events)))
+            } else {
+                // Subsequent calls — shouldn't happen if cancel works
+                Ok(Box::pin(stream::iter(vec![Ok(ChatEvent::Done)])))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_phase2_cancel_drains_pending_spawns() {
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let (global_tx, _global_rx) = mpsc::channel::<Envelope>(16);
+        let (_inbox_tx, inbox_rx) = mpsc::channel::<OrchestratorMessage>(16);
+        let permission_rules = std::sync::Arc::new(Vec::new());
+
+        let session_mgr = std::sync::Arc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: std::sync::Arc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            std::sync::Arc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop_v2(&sid, &trimmer, global_tx, inbox_rx, permission_rules)
+            .unwrap();
+        let handle_cancel = ctx.cancel_token.clone();
+
+        let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::new(Phase2ToolProvider {
+            call_count: AtomicUsize::new(0),
+        });
+        let rule_engine = std::sync::Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig {
+            hard_limit: 10,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel(64);
+
+        let sm_clone = session_mgr.clone();
+        let handle = tokio::spawn(async move {
+            run_agent_loop(
+                provider,
+                std::sync::Arc::new(registry),
+                rule_engine,
+                sm_clone,
+                ctx,
+                &config,
+                Message::user("Do something"),
+                tx,
+            )
+            .await;
+        });
+
+        // Give agent time to enter Phase 2 and wait for inbox
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        handle_cancel.cancel();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .expect("agent loop should exit within 1s after cancel");
+
+        // finish_loop 总是重置到 Idle（_status 参数被忽略）
+        let final_session = session_mgr.get(&sid).unwrap();
+        assert_eq!(
+            final_session.status,
+            crate::session::SessionStatus::Idle,
+            "session should end in Idle after cancel (finish_loop always resets to Idle)"
+        );
+        // Cancel should not panic
+        assert!(result.is_ok() || (result.is_err() && result.unwrap_err().is_cancelled()));
     }
 }
