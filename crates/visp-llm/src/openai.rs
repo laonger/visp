@@ -381,6 +381,17 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<OpenAiStreamEvent, Llm
     Ok(OpenAiStreamEvent::Skip)
 }
 
+/// 按字符边界安全截取，最多取 `max_chars` 个字符。
+///
+/// 用于日志预览，避免在 UTF-8 多字节字符（如中文）中间切片导致 panic。
+/// 返回切片，不分配新内存。
+fn truncate_for_log(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
+    }
+}
+
 /// 将 OpenAI SSE 字节流转换为 ChatEvent 流
 ///
 /// OpenAI 的 SSE 格式简单：
@@ -545,7 +556,7 @@ fn byte_stream_to_chat_events(
                 tracing::debug!(
                     %name,
                     args_len = args.len(),
-                    args_preview = %&args[..args.len().min(200)],
+                    args_preview = %truncate_for_log(&args, 200),
                     "emitting ToolCall"
                 );
                 return Some((
@@ -1339,5 +1350,48 @@ mod tests {
         }
         assert!(matches!(&events[1], ChatEvent::UsageInfo { .. }));
         assert!(matches!(&events[2], ChatEvent::Done));
+    }
+
+    // --- truncate_for_log 测试（回归：UTF-8 char boundary panic） ---
+
+    #[test]
+    fn truncate_for_log_ascii_below_limit_returns_full() {
+        assert_eq!(truncate_for_log("hello", 200), "hello");
+    }
+
+    #[test]
+    fn truncate_for_log_ascii_above_limit_truncates() {
+        let s = "a".repeat(300);
+        let out = truncate_for_log(&s, 200);
+        assert_eq!(out.chars().count(), 200);
+    }
+
+    #[test]
+    fn truncate_for_log_chinese_does_not_panic() {
+        // 67 个汉字 = 201 字节，触发原 bug：bytes 198..201 在 '析' 中间
+        let s = "分析".repeat(100);
+        let out = truncate_for_log(&s, 200);
+        // 200 字符（每个 3 字节）= 600 字节
+        assert_eq!(out.chars().count(), 200);
+    }
+
+    #[test]
+    fn truncate_for_log_at_exact_char_count() {
+        // 边界：字符数刚好等于上限
+        let s = "中文";
+        assert_eq!(truncate_for_log(s, 2), "中文");
+    }
+
+    #[test]
+    fn truncate_for_log_mixed_ascii_and_chinese() {
+        let s = "abc中文def";
+        let out = truncate_for_log(s, 4);
+        assert_eq!(out, "abc中");
+        assert_eq!(out.chars().count(), 4);
+    }
+
+    #[test]
+    fn truncate_for_log_zero_limit() {
+        assert_eq!(truncate_for_log("中文", 0), "");
     }
 }
