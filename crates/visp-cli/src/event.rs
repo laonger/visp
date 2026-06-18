@@ -699,8 +699,17 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
             app.show_help = false;
             return false;
         }
-        // 状态栏左键点击切换鼠标模式（底部区域，右半侧）
+        // 状态栏左键点击切换鼠标模式（底部区域，右半侧）；以及 tab bar 左键切换 tab
         Event::Mouse(m) if m.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+            // 优先：tab bar 点击切换 tab
+            if let Some(idx) = crate::ui::tab_at_screen(&app.tab_bar, m.column, m.row) {
+                if idx != app.tab_bar.active {
+                    app.tab_bar.activate(idx);
+                    app.scroll_following = true;
+                    app.needs_render = true;
+                }
+                return false;
+            }
             if let Ok((term_cols, term_rows)) = crossterm::terminal::size() {
                 // 状态栏在最底部 (0-indexed: term_rows - 1)
                 // 放宽到最后 3 行 + 右侧 1/3，兼容各种布局偏移

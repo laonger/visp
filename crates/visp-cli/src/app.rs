@@ -482,6 +482,10 @@ pub struct TabBar {
     pub active: usize,
     pub page_start: usize,
     pub last_term_width: u16,
+    /// 上次渲染时 tabs widget content_area 的 x 坐标（屏幕绝对列）
+    pub last_tab_area_x: u16,
+    /// 上次渲染时 tabs widget content_area 的 y 坐标（tab 内容行，分隔线在 y+1）
+    pub last_tab_area_y: u16,
 }
 
 impl TabBar {
@@ -491,6 +495,8 @@ impl TabBar {
             active: 0,
             page_start: 0,
             last_term_width: 0,
+            last_tab_area_x: 0,
+            last_tab_area_y: 0,
         }
     }
 

@@ -47,6 +47,89 @@ fn tab_label_line(tab: &TabEntry) -> Line<'static> {
     ])
 }
 
+/// 计算单个 tab title 在屏幕上的渲染宽度（cols）。
+/// = 前置空格(1) + symbol(2 cols) + agent_name 的 unicode 宽度 + 后置空格(1)。
+pub(crate) fn tab_label_render_width(tab: &TabEntry) -> u16 {
+    // 所有状态的 symbol 都是 "<符号><空格>"，宽度 2
+    let symbol_w: u16 = 2;
+    let name_w = UnicodeWidthStr::width(tab.agent_name.as_str()) as u16;
+    1 + symbol_w + name_w + 1
+}
+
+/// ratatui Tabs widget 在 title 之间渲染 divider 的宽度（我们用 `│`，1 col）
+pub(crate) const TAB_DIVIDER_W: u16 = 1;
+/// ratatui Tabs widget 调用 `.padding("", " ")`，左 0，右 1
+pub(crate) const TAB_PADDING_L: u16 = 0;
+pub(crate) const TAB_PADDING_R: u16 = 1;
+
+/// 在 tabs widget content_area 内，根据点击的相对列号 `rel_x` 命中可见 tab 序号。
+///
+/// 渲染顺序（来自 ratatui-widgets/Tabs::render_tabs）：对每个 title i，
+///   pad_left + title_i + pad_right + (if i<last) divider
+/// 命中规则：落在 [pad_left .. pad_left+title_i+pad_right) 区间内的列算命中 i；
+/// 落在 divider 上不命中（返回 None）。
+///
+/// `label_widths` 是按可见顺序传入的每个 title 的渲染宽度（含 tab_label_line 自带的两侧空格）。
+pub(crate) fn hit_test_tab_x(rel_x: u16, label_widths: &[u16]) -> Option<usize> {
+    if label_widths.is_empty() {
+        return None;
+    }
+    let mut x: u16 = 0;
+    let last = label_widths.len() - 1;
+    for (i, &w) in label_widths.iter().enumerate() {
+        // tab i 的可点击范围 = [x .. x + pad_l + w + pad_r)
+        let tab_span = TAB_PADDING_L + w + TAB_PADDING_R;
+        if rel_x >= x && rel_x < x + tab_span {
+            return Some(i);
+        }
+        x += tab_span;
+        if i < last {
+            // divider 区间：不命中
+            if rel_x >= x && rel_x < x + TAB_DIVIDER_W {
+                return None;
+            }
+            x += TAB_DIVIDER_W;
+        }
+    }
+    None
+}
+
+/// 屏幕坐标 (col,row) → 全局 tab 索引（含 default + 当前页 sub）。
+/// 仅当点击落在 tab 内容行（非分隔线行）且命中某个 title（非 divider/页码区）才返回 Some。
+pub(crate) fn tab_at_screen(
+    tab_bar: &crate::app::TabBar,
+    click_col: u16,
+    click_row: u16,
+) -> Option<usize> {
+    // y 必须正好是 tab 内容行
+    if click_row != tab_bar.last_tab_area_y {
+        return None;
+    }
+    // x 必须在 content_area 范围内
+    if click_col < tab_bar.last_tab_area_x {
+        return None;
+    }
+    let rel_x = click_col - tab_bar.last_tab_area_x;
+    if rel_x >= tab_bar.last_term_width {
+        return None;
+    }
+
+    // 构造当前可见 label 宽度数组：[default, sub_range...]
+    let range = tab_bar.current_page_subs(tab_bar.last_term_width);
+    let mut widths: Vec<u16> = Vec::with_capacity(1 + range.len());
+    widths.push(tab_label_render_width(&tab_bar.tabs[0]));
+    for i in range.clone() {
+        widths.push(tab_label_render_width(&tab_bar.tabs[i]));
+    }
+
+    let visible_idx = hit_test_tab_x(rel_x, &widths)?;
+    if visible_idx == 0 {
+        Some(0)
+    } else {
+        Some(range.start + visible_idx - 1)
+    }
+}
+
 /// 渲染顶部 Tab 栏（2 行：1 行 tab 内容 + 1 行分隔线）
 fn render_tab_bar(tab_bar: &mut crate::app::TabBar, f: &mut Frame, area: Rect) {
     // 整条 tab bar 先铺底色（深紫黑），与对话区无缝连贯
@@ -71,6 +154,8 @@ fn render_tab_bar(tab_bar: &mut crate::app::TabBar, f: &mut Frame, area: Rect) {
 
     // 写入终端宽度供 event.rs 翻页按键使用
     tab_bar.last_term_width = content_area.width;
+    tab_bar.last_tab_area_x = content_area.x;
+    tab_bar.last_tab_area_y = content_area.y;
     tab_bar.ensure_active_visible(content_area.width);
 
     let range = tab_bar.current_page_subs(content_area.width);
@@ -1093,5 +1178,101 @@ mod tests {
         assert_eq!(line.spans[1].content, "▶ ");
         assert_eq!(line.spans[1].style.fg, Some(Color::Yellow));
         assert_eq!(line.spans[2].content, "default");
+    }
+
+    // ── tab_label_render_width ───────────────────────────────────
+
+    #[test]
+    fn test_tab_label_render_width_ascii_name() {
+        let tab = TabEntry::new("sid".to_string(), "default");
+        // 1 (左空格) + 2 (符号 "▶ ") + 7 ("default") + 1 (右空格) = 11
+        assert_eq!(tab_label_render_width(&tab), 11);
+    }
+
+    #[test]
+    fn test_tab_label_render_width_short_name() {
+        let tab = TabEntry::new("sid".to_string(), "X");
+        // 1 + 2 + 1 + 1 = 5
+        assert_eq!(tab_label_render_width(&tab), 5);
+    }
+
+    // ── hit_test_tab_x ───────────────────────────────────────────
+
+    #[test]
+    fn test_hit_test_first_tab() {
+        // 单 tab，label_w=5, ratatui pad_l=0, pad_r=1 → 占 [0..6)
+        let widths = vec![5u16];
+        assert_eq!(hit_test_tab_x(0, &widths), Some(0));
+        assert_eq!(hit_test_tab_x(5, &widths), Some(0));
+        assert_eq!(hit_test_tab_x(6, &widths), None); // 越界
+    }
+
+    #[test]
+    fn test_hit_test_two_tabs_with_divider() {
+        // tab0 label_w=5, tab1 label_w=4
+        // 布局: tab0_span=6 [0..6) + divider[6..7) + tab1_span=5 [7..12)
+        let widths = vec![5u16, 4u16];
+        assert_eq!(hit_test_tab_x(0, &widths), Some(0));
+        assert_eq!(hit_test_tab_x(5, &widths), Some(0));
+        assert_eq!(hit_test_tab_x(6, &widths), None); // divider
+        assert_eq!(hit_test_tab_x(7, &widths), Some(1));
+        assert_eq!(hit_test_tab_x(11, &widths), Some(1));
+        assert_eq!(hit_test_tab_x(12, &widths), None);
+    }
+
+    #[test]
+    fn test_hit_test_empty_widths() {
+        assert_eq!(hit_test_tab_x(0, &[]), None);
+    }
+
+    // ── tab_at_screen ────────────────────────────────────────────
+
+    #[test]
+    fn test_tab_at_screen_default_tab() {
+        let mut tab_bar = crate::app::TabBar::new("main".into());
+        tab_bar.last_tab_area_x = 2;
+        tab_bar.last_tab_area_y = 1;
+        tab_bar.last_term_width = 80;
+        // default 名 = "default", label_w=11, +pad_r=1 → span=12. 屏幕范围 col [2..14)
+        assert_eq!(tab_at_screen(&tab_bar, 2, 1), Some(0));
+        assert_eq!(tab_at_screen(&tab_bar, 13, 1), Some(0));
+        assert_eq!(tab_at_screen(&tab_bar, 14, 1), None);
+    }
+
+    #[test]
+    fn test_tab_at_screen_sub_tab() {
+        let mut tab_bar = crate::app::TabBar::new("main".into());
+        tab_bar.insert_sub_agent("sub-1", "X"); // label_w = 1+2+1+1 = 5
+        tab_bar.last_tab_area_x = 2;
+        tab_bar.last_tab_area_y = 1;
+        tab_bar.last_term_width = 80;
+        // 布局（rel_x 起算）：default span=12 [0..12) + divider[12..13) + sub span=6 [13..19)
+        // 屏幕坐标 = 2 + rel_x
+        assert_eq!(tab_at_screen(&tab_bar, 2, 1), Some(0)); // default 起点
+        assert_eq!(tab_at_screen(&tab_bar, 13, 1), Some(0)); // default 末位
+        assert_eq!(tab_at_screen(&tab_bar, 14, 1), None); // divider (rel_x=12)
+        assert_eq!(tab_at_screen(&tab_bar, 15, 1), Some(1)); // sub 起点 (rel_x=13)
+        assert_eq!(tab_at_screen(&tab_bar, 20, 1), Some(1)); // sub 末位 (rel_x=18)
+        assert_eq!(tab_at_screen(&tab_bar, 21, 1), None); // 超出
+    }
+
+    #[test]
+    fn test_tab_at_screen_wrong_row_returns_none() {
+        let mut tab_bar = crate::app::TabBar::new("main".into());
+        tab_bar.last_tab_area_x = 2;
+        tab_bar.last_tab_area_y = 1;
+        tab_bar.last_term_width = 80;
+        // 点击在分隔线行（y+1）或其他行 → None
+        assert_eq!(tab_at_screen(&tab_bar, 5, 0), None);
+        assert_eq!(tab_at_screen(&tab_bar, 5, 2), None);
+    }
+
+    #[test]
+    fn test_tab_at_screen_left_of_area_returns_none() {
+        let mut tab_bar = crate::app::TabBar::new("main".into());
+        tab_bar.last_tab_area_x = 5;
+        tab_bar.last_tab_area_y = 1;
+        tab_bar.last_term_width = 80;
+        assert_eq!(tab_at_screen(&tab_bar, 4, 1), None);
     }
 }
