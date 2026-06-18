@@ -1327,6 +1327,21 @@ impl AppState {
         };
 
         let active = self.tab_bar.active;
+
+        // 立即根据 payload 更新 tab.status（不依赖 render_pending），
+        // 否则非 active 的子 tab Done/Error 后图标不会刷新，需要等切过去
+        match &frame.payload {
+            Some(server_message::Payload::Done(_)) => {
+                if self.tab_bar.tabs[idx].status == AgentStatus::Running {
+                    self.tab_bar.tabs[idx].status = AgentStatus::Done;
+                }
+            }
+            Some(server_message::Payload::Error(_)) => {
+                self.tab_bar.tabs[idx].status = AgentStatus::Error;
+            }
+            _ => {}
+        }
+
         self.tab_bar.tabs[idx].frames.push(frame);
 
         if idx == active {
@@ -2487,6 +2502,26 @@ mod tests {
         app.route_frame(frame);
         assert_eq!(app.tab_bar.tabs[0].frames.len(), 1);
         assert!(app.tab_bar.tabs[0].streaming_text.is_empty());
+    }
+
+    #[test]
+    fn test_route_frame_done_updates_inactive_sub_tab_status_immediately() {
+        // 子 tab 收到 Done，即使它不是 active，status 也应立刻变 Done（图标实时刷新）
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        app.tab_bar.insert_sub_agent("sub-1", "agentA");
+        // active 仍是 0 (default)
+        assert_eq!(app.tab_bar.tabs[1].status, AgentStatus::Running);
+        app.route_frame(make_done_frame("sub-1"));
+        assert_eq!(app.tab_bar.tabs[1].status, AgentStatus::Done);
+    }
+
+    #[test]
+    fn test_route_frame_error_updates_inactive_sub_tab_status_immediately() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        app.tab_bar.insert_sub_agent("sub-1", "agentA");
+        assert_eq!(app.tab_bar.tabs[1].status, AgentStatus::Running);
+        app.route_frame(make_error_frame("sub-1", "agentA", "X", "boom"));
+        assert_eq!(app.tab_bar.tabs[1].status, AgentStatus::Error);
     }
 
     #[test]
