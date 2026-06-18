@@ -447,20 +447,19 @@ impl LlmProvider for AnthropicProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
         config: &LlmConfig,
+        cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError> {
         let url = format!("{}/v1/messages", self.api_url.trim_end_matches('/'));
         let body = build_anthropic_request(messages, tools, config);
         let headers = build_anthropic_headers(&self.api_key);
 
         tracing::debug!(url = %url, model = %config.model, "Anthropic request");
-        let response = self
-            .client
-            .post(&url)
-            .headers(headers)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LlmError::Network(e.to_string()))?;
+        let send_fut = self.client.post(&url).headers(headers).json(&body).send();
+        let response = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(LlmError::Cancelled),
+            resp = send_fut => resp.map_err(|e| LlmError::Network(e.to_string()))?,
+        };
 
         let status = response.status();
         if status.is_success() {

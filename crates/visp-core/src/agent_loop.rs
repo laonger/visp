@@ -246,7 +246,10 @@ async fn call_llm_with_retry(
 ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, ()> {
     let mut attempt = 0u32;
     loop {
-        match provider.chat_stream(messages, tools, &ctx.config).await {
+        match provider
+            .chat_stream(messages, tools, &ctx.config, &ctx.cancel_token)
+            .await
+        {
             Ok(s) => break Ok(Box::pin(s)),
             Err(e @ (LlmError::RateLimit { .. } | LlmError::Network(_))) => {
                 if attempt >= cfg.llm_retry_attempts {

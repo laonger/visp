@@ -39,6 +39,9 @@ pub enum LlmError {
 
     #[error("Stream error: {0}")]
     Stream(String),
+
+    #[error("LLM call cancelled")]
+    Cancelled,
 }
 
 /// 会话相关错误

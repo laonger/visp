@@ -239,6 +239,7 @@ pub(crate) fn llm_error_to_code(err: &LlmError) -> (AgentErrorCode, String) {
             format!("status {status}: {message}"),
         ),
         LlmError::Stream(msg) => (AgentErrorCode::LlmStream, msg.clone()),
+        LlmError::Cancelled => (AgentErrorCode::Cancelled, "LLM call cancelled".into()),
     }
 }
 
@@ -613,6 +614,7 @@ mod tests {
             _messages: &[Message],
             _tools: &[crate::message::ToolDefinition],
             _config: &LlmConfig,
+            _cancel: &tokio_util::sync::CancellationToken,
         ) -> Result<
             std::pin::Pin<Box<dyn futures::Stream<Item = Result<ChatEvent, LlmError>> + Send>>,
             LlmError,
@@ -1721,6 +1723,7 @@ mod tests {
                 _messages: &[Message],
                 _tools: &[crate::message::ToolDefinition],
                 _config: &LlmConfig,
+                _cancel: &tokio_util::sync::CancellationToken,
             ) -> Result<
                 std::pin::Pin<Box<dyn futures::Stream<Item = Result<ChatEvent, LlmError>> + Send>>,
                 LlmError,
@@ -1786,6 +1789,7 @@ mod tests {
                 _messages: &[Message],
                 _tools: &[crate::message::ToolDefinition],
                 _config: &LlmConfig,
+                _cancel: &tokio_util::sync::CancellationToken,
             ) -> Result<
                 std::pin::Pin<Box<dyn futures::Stream<Item = Result<ChatEvent, LlmError>> + Send>>,
                 LlmError,

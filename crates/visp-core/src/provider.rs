@@ -99,10 +99,15 @@ pub enum ChatEvent {
 pub trait LlmProvider: Send + Sync {
     /// 流式对话
     /// 发送消息列表，流式接收响应
+    ///
+    /// `cancel` 为取消令牌：实现方应在阻塞 IO 路径（如 HTTP send）使用
+    /// `tokio::select!` 监听该 token，一旦触发立刻返回 `LlmError::Cancelled`，
+    /// 让 agent loop 能快速跳出。轻量 mock 可忽略此参数。
     async fn chat_stream(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
         config: &LlmConfig,
+        cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>;
 }
