@@ -684,10 +684,7 @@ fn render_input_area(app: &mut AppState, f: &mut Frame, area: Rect) {
         }
     }
     app.textarea.set_block(
-        Block::default()
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(theme::INPUT_BORDER_FG))
-            .style(Style::default().bg(theme::INPUT_BG)),
+        Block::default().style(Style::default().bg(theme::INPUT_BG)),
     );
     // 单次渲染：既设置内部 area（折行/导航所需的 screen map），也完成可视输出
     f.render_widget(&app.textarea, input_area);
