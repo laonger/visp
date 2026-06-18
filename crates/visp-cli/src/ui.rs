@@ -353,7 +353,7 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     let render_w = content_w.saturating_sub(2);
     ensure_all_caches(app, render_w);
 
-    const CHAT_PAD: u16 = 1;
+    const CHAT_PAD: u16 = 0;
 
     // ── 计算总高度 + 滚动 ────────────────────────────────
     let total: u16 = app
