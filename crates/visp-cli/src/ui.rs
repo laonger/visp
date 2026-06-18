@@ -162,8 +162,7 @@ fn render_tab_bar(tab_bar: &mut crate::app::TabBar, f: &mut Frame, area: Rect) {
     let range = tab_bar.current_page_subs(content_area.width);
     let active = tab_bar.active;
     // 所有 visible titles: [default] + 当前页的 sub
-    let mut visible: Vec<Line<'static>> =
-        vec![tab_label_line(&tab_bar.tabs[0], active == 0)];
+    let mut visible: Vec<Line<'static>> = vec![tab_label_line(&tab_bar.tabs[0], active == 0)];
     for i in range.clone() {
         visible.push(tab_label_line(&tab_bar.tabs[i], active == i));
     }
@@ -774,9 +773,8 @@ fn render_input_area(app: &mut AppState, f: &mut Frame, area: Rect) {
             }
         }
     }
-    app.textarea.set_block(
-        Block::default().style(Style::default().bg(theme::INPUT_BG)),
-    );
+    app.textarea
+        .set_block(Block::default().style(Style::default().bg(theme::INPUT_BG)));
     // 单次渲染：既设置内部 area（折行/导航所需的 screen map），也完成可视输出
     f.render_widget(&app.textarea, input_area);
 }
