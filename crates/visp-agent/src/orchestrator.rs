@@ -174,9 +174,10 @@ impl Orchestrator {
             AgentMessage::StatusUpdate(_) => {
                 // StatusUpdate 已由 run_agent_loop 直接送达 CLI
             }
-            AgentMessage::Error { .. } => {
-                self.handle_done(&session_id).await;
-                // Error 已由 run_agent_loop 直接送达 CLI
+            AgentMessage::Error { message, .. } => {
+                // W2: 错误退出（含 panic 转发）走专属路径，向父 agent 投递 SubAgentError，
+                // 而非 handle_done 默认的 SubAgentComplete 空内容路径。
+                self.handle_agent_error(&session_id, message).await;
             }
             AgentMessage::ToolCallRequest { .. } => {
                 // ToolCallRequest 已由工具执行任务直接送达 CLI
@@ -697,6 +698,65 @@ impl Orchestrator {
         }
     }
 
+    /// W2: 处理 Agent 错误退出（含 panic 转发）
+    ///
+    /// 与 handle_done 的关键区别：
+    /// - handle_done 假设 sub-agent 正常完成，向父发送 SubAgentComplete + 提取最终结果
+    /// - handle_agent_error 知道 sub-agent 异常退出，向父发送 SubAgentError 携带错误消息
+    ///
+    /// 仍执行公共清理：从 active_agents / sub_agent_handles 移除、finish_loop。
+    async fn handle_agent_error(&mut self, session_id: &str, error_message: String) {
+        let agent_info = match self.active_agents.get(session_id) {
+            Some(a) => {
+                let pending_call_id = a.pending_call_id.clone();
+                let parent_id = a.parent_session_id.clone();
+                let agent_name = a.agent_name.clone();
+                tracing::error!(
+                    session_id,
+                    agent_name = %a.agent_name,
+                    parent_id = ?a.parent_session_id,
+                    error = %error_message,
+                    "sub-agent error received"
+                );
+                (pending_call_id, parent_id, agent_name)
+            }
+            None => {
+                tracing::warn!(
+                    session_id,
+                    "handle_agent_error: agent not in registry, ignoring"
+                );
+                return;
+            }
+        };
+
+        let (pending_call_id, parent_id, agent_name) = agent_info;
+
+        self.active_agents.remove(session_id);
+        self.sub_agent_handles.remove(session_id);
+        let _ = self
+            .session_mgr
+            .finish_loop(session_id, SessionStatus::Error);
+
+        if let Some(ref parent_id) = parent_id {
+            let call_id = pending_call_id.unwrap_or_default();
+            self.send_sub_agent_error(parent_id, &call_id, &error_message)
+                .await;
+            tracing::info!(
+                session_id,
+                parent_id,
+                agent_name,
+                "sub-agent error forwarded to parent as SubAgentError"
+            );
+        } else {
+            // Root agent error — Error event 已由 run_agent_loop 直接送 CLI；这里仅记录
+            tracing::error!(
+                session_id,
+                agent_name,
+                "root agent errored: {error_message}"
+            );
+        }
+    }
+
     /// 提取 Agent 的最终结果（最后一条 assistant 消息内容）
     fn extract_result(&self, session_id: &str) -> String {
         if let Ok(session) = self.session_mgr.get(session_id) {
@@ -1117,6 +1177,74 @@ mod tests {
                 assert_eq!(call_id, "call-task-1");
             }
             _ => panic!("expected SubAgentComplete, got a different variant"),
+        }
+    }
+
+    /// W2: sub-agent 发 AgentMessage::Error（如 panic 转发）时，
+    /// orchestrator 应通过 SubAgentError 通知父 agent，而非走 SubAgentComplete 的空内容路径。
+    #[tokio::test]
+    async fn test_handle_agent_error_forwards_sub_agent_error_to_parent() {
+        use visp_core::agent::{AgentMessage, Envelope};
+        use visp_core::error::AgentErrorCode;
+
+        let (mut orch, _global_tx, _client_tx, _grpc_rx) = make_orchestrator();
+        let cancel = CancellationToken::new();
+
+        // Parent agent + inbox
+        let (parent_inbox_tx, mut parent_inbox_rx) = mpsc::channel(16);
+        orch.active_agents.register(ActiveAgent {
+            session_id: "parent-1".to_string(),
+            parent_session_id: None,
+            agent_name: "root".to_string(),
+            cancel_token: cancel.clone(),
+            inbox: parent_inbox_tx,
+            pending_call_id: None,
+            started_at: Instant::now(),
+        });
+
+        // Sub-agent with pending_call_id
+        orch.active_agents.register(ActiveAgent {
+            session_id: "child-1".to_string(),
+            parent_session_id: Some("parent-1".to_string()),
+            agent_name: "sub-agent".to_string(),
+            cancel_token: cancel.clone(),
+            inbox: mpsc::channel(16).0,
+            pending_call_id: Some("call-task-1".to_string()),
+            started_at: Instant::now(),
+        });
+
+        // Act: simulate AgentMessage::Error envelope from the sub-agent
+        let envelope = Envelope {
+            session_id: "child-1".to_string(),
+            message: AgentMessage::Error {
+                code: AgentErrorCode::Internal,
+                message: "agent loop panicked: provider panic".to_string(),
+            },
+        };
+        orch.handle_agent_message(envelope).await;
+
+        // Assert: child removed from registry
+        assert!(
+            orch.active_agents.get("child-1").is_none(),
+            "child should be removed after error"
+        );
+
+        // Assert: parent inbox received SubAgentError (NOT SubAgentComplete)
+        let msg = parent_inbox_rx
+            .try_recv()
+            .expect("parent inbox should contain a message");
+        match msg {
+            OrchestratorMessage::SubAgentError { call_id, error } => {
+                assert_eq!(call_id, "call-task-1");
+                assert!(
+                    error.contains("panic"),
+                    "error should mention panic, got: {error}"
+                );
+            }
+            OrchestratorMessage::SubAgentComplete { .. } => {
+                panic!("got SubAgentComplete but expected SubAgentError on error path");
+            }
+            _ => panic!("unexpected message variant"),
         }
     }
 }

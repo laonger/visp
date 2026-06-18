@@ -1774,6 +1774,91 @@ mod tests {
         );
     }
 
+    /// W2: agent loop panic 时，应通过 global_tx 发送 AgentMessage::Error
+    /// 让 orchestrator 能够把失败结果转发给父 agent。
+    #[tokio::test]
+    async fn test_panic_emits_error_envelope_to_global_tx() {
+        struct PanicProvider;
+        #[async_trait::async_trait]
+        impl LlmProvider for PanicProvider {
+            async fn chat_stream(
+                &self,
+                _messages: &[Message],
+                _tools: &[crate::message::ToolDefinition],
+                _config: &LlmConfig,
+            ) -> Result<
+                std::pin::Pin<Box<dyn futures::Stream<Item = Result<ChatEvent, LlmError>> + Send>>,
+                LlmError,
+            > {
+                panic!("provider panic");
+            }
+        }
+
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(PanicProvider);
+
+        // 手动构建带 global_tx 的 ctx（test_setup 默认不带）
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn ContextTrimmer + Send + Sync> = StdArc::new(MockTrimmer);
+
+        let (global_tx, mut global_rx) = mpsc::channel::<Envelope>(16);
+        let (_inbox_tx, inbox_rx) = mpsc::channel::<OrchestratorMessage>(16);
+        let permission_rules = StdArc::new(Vec::new());
+
+        let ctx = session_mgr
+            .start_loop_v2(&sid, &trimmer, global_tx, inbox_rx, permission_rules)
+            .unwrap();
+
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig::default();
+        let (tx, _rx) = mpsc::channel(64);
+
+        let sm_for_spawn = session_mgr.clone();
+        let handle = tokio::spawn(async move {
+            run_agent_loop(
+                provider,
+                StdArc::new(registry),
+                rule_engine,
+                sm_for_spawn,
+                ctx,
+                &config,
+                Message::user("Hi"),
+                tx,
+            )
+            .await;
+        });
+
+        // 等待 task panic
+        let join_res = handle.await;
+        assert!(
+            join_res.is_err() && join_res.unwrap_err().is_panic(),
+            "expected agent loop to panic"
+        );
+
+        // 关键断言：global_tx 上应能收到 AgentMessage::Error envelope
+        let envelope =
+            tokio::time::timeout(std::time::Duration::from_millis(500), global_rx.recv())
+                .await
+                .expect("should not timeout waiting for error envelope")
+                .expect("envelope channel should not be closed");
+
+        assert_eq!(envelope.session_id, sid);
+        match envelope.message {
+            AgentMessage::Error { code, message } => {
+                assert_eq!(code, AgentErrorCode::Internal);
+                assert!(
+                    message.contains("panic"),
+                    "error message should mention panic, got: {message}"
+                );
+            }
+            _ => panic!("expected AgentMessage::Error, got a different variant"),
+        }
+    }
+
     // ── render_tool_guide tests ─────────────────────────────────────────────
 
     #[test]

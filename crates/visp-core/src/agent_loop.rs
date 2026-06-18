@@ -1063,7 +1063,26 @@ async fn execute_tool_calls(
                                 }
                             }
                             Some(OrchestratorMessage::Cancelled) => break,
-                            None => {}
+                            None => {
+                                // W2: inbox 关闭兜底——orchestrator 已断开，
+                                // 把所有未完成的 pending_spawns 合成失败 ToolResult，
+                                // 避免父 agent 死等 + 下一轮 LLM 调用因缺失 tool_result 而 400。
+                                tracing::error!(
+                                    pending_count = pending_spawns.len(),
+                                    "sub-agent inbox closed before all spawns completed; synthesizing error ToolResults"
+                                );
+                                for ps in pending_spawns.drain(..) {
+                                    collected.push(ToolExecResult {
+                                        index: ps.index,
+                                        call_id: ps.call_id,
+                                        result: ToolResult::error(
+                                            "sub-agent inbox closed before completing",
+                                        ),
+                                    });
+                                }
+                                inbox = None;
+                                break;
+                            }
                         }
                     }
                 }
@@ -1109,7 +1128,24 @@ async fn execute_tool_calls(
                         }
                     }
                     Some(OrchestratorMessage::Cancelled) => break,
-                    None => break,
+                    None => {
+                        // W2: 同上，inbox 关闭时合成失败 ToolResult，避免父 agent 死等。
+                        tracing::error!(
+                            pending_count = pending_spawns.len(),
+                            "sub-agent inbox closed before all spawns completed (no tasks branch); synthesizing error ToolResults"
+                        );
+                        for ps in pending_spawns.drain(..) {
+                            collected.push(ToolExecResult {
+                                index: ps.index,
+                                call_id: ps.call_id,
+                                result: ToolResult::error(
+                                    "sub-agent inbox closed before completing",
+                                ),
+                            });
+                        }
+                        inbox = None;
+                        break;
+                    }
                 }
             }
 
@@ -1198,6 +1234,9 @@ pub async fn run_agent_loop(
     // Clone for use in panic handler after the async block
     let sid_panic = sid.clone();
     let sm_panic = sm.clone();
+    // W2: Clone global_tx so the panic handler can forward AgentMessage::Error
+    // to the orchestrator (which will then notify the parent agent via SubAgentError).
+    let global_tx_panic = ctx.global_tx.clone();
 
     // Wrap entire body in catch_unwind for panic safety.
     // On panic, session is reset to Idle before re-raising.
@@ -1364,9 +1403,61 @@ pub async fn run_agent_loop(
     .catch_unwind()
     .await;
 
-    // If panicked, reset session status
+    // If panicked, reset session status and notify orchestrator before re-raising.
     if let Err(panic) = result {
         let _ = sm_panic.finish_loop(&sid_panic, SessionStatus::Idle);
+
+        // W2: Extract panic message and forward AgentMessage::Error to orchestrator.
+        // This lets the orchestrator notify the parent agent via SubAgentError so
+        // the parent's Phase 2 collection loop won't dead-wait on this sub-agent.
+        let panic_msg = if let Some(s) = panic.downcast_ref::<&'static str>() {
+            (*s).to_string()
+        } else if let Some(s) = panic.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic payload".to_string()
+        };
+
+        if let Some(global_tx) = global_tx_panic {
+            // 使用 try_send 避免阻塞；失败仅记录日志（不影响 resume_unwind）
+            let envelope = Envelope {
+                session_id: sid_panic.clone(),
+                message: AgentMessage::Error {
+                    code: AgentErrorCode::Internal,
+                    message: format!("agent loop panicked: {panic_msg}"),
+                },
+            };
+            match global_tx.try_send(envelope) {
+                Ok(()) => {
+                    tracing::error!(
+                        session_id = %sid_panic,
+                        panic = %panic_msg,
+                        "agent loop panicked; error envelope forwarded to orchestrator"
+                    );
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tracing::error!(
+                        session_id = %sid_panic,
+                        panic = %panic_msg,
+                        "agent loop panicked but global_tx is full; parent may dead-wait"
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::error!(
+                        session_id = %sid_panic,
+                        panic = %panic_msg,
+                        "agent loop panicked but global_tx is closed"
+                    );
+                }
+            }
+        } else {
+            tracing::error!(
+                session_id = %sid_panic,
+                panic = %panic_msg,
+                "agent loop panicked (no global_tx; root agent or test)"
+            );
+        }
+
         std::panic::resume_unwind(panic);
     }
 }
