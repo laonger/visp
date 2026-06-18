@@ -38,9 +38,12 @@ fn tab_label_line(tab: &TabEntry) -> Line<'static> {
         AgentStatus::Done => ("✓ ", Color::Green),
         AgentStatus::Error => ("✗ ", Color::Red),
     };
+    // 两侧各加 1 字符 padding，避免文字与底色边缘顶格
     Line::from(vec![
+        Span::raw(" "),
         Span::styled(symbol, Style::default().fg(color)),
         Span::styled(tab.agent_name.clone(), Style::default().fg(theme::TAB_FG)),
+        Span::raw(" "),
     ])
 }
 
@@ -1053,8 +1056,8 @@ mod tests {
         // 默认状态为 Running
         assert_eq!(tab.status, AgentStatus::Running);
         let line = tab_label_line(&tab);
-        assert_eq!(line.spans[0].content, "▶ ");
-        assert_eq!(line.spans[0].style.fg, Some(Color::Yellow));
+        assert_eq!(line.spans[1].content, "▶ ");
+        assert_eq!(line.spans[1].style.fg, Some(Color::Yellow));
     }
 
     #[test]
@@ -1062,8 +1065,8 @@ mod tests {
         let mut tab = TabEntry::new("sid".to_string(), "agentB");
         tab.status = AgentStatus::Done;
         let line = tab_label_line(&tab);
-        assert_eq!(line.spans[0].content, "✓ ");
-        assert_eq!(line.spans[0].style.fg, Some(Color::Green));
+        assert_eq!(line.spans[1].content, "✓ ");
+        assert_eq!(line.spans[1].style.fg, Some(Color::Green));
     }
 
     #[test]
@@ -1071,15 +1074,15 @@ mod tests {
         let mut tab = TabEntry::new("sid".to_string(), "agentC");
         tab.status = AgentStatus::Error;
         let line = tab_label_line(&tab);
-        assert_eq!(line.spans[0].content, "✗ ");
-        assert_eq!(line.spans[0].style.fg, Some(Color::Red));
+        assert_eq!(line.spans[1].content, "✗ ");
+        assert_eq!(line.spans[1].style.fg, Some(Color::Red));
     }
 
     #[test]
     fn test_tab_label_contains_agent_name() {
         let tab = TabEntry::new("sid".to_string(), "my-agent");
         let line = tab_label_line(&tab);
-        assert_eq!(line.spans[1].content, "my-agent");
+        assert_eq!(line.spans[2].content, "my-agent");
     }
 
     #[test]
@@ -1087,8 +1090,8 @@ mod tests {
         let tab = TabEntry::new("main-sid".to_string(), "default");
         assert_eq!(tab.status, AgentStatus::Running);
         let line = tab_label_line(&tab);
-        assert_eq!(line.spans[0].content, "▶ ");
-        assert_eq!(line.spans[0].style.fg, Some(Color::Yellow));
-        assert_eq!(line.spans[1].content, "default");
+        assert_eq!(line.spans[1].content, "▶ ");
+        assert_eq!(line.spans[1].style.fg, Some(Color::Yellow));
+        assert_eq!(line.spans[2].content, "default");
     }
 }
