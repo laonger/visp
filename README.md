@@ -7,6 +7,9 @@
 
 > 核心目标：利用 Rust 的零成本抽象、无 GC、高效并发特性，解决原 Node.js 实现 CPU 占用偏高的问题。
 
+
+![screenshot](assets/screenshot.png)
+
 ---
 
 ## 架构概览
