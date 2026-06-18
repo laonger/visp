@@ -31,19 +31,20 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 // Tab Bar 渲染
 // ════════════════════════════════════════════════════════════════
 
-/// 为单个 TabEntry 生成标签行：状态符号 + agent_name
-fn tab_label_line(tab: &TabEntry) -> Line<'static> {
+/// 为单个 TabEntry 生成标签行：状态符号 + agent_name。
+/// `is_active=true` 时用方括号 `[ ... ]` 包裹强调；否则用空格 padding。
+fn tab_label_line(tab: &TabEntry, is_active: bool) -> Line<'static> {
     let (symbol, color) = match tab.status {
         AgentStatus::Running => ("▶ ", Color::Yellow),
         AgentStatus::Done => ("✓ ", Color::Green),
         AgentStatus::Error => ("✗ ", Color::Red),
     };
-    // 两侧各加 1 字符 padding，避免文字与底色边缘顶格
+    let (lpad, rpad) = if is_active { ("[", "]") } else { (" ", " ") };
     Line::from(vec![
-        Span::raw(" "),
+        Span::raw(lpad),
         Span::styled(symbol, Style::default().fg(color)),
         Span::styled(tab.agent_name.clone(), Style::default().fg(theme::TAB_FG)),
-        Span::raw(" "),
+        Span::raw(rpad),
     ])
 }
 
@@ -159,10 +160,12 @@ fn render_tab_bar(tab_bar: &mut crate::app::TabBar, f: &mut Frame, area: Rect) {
     tab_bar.ensure_active_visible(content_area.width);
 
     let range = tab_bar.current_page_subs(content_area.width);
+    let active = tab_bar.active;
     // 所有 visible titles: [default] + 当前页的 sub
-    let mut visible: Vec<Line<'static>> = vec![tab_label_line(&tab_bar.tabs[0])];
+    let mut visible: Vec<Line<'static>> =
+        vec![tab_label_line(&tab_bar.tabs[0], active == 0)];
     for i in range.clone() {
-        visible.push(tab_label_line(&tab_bar.tabs[i]));
+        visible.push(tab_label_line(&tab_bar.tabs[i], active == i));
     }
 
     let tabs = Tabs::new(visible)
@@ -1140,7 +1143,7 @@ mod tests {
         let tab = TabEntry::new("sid".to_string(), "agentA");
         // 默认状态为 Running
         assert_eq!(tab.status, AgentStatus::Running);
-        let line = tab_label_line(&tab);
+        let line = tab_label_line(&tab, false);
         assert_eq!(line.spans[1].content, "▶ ");
         assert_eq!(line.spans[1].style.fg, Some(Color::Yellow));
     }
@@ -1149,7 +1152,7 @@ mod tests {
     fn test_tab_label_done_shows_green_check() {
         let mut tab = TabEntry::new("sid".to_string(), "agentB");
         tab.status = AgentStatus::Done;
-        let line = tab_label_line(&tab);
+        let line = tab_label_line(&tab, false);
         assert_eq!(line.spans[1].content, "✓ ");
         assert_eq!(line.spans[1].style.fg, Some(Color::Green));
     }
@@ -1158,7 +1161,7 @@ mod tests {
     fn test_tab_label_error_shows_red_cross() {
         let mut tab = TabEntry::new("sid".to_string(), "agentC");
         tab.status = AgentStatus::Error;
-        let line = tab_label_line(&tab);
+        let line = tab_label_line(&tab, false);
         assert_eq!(line.spans[1].content, "✗ ");
         assert_eq!(line.spans[1].style.fg, Some(Color::Red));
     }
@@ -1166,7 +1169,7 @@ mod tests {
     #[test]
     fn test_tab_label_contains_agent_name() {
         let tab = TabEntry::new("sid".to_string(), "my-agent");
-        let line = tab_label_line(&tab);
+        let line = tab_label_line(&tab, false);
         assert_eq!(line.spans[2].content, "my-agent");
     }
 
@@ -1174,10 +1177,33 @@ mod tests {
     fn test_default_tab_also_shows_status() {
         let tab = TabEntry::new("main-sid".to_string(), "default");
         assert_eq!(tab.status, AgentStatus::Running);
-        let line = tab_label_line(&tab);
+        let line = tab_label_line(&tab, false);
         assert_eq!(line.spans[1].content, "▶ ");
         assert_eq!(line.spans[1].style.fg, Some(Color::Yellow));
         assert_eq!(line.spans[2].content, "default");
+    }
+
+    #[test]
+    fn test_tab_label_inactive_uses_space_padding() {
+        let tab = TabEntry::new("sid".to_string(), "X");
+        let line = tab_label_line(&tab, false);
+        assert_eq!(line.spans[0].content, " ");
+        assert_eq!(line.spans[3].content, " ");
+    }
+
+    #[test]
+    fn test_tab_label_active_uses_brackets() {
+        let tab = TabEntry::new("sid".to_string(), "X");
+        let line = tab_label_line(&tab, true);
+        assert_eq!(line.spans[0].content, "[");
+        assert_eq!(line.spans[3].content, "]");
+    }
+
+    #[test]
+    fn test_tab_label_render_width_unchanged_for_active() {
+        // 方括号与空格同宽（1 col），label 渲染宽度对 active/inactive 一致
+        let tab = TabEntry::new("sid".to_string(), "default");
+        assert_eq!(tab_label_render_width(&tab), 11);
     }
 
     // ── tab_label_render_width ───────────────────────────────────
