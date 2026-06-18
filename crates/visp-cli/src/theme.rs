@@ -130,6 +130,8 @@ pub const SELECT_HIGHLIGHT_BG: Color = CONFIRM_SELECTED_BG;
 /// 消息块的统一布局参数。所有消息类型共用同一套渲染流程，差异由此数据驱动。
 #[derive(Copy, Clone)]
 pub struct BlockStyle {
+    /// 顶部空白行（不被 bg_fill 覆盖，纯空气）；用于控制 block 之间的视觉间距
+    pub top_margin: u16,
     /// 垂直两端留白（字符数）
     pub margin_vertical: u16,
     /// 水平两端留白（字符数）
@@ -145,11 +147,12 @@ pub struct BlockStyle {
 impl BlockStyle {
     /// 计算该 block 占用的总行数
     pub const fn total_height(self, line_count: u16) -> u16 {
-        1 + self.margin_vertical + line_count + self.bottom_pad
+        self.top_margin + self.margin_vertical + line_count + self.bottom_pad
     }
 }
 
 pub const USER_STYLE: BlockStyle = BlockStyle {
+    top_margin: 2,
     margin_vertical: 1,
     margin_horizontal: 1,
     bg_fill: Some(USER_BG),
@@ -158,6 +161,7 @@ pub const USER_STYLE: BlockStyle = BlockStyle {
 };
 
 pub const ASSISTANT_STYLE: BlockStyle = BlockStyle {
+    top_margin: 1,
     margin_vertical: 1,
     margin_horizontal: 1,
     bg_fill: Some(ASSISTANT_BG),
@@ -166,15 +170,17 @@ pub const ASSISTANT_STYLE: BlockStyle = BlockStyle {
 };
 
 pub const THINKING_STYLE: BlockStyle = BlockStyle {
+    top_margin: 0,
     margin_vertical: 1,
     margin_horizontal: 1,
     bg_fill: None,
     shadow: false,
-    bottom_pad: 1,
+    bottom_pad: 0,
 };
 
 /// 工具调用/结果的 fallback 样式（无底色）
 pub const TOOL_STYLE: BlockStyle = BlockStyle {
+    top_margin: 1,
     margin_vertical: 1,
     margin_horizontal: 1,
     bg_fill: None,
@@ -184,6 +190,7 @@ pub const TOOL_STYLE: BlockStyle = BlockStyle {
 
 /// 工具调用样式（完整框 + 阴影）
 pub const TOOL_CALL_STYLE: BlockStyle = BlockStyle {
+    top_margin: 1,
     margin_vertical: 1,
     margin_horizontal: 1,
     bg_fill: None,
@@ -193,6 +200,7 @@ pub const TOOL_CALL_STYLE: BlockStyle = BlockStyle {
 
 /// 工具结果样式（纯文本缩进，无底色，从属于调用）
 pub const TOOL_RESULT_STYLE: BlockStyle = BlockStyle {
+    top_margin: 1,
     margin_vertical: 0,
     margin_horizontal: 3,
     bg_fill: None,
@@ -202,6 +210,7 @@ pub const TOOL_RESULT_STYLE: BlockStyle = BlockStyle {
 
 /// 工具错误样式（缩进 2 格，红色底色强调）
 pub const TOOL_ERROR_STYLE: BlockStyle = BlockStyle {
+    top_margin: 1,
     margin_vertical: 0,
     margin_horizontal: 3,
     bg_fill: Some(TOOL_BG),
@@ -211,6 +220,7 @@ pub const TOOL_ERROR_STYLE: BlockStyle = BlockStyle {
 
 /// Usage 统计行（已废弃，保留兼容）
 pub const USAGE_STYLE: BlockStyle = BlockStyle {
+    top_margin: 1,
     margin_vertical: 0,
     margin_horizontal: 1,
     bg_fill: Some(TOOL_BG),

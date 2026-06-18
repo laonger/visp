@@ -262,14 +262,16 @@ fn render_block(
 ) {
     let content_w = area.width.saturating_sub(1);
 
-    let mut shadow_y = rel_y;
+    // 顶部 top_margin 行保持空气（不被 bg_fill 覆盖）
+    let block_y = rel_y + style.top_margin;
+    let mut shadow_y = block_y;
     // 2) 底色填充
     if let Some(bg) = style.bg_fill {
         let buf = f.buffer_mut();
         let end_x = (area.x + content_w).min(buf.area().right());
-        let fill_end = (rel_y + style.margin_vertical + line_count + style.margin_vertical)
+        let fill_end = (block_y + style.margin_vertical + line_count + style.margin_vertical)
             .min(buf.area().bottom());
-        for row in (rel_y)..fill_end {
+        for row in (block_y)..fill_end {
             for x in area.x..end_x {
                 buf[(x, row)].set_bg(bg);
             }
@@ -279,7 +281,7 @@ fn render_block(
 
     // 3) 内容 Paragraph
     let content_x = area.x + style.margin_horizontal;
-    let content_y = rel_y + style.margin_vertical;
+    let content_y = block_y + style.margin_vertical;
     let content_w_adj = content_w.saturating_sub(style.margin_horizontal * 2);
     let actual_lines = line_count.min(area.bottom().saturating_sub(content_y));
     if actual_lines > 0 {
