@@ -841,6 +841,29 @@ mod tests {
         );
     }
 
+    /// W1: Done 分支 —— provider 直接返回 ChatEvent::Done
+    #[tokio::test]
+    async fn test_done_decision_logs_completion() {
+        let provider: StdArc<dyn LlmProvider> =
+            StdArc::new(TestProvider::new(vec![vec![ChatEvent::Done]]));
+
+        let (events, _sm, _sid) =
+            run_collect(provider, vec![], test_setup(), 10, 200, Message::user("Go")).await;
+
+        // Agent loop should produce a Done event
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Done)),
+            "expected Done event from minimal provider"
+        );
+        // No errors during bare-minimum run
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, AgentEvent::Error { .. })),
+            "unexpected error events"
+        );
+    }
+
     /// 2. 工具调用：ToolCall → Done
     #[tokio::test]
     async fn test_tool_call() {

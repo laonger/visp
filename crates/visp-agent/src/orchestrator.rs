@@ -604,6 +604,12 @@ impl Orchestrator {
                 let pending_call_id = a.pending_call_id.clone();
                 let parent_id = a.parent_session_id.clone();
                 let agent_name = a.agent_name.clone();
+                tracing::info!(
+                    session_id,
+                    agent_name = %a.agent_name,
+                    parent_id = ?a.parent_session_id,
+                    "sub-agent done received"
+                );
                 (pending_call_id, parent_id, agent_name)
             }
             None => {
@@ -635,11 +641,27 @@ impl Orchestrator {
                         content,
                         task_id: String::new(),
                     }) {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        tracing::info!(
+                            session_id,
+                            parent_id,
+                            agent_name,
+                            "sub-agent completion forwarded to parent"
+                        );
+                    }
                     Err(mpsc::error::TrySendError::Full(msg)) => {
                         let inbox = parent.inbox.clone();
+                        let log_session_id = session_id.to_string();
+                        let log_parent_id = parent_id.clone();
+                        let log_agent_name = agent_name.clone();
                         tokio::spawn(async move {
                             let _ = inbox.send(msg).await;
+                            tracing::info!(
+                                session_id = %log_session_id,
+                                parent_id = %log_parent_id,
+                                agent_name = %log_agent_name,
+                                "sub-agent completion forwarded to parent (after backpressure)"
+                            );
                         });
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -737,6 +759,8 @@ impl Orchestrator {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::time::Instant;
+    use tokio_util::sync::CancellationToken;
     use visp_core::context::{ContextTrimmer, NoopTrimmer};
     use visp_core::session::InMemorySessionStore;
 
@@ -982,5 +1006,58 @@ mod tests {
         assert_eq!(child_session.agent_name, "reviewer");
         // Verify permission was set on child session
         assert!(!child_session.permission.is_empty());
+    }
+
+    // ── W1: Sub-agent lifecycle observability ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_handle_done_emits_completion_log() {
+        let (mut orch, _global_tx, _client_tx, _grpc_rx) = make_orchestrator();
+        let cancel = CancellationToken::new();
+
+        // Create inbox for parent agent
+        let (parent_inbox_tx, mut parent_inbox_rx) = mpsc::channel(16);
+
+        // Register parent agent
+        orch.active_agents.register(ActiveAgent {
+            session_id: "parent-1".to_string(),
+            parent_session_id: None,
+            agent_name: "root".to_string(),
+            cancel_token: cancel.clone(),
+            inbox: parent_inbox_tx,
+            pending_call_id: None,
+            started_at: Instant::now(),
+        });
+
+        // Register sub-agent
+        orch.active_agents.register(ActiveAgent {
+            session_id: "child-1".to_string(),
+            parent_session_id: Some("parent-1".to_string()),
+            agent_name: "sub-agent".to_string(),
+            cancel_token: cancel.clone(),
+            inbox: mpsc::channel(16).0,
+            pending_call_id: Some("call-task-1".to_string()),
+            started_at: Instant::now(),
+        });
+
+        // Act: handle_done for the sub-agent
+        orch.handle_done("child-1").await;
+
+        // Assert: child removed from registry
+        assert!(orch.active_agents.get("child-1").is_none());
+
+        // Assert: parent still active
+        assert!(orch.active_agents.get("parent-1").is_some());
+
+        // Assert: parent inbox received SubAgentComplete
+        let msg = parent_inbox_rx
+            .try_recv()
+            .expect("parent inbox should contain SubAgentComplete");
+        match msg {
+            OrchestratorMessage::SubAgentComplete { call_id, .. } => {
+                assert_eq!(call_id, "call-task-1");
+            }
+            _ => panic!("expected SubAgentComplete, got a different variant"),
+        }
     }
 }

@@ -1292,6 +1292,12 @@ pub async fn run_agent_loop(
             // f. Handle stream result (check USER_QUERY marker or done)
             match handle_stream_result(&output, total_tool_calls, &mut ctx, &sm, &sid, &tx).await {
                 Ok(StreamDecision::Done) => {
+                    tracing::info!(
+                        session_id = %sid,
+                        iterations = iteration,
+                        total_tool_calls,
+                        "agent loop completed"
+                    );
                     return;
                 }
                 Ok(StreamDecision::UserQuery { response_rx }) => {
