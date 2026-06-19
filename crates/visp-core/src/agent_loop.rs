@@ -137,7 +137,7 @@ async fn setup_iteration(
             &ctx.session_id,
             AgentEvent::Error {
                 code: AgentErrorCode::Cancelled,
-                message: "Agent loop cancelled".into(),
+                message: "agent cancelled".into(),
             },
         )
         .await?;
@@ -259,13 +259,21 @@ async fn call_llm_with_retry(
             Err(e @ (LlmError::RateLimit { .. } | LlmError::Network(_))) => {
                 if attempt >= cfg.llm_retry_attempts {
                     let (code, msg) = llm_error_to_code(&e);
-                    tracing::error!(
-                        session_id = %sid,
-                        error_code = ?code,
-                        error_msg = %msg,
-                        attempts = attempt + 1,
-                        "LLM provider error after retries exhausted"
-                    );
+                    if matches!(code, AgentErrorCode::Cancelled) {
+                        tracing::info!(
+                            session_id = %sid,
+                            attempts = attempt + 1,
+                            "LLM call cancelled by user"
+                        );
+                    } else {
+                        tracing::error!(
+                            session_id = %sid,
+                            error_code = ?code,
+                            error_msg = %msg,
+                            attempts = attempt + 1,
+                            "LLM provider error after retries exhausted"
+                        );
+                    }
                     return Err(e);
                 }
                 let delay = cfg.llm_retry_base_delay_ms * (1u64 << attempt);
@@ -281,12 +289,19 @@ async fn call_llm_with_retry(
             }
             Err(e) => {
                 let (code, msg) = llm_error_to_code(&e);
-                tracing::error!(
-                    session_id = %sid,
-                    error_code = ?code,
-                    error_msg = %msg,
-                    "LLM provider error"
-                );
+                if matches!(code, AgentErrorCode::Cancelled) {
+                    tracing::info!(
+                        session_id = %sid,
+                        "LLM call cancelled by user"
+                    );
+                } else {
+                    tracing::error!(
+                        session_id = %sid,
+                        error_code = ?code,
+                        error_msg = %msg,
+                        "LLM provider error"
+                    );
+                }
                 return Err(e);
             }
         }
@@ -330,7 +345,7 @@ async fn collect_stream_events(
                     tx, sm, sid, &ctx.global_tx, &ctx.session_id,
                     AgentEvent::Error {
                         code: AgentErrorCode::Cancelled,
-                        message: "Agent loop cancelled".into(),
+                        message: "agent cancelled".into(),
                     },
                 ).await.ok()?;
                 let _ = sm.finish_loop(sid, SessionStatus::Error);
@@ -1276,7 +1291,7 @@ pub async fn run_agent_loop(
                 &ctx.session_id,
                 AgentEvent::Error {
                     code: AgentErrorCode::Cancelled,
-                    message: "Agent loop cancelled".into(),
+                    message: "agent cancelled".into(),
                 },
             )
             .await;

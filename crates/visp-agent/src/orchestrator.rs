@@ -22,7 +22,7 @@ use visp_core::agent::{
 use visp_core::agent_definition::{AgentDefinition, merge_permissions};
 use visp_core::agent_registry::AgentRegistry;
 use visp_core::context::ContextTrimmer;
-use visp_core::error::SessionError;
+use visp_core::error::{AgentErrorCode, SessionError};
 use visp_core::message::Message;
 use visp_core::provider::LlmProvider;
 use visp_core::rules::RuleEngine;
@@ -174,10 +174,10 @@ impl Orchestrator {
             AgentMessage::StatusUpdate(_) => {
                 // StatusUpdate 已由 run_agent_loop 直接送达 CLI
             }
-            AgentMessage::Error { message, .. } => {
+            AgentMessage::Error { code, message } => {
                 // W2: 错误退出（含 panic 转发）走专属路径，向父 agent 投递 SubAgentError，
                 // 而非 handle_done 默认的 SubAgentComplete 空内容路径。
-                self.handle_agent_error(&session_id, message).await;
+                self.handle_agent_error(&session_id, code, message).await;
             }
             AgentMessage::ToolCallRequest { .. } => {
                 // ToolCallRequest 已由工具执行任务直接送达 CLI
@@ -705,19 +705,45 @@ impl Orchestrator {
     /// - handle_agent_error 知道 sub-agent 异常退出，向父发送 SubAgentError 携带错误消息
     ///
     /// 仍执行公共清理：从 active_agents / sub_agent_handles 移除、finish_loop。
-    async fn handle_agent_error(&mut self, session_id: &str, error_message: String) {
+    ///
+    /// 注：当 code == AgentErrorCode::Cancelled（用户主动取消）时：
+    /// - 错误消息统一为 "agent cancelled"（去除 "Agent loop cancelled" 等异种文本）
+    /// - 日志降级为 info!（用户取消是预期行为，不该污染 ERROR 日志）
+    async fn handle_agent_error(
+        &mut self,
+        session_id: &str,
+        code: AgentErrorCode,
+        error_message: String,
+    ) {
+        let is_cancel = matches!(code, AgentErrorCode::Cancelled);
+        // 取消路径下统一错误文本，便于父 agent / 日志侧识别
+        let normalized_message = if is_cancel {
+            "agent cancelled".to_string()
+        } else {
+            error_message
+        };
+
         let agent_info = match self.active_agents.get(session_id) {
             Some(a) => {
                 let pending_call_id = a.pending_call_id.clone();
                 let parent_id = a.parent_session_id.clone();
                 let agent_name = a.agent_name.clone();
-                tracing::error!(
-                    session_id,
-                    agent_name = %a.agent_name,
-                    parent_id = ?a.parent_session_id,
-                    error = %error_message,
-                    "sub-agent error received"
-                );
+                if is_cancel {
+                    tracing::info!(
+                        session_id,
+                        agent_name = %a.agent_name,
+                        parent_id = ?a.parent_session_id,
+                        "agent cancelled by user"
+                    );
+                } else {
+                    tracing::error!(
+                        session_id,
+                        agent_name = %a.agent_name,
+                        parent_id = ?a.parent_session_id,
+                        error = %normalized_message,
+                        "sub-agent error received"
+                    );
+                }
                 (pending_call_id, parent_id, agent_name)
             }
             None => {
@@ -739,7 +765,7 @@ impl Orchestrator {
 
         if let Some(ref parent_id) = parent_id {
             let call_id = pending_call_id.unwrap_or_default();
-            self.send_sub_agent_error(parent_id, &call_id, &error_message)
+            self.send_sub_agent_error(parent_id, &call_id, &normalized_message)
                 .await;
             tracing::info!(
                 session_id,
@@ -747,12 +773,14 @@ impl Orchestrator {
                 agent_name,
                 "sub-agent error forwarded to parent as SubAgentError"
             );
+        } else if is_cancel {
+            tracing::info!(session_id, agent_name, "root agent cancelled by user");
         } else {
             // Root agent error — Error event 已由 run_agent_loop 直接送 CLI；这里仅记录
             tracing::error!(
                 session_id,
                 agent_name,
-                "root agent errored: {error_message}"
+                "root agent errored: {normalized_message}"
             );
         }
     }
@@ -1243,6 +1271,65 @@ mod tests {
             }
             OrchestratorMessage::SubAgentComplete { .. } => {
                 panic!("got SubAgentComplete but expected SubAgentError on error path");
+            }
+            _ => panic!("unexpected message variant"),
+        }
+    }
+
+    /// Cancel 路径下：sub-agent 因 Ctrl-C 退出（code=Cancelled），
+    /// orchestrator 应将统一文本 "agent cancelled" 转发给父，
+    /// 不应让"Agent loop cancelled"等异种文本混入。
+    #[tokio::test]
+    async fn test_handle_agent_error_cancel_unifies_text() {
+        use visp_core::agent::{AgentMessage, Envelope};
+        use visp_core::error::AgentErrorCode;
+
+        let (mut orch, _global_tx, _client_tx, _grpc_rx) = make_orchestrator();
+        let cancel = CancellationToken::new();
+
+        let (parent_inbox_tx, mut parent_inbox_rx) = mpsc::channel(16);
+        orch.active_agents.register(ActiveAgent {
+            session_id: "parent-c".to_string(),
+            parent_session_id: None,
+            agent_name: "root".to_string(),
+            cancel_token: cancel.clone(),
+            inbox: parent_inbox_tx,
+            pending_call_id: None,
+            started_at: Instant::now(),
+        });
+        orch.active_agents.register(ActiveAgent {
+            session_id: "child-c".to_string(),
+            parent_session_id: Some("parent-c".to_string()),
+            agent_name: "code_reader".to_string(),
+            cancel_token: cancel.clone(),
+            inbox: mpsc::channel(16).0,
+            pending_call_id: Some("call-cancel-1".to_string()),
+            started_at: Instant::now(),
+        });
+
+        // 模拟 sub-agent 取消退出：code=Cancelled，message 是 agent_loop 里旧文本
+        let envelope = Envelope {
+            session_id: "child-c".to_string(),
+            message: AgentMessage::Error {
+                code: AgentErrorCode::Cancelled,
+                message: "Agent loop cancelled".to_string(),
+            },
+        };
+        orch.handle_agent_message(envelope).await;
+
+        let msg = parent_inbox_rx
+            .try_recv()
+            .expect("parent inbox should contain a message");
+        match msg {
+            OrchestratorMessage::SubAgentError { call_id, error } => {
+                assert_eq!(call_id, "call-cancel-1");
+                assert_eq!(
+                    error, "agent cancelled",
+                    "cancel 路径下应统一文本为 'agent cancelled'，实际: {error}"
+                );
+            }
+            OrchestratorMessage::SubAgentComplete { .. } => {
+                panic!("expected SubAgentError, got SubAgentComplete")
             }
             _ => panic!("unexpected message variant"),
         }

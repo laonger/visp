@@ -239,7 +239,7 @@ pub(crate) fn llm_error_to_code(err: &LlmError) -> (AgentErrorCode, String) {
             format!("status {status}: {message}"),
         ),
         LlmError::Stream(msg) => (AgentErrorCode::LlmStream, msg.clone()),
-        LlmError::Cancelled => (AgentErrorCode::Cancelled, "LLM call cancelled".into()),
+        LlmError::Cancelled => (AgentErrorCode::Cancelled, "agent cancelled".into()),
     }
 }
 
