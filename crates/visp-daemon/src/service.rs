@@ -517,26 +517,6 @@ impl CoderDaemon for CoderDaemonService {
                             if session.history.is_empty() {
                                 // no-op: new session, no history to show
                             } else {
-                                let mut history_lines = Vec::new();
-                                history_lines.push(format!(
-                                    "═══ Resumed session ({} previous messages) ═══",
-                                    session.history.len()
-                                ));
-                                for msg in &session.history {
-                                    let role_label = match msg.role {
-                                        Role::User => "User",
-                                        Role::Assistant => "Assistant",
-                                        Role::Tool => "  Tool",
-                                        _ => continue,
-                                    };
-                                    let preview: String = msg.content.chars().take(120).collect();
-                                    if preview.len() < msg.content.len() {
-                                        history_lines.push(format!("{role_label}: {preview}..."));
-                                    } else {
-                                        history_lines.push(format!("{role_label}: {preview}"));
-                                    }
-                                }
-                                history_lines.push("═══ End of history ═══".into());
                                 // 收集用户输入，供 CLI 填充 input_history（↑↓ 翻找历史提问）
                                 let user_inputs: Vec<String> = session
                                     .history
@@ -544,14 +524,59 @@ impl CoderDaemon for CoderDaemonService {
                                     .filter(|m| m.role == Role::User)
                                     .map(|m| m.content.clone())
                                     .collect();
+                                // 发送摘要头（含 user_inputs 用于恢复输入历史）
                                 let _ = tx
                                     .send(Ok(proto::ServerMessage {
                                         payload: Some(
                                             proto::server_message::Payload::StatusUpdate(
                                                 proto::StatusUpdate {
-                                                    message: history_lines.join("\n"),
+                                                    message: format!(
+                                                        "═══ Resumed session ({} previous messages) ═══",
+                                                        session.history.len()
+                                                    ),
                                                     session_id: session_id.clone(),
                                                     user_inputs,
+                                                },
+                                            ),
+                                        ),
+                                    }))
+                                    .await;
+                                // 逐条发送完整的历史消息（不再截断为 120 字符预览）
+                                for msg in &session.history {
+                                    let role_label = match msg.role {
+                                        Role::User => "User",
+                                        Role::Assistant => "Assistant",
+                                        Role::Tool => "  Tool",
+                                        _ => continue,
+                                    };
+                                    let _ = tx
+                                        .send(Ok(proto::ServerMessage {
+                                            payload: Some(
+                                                proto::server_message::Payload::StatusUpdate(
+                                                    proto::StatusUpdate {
+                                                        message: format!(
+                                                            "{role_label}: {}",
+                                                            msg.content
+                                                        ),
+                                                        session_id: session_id.clone(),
+                                                        user_inputs: vec![],
+                                                    },
+                                                ),
+                                            ),
+                                        }))
+                                        .await;
+                                }
+                                // 结束标记
+                                let _ = tx
+                                    .send(Ok(proto::ServerMessage {
+                                        payload: Some(
+                                            proto::server_message::Payload::StatusUpdate(
+                                                proto::StatusUpdate {
+                                                    message:
+                                                        "══════════════════════════════════════"
+                                                            .into(),
+                                                    session_id: session_id.clone(),
+                                                    user_inputs: vec![],
                                                 },
                                             ),
                                         ),
