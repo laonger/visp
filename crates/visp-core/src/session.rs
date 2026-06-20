@@ -732,6 +732,7 @@ mod tests {
             content: "hello".into(),
             tool_call_id: None,
             tool_calls: None,
+            tool_call_count: None,
             extra_blocks: None,
             skip_context: false,
             estimated_tokens: 0,

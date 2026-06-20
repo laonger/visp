@@ -661,6 +661,10 @@ pub async fn run_agent_loop(
                         Some(thinking_blocks.clone())
                     };
                     text_msg.estimated_tokens = estimate_message_tokens(&text_msg);
+                    text_msg.actual_tokens_input = Some(input_tokens);
+                    text_msg.actual_tokens_output = Some(output_tokens);
+                    text_msg.actual_cache_read = Some(cache_read_input_tokens);
+                    text_msg.actual_cache_write = Some(cache_creation_input_tokens);
                     ctx.history.push(text_msg.clone());
                     if let Err(e) = sm.append_message(&sid, text_msg) {
                         try_send!(AgentEvent::Error {
@@ -692,6 +696,7 @@ pub async fn run_agent_loop(
                 content: text_buffer,
                 tool_call_id: None,
                 tool_calls: Some(tool_calls.clone()),
+                tool_call_count: Some(tool_calls.len() as u32),
                 skip_context: false,
                 extra_blocks: if thinking_blocks.is_empty() {
                     None
@@ -710,6 +715,10 @@ pub async fn run_agent_loop(
                 created_at: None,
             };
             assistant_msg.estimated_tokens = estimate_message_tokens(&assistant_msg);
+            assistant_msg.actual_tokens_input = Some(input_tokens);
+            assistant_msg.actual_tokens_output = Some(output_tokens);
+            assistant_msg.actual_cache_read = Some(cache_read_input_tokens);
+            assistant_msg.actual_cache_write = Some(cache_creation_input_tokens);
             ctx.history.push(assistant_msg.clone());
             if let Err(e) = sm.append_message(&sid, assistant_msg) {
                 try_send!(AgentEvent::Error {

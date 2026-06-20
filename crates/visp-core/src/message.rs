@@ -86,6 +86,9 @@ pub struct Message {
     /// 工具执行耗时（毫秒，仅 tool 消息）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_result_duration_ms: Option<u64>,
+    /// 工具调用次数（仅 assistant 的 ToolCall 消息）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_count: Option<u32>,
     /// 创建时间（Unix 毫秒，用于 DB 持久化）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<i64>,
@@ -99,6 +102,7 @@ impl Message {
             content: content.into(),
             tool_call_id: None,
             tool_calls: None,
+            tool_call_count: None,
             extra_blocks: None,
             skip_context: false,
             estimated_tokens: 0,
@@ -123,6 +127,7 @@ impl Message {
             content: content.into(),
             tool_call_id: None,
             tool_calls: None,
+            tool_call_count: None,
             extra_blocks: None,
             skip_context: false,
             estimated_tokens: 0,
@@ -147,6 +152,7 @@ impl Message {
             content: content.into(),
             tool_call_id: None,
             tool_calls: None,
+            tool_call_count: None,
             extra_blocks: None,
             skip_context: false,
             estimated_tokens: 0,
@@ -171,6 +177,7 @@ impl Message {
             content: content.into(),
             tool_call_id: Some(call_id.into()),
             tool_calls: None,
+            tool_call_count: None,
             extra_blocks: None,
             skip_context: false,
             estimated_tokens: 0,
@@ -195,6 +202,7 @@ impl Message {
             content: String::new(),
             tool_call_id: None,
             tool_calls: Some(calls),
+            tool_call_count: None,
             extra_blocks: None,
             skip_context: false,
             estimated_tokens: 0,
@@ -217,6 +225,7 @@ impl Message {
             content: content.into(),
             tool_call_id: None,
             tool_calls: None,
+            tool_call_count: None,
             extra_blocks: None,
             skip_context: false,
             estimated_tokens: 0,
@@ -239,6 +248,7 @@ impl Message {
             content: content.into(),
             tool_call_id: None,
             tool_calls: None,
+            tool_call_count: None,
             extra_blocks: None,
             skip_context: false,
             estimated_tokens: 0,
@@ -261,6 +271,7 @@ impl Message {
             content: content.into(),
             tool_call_id: None,
             tool_calls: None,
+            tool_call_count: None,
             extra_blocks: None,
             skip_context: false,
             estimated_tokens: 0,
