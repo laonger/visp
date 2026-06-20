@@ -5,7 +5,7 @@ pub struct Migrator;
 
 impl Migrator {
     /// Current schema version (incremented on each migration).
-    pub const VERSION: i64 = 3;
+    pub const VERSION: i64 = 4;
 
     /// SQL to create the session table.
     const CREATE_SESSION: &'static str = r#"
@@ -37,6 +37,7 @@ impl Migrator {
             tool_calls_json       TEXT,
             tool_result_is_error  INTEGER,
             tool_result_duration_ms INTEGER,
+            tool_call_count       INTEGER NOT NULL DEFAULT 0,
             estimated_tokens      INTEGER NOT NULL DEFAULT 0,
             extra_blocks          TEXT,
             provider_metadata     TEXT,
@@ -62,13 +63,6 @@ impl Migrator {
     /// Run all pending migrations.
     /// Safe to call multiple times — uses PRAGMA user_version for idempotency.
     pub fn run(conn: &Connection) -> Result<()> {
-        let current_version: i64 =
-            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-
-        if current_version >= Self::VERSION {
-            return Ok(());
-        }
-
         // PRAGMA configuration (must be outside transaction)
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
@@ -90,8 +84,12 @@ impl Migrator {
             conn.execute_batch(idx)?;
         }
 
-        // v1→v2 migration: add tool_calls_json column to message table
-        if current_version < 2 {
+        // Ensure all columns exist (idempotent via pragma_table_info checks).
+        // Runs unconditionally — not gated on current_version — to self-heal
+        // databases whose version was bumped ahead of the actual schema.
+
+        // v1→v2: tool_calls_json
+        {
             let has_column: bool = conn
                 .prepare(
                     "SELECT COUNT(*) FROM pragma_table_info('message') WHERE name='tool_calls_json'",
@@ -104,8 +102,8 @@ impl Migrator {
             }
         }
 
-        // v2→v3 migration: add skip_context column to message table
-        if current_version < 3 {
+        // v2→v3: skip_context
+        {
             let has_column: bool = conn
                 .prepare(
                     "SELECT COUNT(*) FROM pragma_table_info('message') WHERE name='skip_context'",
@@ -116,6 +114,22 @@ impl Migrator {
             if !has_column {
                 conn.execute_batch(
                     "ALTER TABLE message ADD COLUMN skip_context INTEGER NOT NULL DEFAULT 0;",
+                )?;
+            }
+        }
+
+        // v3→v4: tool_call_count
+        {
+            let has_column: bool = conn
+                .prepare(
+                    "SELECT COUNT(*) FROM pragma_table_info('message') WHERE name='tool_call_count'",
+                )
+                .and_then(|mut s| s.query_row([], |row| row.get::<_, i64>(0)))
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            if !has_column {
+                conn.execute_batch(
+                    "ALTER TABLE message ADD COLUMN tool_call_count INTEGER NOT NULL DEFAULT 0;",
                 )?;
             }
         }
@@ -197,7 +211,7 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     #[test]
@@ -256,11 +270,11 @@ mod tests {
         // Run migration (should upgrade to v2)
         Migrator::run(&conn).unwrap();
 
-        // Verify version is now 3 (migrates through v2→v3 as well)
+        // Verify version is now 4 (migrates through v2→v3→v4 as well)
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
 
         // Verify tool_calls_json column exists
         let has_column: bool = conn
@@ -358,11 +372,11 @@ mod tests {
         // Run migration (should upgrade to v3)
         Migrator::run(&conn).unwrap();
 
-        // Verify version is now 3
+        // Verify version is now 4 (migrates through v3→v4 as well)
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
 
         // Verify skip_context column exists
         let has_column: bool = conn
@@ -407,5 +421,85 @@ mod tests {
             .pragma_query_value(None, "foreign_keys", |row| row.get(0))
             .unwrap();
         assert!(fk);
+    }
+
+    #[test]
+    fn test_migrate_self_heals_when_version_exceeds_schema() {
+        // Regression: a DB whose user_version already equals VERSION but whose
+        // message table is missing the tool_call_count column (e.g. version
+        // was bumped by a prior partial run). The migrator must repair the
+        // schema instead of skipping.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA user_version = 4;
+             CREATE TABLE IF NOT EXISTS session (
+                id TEXT PRIMARY KEY,
+                project_path TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'idle',
+                model TEXT NOT NULL DEFAULT '',
+                system_prompt_template TEXT NOT NULL DEFAULT '',
+                config_json TEXT NOT NULL DEFAULT '{}',
+                approved_tools TEXT NOT NULL DEFAULT '[]',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS message (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
+                role TEXT NOT NULL,
+                type TEXT NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                tool_call_id TEXT,
+                tool_name TEXT,
+                tool_arguments TEXT,
+                tool_calls_json TEXT,
+                tool_result_is_error INTEGER,
+                tool_result_duration_ms INTEGER,
+                estimated_tokens INTEGER NOT NULL DEFAULT 0,
+                extra_blocks TEXT,
+                provider_metadata TEXT,
+                actual_tokens_input INTEGER,
+                actual_tokens_output INTEGER,
+                actual_cache_read INTEGER,
+                actual_cache_write INTEGER,
+                actual_cost REAL,
+                skip_context INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_message_session ON message(session_id, id);
+             CREATE INDEX IF NOT EXISTS idx_message_session_role ON message(session_id, role);
+             CREATE INDEX IF NOT EXISTS idx_message_tool_call ON message(tool_call_id);
+             CREATE INDEX IF NOT EXISTS idx_session_project ON session(project_path, created_at);
+             CREATE INDEX IF NOT EXISTS idx_session_updated ON session(updated_at);",
+        )
+        .unwrap();
+
+        // Before migration: tool_call_count column is missing
+        let has_before: bool = conn
+            .prepare(
+                "SELECT COUNT(*) FROM pragma_table_info('message') WHERE name='tool_call_count'",
+            )
+            .and_then(|mut s| s.query_row([], |row| row.get::<_, i64>(0)))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        assert!(
+            !has_before,
+            "tool_call_count should be missing before self-heal"
+        );
+
+        // Run migration — with the old code this early-returns because
+        // user_version (4) >= VERSION (4), leaving the column missing.
+        Migrator::run(&conn).unwrap();
+
+        // After migration: tool_call_count column exists (self-healed)
+        let has_after: bool = conn
+            .prepare(
+                "SELECT COUNT(*) FROM pragma_table_info('message') WHERE name='tool_call_count'",
+            )
+            .and_then(|mut s| s.query_row([], |row| row.get::<_, i64>(0)))
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        assert!(has_after, "tool_call_count should be added by self-heal");
     }
 }

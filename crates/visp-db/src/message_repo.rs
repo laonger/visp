@@ -55,8 +55,8 @@ impl MessageRepo {
             .map(|v| serde_json::to_string(v).unwrap_or_default());
 
         conn.execute(
-            "INSERT INTO message (session_id, role, type, content, tool_call_id, tool_name, tool_arguments, tool_calls_json, tool_result_is_error, tool_result_duration_ms, estimated_tokens, extra_blocks, provider_metadata, actual_tokens_input, actual_tokens_output, actual_cache_read, actual_cache_write, actual_cost, skip_context, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+            "INSERT INTO message (session_id, role, type, content, tool_call_id, tool_name, tool_arguments, tool_calls_json, tool_result_is_error, tool_result_duration_ms, tool_call_count, estimated_tokens, extra_blocks, provider_metadata, actual_tokens_input, actual_tokens_output, actual_cache_read, actual_cache_write, actual_cost, skip_context, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 session_id,
                 role_str,
@@ -68,6 +68,7 @@ impl MessageRepo {
                 tool_calls_json,
                 msg.tool_result_is_error.map(|v| v as i64),
                 msg.tool_result_duration_ms.map(|v| v as i64),
+                msg.tool_calls.as_ref().map(|c| c.len() as i64).unwrap_or(0),
                 msg.estimated_tokens,
                 extra_blocks,
                 provider_metadata,
@@ -86,7 +87,7 @@ impl MessageRepo {
     /// Get all messages for a session, ordered by id (insertion order).
     pub fn get_by_session(conn: &Connection, session_id: &str) -> Result<Vec<Message>> {
         let mut stmt = conn.prepare(
-            "SELECT id, role, type, content, tool_call_id, tool_name, tool_arguments, tool_calls_json, tool_result_is_error, tool_result_duration_ms, estimated_tokens, extra_blocks, provider_metadata, actual_tokens_input, actual_tokens_output, actual_cache_read, actual_cache_write, actual_cost, skip_context, created_at
+            "SELECT id, role, type, content, tool_call_id, tool_name, tool_arguments, tool_calls_json, tool_result_is_error, tool_result_duration_ms, tool_call_count, estimated_tokens, extra_blocks, provider_metadata, actual_tokens_input, actual_tokens_output, actual_cache_read, actual_cache_write, actual_cost, skip_context, created_at
              FROM message WHERE session_id = ?1 ORDER BY id ASC",
         )?;
 
@@ -102,16 +103,17 @@ impl MessageRepo {
                 let tool_calls_json: Option<String> = row.get(7)?;
                 let tool_result_is_error: Option<i64> = row.get(8)?;
                 let tool_result_duration_ms: Option<i64> = row.get(9)?;
-                let estimated_tokens: u32 = row.get(10)?;
-                let extra_blocks_str: Option<String> = row.get(11)?;
-                let provider_metadata_str: Option<String> = row.get(12)?;
-                let actual_tokens_input: Option<u32> = row.get(13)?;
-                let actual_tokens_output: Option<u32> = row.get(14)?;
-                let actual_cache_read: Option<u32> = row.get(15)?;
-                let actual_cache_write: Option<u32> = row.get(16)?;
-                let actual_cost: Option<f64> = row.get(17)?;
-                let skip_context_int: i64 = row.get(18)?;
-                let created_at: Option<i64> = row.get(19)?;
+                let tool_call_count: i64 = row.get(10)?;
+                let estimated_tokens: u32 = row.get(11)?;
+                let extra_blocks_str: Option<String> = row.get(12)?;
+                let provider_metadata_str: Option<String> = row.get(13)?;
+                let actual_tokens_input: Option<u32> = row.get(14)?;
+                let actual_tokens_output: Option<u32> = row.get(15)?;
+                let actual_cache_read: Option<u32> = row.get(16)?;
+                let actual_cache_write: Option<u32> = row.get(17)?;
+                let actual_cost: Option<f64> = row.get(18)?;
+                let skip_context_int: i64 = row.get(19)?;
+                let created_at: Option<i64> = row.get(20)?;
 
                 let role = match role_str.as_str() {
                     "user" => Role::User,
@@ -175,6 +177,7 @@ impl MessageRepo {
                     provider_metadata,
                     tool_result_is_error: tool_result_is_error.map(|v| v != 0),
                     tool_result_duration_ms: tool_result_duration_ms.map(|v| v as u64),
+                    tool_call_count: Some(tool_call_count as u32).filter(|&c| c > 0),
                     created_at,
                 })
             })?
@@ -371,6 +374,7 @@ mod tests {
                     arguments: r#"{"path":"/tmp/test"}"#.to_string(),
                 },
             ]),
+            tool_call_count: None,
             extra_blocks: None,
             skip_context: false,
             estimated_tokens: 0,
@@ -412,6 +416,7 @@ mod tests {
             content: "text".to_string(),
             tool_call_id: None,
             tool_calls: None,
+            tool_call_count: None,
             extra_blocks: None,
             skip_context: false,
             estimated_tokens: 0,
