@@ -502,6 +502,10 @@ async fn handle_stream_result(
                     Some(thinking_blocks.clone())
                 };
                 text_msg.estimated_tokens = estimate_message_tokens(&text_msg);
+                text_msg.actual_tokens_input = Some(input_tokens);
+                text_msg.actual_tokens_output = Some(output_tokens);
+                text_msg.actual_cache_read = Some(cache_read_input_tokens);
+                text_msg.actual_cache_write = Some(cache_creation_input_tokens);
                 ctx.history.push(text_msg.clone());
                 if let Err(e) = sm.append_message(sid, text_msg) {
                     send_event(
@@ -614,6 +618,10 @@ async fn handle_stream_result(
                 Some(thinking_blocks.clone())
             };
             text_msg.estimated_tokens = estimate_message_tokens(&text_msg);
+            text_msg.actual_tokens_input = Some(input_tokens);
+            text_msg.actual_tokens_output = Some(output_tokens);
+            text_msg.actual_cache_read = Some(cache_read_input_tokens);
+            text_msg.actual_cache_write = Some(cache_creation_input_tokens);
             ctx.history.push(text_msg.clone());
             if let Err(e) = sm.append_message(sid, text_msg) {
                 send_event(
@@ -673,6 +681,10 @@ async fn execute_tool_calls(
     tool_calls: &[ToolCallRequest],
     text_buffer: String,
     thinking_blocks: Vec<serde_json::Value>,
+    actual_tokens_input: u32,
+    actual_tokens_output: u32,
+    actual_cache_read: u32,
+    actual_cache_write: u32,
     total_tool_calls: &mut u32,
     ctx: &mut AgentLoopContext,
     sm: &Arc<SessionManager>,
@@ -698,10 +710,10 @@ async fn execute_tool_calls(
             Some(thinking_blocks)
         },
         estimated_tokens: 0,
-        actual_tokens_input: None,
-        actual_tokens_output: None,
-        actual_cache_read: None,
-        actual_cache_write: None,
+        actual_tokens_input: Some(actual_tokens_input),
+        actual_tokens_output: Some(actual_tokens_output),
+        actual_cache_read: Some(actual_cache_read),
+        actual_cache_write: Some(actual_cache_write),
         actual_cost: None,
         provider_metadata: None,
         tool_call_count: Some(tool_calls.len() as u32),
@@ -1444,6 +1456,10 @@ pub async fn run_agent_loop(
                 &output.tool_calls,
                 output.text_buffer,
                 output.thinking_blocks,
+                output.input_tokens,
+                output.output_tokens,
+                output.cache_read_input_tokens,
+                output.cache_creation_input_tokens,
                 &mut total_tool_calls,
                 &mut ctx,
                 &sm,
@@ -1745,5 +1761,116 @@ mod tests {
         );
         // Cancel should not panic
         assert!(result.is_ok() || (result.is_err() && result.unwrap_err().is_cancelled()));
+    }
+
+    /// Provider that returns TextDelta + UsageInfo + Done with explicit token counts
+    struct TokenProvider {
+        text: String,
+        input_tokens: u32,
+        output_tokens: u32,
+        cache_read: u32,
+        cache_write: u32,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for TokenProvider {
+        async fn chat_stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _config: &LlmConfig,
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>
+        {
+            let events: Vec<Result<ChatEvent, LlmError>> = vec![
+                Ok(ChatEvent::TextDelta(self.text.clone())),
+                Ok(ChatEvent::UsageInfo {
+                    input_tokens: self.input_tokens,
+                    output_tokens: self.output_tokens,
+                    tool_calls: 0,
+                    cache_creation_input_tokens: self.cache_write,
+                    cache_read_input_tokens: self.cache_read,
+                }),
+                Ok(ChatEvent::Done),
+            ];
+            Ok(Box::pin(stream::iter(events)))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_actual_tokens_persisted_on_assistant_message() {
+        use crate::session::InMemorySessionStore;
+        use std::path::Path;
+
+        let session_mgr = std::sync::Arc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: std::sync::Arc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            std::sync::Arc::new(Phase2MockTrimmer);
+        let (global_tx, _global_rx) = mpsc::channel::<Envelope>(16);
+        let (_inbox_tx, inbox_rx) = mpsc::channel::<OrchestratorMessage>(16);
+        let permission_rules = std::sync::Arc::new(Vec::new());
+        let ctx = session_mgr
+            .start_loop_v2(&sid, &trimmer, global_tx, inbox_rx, permission_rules)
+            .unwrap();
+
+        let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::new(TokenProvider {
+            text: "Hello world".into(),
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read: 10,
+            cache_write: 5,
+        });
+        let rule_engine = std::sync::Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig::default();
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            std::sync::Arc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("Hi"),
+            tx,
+        )
+        .await;
+
+        // Verify tokens were persisted on assistant message
+        let final_session = session_mgr.get(&sid).unwrap();
+        let assistant_msgs: Vec<_> = final_session
+            .history
+            .iter()
+            .filter(|m| m.role == Role::Assistant)
+            .collect();
+        assert!(
+            !assistant_msgs.is_empty(),
+            "expected at least one assistant message"
+        );
+        let msg = assistant_msgs[0];
+        assert_eq!(
+            msg.actual_tokens_input,
+            Some(100),
+            "actual_tokens_input should be 100"
+        );
+        assert_eq!(
+            msg.actual_tokens_output,
+            Some(50),
+            "actual_tokens_output should be 50"
+        );
+        assert_eq!(
+            msg.actual_cache_read,
+            Some(10),
+            "actual_cache_read should be 10"
+        );
+        assert_eq!(
+            msg.actual_cache_write,
+            Some(5),
+            "actual_cache_write should be 5"
+        );
     }
 }

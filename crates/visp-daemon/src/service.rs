@@ -273,6 +273,7 @@ impl CoderDaemon for CoderDaemonService {
         Ok(Response::new(proto::ListSessionsResponse {
             sessions: sessions
                 .iter()
+                .filter(|s| s.parent_id.is_none())
                 .map(|s| {
                     session_to_proto(
                         s,
