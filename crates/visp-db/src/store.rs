@@ -156,8 +156,14 @@ impl SessionStore for SqliteSessionStore {
             .conn
             .lock()
             .map_err(|e| SessionError::Other(format!("Lock error: {e}")))?;
-        SessionRepo::list_child_sessions(&conn, parent_id)
-            .map_err(|e| SessionError::Other(format!("List child sessions failed: {e}")))
+        let mut sessions = SessionRepo::list_child_sessions(&conn, parent_id)
+            .map_err(|e| SessionError::Other(format!("List child sessions failed: {e}")))?;
+        // Load history for each session (required by replay_session_history)
+        for session in &mut sessions {
+            session.history = MessageRepo::get_by_session(&conn, &session.id)
+                .map_err(|e| SessionError::Other(format!("Get messages failed: {e}")))?;
+        }
+        Ok(sessions)
     }
 }
 
@@ -322,6 +328,14 @@ mod tests {
         child2.created_at_unix = Some(200);
         store.create(child2).unwrap();
 
+        // Append messages to verify history is loaded
+        store
+            .append_message("schild1", Message::user("hello from child1"))
+            .unwrap();
+        store
+            .append_message("schild2", Message::assistant("response from child2"))
+            .unwrap();
+
         // Session for another parent should not leak
         let mut other = sample_session("sother");
         other.parent_id = Some("sother-parent".into());
@@ -331,5 +345,14 @@ mod tests {
         assert_eq!(children.len(), 2);
         let ids: Vec<&str> = children.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, vec!["schild1", "schild2"]);
+
+        // Verify history is loaded
+        let c1 = children.iter().find(|s| s.id == "schild1").unwrap();
+        assert_eq!(c1.history.len(), 1);
+        assert_eq!(c1.history[0].content, "hello from child1");
+
+        let c2 = children.iter().find(|s| s.id == "schild2").unwrap();
+        assert_eq!(c2.history.len(), 1);
+        assert_eq!(c2.history[0].content, "response from child2");
     }
 }
