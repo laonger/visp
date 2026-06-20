@@ -249,10 +249,17 @@ impl Orchestrator {
     pub async fn handle_client_message(&mut self, msg: ClientMessage) {
         match msg {
             ClientMessage::UserInput { session_id, text } => {
-                if let Ok(session) = self.session_mgr.get(&session_id)
-                    && session.status == SessionStatus::Idle
-                {
-                    self.start_main_agent(&session_id, &text).await;
+                match self.session_mgr.get(&session_id) {
+                    Ok(session) if session.parent_id.is_none() => {
+                        // 恢复场景主 session 可能是 Completed/Error，重置为 Idle 再启动
+                        if session.status != SessionStatus::Idle {
+                            let _ = self
+                                .session_mgr
+                                .finish_loop(&session_id, SessionStatus::Idle);
+                        }
+                        self.start_main_agent(&session_id, &text).await;
+                    }
+                    _ => {}
                 }
             }
             ClientMessage::UserQueryResponse {

@@ -374,13 +374,23 @@ impl CoderDaemon for CoderDaemonService {
                 match msg.payload {
                     Some(proto::client_message::Payload::UserInput(input)) => {
                         let session_id = input.session_id;
-                        // 检查 session 是否可接受新输入（仅 Idle 主 session）
-                        // 非活跃 = Running/Completed/Error，或 Idle 带 parent 的子 session
+                        // 检查 session 是否可接受新输入：
+                        // 主 session（无 parent_id）的 Idle/Completed/Error 均可接受；
+                        // Running 理论上不会出现在恢复场景，若有则重置为 Idle。
+                        // 子 session（有 parent_id）一律 view-only。
                         let can_accept = match session_mgr.get(&session_id) {
-                            Ok(s) => match s.status {
-                                visp_core::session::SessionStatus::Idle => s.parent_id.is_none(),
-                                _ => false,
-                            },
+                            Ok(s) => {
+                                let is_main = s.parent_id.is_none();
+                                if is_main && s.status == visp_core::session::SessionStatus::Running
+                                {
+                                    // 恢复场景不应出现 Running，防御性重置
+                                    let _ = session_mgr.finish_loop(
+                                        &session_id,
+                                        visp_core::session::SessionStatus::Idle,
+                                    );
+                                }
+                                is_main
+                            }
                             Err(_) => false,
                         };
                         if can_accept {
@@ -2491,11 +2501,7 @@ mod tests {
         // Simulate what the inbound handler does for UserInput
         let session_mgr = mgr.clone();
         let can_accept = match session_mgr.get("child-1") {
-            Ok(s) => match s.status {
-                SessionStatus::Running => true,
-                SessionStatus::Idle => s.parent_id.is_none(),
-                _ => false,
-            },
+            Ok(s) => s.parent_id.is_none(),
             Err(_) => false,
         };
 
@@ -2520,7 +2526,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_user_input_to_running_session_is_rejected() {
+    async fn test_user_input_to_running_session_resets_and_accepts() {
         let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
         let session = mgr.create(Path::new("/tmp"), LlmConfig::default()).unwrap();
         let sid = session.id.clone();
@@ -2530,22 +2536,26 @@ mod tests {
             Arc::new(visp_core::context::NoopTrimmer);
         mgr.start_loop(&sid, &trimmer).unwrap();
 
-        // Simulate the handler check — Running sessions should be rejected
-        // because after daemon restart there's no actual agent loop, and the
-        // orchestrator only handles Idle sessions.
+        // Simulate the handler check — Running main session should be reset to Idle and accepted
         let session_mgr = mgr.clone();
         let can_accept = match session_mgr.get(&sid) {
-            Ok(s) => match s.status {
-                SessionStatus::Idle => s.parent_id.is_none(),
-                _ => false,
-            },
+            Ok(s) => {
+                let is_main = s.parent_id.is_none();
+                if is_main && s.status == SessionStatus::Running {
+                    let _ = session_mgr.finish_loop(&sid, SessionStatus::Idle);
+                }
+                is_main
+            }
             Err(_) => false,
         };
 
         assert!(
-            !can_accept,
-            "Running session should be rejected for UserInput"
+            can_accept,
+            "Running main session should be accepted after reset"
         );
+        // Verify the session is now Idle
+        let s = session_mgr.get(&sid).unwrap();
+        assert_eq!(s.status, SessionStatus::Idle);
     }
 
     #[tokio::test]
@@ -2568,11 +2578,7 @@ mod tests {
         // Simulate handler
         let session_mgr = mgr.clone();
         let can_accept = match session_mgr.get("child-99") {
-            Ok(s) => match s.status {
-                SessionStatus::Running => true,
-                SessionStatus::Idle => s.parent_id.is_none(),
-                _ => false,
-            },
+            Ok(s) => s.parent_id.is_none(),
             Err(_) => false,
         };
 
@@ -2593,6 +2599,66 @@ mod tests {
             }
             _ => panic!("expected Error payload"),
         }
+    }
+
+    // ── 5d: Completed/Error 主 session 可接受输入 (2) ────────────────────
+
+    #[tokio::test]
+    async fn test_user_input_to_completed_main_session_is_accepted() {
+        let mut store = InMemorySessionStore::new();
+        store
+            .create(make_session(
+                "main-completed",
+                None,
+                "orchestrator",
+                vec![],
+                SessionStatus::Completed,
+            ))
+            .unwrap();
+        let mgr = StdArc::new(SessionManager::new(store));
+        let session_mgr = mgr.clone();
+
+        let can_accept = match session_mgr.get("main-completed") {
+            Ok(s) => {
+                let is_main = s.parent_id.is_none();
+                if is_main && s.status == SessionStatus::Running {
+                    let _ = session_mgr.finish_loop("main-completed", SessionStatus::Idle);
+                }
+                is_main
+            }
+            Err(_) => false,
+        };
+
+        assert!(can_accept, "Completed main session should be accepted");
+    }
+
+    #[tokio::test]
+    async fn test_user_input_to_error_main_session_is_accepted() {
+        let mut store = InMemorySessionStore::new();
+        store
+            .create(make_session(
+                "main-error",
+                None,
+                "orchestrator",
+                vec![],
+                SessionStatus::Error,
+            ))
+            .unwrap();
+        let mgr = StdArc::new(SessionManager::new(store));
+        let session_mgr = mgr.clone();
+
+        let can_accept = match session_mgr.get("main-error") {
+            Ok(s) => {
+                let is_main = s.parent_id.is_none();
+                if is_main && s.status == SessionStatus::Running {
+                    let _ = session_mgr.finish_loop("main-error", SessionStatus::Idle);
+                }
+                is_main
+            }
+            Err(_) => false,
+        };
+
+        assert!(can_accept, "Error main session should be accepted");
     }
 
     // ── 7a: End-to-end integration tests (3) ───────────────────────────────────
