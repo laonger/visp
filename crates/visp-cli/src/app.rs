@@ -1488,6 +1488,7 @@ impl AppState {
         // 重置 active tab 的内容状态（msg/streaming/generating/usage）
         let tab = self.active_tab_mut();
         tab.messages.clear();
+        tab.frames.clear();
         tab.streaming_text.clear();
         tab.generating = false;
         tab.pending_usage = None;
