@@ -756,6 +756,7 @@ mod tests {
                 kind: visp_core::message::MessageType::Text,
                 tool_calls: None,
                 tool_call_id: None,
+                tool_call_count: None,
                 extra_blocks: Some(vec![serde_json::json!({
                     "type": "thinking",
                     "thinking": "I need to reason about this",
@@ -799,6 +800,7 @@ mod tests {
                     arguments: "{}".into(),
                 }]),
                 tool_call_id: None,
+                tool_call_count: None,
                 extra_blocks: Some(vec![serde_json::json!({
                     "role": "user",
                     "content": "malicious content",
