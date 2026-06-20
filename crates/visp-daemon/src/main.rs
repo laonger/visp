@@ -12,7 +12,7 @@ use visp_core::{
     context::ContextTrimmer,
     provider::LlmProvider,
     rules::RuleEngine,
-    session::{InMemorySessionStore, SessionManager, SessionStore},
+    session::{InMemorySessionStore, SessionManager, SessionStatus, SessionStore},
     tool_registry::ToolRegistry,
 };
 
@@ -247,6 +247,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let session_mgr = Arc::new(SessionManager::new(store));
+
+    // 7.1. Reset orphaned Running sessions to Idle.
+    // When daemon restarts, sessions that were Running in the previous
+    // instance have no actual agent loop but retain Running status in DB.
+    // Resetting them to Idle ensures they can accept new input.
+    if let Ok(sessions) = session_mgr.list() {
+        for session in &sessions {
+            if session.status == SessionStatus::Running {
+                tracing::info!(
+                    session_id = %session.id,
+                    "resetting orphaned Running session to Idle"
+                );
+                let _ = session_mgr.finish_loop(&session.id, SessionStatus::Idle);
+            }
+        }
+    }
 
     // 8. Agent config
     let agent_config = AgentConfig {

@@ -374,11 +374,10 @@ impl CoderDaemon for CoderDaemonService {
                 match msg.payload {
                     Some(proto::client_message::Payload::UserInput(input)) => {
                         let session_id = input.session_id;
-                        // 检查 session 是否活跃（有运行中的 agent loop 或可启动的 Idle 主 session）
-                        // 非活跃 = Completed/Error，或 Idle/无 parent 的子 session
+                        // 检查 session 是否可接受新输入（仅 Idle 主 session）
+                        // 非活跃 = Running/Completed/Error，或 Idle 带 parent 的子 session
                         let can_accept = match session_mgr.get(&session_id) {
                             Ok(s) => match s.status {
-                                visp_core::session::SessionStatus::Running => true,
                                 visp_core::session::SessionStatus::Idle => s.parent_id.is_none(),
                                 _ => false,
                             },
@@ -2521,7 +2520,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_user_input_to_running_session_works() {
+    async fn test_user_input_to_running_session_is_rejected() {
         let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
         let session = mgr.create(Path::new("/tmp"), LlmConfig::default()).unwrap();
         let sid = session.id.clone();
@@ -2531,18 +2530,22 @@ mod tests {
             Arc::new(visp_core::context::NoopTrimmer);
         mgr.start_loop(&sid, &trimmer).unwrap();
 
-        // Simulate the handler check
+        // Simulate the handler check — Running sessions should be rejected
+        // because after daemon restart there's no actual agent loop, and the
+        // orchestrator only handles Idle sessions.
         let session_mgr = mgr.clone();
         let can_accept = match session_mgr.get(&sid) {
             Ok(s) => match s.status {
-                SessionStatus::Running => true,
                 SessionStatus::Idle => s.parent_id.is_none(),
                 _ => false,
             },
             Err(_) => false,
         };
 
-        assert!(can_accept, "Running session should accept UserInput");
+        assert!(
+            !can_accept,
+            "Running session should be rejected for UserInput"
+        );
     }
 
     #[tokio::test]
