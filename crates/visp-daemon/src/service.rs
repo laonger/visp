@@ -2591,4 +2591,370 @@ mod tests {
             _ => panic!("expected Error payload"),
         }
     }
+
+    // ── 7a: End-to-end integration tests (3) ───────────────────────────────────
+
+    #[tokio::test]
+    async fn e2e_resume_session_with_nested_sub_agents() {
+        let mut store = InMemorySessionStore::new();
+
+        // Main session: User + Assistant + Tool
+        let main_msgs = vec![
+            Message::user("hello"),
+            Message::assistant("main response"),
+            Message::tool("main result", "call-0"),
+        ];
+        let main = make_session("main", None, "default", main_msgs, SessionStatus::Idle);
+        let main_id = main.id.clone();
+        store.create(main).unwrap();
+
+        // Child session: User(task prompt) + Assistant + Tool
+        store
+            .create(make_session(
+                "child",
+                Some("main"),
+                "sub-agent-child",
+                vec![
+                    Message::user("task: implement feature X"),
+                    Message::assistant("child response"),
+                    Message::tool("child result", "call-1"),
+                ],
+                SessionStatus::Idle,
+            ))
+            .unwrap();
+
+        // Grandchild session: User(task prompt) + Assistant + Tool
+        store
+            .create(make_session(
+                "grand",
+                Some("child"),
+                "sub-agent-grand",
+                vec![
+                    Message::user("task: review the code"),
+                    Message::assistant("grand response"),
+                    Message::tool("grand result", "call-2"),
+                ],
+                SessionStatus::Idle,
+            ))
+            .unwrap();
+
+        let mgr = StdArc::new(SessionManager::new(store));
+        let (tx, mut rx) = mpsc::channel(256);
+
+        simulate_join_session(&mgr, &tx, &main_id).await;
+        drop(tx);
+
+        let mut frames = Vec::new();
+        while let Some(Ok(msg)) = rx.recv().await {
+            frames.push(msg);
+        }
+
+        // 12 frames: 4 (main) + 4 (child) + 4 (grand)
+        assert_eq!(
+            frames.len(),
+            12,
+            "expected 12 frames: main(4) + child(4) + grand(4)"
+        );
+
+        // ── Main session (frames 0-3) ──
+        match &frames[0].payload {
+            Some(proto::server_message::Payload::StatusUpdate(s)) => {
+                assert_eq!(s.session_id, main_id);
+                assert!(!s.view_only, "main session must have view_only=false");
+                assert!(
+                    s.agent_name.is_empty(),
+                    "main session agent_name should be empty"
+                );
+                assert_eq!(
+                    s.user_inputs,
+                    vec!["hello"],
+                    "main user_inputs should contain user message"
+                );
+            }
+            _ => panic!("frame 0 should be main StatusUpdate"),
+        }
+        match &frames[1].payload {
+            Some(proto::server_message::Payload::TextDelta(t)) => {
+                assert_eq!(t.delta, "main response");
+                assert_eq!(t.session_id, main_id);
+            }
+            _ => panic!("frame 1 should be main TextDelta"),
+        }
+        match &frames[2].payload {
+            Some(proto::server_message::Payload::ToolResult(tr)) => {
+                assert_eq!(tr.call_id, "call-0");
+                assert_eq!(tr.content, "main result");
+                assert_eq!(tr.session_id, main_id);
+            }
+            _ => panic!("frame 2 should be main ToolResult"),
+        }
+        match &frames[3].payload {
+            Some(proto::server_message::Payload::Done(d)) => {
+                assert_eq!(d.session_id, main_id);
+            }
+            _ => panic!("frame 3 should be main Done"),
+        }
+
+        // ── Child session (frames 4-7) ──
+        match &frames[4].payload {
+            Some(proto::server_message::Payload::StatusUpdate(s)) => {
+                assert_eq!(s.session_id, "child");
+                assert!(s.view_only, "child session must have view_only=true");
+                assert_eq!(s.agent_name, "sub-agent-child");
+                assert_eq!(
+                    s.user_inputs,
+                    vec!["task: implement feature X"],
+                    "child user_inputs should contain task prompt"
+                );
+            }
+            _ => panic!("frame 4 should be child StatusUpdate"),
+        }
+        match &frames[5].payload {
+            Some(proto::server_message::Payload::TextDelta(t)) => {
+                assert_eq!(t.delta, "child response");
+                assert_eq!(t.session_id, "child");
+                assert_eq!(t.agent_name, "sub-agent-child");
+            }
+            _ => panic!("frame 5 should be child TextDelta"),
+        }
+        match &frames[6].payload {
+            Some(proto::server_message::Payload::ToolResult(tr)) => {
+                assert_eq!(tr.call_id, "call-1");
+                assert_eq!(tr.content, "child result");
+                assert_eq!(tr.session_id, "child");
+                assert_eq!(tr.agent_name, "sub-agent-child");
+            }
+            _ => panic!("frame 6 should be child ToolResult"),
+        }
+        match &frames[7].payload {
+            Some(proto::server_message::Payload::Done(d)) => {
+                assert_eq!(d.session_id, "child");
+            }
+            _ => panic!("frame 7 should be child Done"),
+        }
+
+        // ── Grandchild session (frames 8-11) ──
+        match &frames[8].payload {
+            Some(proto::server_message::Payload::StatusUpdate(s)) => {
+                assert_eq!(s.session_id, "grand");
+                assert!(s.view_only, "grand session must have view_only=true");
+                assert_eq!(s.agent_name, "sub-agent-grand");
+                assert_eq!(
+                    s.user_inputs,
+                    vec!["task: review the code"],
+                    "grand user_inputs should contain task prompt"
+                );
+            }
+            _ => panic!("frame 8 should be grand StatusUpdate"),
+        }
+        match &frames[9].payload {
+            Some(proto::server_message::Payload::TextDelta(t)) => {
+                assert_eq!(t.delta, "grand response");
+                assert_eq!(t.session_id, "grand");
+                assert_eq!(t.agent_name, "sub-agent-grand");
+            }
+            _ => panic!("frame 9 should be grand TextDelta"),
+        }
+        match &frames[10].payload {
+            Some(proto::server_message::Payload::ToolResult(tr)) => {
+                assert_eq!(tr.call_id, "call-2");
+                assert_eq!(tr.content, "grand result");
+                assert_eq!(tr.session_id, "grand");
+            }
+            _ => panic!("frame 10 should be grand ToolResult"),
+        }
+        match &frames[11].payload {
+            Some(proto::server_message::Payload::Done(d)) => {
+                assert_eq!(d.session_id, "grand");
+            }
+            _ => panic!("frame 11 should be grand Done"),
+        }
+    }
+
+    #[tokio::test]
+    async fn e2e_resume_session_no_sub_agents_unchanged() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = mgr.create(Path::new("/tmp"), LlmConfig::default()).unwrap();
+        let sid = session.id.clone();
+        mgr.append_message(&sid, Message::user("prompt")).unwrap();
+        mgr.append_message(&sid, Message::assistant("response 1"))
+            .unwrap();
+
+        let (tx, mut rx) = mpsc::channel(16);
+        simulate_join_session(&mgr, &tx, &sid).await;
+
+        let f1 = rx.recv().await.unwrap().unwrap();
+        let f2 = rx.recv().await.unwrap().unwrap();
+        let f3 = rx.recv().await.unwrap().unwrap();
+        let no_f4 = rx.try_recv();
+
+        // Frame 1: StatusUpdate (view_only=false, no descendants)
+        match &f1.payload {
+            Some(proto::server_message::Payload::StatusUpdate(s)) => {
+                assert_eq!(s.session_id, sid);
+                assert!(!s.view_only, "main must have view_only=false");
+                assert_eq!(s.user_inputs, vec!["prompt"]);
+            }
+            _ => panic!("frame 0 should be StatusUpdate"),
+        }
+
+        // Frame 2: TextDelta (no user messages leaked)
+        match &f2.payload {
+            Some(proto::server_message::Payload::TextDelta(t)) => {
+                assert_eq!(t.delta, "response 1");
+                assert_eq!(t.session_id, sid);
+            }
+            _ => panic!("frame 1 should be TextDelta"),
+        }
+
+        // Frame 3: Done
+        match &f3.payload {
+            Some(proto::server_message::Payload::Done(d)) => {
+                assert_eq!(d.session_id, sid);
+            }
+            _ => panic!("frame 2 should be Done"),
+        }
+
+        // No extra frames
+        assert!(no_f4.is_err(), "no descendants → no extra frames");
+    }
+
+    #[tokio::test]
+    async fn e2e_descendant_load_failure_skipped() {
+        use std::sync::Mutex;
+
+        struct FailOnSecondListCall {
+            calls: Mutex<usize>,
+            sessions: Vec<Session>,
+        }
+
+        impl SessionStore for FailOnSecondListCall {
+            fn create(&mut self, _s: Session) -> Result<(), SessionError> {
+                Ok(())
+            }
+            fn get(&self, id: &str) -> Result<Session, SessionError> {
+                self.sessions
+                    .iter()
+                    .find(|s| s.id == id)
+                    .cloned()
+                    .ok_or_else(|| SessionError::NotFound("mock".into()))
+            }
+            fn list(&self) -> Result<Vec<Session>, SessionError> {
+                Ok(self.sessions.clone())
+            }
+            fn delete(&mut self, _id: &str) -> Result<(), SessionError> {
+                Ok(())
+            }
+            fn update(&mut self, _s: Session) -> Result<(), SessionError> {
+                Ok(())
+            }
+            fn get_messages(&self, _id: &str) -> Result<Vec<Message>, SessionError> {
+                Ok(vec![])
+            }
+            fn append_message(&mut self, _id: &str, _m: Message) -> Result<(), SessionError> {
+                Ok(())
+            }
+            fn list_by_project(&self, _p: &str) -> Result<Vec<Session>, SessionError> {
+                Ok(self.sessions.clone())
+            }
+            fn list_child_sessions(&self, parent_id: &str) -> Result<Vec<Session>, SessionError> {
+                let mut calls = self.calls.lock().unwrap();
+                *calls += 1;
+                if *calls == 2 {
+                    // Second call (for child A's own children) fails
+                    return Err(SessionError::NotFound("simulated load failure".into()));
+                }
+                Ok(self
+                    .sessions
+                    .iter()
+                    .filter(|s| s.parent_id.as_deref() == Some(parent_id))
+                    .cloned()
+                    .collect())
+            }
+        }
+
+        let main = make_session("main", None, "default", vec![], SessionStatus::Idle);
+        let main_id = main.id.clone();
+        let child_a = make_session(
+            "child-a",
+            Some("main"),
+            "agent-a",
+            vec![Message::assistant("from A")],
+            SessionStatus::Idle,
+        );
+        let child_b = make_session(
+            "child-b",
+            Some("main"),
+            "agent-b",
+            vec![Message::assistant("from B")],
+            SessionStatus::Idle,
+        );
+
+        let store = FailOnSecondListCall {
+            calls: Mutex::new(0),
+            sessions: vec![main, child_a, child_b],
+        };
+        let mgr = StdArc::new(SessionManager::new(store));
+        let (tx, mut rx) = mpsc::channel(256);
+
+        simulate_join_session(&mgr, &tx, &main_id).await;
+        drop(tx);
+
+        let mut frames = Vec::new();
+        while let Some(Ok(msg)) = rx.recv().await {
+            frames.push(msg);
+        }
+
+        // Main: StatusUpdate + Done = 2
+        // child-a: StatusUpdate + TextDelta + Done = 3
+        // child-b: StatusUpdate + TextDelta + Done = 3
+        // Total = 8
+        assert_eq!(
+            frames.len(),
+            8,
+            "both children should replay despite load failure during BFS"
+        );
+
+        // Verify main frames
+        match &frames[0].payload {
+            Some(proto::server_message::Payload::StatusUpdate(s)) => {
+                assert!(!s.view_only);
+            }
+            _ => panic!("frame 0 should be main StatusUpdate"),
+        }
+
+        // Verify both children replayed (any sibling order)
+        let child_session_ids: HashSet<String> = frames
+            .iter()
+            .filter_map(|f| match &f.payload {
+                Some(proto::server_message::Payload::StatusUpdate(s)) if s.view_only => {
+                    Some(s.session_id.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            child_session_ids.contains("child-a"),
+            "child-a should be replayed"
+        );
+        assert!(
+            child_session_ids.contains("child-b"),
+            "child-b should be replayed"
+        );
+
+        // Verify both TextDeltas present
+        let child_text: HashSet<String> = frames
+            .iter()
+            .filter_map(|f| match &f.payload {
+                Some(proto::server_message::Payload::TextDelta(t))
+                    if t.session_id == "child-a" || t.session_id == "child-b" =>
+                {
+                    Some(t.delta.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(child_text.contains("from A"), "child-a text should appear");
+        assert!(child_text.contains("from B"), "child-b text should appear");
+    }
 }
