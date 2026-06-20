@@ -627,6 +627,12 @@ impl SessionManager {
         store.get(id)
     }
 
+    /// 获取会话的全部消息
+    pub fn get_messages(&self, id: &str) -> Result<Vec<Message>, SessionError> {
+        let store = self.store.lock().unwrap();
+        store.get_messages(id)
+    }
+
     /// 获取指定父 session 的所有子 session（直接代理 SessionStore.list_child_sessions）
     pub fn list_child_sessions(&self, parent_id: &str) -> Result<Vec<Session>, SessionError> {
         let store = self.store.lock().unwrap();

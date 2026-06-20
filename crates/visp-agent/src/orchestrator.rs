@@ -459,15 +459,8 @@ impl Orchestrator {
             &agent_def.permission,
         );
 
-        // 5. Generate session ID
-        let sub_session_id = format!(
-            "{parent_session_id}/{subagent_type}/{}",
-            uuid::Uuid::new_v4()
-                .to_string()
-                .split('-')
-                .next()
-                .unwrap_or("0000")
-        );
+        // 5. Generate session ID — pure UUID, parent/agent stored in session table
+        let sub_session_id = uuid::Uuid::new_v4().to_string();
 
         // 6. Create sub session
         let sub_session = match self.session_mgr.create_sub(SubSessionParams {

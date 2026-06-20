@@ -264,6 +264,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // 7.2. Delete empty sessions (no messages).
+    // Sessions created but never used (e.g. from aborted /new commands)
+    // clutter the session list. Clean them up on startup.
+    if let Ok(sessions) = session_mgr.list() {
+        for session in &sessions {
+            if let Ok(messages) = session_mgr.get_messages(&session.id)
+                && messages.is_empty()
+            {
+                tracing::info!(
+                    session_id = %session.id,
+                    "deleting empty session (no messages)"
+                );
+                let _ = session_mgr.delete(&session.id);
+            }
+        }
+    }
+
     // 8. Agent config
     let agent_config = AgentConfig {
         soft_limit: config.agent.soft_limit,
