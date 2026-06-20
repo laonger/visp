@@ -5,7 +5,7 @@ pub struct Migrator;
 
 impl Migrator {
     /// Current schema version (incremented on each migration).
-    pub const VERSION: i64 = 4;
+    pub const VERSION: i64 = 5;
 
     /// SQL to create the session table.
     const CREATE_SESSION: &'static str = r#"
@@ -61,6 +61,7 @@ impl Migrator {
         "CREATE INDEX IF NOT EXISTS idx_message_tool_call ON message(tool_call_id);",
         "CREATE INDEX IF NOT EXISTS idx_session_project ON session(project_path, created_at);",
         "CREATE INDEX IF NOT EXISTS idx_session_updated ON session(updated_at);",
+        "CREATE INDEX IF NOT EXISTS idx_session_parent_id ON session(parent_id);",
     ];
 
     /// Run all pending migrations.
@@ -157,6 +158,11 @@ impl Migrator {
             }
         }
 
+        // Create indexes (after all columns exist from version-specific migrations)
+        for idx in Self::INDEXES {
+            conn.execute_batch(idx)?;
+        }
+
         // Update version
         conn.pragma_update(None, "user_version", Self::VERSION)?;
 
@@ -206,6 +212,7 @@ mod tests {
             "idx_message_session",
             "idx_message_session_role",
             "idx_message_tool_call",
+            "idx_session_parent_id",
             "idx_session_project",
             "idx_session_updated",
         ];
@@ -229,12 +236,38 @@ mod tests {
     }
 
     #[test]
+    fn test_migrate_parent_id_index_idempotent() {
+        let conn = setup_db();
+        // Verify the index exists after first migration
+        let idx_count_before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_session_parent_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_count_before, 1);
+
+        // Second migration run should be idempotent (IF NOT EXISTS)
+        Migrator::run(&conn).unwrap();
+
+        let idx_count_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_session_parent_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_count_after, 1);
+    }
+
+    #[test]
     fn test_migrate_version() {
         let conn = setup_db();
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
     }
 
     #[test]
@@ -297,7 +330,7 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
 
         // Verify tool_calls_json column exists
         let has_column: bool = conn
@@ -395,11 +428,11 @@ mod tests {
         // Run migration (should upgrade to v3→v4)
         Migrator::run(&conn).unwrap();
 
-        // Verify version is now 4 (migrates through v3→v4 as well)
+        // Verify version is now 5
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
 
         // Verify skip_context column exists
         let has_column: bool = conn
@@ -445,7 +478,7 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
 
         // Verify new columns exist
         for col in &["agent_name", "parent_id", "permission_json"] {

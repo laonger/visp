@@ -151,9 +151,13 @@ impl SessionStore for SqliteSessionStore {
             .map_err(|e| SessionError::Other(format!("List by project failed: {e}")))
     }
 
-    fn list_child_sessions(&self, _parent_id: &str) -> Result<Vec<Session>, SessionError> {
-        // Wave 2: Replace with real SQL query filtering by parent_id
-        Ok(vec![])
+    fn list_child_sessions(&self, parent_id: &str) -> Result<Vec<Session>, SessionError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| SessionError::Other(format!("Lock error: {e}")))?;
+        SessionRepo::list_child_sessions(&conn, parent_id)
+            .map_err(|e| SessionError::Other(format!("List child sessions failed: {e}")))
     }
 }
 
@@ -302,5 +306,30 @@ mod tests {
         // Verify messages are gone
         let messages = store.get_messages("c1").unwrap();
         assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_store_list_child_sessions() {
+        let mut store = setup();
+
+        let mut child1 = sample_session("schild1");
+        child1.parent_id = Some("sparent".into());
+        child1.created_at_unix = Some(100);
+        store.create(child1).unwrap();
+
+        let mut child2 = sample_session("schild2");
+        child2.parent_id = Some("sparent".into());
+        child2.created_at_unix = Some(200);
+        store.create(child2).unwrap();
+
+        // Session for another parent should not leak
+        let mut other = sample_session("sother");
+        other.parent_id = Some("sother-parent".into());
+        store.create(other).unwrap();
+
+        let children = store.list_child_sessions("sparent").unwrap();
+        assert_eq!(children.len(), 2);
+        let ids: Vec<&str> = children.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["schild1", "schild2"]);
     }
 }

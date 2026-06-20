@@ -103,6 +103,25 @@ impl SessionRepo {
         Ok(sessions)
     }
 
+    /// List child sessions by parent_id.
+    pub fn list_child_sessions(conn: &Connection, parent_id: &str) -> Result<Vec<Session>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, project_path, status, model, system_prompt_template, config_json, approved_tools, agent_name, parent_id, permission_json, created_at
+             FROM session WHERE parent_id = ?1 AND id != ?1 ORDER BY created_at ASC",
+        )?;
+
+        let mut sessions = stmt
+            .query_map(params![parent_id], Self::row_to_session)?
+            .collect::<Result<Vec<_>>>()?;
+
+        for session in &mut sessions {
+            session.last_user_message =
+                MessageRepo::get_last_user_message(conn, &session.id).unwrap_or(None);
+        }
+
+        Ok(sessions)
+    }
+
     /// Update a session. Returns the number of rows affected.
     pub fn update(conn: &Connection, session: &Session) -> Result<usize> {
         let now = chrono::Utc::now().timestamp_millis();
@@ -397,5 +416,103 @@ mod tests {
         // Other project should have no sessions
         let other = SessionRepo::list_by_project(&conn, "/other").unwrap();
         assert!(other.is_empty());
+    }
+
+    #[test]
+    fn test_list_child_sessions_returns_children() {
+        let conn = setup();
+        let mut child1 = sample_session("child-1");
+        child1.parent_id = Some("parent-1".into());
+        child1.created_at_unix = Some(100);
+        SessionRepo::insert(&conn, &child1).unwrap();
+        let mut child2 = sample_session("child-2");
+        child2.parent_id = Some("parent-1".into());
+        child2.created_at_unix = Some(200);
+        SessionRepo::insert(&conn, &child2).unwrap();
+
+        let children = SessionRepo::list_child_sessions(&conn, "parent-1").unwrap();
+        assert_eq!(children.len(), 2);
+    }
+
+    #[test]
+    fn test_list_child_sessions_empty_when_no_children() {
+        let conn = setup();
+        let parent = sample_session("lonely");
+        SessionRepo::insert(&conn, &parent).unwrap();
+
+        let children = SessionRepo::list_child_sessions(&conn, "lonely").unwrap();
+        assert!(children.is_empty());
+    }
+
+    #[test]
+    fn test_list_child_sessions_orders_by_created_at_asc() {
+        let conn = setup();
+        for i in 0..3 {
+            let mut child = sample_session(&format!("child-order-{i}"));
+            child.parent_id = Some("parent-order".into());
+            child.created_at_unix = Some(3000 - i * 1000); // 3000, 2000, 1000 — reversed insertion
+            SessionRepo::insert(&conn, &child).unwrap();
+        }
+
+        let children = SessionRepo::list_child_sessions(&conn, "parent-order").unwrap();
+        assert_eq!(children.len(), 3);
+        assert!(children[0].created_at_unix.unwrap() <= children[1].created_at_unix.unwrap());
+        assert!(children[1].created_at_unix.unwrap() <= children[2].created_at_unix.unwrap());
+    }
+
+    #[test]
+    fn test_list_child_sessions_excludes_parent_self() {
+        let conn = setup();
+        // A session where parent_id equals its own id
+        let mut self_ref = sample_session("self-ref");
+        self_ref.parent_id = Some("self-ref".into());
+        self_ref.created_at_unix = Some(100);
+        SessionRepo::insert(&conn, &self_ref).unwrap();
+        // A real child
+        let mut child = sample_session("real-child");
+        child.parent_id = Some("self-ref".into());
+        child.created_at_unix = Some(200);
+        SessionRepo::insert(&conn, &child).unwrap();
+
+        let children = SessionRepo::list_child_sessions(&conn, "self-ref").unwrap();
+        // Should only return the real child, not the self-referential session
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].id, "real-child");
+    }
+
+    #[test]
+    fn test_list_child_sessions_does_not_return_other_parents_children() {
+        let conn = setup();
+        let mut c1 = sample_session("c1");
+        c1.parent_id = Some("p1".into());
+        c1.created_at_unix = Some(100);
+        SessionRepo::insert(&conn, &c1).unwrap();
+        let mut c2 = sample_session("c2");
+        c2.parent_id = Some("p2".into());
+        c2.created_at_unix = Some(100);
+        SessionRepo::insert(&conn, &c2).unwrap();
+
+        let children = SessionRepo::list_child_sessions(&conn, "p1").unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].id, "c1");
+    }
+
+    #[test]
+    fn test_list_child_sessions_only_returns_direct_children() {
+        let conn = setup();
+        // parent → child → grandchild
+        let mut child = sample_session("child");
+        child.parent_id = Some("parent".into());
+        child.created_at_unix = Some(100);
+        SessionRepo::insert(&conn, &child).unwrap();
+        let mut grandchild = sample_session("grandchild");
+        grandchild.parent_id = Some("child".into());
+        grandchild.created_at_unix = Some(200);
+        SessionRepo::insert(&conn, &grandchild).unwrap();
+
+        // Querying parent should only return child (not grandchild)
+        let children = SessionRepo::list_child_sessions(&conn, "parent").unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].id, "child");
     }
 }
