@@ -150,6 +150,11 @@ impl SessionStore for SqliteSessionStore {
         SessionRepo::list_by_project(&conn, project_path)
             .map_err(|e| SessionError::Other(format!("List by project failed: {e}")))
     }
+
+    fn list_child_sessions(&self, _parent_id: &str) -> Result<Vec<Session>, SessionError> {
+        // Wave 2: Replace with real SQL query filtering by parent_id
+        Ok(vec![])
+    }
 }
 
 #[cfg(test)]

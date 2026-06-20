@@ -63,6 +63,8 @@ pub trait SessionStore: Send {
     fn append_message(&mut self, session_id: &str, message: Message) -> Result<(), SessionError>;
     /// 按项目路径过滤会话列表
     fn list_by_project(&self, project_path: &str) -> Result<Vec<Session>, SessionError>;
+    /// 获取指定父会话的所有子会话
+    fn list_child_sessions(&self, parent_id: &str) -> Result<Vec<Session>, SessionError>;
 }
 
 /// 内存会话存储
@@ -172,6 +174,15 @@ impl SessionStore for InMemorySessionStore {
         }
         Ok(sessions)
     }
+
+    fn list_child_sessions(&self, parent_id: &str) -> Result<Vec<Session>, SessionError> {
+        Ok(self
+            .sessions
+            .values()
+            .filter(|s| s.parent_id.as_deref() == Some(parent_id))
+            .cloned()
+            .collect())
+    }
 }
 
 impl SessionStore for Box<dyn SessionStore> {
@@ -198,6 +209,9 @@ impl SessionStore for Box<dyn SessionStore> {
     }
     fn list_by_project(&self, project_path: &str) -> Result<Vec<Session>, SessionError> {
         (**self).list_by_project(project_path)
+    }
+    fn list_child_sessions(&self, parent_id: &str) -> Result<Vec<Session>, SessionError> {
+        (**self).list_child_sessions(parent_id)
     }
 }
 
@@ -652,6 +666,91 @@ mod tests {
         fn trim(&self, history: &[Message], _: u32, _: u32, _: u32) -> Vec<Message> {
             history.to_vec()
         }
+    }
+
+    // ── MockSessionStore for list_child_sessions tests ────────────────────
+
+    struct MockSessionStore {
+        child_sessions: Vec<Session>,
+    }
+
+    impl SessionStore for MockSessionStore {
+        fn create(&mut self, _session: Session) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn get(&self, _session_id: &str) -> Result<Session, SessionError> {
+            unimplemented!()
+        }
+        fn list(&self) -> Result<Vec<Session>, SessionError> {
+            unimplemented!()
+        }
+        fn delete(&mut self, _session_id: &str) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn update(&mut self, _session: Session) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn get_messages(&self, _session_id: &str) -> Result<Vec<Message>, SessionError> {
+            unimplemented!()
+        }
+        fn append_message(
+            &mut self,
+            _session_id: &str,
+            _message: Message,
+        ) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn list_by_project(&self, _project_path: &str) -> Result<Vec<Session>, SessionError> {
+            unimplemented!()
+        }
+        fn list_child_sessions(&self, _parent_id: &str) -> Result<Vec<Session>, SessionError> {
+            Ok(self.child_sessions.clone())
+        }
+    }
+
+    #[test]
+    fn session_store_list_child_sessions_signature() {
+        let store = MockSessionStore {
+            child_sessions: vec![],
+        };
+        let result = store.list_child_sessions("any-parent");
+        assert_eq!(result.unwrap(), vec![]);
+    }
+
+    #[test]
+    fn mock_store_list_child_sessions_returns_empty() {
+        let store = MockSessionStore {
+            child_sessions: vec![],
+        };
+        let result = store.list_child_sessions("any");
+        assert_eq!(result.unwrap(), vec![]);
+    }
+
+    #[test]
+    fn mock_store_list_child_sessions_returns_sessions() {
+        let session = Session {
+            id: "child-1".into(),
+            project_path: PathBuf::from("/tmp"),
+            status: SessionStatus::Idle,
+            created_at: Instant::now(),
+            created_at_unix: Some(1700000000000),
+            history: vec![],
+            last_user_message: None,
+            config: LlmConfig::default(),
+            system_prompt_template: "default".into(),
+            approved_tools: HashSet::new(),
+            agent_name: "sub-agent".into(),
+            parent_id: Some("parent-1".into()),
+            permission: vec![],
+        };
+        let store = MockSessionStore {
+            child_sessions: vec![session.clone()],
+        };
+        let result = store.list_child_sessions("parent-1").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "child-1");
+        assert_eq!(result[0].agent_name, "sub-agent");
+        assert_eq!(result[0].parent_id, Some("parent-1".into()));
     }
 
     // ── Step 3: Session.created_at_unix ──

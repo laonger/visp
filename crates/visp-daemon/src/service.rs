@@ -444,6 +444,7 @@ impl CoderDaemon for CoderDaemonService {
                                         ),
                                         user_inputs,
                                         agent_name: String::new(),
+                                        view_only: false,
                                     },
                                 )),
                             };
@@ -890,6 +891,7 @@ fn agent_event_to_server_message(
                     session_id: sid,
                     user_inputs: vec![],
                     agent_name: aname,
+                    view_only: false,
                 },
             )),
         },

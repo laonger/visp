@@ -38,6 +38,7 @@ fn tab_label_line(tab: &TabEntry, is_active: bool) -> Line<'static> {
         AgentStatus::Running => ("▶ ", Color::Yellow),
         AgentStatus::Done => ("✓ ", Color::Green),
         AgentStatus::Error => ("✗ ", Color::Red),
+        AgentStatus::ViewOnly => ("◷ ", Color::DarkGray),
     };
     let (lpad, rpad) = if is_active { ("[", "]") } else { (" ", " ") };
     Line::from(vec![

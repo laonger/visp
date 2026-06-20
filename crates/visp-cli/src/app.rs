@@ -297,6 +297,7 @@ pub enum AgentStatus {
     Running,
     Done,
     Error,
+    ViewOnly,
 }
 
 #[derive(Debug, Clone)]
@@ -329,6 +330,12 @@ impl TabEntry {
             next_message_id: 0,
             scroll: 0,
         }
+    }
+
+    pub fn new_view_only(session_id: impl Into<String>, agent_name: impl Into<String>) -> Self {
+        let mut entry = Self::new(session_id, agent_name);
+        entry.status = AgentStatus::ViewOnly;
+        entry
     }
 
     pub fn push_chat_line(
@@ -1933,6 +1940,68 @@ mod tests {
         assert_eq!(tab.scroll, 0);
     }
 
+    // ── AgentStatus::ViewOnly ──────────────────────────────────
+
+    #[test]
+    fn agent_status_view_only_variant_exists() {
+        let status = AgentStatus::ViewOnly;
+        match status {
+            AgentStatus::ViewOnly => {} // 命中正确分支
+            _ => panic!("Expected ViewOnly variant"),
+        }
+    }
+
+    #[test]
+    fn agent_status_all_variants_display() {
+        // 所有变体都能 match 不 panic
+        let variants = [
+            AgentStatus::Running,
+            AgentStatus::Done,
+            AgentStatus::Error,
+            AgentStatus::ViewOnly,
+        ];
+        for v in &variants {
+            match v {
+                AgentStatus::Running => {}
+                AgentStatus::Done => {}
+                AgentStatus::Error => {}
+                AgentStatus::ViewOnly => {}
+            }
+        }
+    }
+
+    // ── TabEntry::new_view_only ────────────────────────────────
+
+    #[test]
+    fn tab_entry_new_view_only_has_view_only_status() {
+        let tab = TabEntry::new_view_only("sid", "name");
+        assert_eq!(tab.status, AgentStatus::ViewOnly);
+    }
+
+    #[test]
+    fn tab_entry_new_keeps_running_status() {
+        let tab = TabEntry::new("sid", "name");
+        assert_eq!(tab.status, AgentStatus::Running);
+    }
+
+    #[test]
+    fn tab_entry_new_view_only_other_fields_default() {
+        let new_tab = TabEntry::new("sid", "name");
+        let vo_tab = TabEntry::new_view_only("sid", "name");
+
+        // 与 new() 一致的默认值
+        assert!(vo_tab.frames.is_empty());
+        assert!(vo_tab.messages.is_empty());
+        assert_eq!(vo_tab.scroll, 0);
+        assert_eq!(vo_tab.rendered_up_to, new_tab.rendered_up_to);
+        assert_eq!(vo_tab.streaming_text, new_tab.streaming_text);
+        assert!(!vo_tab.generating);
+        assert_eq!(vo_tab.pending_usage, new_tab.pending_usage);
+        assert_eq!(vo_tab.next_message_id, new_tab.next_message_id);
+        assert_eq!(vo_tab.session_id, new_tab.session_id);
+        assert_eq!(vo_tab.agent_name, new_tab.agent_name);
+    }
+
     #[test]
     fn test_tabbar_new_creates_default_tab() {
         let bar = TabBar::new("main-sid".into());
@@ -2406,6 +2475,7 @@ mod tests {
                     session_id: sid.into(),
                     agent_name: agent_name.into(),
                     user_inputs: vec![],
+                    view_only: false,
                 },
             )),
         }
