@@ -1736,12 +1736,12 @@ mod tests {
             .await
             .expect("agent loop should exit within 1s after cancel");
 
-        // finish_loop 总是重置到 Idle（_status 参数被忽略）
+        // finish_loop 现在尊重传入的 status 参数（cancel 走 Error 路径）
         let final_session = session_mgr.get(&sid).unwrap();
         assert_eq!(
             final_session.status,
-            crate::session::SessionStatus::Idle,
-            "session should end in Idle after cancel (finish_loop always resets to Idle)"
+            crate::session::SessionStatus::Error,
+            "session should end in Error after cancel"
         );
         // Cancel should not panic
         assert!(result.is_ok() || (result.is_err() && result.unwrap_err().is_cancelled()));

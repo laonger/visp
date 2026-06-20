@@ -1706,9 +1706,9 @@ mod tests {
         // Drain events
         while rx.recv().await.is_some() {}
 
-        // Session should be Idle after normal completion
+        // Session should be Completed after normal completion
         let session = sm.get(&sid).unwrap();
-        assert_eq!(session.status, SessionStatus::Idle);
+        assert_eq!(session.status, SessionStatus::Completed);
         assert_eq!(session.history.len(), 2, "Expected 2 messages in history");
     }
 
