@@ -485,6 +485,30 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
 
     let mut y: u16 = CHAT_PAD;
 
+    // Render task prompt header for ViewOnly tab
+    if app.active_tab().status == AgentStatus::ViewOnly && !app.input_history.is_empty() {
+        let prompt_text = format!("[task prompt] {}", app.input_history[0]);
+        let task_style = theme::BlockStyle {
+            top_margin: 1,
+            margin_vertical: 1,
+            margin_horizontal: 1,
+            bg_fill: Some(theme::BG),
+            shadow: false,
+            bottom_pad: 0,
+        };
+        let task_lines = vec![Line::styled(
+            pad_to_width(&prompt_text, render_w as usize),
+            Style::default().fg(Color::DarkGray),
+        )];
+        let h = task_style.total_height(1);
+        if let Some((rel_y, _visible_h)) =
+            viewport_intersect(y, h, scroll_y, visible, area.bottom())
+        {
+            render_block(f, area, task_style, &task_lines, 1, area.y + rel_y);
+        }
+        y += h;
+    }
+
     for msg in app.messages() {
         let style = theme::style_for(msg.line_type.clone());
         if let Some(cache) = app.message_caches.iter().find(|c| c.msg_id == msg.id) {
@@ -718,9 +742,16 @@ fn render_input_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     let is_other_mode = app.confirm.as_ref().is_some_and(|c| c.other_active);
 
     if input_disabled {
-        // 非 default tab：显示灰色提示
-        app.textarea.set_style(Style::default().fg(Color::DarkGray));
-        app.textarea.set_placeholder_text("切回 default tab 输入");
+        if app.active_tab().status == AgentStatus::ViewOnly {
+            // ViewOnly tab：显示只读提示
+            app.textarea.set_style(Style::default().fg(Color::DarkGray));
+            app.textarea
+                .set_placeholder_text("此 tab 为只读历史，无法输入");
+        } else {
+            // 其他 sub tab：显示灰色提示
+            app.textarea.set_style(Style::default().fg(Color::DarkGray));
+            app.textarea.set_placeholder_text("切回 default tab 输入");
+        }
     } else if is_other_mode {
         app.textarea.set_style(Style::default().fg(theme::INPUT_FG));
         app.textarea
@@ -1199,6 +1230,16 @@ mod tests {
     }
 
     #[test]
+    fn test_tab_label_view_only_shows_gray_icon() {
+        let mut tab = TabEntry::new("sid".to_string(), "agentV");
+        tab.status = AgentStatus::ViewOnly;
+        let line = tab_label_line(&tab, false);
+        assert_eq!(line.spans[1].content, "◷ ");
+        assert_eq!(line.spans[1].style.fg, Some(Color::DarkGray));
+        assert_eq!(line.spans[2].content, "agentV");
+    }
+
+    #[test]
     fn test_tab_label_render_width_unchanged_for_active() {
         // 方括号与空格同宽（1 col），label 渲染宽度对 active/inactive 一致
         let tab = TabEntry::new("sid".to_string(), "default");
@@ -1267,7 +1308,7 @@ mod tests {
     #[test]
     fn test_tab_at_screen_sub_tab() {
         let mut tab_bar = crate::app::TabBar::new("main".into());
-        tab_bar.insert_sub_agent("sub-1", "X"); // label_w = 1+2+1+1 = 5
+        tab_bar.insert_sub_agent("sub-1", "X", false); // label_w = 1+2+1+1 = 5
         tab_bar.last_tab_area_x = 2;
         tab_bar.last_tab_area_y = 1;
         tab_bar.last_term_width = 80;

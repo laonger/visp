@@ -627,6 +627,12 @@ impl SessionManager {
         store.get(id)
     }
 
+    /// 获取指定父 session 的所有子 session（直接代理 SessionStore.list_child_sessions）
+    pub fn list_child_sessions(&self, parent_id: &str) -> Result<Vec<Session>, SessionError> {
+        let store = self.store.lock().unwrap();
+        store.list_child_sessions(parent_id)
+    }
+
     /// 取消运行中的 agent（取消 CancellationToken）
     /// 如果 session 未在运行中，则为 no-op
     pub fn cancel_agent(&self, id: &str) {

@@ -583,6 +583,46 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
 
             // Sub-agent tab: 禁止键盘输入（仅 default tab 可输入；保证全局快捷键已在前方处理完毕）
             if app.tab_bar.active != 0 {
+                // ViewOnly tab: ↑↓ browse input_history, Enter shows hint, others blocked
+                if app.active_tab().status == crate::app::AgentStatus::ViewOnly {
+                    match key.code {
+                        KeyCode::Up => {
+                            if !app.input_history.is_empty() {
+                                let idx = app
+                                    .history_index
+                                    .map_or(app.input_history.len().saturating_sub(1), |i| {
+                                        i.saturating_sub(1)
+                                    });
+                                app.history_index = Some(idx);
+                                app.textarea = crate::app::AppState::new_textarea();
+                                app.textarea.insert_str(&app.input_history[idx]);
+                            }
+                            return false;
+                        }
+                        KeyCode::Down => {
+                            if let Some(idx) = app.history_index {
+                                let ni = idx + 1;
+                                if ni >= app.input_history.len() {
+                                    app.history_index = None;
+                                    app.textarea = crate::app::AppState::new_textarea();
+                                } else {
+                                    app.history_index = Some(ni);
+                                    app.textarea = crate::app::AppState::new_textarea();
+                                    app.textarea.insert_str(&app.input_history[ni]);
+                                }
+                            }
+                            return false;
+                        }
+                        KeyCode::Enter => {
+                            app.add_message(
+                                crate::app::LineType::Status,
+                                "此 tab 为只读历史，无法输入".into(),
+                            );
+                            return false;
+                        }
+                        _ => return false,
+                    }
+                }
                 return false;
             }
 
