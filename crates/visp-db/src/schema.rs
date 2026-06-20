@@ -83,11 +83,6 @@ impl Migrator {
         conn.execute_batch(Self::CREATE_SESSION)?;
         conn.execute_batch(Self::CREATE_MESSAGE)?;
 
-        // Create indexes
-        for idx in Self::INDEXES {
-            conn.execute_batch(idx)?;
-        }
-
         // Ensure all columns exist (idempotent via pragma_table_info checks).
         // Runs unconditionally — not gated on current_version — to self-heal
         // databases whose version was bumped ahead of the actual schema.
