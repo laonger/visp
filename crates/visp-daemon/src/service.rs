@@ -1331,7 +1331,9 @@ mod tests {
         let session = mgr.create(Path::new("/tmp"), LlmConfig::default()).unwrap();
         let trimmer: Arc<dyn ContextTrimmer + Send + Sync> =
             Arc::new(visp_core::context::NoopTrimmer);
-        let ctx = mgr.start_loop(&session.id, &trimmer).unwrap();
+        let ctx = mgr
+            .start_loop(&session.id, &trimmer, None, None, None)
+            .unwrap();
         let token = ctx.cancel_token.clone();
         assert!(
             !token.is_cancelled(),
@@ -2535,7 +2537,7 @@ mod tests {
         // Manually set session to Running via start_loop
         let trimmer: Arc<dyn ContextTrimmer + Send + Sync> =
             Arc::new(visp_core::context::NoopTrimmer);
-        mgr.start_loop(&sid, &trimmer).unwrap();
+        mgr.start_loop(&sid, &trimmer, None, None, None).unwrap();
 
         // Simulate the handler check — Running main session should be reset to Idle and accepted
         let session_mgr = mgr.clone();

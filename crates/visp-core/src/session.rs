@@ -494,54 +494,17 @@ impl SessionManager {
     }
 
     /// 启动 agent 循环，检查状态必须为 Idle
+    /// 启动 agent 循环。
+    ///
+    /// `global_tx` / `inbox_rx` / `permission_rules` 用于多 Agent 模式；
+    /// 单 Agent 模式（测试 / 旧路径）传 `None` 即可。
     pub fn start_loop(
         &self,
         id: &str,
         context_trimmer: &Arc<dyn crate::context::ContextTrimmer + Send + Sync>,
-    ) -> Result<AgentLoopContext, SessionError> {
-        let token = CancellationToken::new();
-
-        let mut store = self.store.lock().unwrap();
-        let session = store.get(id)?;
-
-        if session.status != SessionStatus::Idle {
-            return Err(SessionError::SessionBusy {
-                session_id: id.to_string(),
-            });
-        }
-
-        let mut updated = session.clone();
-        updated.status = SessionStatus::Running;
-        store.update(updated)?;
-        // store lock released here
-
-        self.running_tokens
-            .lock()
-            .unwrap()
-            .insert(id.to_string(), token.clone());
-
-        Ok(AgentLoopContext {
-            session_id: id.to_string(),
-            history: session.history,
-            working_dir: session.project_path,
-            config: session.config,
-            cancel_token: token,
-            context_trimmer: Arc::clone(context_trimmer),
-            global_tx: None,
-            inbox_rx: None,
-            permission_rules: None,
-        })
-    }
-
-    /// 启动 agent 循环（多 Agent 模式）
-    /// 与 `start_loop` 的区别：接受并传入 global_tx / inbox_rx / permission_rules
-    pub fn start_loop_v2(
-        &self,
-        id: &str,
-        context_trimmer: &Arc<dyn crate::context::ContextTrimmer + Send + Sync>,
-        global_tx: mpsc::Sender<Envelope>,
-        inbox_rx: mpsc::Receiver<OrchestratorMessage>,
-        permission_rules: Arc<Vec<PermissionRule>>,
+        global_tx: Option<mpsc::Sender<Envelope>>,
+        inbox_rx: Option<mpsc::Receiver<OrchestratorMessage>>,
+        permission_rules: Option<Arc<Vec<PermissionRule>>>,
     ) -> Result<AgentLoopContext, SessionError> {
         let token = CancellationToken::new();
 
@@ -571,9 +534,9 @@ impl SessionManager {
             config: session.config,
             cancel_token: token,
             context_trimmer: Arc::clone(context_trimmer),
-            global_tx: Some(global_tx),
-            inbox_rx: Some(inbox_rx),
-            permission_rules: Some(permission_rules),
+            global_tx,
+            inbox_rx,
+            permission_rules,
         })
     }
 
@@ -911,7 +874,9 @@ mod tests {
             .unwrap();
 
         let trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(MockTrimmer);
-        let ctx = manager.start_loop(&session.id, &trimmer).unwrap();
+        let ctx = manager
+            .start_loop(&session.id, &trimmer, None, None, None)
+            .unwrap();
         assert_eq!(ctx.session_id, session.id);
         assert_eq!(ctx.working_dir, Path::new("/tmp"));
 
@@ -927,9 +892,11 @@ mod tests {
             .unwrap();
 
         let trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(MockTrimmer);
-        let _ctx = manager.start_loop(&session.id, &trimmer).unwrap();
+        let _ctx = manager
+            .start_loop(&session.id, &trimmer, None, None, None)
+            .unwrap();
 
-        match manager.start_loop(&session.id, &trimmer) {
+        match manager.start_loop(&session.id, &trimmer, None, None, None) {
             Err(SessionError::SessionBusy { session_id }) => {
                 assert_eq!(session_id, session.id);
             }
@@ -945,7 +912,9 @@ mod tests {
             .unwrap();
 
         let trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(MockTrimmer);
-        let _ctx = manager.start_loop(&session.id, &trimmer).unwrap();
+        let _ctx = manager
+            .start_loop(&session.id, &trimmer, None, None, None)
+            .unwrap();
         manager
             .finish_loop(&session.id, SessionStatus::Completed)
             .unwrap();
@@ -962,7 +931,9 @@ mod tests {
             .unwrap();
 
         let trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(MockTrimmer);
-        let ctx = manager.start_loop(&session.id, &trimmer).unwrap();
+        let ctx = manager
+            .start_loop(&session.id, &trimmer, None, None, None)
+            .unwrap();
         let token = ctx.cancel_token.clone();
         assert!(!token.is_cancelled());
 

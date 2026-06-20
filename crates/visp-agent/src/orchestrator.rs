@@ -341,12 +341,12 @@ impl Orchestrator {
         let permissions = merge_permissions(&[], &[], &agent_def.permission);
 
         // Create loop context
-        let ctx = match self.session_mgr.start_loop_v2(
+        let ctx = match self.session_mgr.start_loop(
             session_id,
             &self.context_trimmer,
-            self.global_tx.clone(),
-            inbox_rx,
-            Arc::new(permissions),
+            Some(self.global_tx.clone()),
+            Some(inbox_rx),
+            Some(Arc::new(permissions)),
         ) {
             Ok(ctx) => ctx,
             Err(e) => {
@@ -511,16 +511,16 @@ impl Orchestrator {
         });
 
         // 8. Start loop context (consumes inbox_rx)
-        let ctx = match self.session_mgr.start_loop_v2(
+        let ctx = match self.session_mgr.start_loop(
             &sub_session_id,
             &self.context_trimmer,
-            self.global_tx.clone(),
-            inbox_rx,
-            Arc::new(merged_rules),
+            Some(self.global_tx.clone()),
+            Some(inbox_rx),
+            Some(Arc::new(merged_rules)),
         ) {
             Ok(ctx) => ctx,
             Err(e) => {
-                tracing::error!(session_id = sub_session_id, error = %e, "start_loop_v2 failed for sub agent");
+                tracing::error!(session_id = sub_session_id, error = %e, "start_loop failed for sub agent");
                 self.active_agents.remove(&sub_session_id);
                 self.send_sub_agent_error(
                     parent_session_id,

@@ -648,7 +648,9 @@ mod tests {
             .create(Path::new("/tmp"), LlmConfig::default())
             .unwrap();
         let trimmer: StdArc<dyn ContextTrimmer + Send + Sync> = StdArc::new(MockTrimmer);
-        let ctx = session_mgr.start_loop(&session.id, &trimmer).unwrap();
+        let ctx = session_mgr
+            .start_loop(&session.id, &trimmer, None, None, None)
+            .unwrap();
         let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
         TestSetup {
             session_mgr,
@@ -1813,7 +1815,13 @@ mod tests {
         let permission_rules = StdArc::new(Vec::new());
 
         let ctx = session_mgr
-            .start_loop_v2(&sid, &trimmer, global_tx, inbox_rx, permission_rules)
+            .start_loop(
+                &sid,
+                &trimmer,
+                Some(global_tx),
+                Some(inbox_rx),
+                Some(permission_rules),
+            )
             .unwrap();
 
         let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());

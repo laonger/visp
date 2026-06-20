@@ -1714,7 +1714,13 @@ mod tests {
         let trimmer: std::sync::Arc<dyn crate::context::ContextTrimmer + Send + Sync> =
             std::sync::Arc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop_v2(&sid, &trimmer, global_tx, inbox_rx, permission_rules)
+            .start_loop(
+                &sid,
+                &trimmer,
+                Some(global_tx),
+                Some(inbox_rx),
+                Some(permission_rules),
+            )
             .unwrap();
         let handle_cancel = ctx.cancel_token.clone();
 
@@ -1813,7 +1819,13 @@ mod tests {
         let (_inbox_tx, inbox_rx) = mpsc::channel::<OrchestratorMessage>(16);
         let permission_rules = std::sync::Arc::new(Vec::new());
         let ctx = session_mgr
-            .start_loop_v2(&sid, &trimmer, global_tx, inbox_rx, permission_rules)
+            .start_loop(
+                &sid,
+                &trimmer,
+                Some(global_tx),
+                Some(inbox_rx),
+                Some(permission_rules),
+            )
             .unwrap();
 
         let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::new(TokenProvider {
