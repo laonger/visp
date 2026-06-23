@@ -3,6 +3,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::ProviderMetadata;
 use crate::agent::{
     AgentConfig, AgentEvent, AgentLoopContext, AgentMessage, Envelope, OrchestratorMessage,
     PendingSpawn, ToolExecResult, UserQueryResult, cleanup_orphan_tool_uses, extract_thinking_text,
@@ -317,6 +318,7 @@ struct StreamOutput {
     output_tokens: u32,
     cache_creation_input_tokens: u32,
     cache_read_input_tokens: u32,
+    provider_metadata: Option<ProviderMetadata>,
 }
 
 /// e. Collect stream events (TextDelta, ThinkingBlock, ToolCall, UsageInfo)
@@ -335,6 +337,7 @@ async fn collect_stream_events(
     let mut output_tokens: u32 = 0;
     let mut cache_creation_input_tokens: u32 = 0;
     let mut cache_read_input_tokens: u32 = 0;
+    let mut pending_metadata: Option<ProviderMetadata> = None;
 
     let mut pin_stream = Box::pin(stream);
     loop {
@@ -377,8 +380,8 @@ async fn collect_stream_events(
                     Some(Ok(ChatEvent::ToolCall { id, name, arguments })) => {
                         tool_calls.push(ToolCallRequest { id, name, arguments });
                     }
-                    Some(Ok(ChatEvent::OutputMetadata(_))) => {
-                        // Reserved for W0B-6/7: inject metadata into assistant message
+                    Some(Ok(ChatEvent::OutputMetadata(meta))) => {
+                        pending_metadata = Some(meta);
                     }
                     Some(Ok(ChatEvent::Done)) => break,
                     Some(Err(e)) => {
@@ -424,6 +427,7 @@ async fn collect_stream_events(
         output_tokens,
         cache_creation_input_tokens,
         cache_read_input_tokens,
+        provider_metadata: pending_metadata,
     })
 }
 
@@ -467,6 +471,7 @@ async fn handle_stream_result(
     let output_tokens = output.output_tokens;
     let cache_creation_input_tokens = output.cache_creation_input_tokens;
     let cache_read_input_tokens = output.cache_read_input_tokens;
+    let provider_metadata = &output.provider_metadata;
 
     if tool_calls.is_empty() {
         // Check [USER_QUERY] marker
@@ -499,13 +504,13 @@ async fn handle_stream_result(
 
             // Save text message if present
             if !clean_text.is_empty() {
-                let mut text_msg = Message::assistant(clean_text.clone());
+                let mut text_msg =
+                    Message::assistant_with_metadata(clean_text.clone(), provider_metadata.clone());
                 text_msg.extra_blocks = if thinking_blocks.is_empty() {
                     None
                 } else {
                     Some(thinking_blocks.clone())
                 };
-                text_msg.estimated_tokens = estimate_message_tokens(&text_msg);
                 text_msg.actual_tokens_input = Some(input_tokens);
                 text_msg.actual_tokens_output = Some(output_tokens);
                 text_msg.actual_cache_read = Some(cache_read_input_tokens);
@@ -615,13 +620,13 @@ async fn handle_stream_result(
         }
 
         if !text_buffer.is_empty() {
-            let mut text_msg = Message::assistant(text_buffer.clone());
+            let mut text_msg =
+                Message::assistant_with_metadata(text_buffer.clone(), provider_metadata.clone());
             text_msg.extra_blocks = if thinking_blocks.is_empty() {
                 None
             } else {
                 Some(thinking_blocks.clone())
             };
-            text_msg.estimated_tokens = estimate_message_tokens(&text_msg);
             text_msg.actual_tokens_input = Some(input_tokens);
             text_msg.actual_tokens_output = Some(output_tokens);
             text_msg.actual_cache_read = Some(cache_read_input_tokens);
@@ -689,6 +694,7 @@ async fn execute_tool_calls(
     actual_tokens_output: u32,
     actual_cache_read: u32,
     actual_cache_write: u32,
+    provider_metadata: Option<ProviderMetadata>,
     total_tool_calls: &mut u32,
     ctx: &mut AgentLoopContext,
     sm: &Arc<SessionManager>,
@@ -719,7 +725,8 @@ async fn execute_tool_calls(
         actual_cache_read: Some(actual_cache_read),
         actual_cache_write: Some(actual_cache_write),
         actual_cost: None,
-        provider_metadata: None,
+        provider_metadata: provider_metadata
+            .map(|pm| serde_json::to_value(pm).expect("ProviderMetadata serialization")),
         tool_call_count: Some(tool_calls.len() as u32),
         tool_result_is_error: None,
         tool_result_duration_ms: None,
@@ -1475,6 +1482,7 @@ pub async fn run_agent_loop(
                 output.output_tokens,
                 output.cache_read_input_tokens,
                 output.cache_creation_input_tokens,
+                output.provider_metadata,
                 &mut total_tool_calls,
                 &mut ctx,
                 &sm,
@@ -2021,6 +2029,246 @@ mod tests {
             dur.unwrap() >= 25,
             "tool_result_duration_ms should be >= 25ms (slept 30ms), got {:?}",
             dur
+        );
+    }
+
+    // ── W0B-6: provider_metadata injection ──────────────────────────────────
+
+    /// Provider that returns TextDelta + OutputMetadata + Done
+    struct MetadataProvider {
+        metadata: ProviderMetadata,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for MetadataProvider {
+        async fn chat_stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _config: &LlmConfig,
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>
+        {
+            let events: Vec<Result<ChatEvent, LlmError>> = vec![
+                Ok(ChatEvent::TextDelta("hello".to_string())),
+                Ok(ChatEvent::OutputMetadata(self.metadata.clone())),
+                Ok(ChatEvent::Done),
+            ];
+            Ok(Box::pin(stream::iter(events)))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_agent_loop_assistant_message_has_provider_metadata() {
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let metadata = ProviderMetadata {
+            model: "claude-test".to_string(),
+            finish_reasons: vec!["stop".to_string()],
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            latency_ms: 100,
+        };
+
+        let session_mgr = std::sync::Arc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: std::sync::Arc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            std::sync::Arc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::new(MetadataProvider {
+            metadata: metadata.clone(),
+        });
+        let rule_engine = std::sync::Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig::default();
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            std::sync::Arc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("hello"),
+            tx,
+        )
+        .await;
+
+        let final_session = session_mgr.get(&sid).unwrap();
+        let assistant_msgs: Vec<_> = final_session
+            .history
+            .iter()
+            .filter(|m| m.role == Role::Assistant)
+            .collect();
+        assert_eq!(
+            assistant_msgs.len(),
+            1,
+            "expected exactly one assistant message"
+        );
+        let msg = assistant_msgs[0];
+        let expected_json = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(
+            msg.provider_metadata,
+            Some(expected_json),
+            "provider_metadata should match"
+        );
+    }
+
+    /// Provider for multi-turn: first call returns tool_use + metadata, second returns text + different metadata
+    struct TwoRoundMetadataProvider {
+        call_count: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for TwoRoundMetadataProvider {
+        async fn chat_stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _config: &LlmConfig,
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>
+        {
+            let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if count == 0 {
+                // First round: tool call + metadata1
+                let events: Vec<Result<ChatEvent, LlmError>> = vec![
+                    Ok(ChatEvent::ToolCall {
+                        id: "call_sleepy_1".into(),
+                        name: "sleepy".into(),
+                        arguments: "{}".into(),
+                    }),
+                    Ok(ChatEvent::OutputMetadata(ProviderMetadata {
+                        model: "claude-test".into(),
+                        finish_reasons: vec!["tool_use".into()],
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        cache_read_input_tokens: None,
+                        cache_creation_input_tokens: None,
+                        latency_ms: 100,
+                    })),
+                    Ok(ChatEvent::Done),
+                ];
+                Ok(Box::pin(stream::iter(events)))
+            } else {
+                // Second round: text + metadata2
+                let events: Vec<Result<ChatEvent, LlmError>> = vec![
+                    Ok(ChatEvent::TextDelta("result".to_string())),
+                    Ok(ChatEvent::OutputMetadata(ProviderMetadata {
+                        model: "claude-test".into(),
+                        finish_reasons: vec!["stop".into()],
+                        input_tokens: 20,
+                        output_tokens: 10,
+                        cache_read_input_tokens: Some(5),
+                        cache_creation_input_tokens: Some(3),
+                        latency_ms: 200,
+                    })),
+                    Ok(ChatEvent::Done),
+                ];
+                Ok(Box::pin(stream::iter(events)))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_agent_loop_provider_metadata_persists_through_multi_turn() {
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = std::sync::Arc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: std::sync::Arc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            std::sync::Arc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        let provider: std::sync::Arc<dyn LlmProvider> =
+            std::sync::Arc::new(TwoRoundMetadataProvider {
+                call_count: AtomicUsize::new(0),
+            });
+        let rule_engine = std::sync::Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        registry.register(std::sync::Arc::new(SleepyTool)).unwrap();
+        let config = AgentConfig {
+            hard_limit: 10,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            std::sync::Arc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("do something"),
+            tx,
+        )
+        .await;
+
+        let final_session = session_mgr.get(&sid).unwrap();
+        let assistant_msgs: Vec<_> = final_session
+            .history
+            .iter()
+            .filter(|m| m.role == Role::Assistant)
+            .collect();
+        assert_eq!(
+            assistant_msgs.len(),
+            2,
+            "expected two assistant messages for two rounds"
+        );
+
+        // First message (tool call round): tool_use metadata
+        let meta1 = serde_json::to_value(ProviderMetadata {
+            model: "claude-test".into(),
+            finish_reasons: vec!["tool_use".into()],
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            latency_ms: 100,
+        })
+        .unwrap();
+        assert_eq!(
+            assistant_msgs[0].provider_metadata,
+            Some(meta1),
+            "first assistant message should have metadata from first round"
+        );
+
+        // Second message (text round): stop metadata with different tokens
+        let meta2 = serde_json::to_value(ProviderMetadata {
+            model: "claude-test".into(),
+            finish_reasons: vec!["stop".into()],
+            input_tokens: 20,
+            output_tokens: 10,
+            cache_read_input_tokens: Some(5),
+            cache_creation_input_tokens: Some(3),
+            latency_ms: 200,
+        })
+        .unwrap();
+        assert_eq!(
+            assistant_msgs[1].provider_metadata,
+            Some(meta2),
+            "second assistant message should have metadata from second round, no cross-contamination"
         );
     }
 }
