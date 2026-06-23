@@ -411,48 +411,6 @@ mod tests {
     // Red + Green: end-to-end JSON includes trace_id from ParentLinkLayer
     // ------------------------------------------------------------------
 
-    /// Injector layer that places a TraceContext into every new span's extension.
-    #[derive(Clone)]
-    struct TestTcInjector {
-        trace_id: String,
-        span_id: String,
-        parent_span_id: Option<String>,
-    }
-
-    impl TestTcInjector {
-        fn with_parent(span_id: &str, parent_span_id: &str) -> Self {
-            Self {
-                trace_id: "0af7651916cd43dd8448eb211c80319c".into(),
-                span_id: span_id.into(),
-                parent_span_id: Some(parent_span_id.into()),
-            }
-        }
-    }
-
-    impl<S> tracing_subscriber::Layer<S> for TestTcInjector
-    where
-        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
-    {
-        fn on_new_span(
-            &self,
-            _attrs: &tracing::span::Attributes<'_>,
-            id: &tracing::span::Id,
-            ctx: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            if let Some(span_ref) = ctx.span(id) {
-                let tc = visp_core::TraceContext::new(
-                    self.trace_id.clone(),
-                    self.span_id.clone(),
-                    1,
-                    None,
-                    self.parent_span_id.clone(),
-                )
-                .expect("valid TraceContext");
-                span_ref.extensions_mut().insert(tc);
-            }
-        }
-    }
-
     #[test]
     #[serial]
     fn test_init_observability_json_includes_trace_id_field_for_subagent_span() {
@@ -461,10 +419,6 @@ mod tests {
 
         let _guard = tracing_subscriber::registry()
             .with(tracing_subscriber::EnvFilter::new("info"))
-            .with(TestTcInjector::with_parent(
-                "b7ad6b7169203331",
-                "aaaaaaaaaaaaaaaa",
-            ))
             .with(parent_link_layer.clone())
             .with(
                 tracing_subscriber::fmt::layer()
@@ -473,19 +427,22 @@ mod tests {
             )
             .set_default();
 
-        // Create a span that pre-declares trace_id and parent_span_id.
-        // ParentLinkLayer will see the TraceContext and write ParentLinkFields.
-        // on_enter should record the fields onto the span for JSON output.
+        // Create a visp.subagent.spawn span with trace context fields declared
+        // and recorded via span field passing (matches orchestrator approach).
         let span = tracing::info_span!(
             "visp.subagent.spawn",
             visp.subagent.name = "test",
             trace_id = tracing::field::Empty,
             parent_span_id = tracing::field::Empty,
         );
+        // Record trace context fields (ParentLinkLayer.on_record writes
+        // ParentLinkFields into the extension).
+        span.record("trace_id", "0af7651916cd43dd8448eb211c80319c");
+        span.record("parent_span_id", "aaaaaaaaaaaaaaaa");
         {
             let _enter = span.enter();
-            // on_enter triggers ParentLinkLayer to record fields.
-            // Emit an event inside the span so the fmt layer produces output.
+            // on_enter triggers ParentLinkLayer to record fields from the
+            // ParentLinkFields extension onto the span for JSON output.
             tracing::info!("inside span");
         }
         drop(span);
@@ -496,16 +453,14 @@ mod tests {
         let trace_id_found = output.contains("trace_id");
         let parent_span_id_found = output.contains("parent_span_id");
 
-        // Approach A: on_enter records trace_id/parent_span_id via
-        // Span::current(). If this fails, fall back to Approach B.
         assert!(
             trace_id_found,
-            "expected trace_id in JSON output. Approach A may need fallback to B.\nOutput:\n{}",
+            "expected trace_id in JSON output.\nOutput:\n{}",
             output
         );
         assert!(
             parent_span_id_found,
-            "expected parent_span_id in JSON output. Approach A may need fallback to B.\nOutput:\n{}",
+            "expected parent_span_id in JSON output.\nOutput:\n{}",
             output
         );
     }

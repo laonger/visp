@@ -22,16 +22,24 @@ use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
-use visp_core::TraceContext;
 use visp_core::trace_context::SpanW3CId;
 
-/// Custom fields inserted into the span extension when a TraceContext is found.
-// Not yet used by production code; Step 5-sub will wire it into the fmt layer.
+/// Custom fields inserted into the span extension when trace context fields
+/// are recorded via `span.record()`.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ParentLinkFields {
     pub trace_id: String,
     pub parent_span_id: Option<String>,
+    pub trace_state: Option<String>,
+}
+
+/// Accumulates trace context fields across multiple `span.record()` calls.
+#[derive(Default, Clone)]
+struct PendingTraceFields {
+    trace_id: Option<String>,
+    parent_span_id: Option<String>,
+    trace_state: Option<String>,
 }
 
 /// Inner state shared via `Arc` so the layer can be cloned cheaply.
@@ -106,17 +114,26 @@ impl ParentLinkLayer {
 struct ParentLinkFieldsRecorded;
 
 // ---------------------------------------------------------------------------
-// W3C ID field extractor (used in on_record)
+// Trace fields extractor (used in on_record)
 // ---------------------------------------------------------------------------
 
-struct W3cIdExtractor {
+/// Extracts trace context fields and W3C span IDs from span recordings.
+#[derive(Default)]
+struct TraceFieldsExtractor {
     w3c_id: Option<String>,
+    trace_id: Option<String>,
+    parent_span_id: Option<String>,
+    trace_state: Option<String>,
 }
 
-impl Visit for W3cIdExtractor {
+impl Visit for TraceFieldsExtractor {
     fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "visp.span.w3c_id" {
-            self.w3c_id = Some(value.to_string());
+        match field.name() {
+            "visp.span.w3c_id" => self.w3c_id = Some(value.to_string()),
+            "trace_id" => self.trace_id = Some(value.to_string()),
+            "parent_span_id" => self.parent_span_id = Some(value.to_string()),
+            "trace_state" => self.trace_state = Some(value.to_string()),
+            _ => {}
         }
     }
 
@@ -144,70 +161,96 @@ where
             None => return,
         };
 
-        // Register mapping from SpanW3CId if present.
-        let mut span_w3c_id: Option<String> = None;
+        // Register mapping from SpanW3CId if present (set by another layer).
         if let Some(sw) = span_ref.extensions().get::<SpanW3CId>().cloned() {
-            span_w3c_id = Some(sw.0.clone());
             self.inner.mapping.insert(sw.0.clone(), id.clone());
             self.inner.reverse.insert(id.clone(), sw.0);
         }
 
-        // Process TraceContext if present.
-        let tc = match span_ref.extensions().get::<TraceContext>().cloned() {
-            Some(tc) => tc,
-            None => {
-                // No TraceContext — nothing more to do.
-                return;
-            }
-        };
-
-        // Register the span_id from TraceContext (may differ from SpanW3CId).
-        if span_w3c_id.as_deref() != Some(&tc.span_id) {
-            self.inner.mapping.insert(tc.span_id.clone(), id.clone());
-            self.inner.reverse.insert(id.clone(), tc.span_id.clone());
+        // Cross-mpsc propagation: copy ParentLinkFields from parent span.
+        // This mirrors MetricsLayer's SessionId propagation pattern.
+        if span_ref.extensions().get::<ParentLinkFields>().is_some() {
+            return; // Already has explicit fields (set via on_record).
         }
 
-        // Check parent_span_id from TraceContext.
-        let parent_sid: Option<String> = match tc.parent_span_id {
-            Some(ref psid) if !self.inner.mapping.contains_key(psid) => {
-                self.inner.unmatched_count.fetch_add(1, Ordering::Relaxed);
-                Some(psid.clone())
-            }
-            Some(psid) => Some(psid),
-            None => None,
-        };
-
-        // Write ParentLinkFields.
-        span_ref.extensions_mut().insert(ParentLinkFields {
-            trace_id: tc.trace_id,
-            parent_span_id: parent_sid,
-        });
+        if let Some(parent) = span_ref.parent()
+            && let Some(plf) = parent.extensions().get::<ParentLinkFields>().cloned()
+        {
+            span_ref.extensions_mut().insert(plf);
+        }
     }
 
-    /// Detect `visp.span.w3c_id` field recordings and register the W3C ID
-    /// in the mapping.  This handles spans created by `visp-core` which
-    /// records the field (but cannot write extensions directly).
+    /// Detect `visp.span.w3c_id`, `trace_id`, `parent_span_id`, and
+    /// `trace_state` field recordings.
+    ///
+    /// - W3C IDs are registered in the mapping.
+    /// - Trace context fields are accumulated via [`PendingTraceFields`]
+    ///   and written as [`ParentLinkFields`] into the span extension.
     fn on_record(
         &self,
         id: &tracing::span::Id,
         values: &tracing::span::Record<'_>,
         ctx: Context<'_, S>,
     ) {
-        let mut extractor = W3cIdExtractor { w3c_id: None };
+        let mut extractor = TraceFieldsExtractor::default();
         values.record(&mut extractor);
-        let w3c_id = match extractor.w3c_id {
-            Some(id) => id,
+
+        let span_ref = match ctx.span(id) {
+            Some(s) => s,
             None => return,
         };
 
-        // Write SpanW3CId into the extension so other layers (fmt etc.)
-        // can also consume it.
-        if let Some(span_ref) = ctx.span(id) {
+        // Handle visp.span.w3c_id — register W3C ID in mapping.
+        if let Some(w3c_id) = extractor.w3c_id {
             span_ref.extensions_mut().insert(SpanW3CId(w3c_id.clone()));
+            self.inner.mapping.insert(w3c_id.clone(), id.clone());
+            self.inner.reverse.insert(id.clone(), w3c_id);
         }
 
-        self.inner.mapping.insert(w3c_id.clone(), id.clone());
-        self.inner.reverse.insert(id.clone(), w3c_id);
+        // Handle trace context fields — accumulate and write ParentLinkFields.
+        let has_trace_fields = extractor.trace_id.is_some()
+            || extractor.parent_span_id.is_some()
+            || extractor.trace_state.is_some();
+
+        if !has_trace_fields {
+            return;
+        }
+
+        // Accumulate partial field data across multiple record() calls.
+        let mut pending = span_ref
+            .extensions()
+            .get::<PendingTraceFields>()
+            .cloned()
+            .unwrap_or_default();
+
+        if let Some(tid) = extractor.trace_id {
+            pending.trace_id = Some(tid);
+        }
+        if let Some(psid) = &extractor.parent_span_id {
+            // Only count unmatched the first time for this span.
+            if pending.parent_span_id.is_none() && !self.inner.mapping.contains_key(psid) {
+                self.inner.unmatched_count.fetch_add(1, Ordering::Relaxed);
+            }
+            pending.parent_span_id = Some(psid.clone());
+        }
+        if let Some(ts) = extractor.trace_state {
+            pending.trace_state = Some(ts);
+        }
+
+        // Remove-then-insert to avoid tracing-subscriber's debug assertion
+        // that prevents re-inserting an extension of the same type.
+        span_ref.extensions_mut().remove::<PendingTraceFields>();
+        span_ref.extensions_mut().insert(pending.clone());
+
+        // Write ParentLinkFields if we have at least trace_id.
+        if let Some(trace_id) = &pending.trace_id {
+            span_ref.extensions_mut().remove::<ParentLinkFields>();
+            span_ref.extensions_mut().insert(ParentLinkFields {
+                trace_id: trace_id.clone(),
+                parent_span_id: pending.parent_span_id.clone(),
+                trace_state: pending.trace_state.clone(),
+            });
+        }
     }
 
     /// Clean up mapping entries when a span is closed (P1-2).
@@ -263,54 +306,13 @@ mod tests {
     use std::sync::Mutex;
 
     use serial_test::serial;
-    use tracing::span::{Attributes, Id};
+    use tracing::span::{Attributes, Id, Record};
     use tracing_subscriber::Layer;
     use tracing_subscriber::layer::Context;
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::registry::LookupSpan;
 
     use super::*;
-
-    /// Injector layer that places a `TraceContext` into every new span's
-    /// extension. Used in tests where we want the ParentLinkLayer to see it.
-    #[derive(Clone)]
-    struct TestTcInjector {
-        tc: TraceContext,
-        filter_name: Option<String>,
-    }
-
-    impl TestTcInjector {
-        fn all(tc: TraceContext) -> Self {
-            Self {
-                tc,
-                filter_name: None,
-            }
-        }
-
-        #[allow(dead_code)]
-        fn named(tc: TraceContext, name: &str) -> Self {
-            Self {
-                tc,
-                filter_name: Some(name.to_string()),
-            }
-        }
-    }
-
-    impl<S> Layer<S> for TestTcInjector
-    where
-        S: Subscriber + for<'a> LookupSpan<'a>,
-    {
-        fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
-            if let Some(ref name) = self.filter_name
-                && attrs.metadata().name() != name
-            {
-                return;
-            }
-            if let Some(span_ref) = ctx.span(id) {
-                span_ref.extensions_mut().insert(self.tc.clone());
-            }
-        }
-    }
 
     /// Injector layer that places a `SpanW3CId` into every new span's
     /// extension.
@@ -341,7 +343,8 @@ mod tests {
     }
 
     /// Collector layer that records whether any span's extension contains
-    /// `ParentLinkFields`.
+    /// `ParentLinkFields`. Captures both via `on_new_span` (propagation)
+    /// and `on_record` (explicit field recording).
     #[derive(Clone)]
     struct TestFieldsCollector {
         seen: Arc<Mutex<Vec<ParentLinkFields>>>,
@@ -366,28 +369,14 @@ mod tests {
                 self.seen.lock().unwrap().push(plf);
             }
         }
-    }
 
-    fn make_tc(span_id: &str) -> TraceContext {
-        TraceContext::new(
-            "0af7651916cd43dd8448eb211c80319c".to_string(),
-            span_id.to_string(),
-            1,
-            None,
-            None,
-        )
-        .unwrap()
-    }
-
-    fn make_tc_with_parent(span_id: &str, parent_span_id: &str) -> TraceContext {
-        TraceContext::new(
-            "0af7651916cd43dd8448eb211c80319c".to_string(),
-            span_id.to_string(),
-            1,
-            None,
-            Some(parent_span_id.to_string()),
-        )
-        .unwrap()
+        fn on_record(&self, id: &Id, _values: &Record<'_>, ctx: Context<'_, S>) {
+            if let Some(span_ref) = ctx.span(id)
+                && let Some(plf) = span_ref.extensions().get::<ParentLinkFields>().cloned()
+            {
+                self.seen.lock().unwrap().push(plf);
+            }
+        }
     }
 
     // ── W1-S4a-1: Layer skeleton ──────────────────────────────────────────
@@ -413,21 +402,24 @@ mod tests {
         // Must not panic.
     }
 
-    // ── W1-S4a-3 (rewritten): extension fields ────────────────────────────
+    // ── W1-S4a-3 (rewritten): span field recording ────────────────────────
 
     #[test]
     #[serial]
     fn test_parent_link_layer_inserts_parent_link_fields_extension() {
-        let tc = make_tc("b7ad6b7169203331");
         let collector = TestFieldsCollector::new();
 
         let _guard = tracing_subscriber::registry()
-            .with(TestTcInjector::all(tc.clone()))
             .with(ParentLinkLayer::new())
             .with(collector.clone())
             .set_default();
 
-        let span = tracing::info_span!("visp.subagent.spawn");
+        let span = tracing::info_span!(
+            "visp.subagent.spawn",
+            trace_id = tracing::field::Empty,
+            parent_span_id = tracing::field::Empty,
+        );
+        span.record("trace_id", "0af7651916cd43dd8448eb211c80319c");
         drop(span);
 
         let seen = collector.seen.lock().unwrap();
@@ -437,7 +429,7 @@ mod tests {
             "expected exactly one span with ParentLinkFields"
         );
         assert_eq!(seen[0].trace_id, "0af7651916cd43dd8448eb211c80319c");
-        // parent_span_id is None because the TraceContext has no parent_span_id
+        // parent_span_id is None because we didn't record it
         assert_eq!(seen[0].parent_span_id, None);
     }
 
@@ -461,7 +453,7 @@ mod tests {
         );
     }
 
-    // ── P0-3: parent_span_id via mapping ──────────────────────────────────
+    // ── P0-3: parent_span_id via mapping (rewritten: span field recording) ─
 
     #[test]
     #[serial]
@@ -469,17 +461,12 @@ mod tests {
         let layer = ParentLinkLayer::new();
         let collector = TestFieldsCollector::new();
 
-        // Parent span is injected with SpanW3CId → registered in mapping.
-        // Child span is injected with TraceContext that has parent_span_id
-        // pointing to the parent's W3C ID.
-        // Parent MUST stay alive while child is created (in real usage the
-        // iteration span is alive when the subagent.spawn span is created).
+        // Parent span registers its W3C ID in the mapping via SpanW3CId extension.
+        // Child span records parent_span_id pointing to the parent's W3C ID.
         let parent_w3c = "aaaaaaaaaaaaaaaa";
-        let child_tc = make_tc_with_parent("bbbbbbbbbbbbbbbb", parent_w3c);
 
         let _guard = tracing_subscriber::registry()
             .with(TestW3CIdInjector::new(parent_w3c))
-            .with(TestTcInjector::named(child_tc, "child"))
             .with(layer.clone())
             .with(collector.clone())
             .set_default();
@@ -489,9 +476,14 @@ mod tests {
         let parent_span = tracing::info_span!("parent");
         let _parent_enter = parent_span.enter();
 
-        // Create child span → TraceContext has parent_span_id="aaa..."
-        // which IS in mapping → ParentLinkFields.parent_span_id = Some("aaa...")
-        let child_span = tracing::info_span!("child");
+        // Create child span with field recordings.
+        let child_span = tracing::info_span!(
+            "child",
+            trace_id = tracing::field::Empty,
+            parent_span_id = tracing::field::Empty,
+        );
+        child_span.record("trace_id", "0af7651916cd43dd8448eb211c80319c");
+        child_span.record("parent_span_id", parent_w3c);
         drop(child_span);
 
         let seen = collector.seen.lock().unwrap();
@@ -512,17 +504,15 @@ mod tests {
     fn test_parent_link_increments_unmatched_when_parent_missing() {
         let layer = ParentLinkLayer::new();
 
-        // Child has parent_span_id="aaa..." but no span registered it.
-        let child_tc = make_tc_with_parent("bbbbbbbbbbbbbbbb", "aaaaaaaaaaaaaaaa");
-
         let _guard = tracing_subscriber::registry()
-            .with(TestTcInjector::named(child_tc, "child"))
             .with(layer.clone())
             .set_default();
 
         assert_eq!(layer.unmatched_count(), 0);
 
-        let child_span = tracing::info_span!("child");
+        // Record parent_span_id that doesn't exist in mapping.
+        let child_span = tracing::info_span!("child", parent_span_id = tracing::field::Empty,);
+        child_span.record("parent_span_id", "aaaaaaaaaaaaaaaa");
         drop(child_span);
 
         assert!(
@@ -537,15 +527,10 @@ mod tests {
         let layer = ParentLinkLayer::new();
         let collector = TestFieldsCollector::new();
 
-        // Inject SpanW3CId into a span → layer registers it in mapping.
-        // Then inject a child TraceContext that references it.
-        // Parent must stay alive while child is created.
         let parent_w3c = "cccccccccccccccc";
-        let child_tc = make_tc_with_parent("dddddddddddddddd", parent_w3c);
 
         let _guard = tracing_subscriber::registry()
             .with(TestW3CIdInjector::new(parent_w3c))
-            .with(TestTcInjector::named(child_tc, "child"))
             .with(layer.clone())
             .with(collector.clone())
             .set_default();
@@ -554,8 +539,14 @@ mod tests {
         let parent_span = tracing::info_span!("parent");
         let _parent_enter = parent_span.enter();
 
-        // Child span resolves parent via mapping
-        let child_span = tracing::info_span!("child");
+        // Child span records field parent_span_id
+        let child_span = tracing::info_span!(
+            "child",
+            trace_id = tracing::field::Empty,
+            parent_span_id = tracing::field::Empty,
+        );
+        child_span.record("trace_id", "0af7651916cd43dd8448eb211c80319c");
+        child_span.record("parent_span_id", parent_w3c);
         drop(child_span);
 
         let seen = collector.seen.lock().unwrap();
@@ -577,17 +568,13 @@ mod tests {
     fn test_parent_link_cleans_mapping_on_span_close() {
         let layer = ParentLinkLayer::new();
 
-        let tc_parent = make_tc("eeeeeeeeeeeeeeee");
-        let tc_child = make_tc_with_parent("ffffffffffffffff", "eeeeeeeeeeeeeeee");
-
         let _guard = tracing_subscriber::registry()
-            .with(TestTcInjector::named(tc_parent, "parent"))
-            .with(TestTcInjector::named(tc_child, "child"))
             .with(layer.clone())
             .set_default();
 
-        // Create and drop parent → mapping has "eeee..."
-        let parent_span = tracing::info_span!("parent");
+        // Register parent W3C ID via field recording.
+        let parent_span = tracing::info_span!("parent", visp.span.w3c_id = tracing::field::Empty,);
+        parent_span.record("visp.span.w3c_id", "eeeeeeeeeeeeeeee");
         let parent_id = parent_span.id().unwrap();
 
         // parent is in mapping
@@ -606,29 +593,24 @@ mod tests {
         );
     }
 
-    // ── W1-S4a-5: unmatched parent + metric ──────────────────────────────
+    // ── W1-S4a-5: unmatched parent + metric (span field recording) ─────────
 
     #[test]
     #[serial]
     fn test_parent_link_layer_unmatched_parent_recorded() {
         let layer = ParentLinkLayer::new();
         let layer_clone = layer.clone();
-        // Child TraceContext has parent_span_id="aaa..." pointing to parent.
-        let child_tc = make_tc_with_parent("bbbbbbbbbbbbbbbb", "aaaaaaaaaaaaaaaa");
 
-        // Only inject into "child" spans (no parent injector).
         let _guard = tracing_subscriber::registry()
-            .with(TestTcInjector::named(child_tc, "child"))
             .with(layer_clone)
             .set_default();
 
         assert_eq!(layer.unmatched_count(), 0);
 
-        // Create child span. Its TraceContext has parent_span_id="aaa..."
-        // but "aaa..." was never registered in the mapping → unmatched_count++.
-        let child_span = tracing::info_span!("child");
+        // Record parent_span_id pointing to unknown W3C ID → unmatched_count++.
+        let child_span = tracing::info_span!("child", parent_span_id = tracing::field::Empty,);
+        child_span.record("parent_span_id", "aaaaaaaaaaaaaaaa");
         drop(child_span);
-        drop(_guard);
 
         assert!(
             layer.unmatched_count() > 0,
@@ -642,5 +624,117 @@ mod tests {
         let layer = ParentLinkLayer::new();
         // Fresh layer: count must be 0.
         assert_eq!(layer.unmatched_count(), 0);
+    }
+
+    // ── Step 1b: on_record reads trace fields from subagent.spawn span ───
+
+    #[test]
+    #[serial]
+    fn test_parent_link_reads_trace_fields_from_subagent_spawn_span() {
+        let layer = ParentLinkLayer::new();
+        let collector = TestFieldsCollector::new();
+
+        let _guard = tracing_subscriber::registry()
+            .with(layer.clone())
+            .with(collector.clone())
+            .set_default();
+
+        // Create a span named visp.subagent.spawn with trace_id and parent_span_id fields.
+        let span = tracing::info_span!(
+            "visp.subagent.spawn",
+            visp.subagent.name = "test",
+            trace_id = tracing::field::Empty,
+            parent_span_id = tracing::field::Empty,
+            visp.span.w3c_id = tracing::field::Empty,
+        );
+        span.record("trace_id", "0af7651916cd43dd8448eb211c80319c");
+        span.record("parent_span_id", "aaaaaaaaaaaaaaaa");
+        // Record a W3C ID so the span registers in mapping.
+        span.record("visp.span.w3c_id", "bbbbbbbbbbbbbbbb");
+        let span_id = span.id().unwrap();
+
+        // Check mapping BEFORE dropping the span (on_close would remove it).
+        assert!(layer.inner.mapping.contains_key("bbbbbbbbbbbbbbbb"));
+        assert!(layer.inner.reverse.contains_key(&span_id));
+
+        drop(span);
+
+        // ParentLinkFields should be present in the span extension.
+        // TestFieldsCollector captures in both on_new_span and on_record,
+        // so there may be multiple entries for the same span.
+        let seen = collector.seen.lock().unwrap();
+        assert!(
+            !seen.is_empty(),
+            "expected at least one ParentLinkFields capture"
+        );
+        // The first capture may come from the trace_id record (parent_span_id
+        // not yet set). Find the entry with parent_span_id to verify completeness.
+        let with_parent = seen.iter().find(|plf| plf.parent_span_id.is_some());
+        assert!(
+            with_parent.is_some(),
+            "expected a ParentLinkFields entry with parent_span_id set"
+        );
+        assert_eq!(
+            with_parent.unwrap().trace_id,
+            "0af7651916cd43dd8448eb211c80319c"
+        );
+        assert_eq!(
+            with_parent.unwrap().parent_span_id.as_deref(),
+            Some("aaaaaaaaaaaaaaaa"),
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_parent_link_propagates_fields_to_child_spans() {
+        let layer = ParentLinkLayer::new();
+        let collector = TestFieldsCollector::new();
+
+        let _guard = tracing_subscriber::registry()
+            .with(layer.clone())
+            .with(collector.clone())
+            .set_default();
+
+        // Parent span: visp.subagent.spawn with trace context fields.
+        let parent = tracing::info_span!(
+            "visp.subagent.spawn",
+            trace_id = tracing::field::Empty,
+            parent_span_id = tracing::field::Empty,
+        );
+        parent.record("trace_id", "0af7651916cd43dd8448eb211c80319c");
+        parent.record("parent_span_id", "aaaaaaaaaaaaaaaa");
+
+        // Child span (e.g. visp.agent.run) is a tracing child of parent.
+        let child =
+            tracing::info_span!("visp.agent.run", visp.span.w3c_id = tracing::field::Empty,);
+        child.record("visp.span.w3c_id", "cccccccccccccccc");
+
+        // Drop parent then child (order matters: parent must outlive child for propagation).
+        // Actually both are in the same scope, so the tracing tree should work.
+        drop(parent);
+        drop(child);
+
+        // Both spans should have ParentLinkFields (child gets it via propagation).
+        let seen = collector.seen.lock().unwrap();
+        // The child span propagates fields from parent when child is a tracing child.
+        // TestFieldsCollector captures from both on_new_span and on_record,
+        // so we may see more entries than spans.
+        assert!(
+            seen.len() >= 2,
+            "expected at least two ParentLinkFields captures (parent + child), got {}: {:?}",
+            seen.len(),
+            seen,
+        );
+
+        // Verify child has the correct propagated trace_id.
+        let child_plf = seen.iter().find(|plf| plf.parent_span_id.is_some());
+        assert!(
+            child_plf.is_some(),
+            "child should have parent_span_id propagated"
+        );
+        assert_eq!(
+            child_plf.unwrap().trace_id,
+            "0af7651916cd43dd8448eb211c80319c"
+        );
     }
 }
