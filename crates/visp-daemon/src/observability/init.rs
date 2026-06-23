@@ -97,6 +97,63 @@ pub fn init_observability(cfg: &ObservabilityConfig) -> ObservabilityGuard {
     }
 }
 
+/// Like [`init_observability`] but accepts a custom [`MakeWriter`] for testing.
+///
+/// This allows integration tests to capture JSON output in memory without
+/// writing to stdout or a file.  All other assembly (EnvFilter, ParentLinkLayer,
+/// MetricsLayer) is identical to `init_observability`.
+///
+/// When `cfg.enabled` is `false`, a no-op guard is returned and the writer
+/// is **not** used (mirrors the production behaviour).
+///
+/// # Panics
+/// If `set_default` fails (e.g., a subscriber was already set globally).
+#[allow(dead_code)]
+pub fn init_observability_with_writer<W>(cfg: &ObservabilityConfig, writer: W) -> ObservabilityGuard
+where
+    W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
+{
+    if !cfg.enabled {
+        return ObservabilityGuard {
+            metrics: None,
+            parent_link: None,
+            _file_guard: None,
+            _set_default: None,
+        };
+    }
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.level));
+    let parent_link = ParentLinkLayer::new();
+    let metrics = MetricsLayer::new();
+
+    let _set_default = if cfg.format == "json" {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(parent_link.clone())
+            .with(metrics.clone())
+            .with(tracing_subscriber::fmt::layer().json().with_writer(writer))
+            .set_default()
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(parent_link.clone())
+            .with(metrics.clone())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .pretty()
+                    .with_writer(writer),
+            )
+            .set_default()
+    };
+
+    ObservabilityGuard {
+        metrics: cfg.metrics_summary.then(|| Arc::new(metrics)),
+        parent_link: cfg.parent_link.then(|| Arc::new(parent_link)),
+        _file_guard: None,
+        _set_default: Some(_set_default),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

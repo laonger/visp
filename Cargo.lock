@@ -4137,6 +4137,7 @@ dependencies = [
 name = "visp-daemon"
 version = "0.4.0"
 dependencies = [
+ "async-trait",
  "dashmap",
  "futures",
  "prost",
@@ -4147,6 +4148,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "toml",
  "tonic",
  "tracing",
