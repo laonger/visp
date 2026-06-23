@@ -80,18 +80,15 @@ fn create_llm_provider(config: &LlmModelConfig) -> Result<Arc<dyn LlmProvider>, 
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Init tracing
-    tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
-
-    // 2. Load config
+    // 1. Load config
     let config_path = std::env::args().nth(1).map(std::path::PathBuf::from);
     let config: DaemonConfig =
         config::load_config(config_path.as_deref()).map_err(|e| format!("config: {e}"))?;
+
+    // 2. Init observability (tracing subscriber stack)
+    //    Guard lives for the lifetime of main; on drop it unwinds the subscriber.
+    let _observability_guard =
+        crate::observability::init::init_observability(&config.observability);
 
     tracing::info!(listen_addr = %config.daemon.listen_addr, "starting visp-daemon");
 
