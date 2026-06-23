@@ -3972,6 +3972,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "visp-core",
  "visp-llm",

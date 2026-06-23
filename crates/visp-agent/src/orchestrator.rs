@@ -13,6 +13,8 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing;
+use tracing::Instrument;
+use tracing_subscriber::registry::LookupSpan;
 
 use visp_core::agent::run_agent_loop;
 use visp_core::agent::{
@@ -231,12 +233,14 @@ impl Orchestrator {
                 task_id,
                 ..
             } => {
+                let trace_context = envelope.trace_context.clone();
                 self.spawn_sub_agent(
                     &envelope.session_id,
                     &call_id,
                     &subagent_type,
                     &description,
                     task_id.as_deref(),
+                    trace_context,
                 )
                 .await;
             }
@@ -410,6 +414,7 @@ impl Orchestrator {
         subagent_type: &str,
         description: &str,
         _task_id: Option<&str>,
+        trace_context: Option<visp_core::TraceContext>,
     ) {
         // 1. Depth check
         let depth = self.active_agents.compute_depth(parent_session_id);
@@ -582,21 +587,52 @@ impl Orchestrator {
         let session_mgr = self.session_mgr.clone();
         let config = self.agent_config.clone();
 
-        let loop_handle = tokio::spawn(async move {
-            run_agent_loop(
-                provider,
-                tool_registry,
-                rule_engine,
-                session_mgr,
-                ctx,
-                &config,
-                msg,
-                agent_tx,
-            )
-            .await;
-        });
+        // ── W1-S3c: 创建 visp.subagent.spawn span ─────────────────────────
+        let spawn_span = tracing::info_span!(
+            "visp.subagent.spawn",
+            visp.subagent.name = %subagent_type,
+            visp.subagent.session_id = %sub_session_id,
+            visp.subagent.call_id = %call_id,
+            visp.subagent.task_id = tracing::field::Empty,
+            visp.subagent.depth = depth,
+        );
+
+        // 将 TraceContext 写入 span extension（供 ParentLinkLayer 使用）
+        if let Some(tc) = trace_context {
+            spawn_span.with_subscriber(|(_id, dispatch)| {
+                #[allow(unused_imports)]
+                use tracing_subscriber::Registry;
+                if let Some(registry) = dispatch.downcast_ref::<tracing_subscriber::Registry>()
+                    && let Some(span_ref) = registry.span(_id)
+                {
+                    span_ref.extensions_mut().insert(tc);
+                }
+            });
+        }
+
+        let loop_handle = tokio::spawn(
+            async move {
+                run_agent_loop(
+                    provider,
+                    tool_registry,
+                    rule_engine,
+                    session_mgr,
+                    ctx,
+                    &config,
+                    msg,
+                    agent_tx,
+                )
+                .await;
+            }
+            .instrument(spawn_span.clone()),
+        );
         self.sub_agent_handles
             .insert(sub_session_id.clone(), loop_handle);
+
+        // 记录 task_id（如有）
+        if let Some(task_id) = _task_id {
+            spawn_span.record("visp.subagent.task_id", task_id);
+        }
 
         tracing::info!(
             parent = parent_session_id,
@@ -1280,6 +1316,406 @@ mod tests {
             }
             _ => panic!("unexpected message variant"),
         }
+    }
+
+    // ── W1-S3c: 注入 visp.subagent.spawn span ─────────────────────────────
+    use std::sync::Arc as TArc;
+    use std::sync::Mutex as TMutex;
+    use std::time::Duration;
+    use tracing::Subscriber;
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::registry::LookupSpan;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use visp_core::agent_definition::AgentMode;
+    use visp_core::provider::LlmConfig;
+
+    #[derive(Debug, Clone)]
+    struct CapturedSpan {
+        name: String,
+        fields: Vec<(String, String)>,
+        id: u64,
+        parent_id: Option<u64>,
+    }
+
+    struct SpanFieldVisitor {
+        fields: Vec<(String, String)>,
+    }
+
+    impl Visit for SpanFieldVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .push((field.name().to_string(), format!("{value:?}")));
+        }
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+    }
+
+    struct TestLayer {
+        spans: TArc<TMutex<Vec<CapturedSpan>>>,
+        #[allow(dead_code)]
+        events: TArc<TMutex<Vec<String>>>,
+        captured_tcs: TArc<TMutex<Vec<visp_core::TraceContext>>>,
+    }
+
+    impl TestLayer {
+        fn new(
+            spans: TArc<TMutex<Vec<CapturedSpan>>>,
+            events: TArc<TMutex<Vec<String>>>,
+            captured_tcs: TArc<TMutex<Vec<visp_core::TraceContext>>>,
+        ) -> Self {
+            Self {
+                spans,
+                events,
+                captured_tcs,
+            }
+        }
+    }
+
+    impl<S> Layer<S> for TestLayer
+    where
+        S: Subscriber + for<'a> LookupSpan<'a>,
+    {
+        fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+            let mut visitor = SpanFieldVisitor { fields: Vec::new() };
+            attrs.record(&mut visitor);
+            let parent_id = ctx.lookup_current().map(|s| s.id().into_u64());
+            let mut spans = self.spans.lock().unwrap();
+            spans.push(CapturedSpan {
+                name: attrs.metadata().name().to_string(),
+                fields: visitor.fields,
+                id: id.into_u64(),
+                parent_id,
+            });
+
+            // 如果当前 span（父 span）有 TraceContext extension，捕获它
+            if let Some(current) = ctx.lookup_current()
+                && let Some(tc) = current.extensions().get::<visp_core::TraceContext>()
+            {
+                self.captured_tcs.lock().unwrap().push(tc.clone());
+            }
+        }
+
+        fn on_record(&self, id: &Id, values: &Record<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = SpanFieldVisitor { fields: Vec::new() };
+            values.record(&mut visitor);
+            let mut spans = self.spans.lock().unwrap();
+            if let Some(span) = spans.iter_mut().find(|s| s.id == id.into_u64()) {
+                span.fields.extend(visitor.fields);
+            }
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn setup_tracing() -> (
+        TArc<TMutex<Vec<CapturedSpan>>>,
+        TArc<TMutex<Vec<String>>>,
+        TArc<TMutex<Vec<visp_core::TraceContext>>>,
+    ) {
+        let spans = TArc::new(TMutex::new(Vec::new()));
+        let events = TArc::new(TMutex::new(Vec::new()));
+        let captured_tcs = TArc::new(TMutex::new(Vec::new()));
+        (spans, events, captured_tcs)
+    }
+
+    fn make_tracing_guard(
+        spans: &TArc<TMutex<Vec<CapturedSpan>>>,
+        events: &TArc<TMutex<Vec<String>>>,
+        captured_tcs: &TArc<TMutex<Vec<visp_core::TraceContext>>>,
+    ) -> tracing::subscriber::DefaultGuard {
+        use tracing_subscriber::layer::SubscriberExt;
+        tracing_subscriber::registry()
+            .with(TestLayer::new(
+                spans.clone(),
+                events.clone(),
+                captured_tcs.clone(),
+            ))
+            .set_default()
+    }
+
+    /// 创建完整可用的 orchestrator（含父 session、agent 定义、provider）
+    fn make_orchestrator_for_spawn() -> (
+        Orchestrator,
+        mpsc::Sender<Envelope>,
+        mpsc::Receiver<AgentEventFrame>,
+        String,
+    ) {
+        let (_cancel_tx, cancel_rx) = mpsc::channel(16);
+        let (global_tx, global_rx) = mpsc::channel(256);
+        let (grpc_tx, grpc_rx) = mpsc::channel::<AgentEventFrame>(256);
+        let (_client_tx, client_rx) = mpsc::channel(64);
+
+        let store: Box<dyn visp_core::session::SessionStore> =
+            Box::new(InMemorySessionStore::new());
+        let session_mgr = Arc::new(SessionManager::new(store));
+        let parent = session_mgr
+            .create(&PathBuf::from("/tmp"), LlmConfig::default())
+            .unwrap();
+        let parent_id = parent.id.clone();
+
+        // Register default subagent type
+        let mut agent_registry = AgentRegistry::new();
+        agent_registry
+            .register(AgentDefinition {
+                name: "default".to_string(),
+                description: String::new(),
+                mode: AgentMode::Subagent,
+                model: None,
+                temperature: None,
+                steps: None,
+                permission: vec![],
+                system_prompt: String::new(),
+            })
+            .ok();
+        let agent_registry = Arc::new(agent_registry);
+
+        let tool_registry = Arc::new(ToolRegistry::new());
+        let rule_engine = Arc::new(RuleEngine::new(&PathBuf::from(".")).unwrap());
+        let agent_config = AgentConfig::default();
+        let context_trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(NoopTrimmer);
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(visp_llm::mock::MockProvider::new(vec![]));
+        let mut providers = HashMap::new();
+        providers.insert("default".to_string(), provider);
+
+        let global_tx_for_orch = global_tx.clone();
+        let orch = Orchestrator::new(
+            cancel_rx,
+            global_rx,
+            global_tx_for_orch,
+            client_rx,
+            grpc_tx,
+            session_mgr,
+            agent_registry,
+            tool_registry,
+            rule_engine,
+            agent_config,
+            context_trimmer,
+            providers,
+            "default".to_string(),
+        );
+
+        (orch, global_tx, grpc_rx, parent_id)
+    }
+
+    #[tokio::test]
+    async fn test_subagent_spawn_span_created_in_orchestrator() {
+        let (spans, _events, _tcs) = setup_tracing();
+        let _guard = make_tracing_guard(&spans, &_events, &_tcs);
+        let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+
+        let envelope = Envelope {
+            session_id: parent_id.clone(),
+            message: AgentMessage::SpawnRequest {
+                call_id: "call-1".to_string(),
+                subagent_type: "default".to_string(),
+                description: "do something".to_string(),
+                task_id: None,
+                trace_context: None,
+            },
+            trace_context: None,
+        };
+        orch.handle_agent_message(envelope).await;
+
+        let captured = spans.lock().unwrap();
+        let spawn_spans: Vec<_> = captured
+            .iter()
+            .filter(|s| s.name == "visp.subagent.spawn")
+            .collect();
+        assert!(
+            !spawn_spans.is_empty(),
+            "expected at least one 'visp.subagent.spawn' span, found {} total spans: {:?}",
+            captured.len(),
+            captured.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subagent_spawn_fields() {
+        let (spans, _events, _tcs) = setup_tracing();
+        let _guard = make_tracing_guard(&spans, &_events, &_tcs);
+        let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+
+        let envelope = Envelope {
+            session_id: parent_id.clone(),
+            message: AgentMessage::SpawnRequest {
+                call_id: "call-field-test".to_string(),
+                subagent_type: "default".to_string(),
+                description: "test description".to_string(),
+                task_id: Some("task-42".to_string()),
+                trace_context: None,
+            },
+            trace_context: None,
+        };
+        orch.handle_agent_message(envelope).await;
+
+        let captured = spans.lock().unwrap();
+        let spawn_span = captured
+            .iter()
+            .find(|s| s.name == "visp.subagent.spawn")
+            .expect("expected 'visp.subagent.spawn' span");
+
+        let field_map: std::collections::HashMap<&str, &str> = spawn_span
+            .fields
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        assert_eq!(
+            field_map.get("visp.subagent.name"),
+            Some(&"default"),
+            "visp.subagent.name should be 'default', got: {:?}",
+            field_map.get("visp.subagent.name")
+        );
+        assert_eq!(
+            field_map.get("visp.subagent.call_id"),
+            Some(&"call-field-test"),
+            "visp.subagent.call_id should be 'call-field-test'"
+        );
+        assert!(
+            field_map.contains_key("visp.subagent.session_id"),
+            "visp.subagent.session_id should be present"
+        );
+        assert!(
+            field_map.get("visp.subagent.task_id") == Some(&"task-42"),
+            "visp.subagent.task_id should be 'task-42'"
+        );
+        assert_eq!(
+            field_map.get("visp.subagent.depth"),
+            Some(&"0"),
+            "visp.subagent.depth should be '0', got: {:?}",
+            field_map.get("visp.subagent.depth")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subagent_run_loop_attached_via_instrument() {
+        let (spans, _events, _tcs) = setup_tracing();
+        let _guard = make_tracing_guard(&spans, &_events, &_tcs);
+        let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+
+        let envelope = Envelope {
+            session_id: parent_id.clone(),
+            message: AgentMessage::SpawnRequest {
+                call_id: "call-3".to_string(),
+                subagent_type: "default".to_string(),
+                description: "do something".to_string(),
+                task_id: None,
+                trace_context: None,
+            },
+            trace_context: None,
+        };
+        orch.handle_agent_message(envelope).await;
+
+        // 给 spawned task 时间启动，使 visp.agent.run span 被创建
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let captured = spans.lock().unwrap();
+        let spawn_span = captured
+            .iter()
+            .find(|s| s.name == "visp.subagent.spawn")
+            .expect("expected 'visp.subagent.spawn' span");
+        let run_span = captured
+            .iter()
+            .find(|s| s.name == "visp.agent.run")
+            .expect("expected 'visp.agent.run' span (run_agent_loop should have started)");
+
+        assert_eq!(
+            run_span.parent_id,
+            Some(spawn_span.id),
+            "'visp.agent.run' should be a child of 'visp.subagent.spawn' (parent_id={:?}, spawn_id={})",
+            run_span.parent_id,
+            spawn_span.id,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_reads_trace_context_from_envelope() {
+        let (spans, _events, tcs) = setup_tracing();
+        let _guard = make_tracing_guard(&spans, &_events, &tcs);
+        let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+
+        let tc = visp_core::TraceContext::new(
+            "0af7651916cd43dd8448eb211c80319c".to_string(),
+            "b7ad6b7169203331".to_string(),
+            1,
+            None,
+        )
+        .unwrap();
+
+        let envelope = Envelope {
+            session_id: parent_id.clone(),
+            message: AgentMessage::SpawnRequest {
+                call_id: "call-tc-1".to_string(),
+                subagent_type: "default".to_string(),
+                description: "task with trace".to_string(),
+                task_id: None,
+                trace_context: None,
+            },
+            trace_context: Some(tc.clone()),
+        };
+        orch.handle_agent_message(envelope).await;
+
+        // 给 spawned task 时间启动，使子 span 创建时触发 extension 读取
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let captured_tcs = tcs.lock().unwrap();
+        assert!(
+            !captured_tcs.is_empty(),
+            "expected TraceContext to be captured from span extension, got empty"
+        );
+        assert_eq!(captured_tcs[0].trace_id, tc.trace_id);
+        assert_eq!(captured_tcs[0].span_id, tc.span_id);
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_missing_trace_context_falls_back_to_orphan() {
+        let (spans, _events, tcs) = setup_tracing();
+        let _guard = make_tracing_guard(&spans, &_events, &tcs);
+        let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+
+        // Envelope 不带 trace_context（None）
+        let envelope = Envelope {
+            session_id: parent_id.clone(),
+            message: AgentMessage::SpawnRequest {
+                call_id: "call-orphan".to_string(),
+                subagent_type: "default".to_string(),
+                description: "orphan test".to_string(),
+                task_id: None,
+                trace_context: None,
+            },
+            trace_context: None,
+        };
+        orch.handle_agent_message(envelope).await;
+
+        // 验证不 panic，且 spawn span 已创建
+        let captured = spans.lock().unwrap();
+        assert!(
+            captured.iter().any(|s| s.name == "visp.subagent.spawn"),
+            "'visp.subagent.spawn' span should be created even without trace_context"
+        );
+
+        // 验证未捕获任何 TraceContext extension
+        let captured_tcs = tcs.lock().unwrap();
+        assert!(
+            captured_tcs.is_empty(),
+            "should not capture any TraceContext when envelope has trace_context=None"
+        );
     }
 
     /// Cancel 路径下：sub-agent 因 Ctrl-C 退出（code=Cancelled），
