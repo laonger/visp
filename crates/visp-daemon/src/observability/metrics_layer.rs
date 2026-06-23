@@ -370,6 +370,10 @@ where
                     tool_duration_ms = metrics.tool_duration_ms,
                     "session completed",
                 );
+
+                // P0-4: Destroy the bucket after summary emission so a
+                // subsequent visp.agent.run for the same session starts fresh.
+                self.sessions.remove(&session_id);
             }
 
             _ => {}
@@ -475,18 +479,23 @@ mod tests {
             visp.tool.duration_ms = tracing::field::Empty,
         );
         tool.record("visp.tool.duration_ms", 150i64);
+        // Tool updates are finalized in on_close, so drop tool first.
         drop(tool);
 
-        drop(_enter);
-        drop(parent);
-        drop(_guard);
-
+        // Snapshot metrics while the run span is still alive.
         let metrics = layer.session_metrics("sess_tool_1").unwrap();
         assert_eq!(
             metrics.tool_duration_ms, 150,
             "tool duration should be accumulated"
         );
         assert_eq!(metrics.tool_calls, 1, "should count one tool call");
+
+        drop(_enter);
+        drop(parent);
+        drop(_guard);
+
+        // Bucket is removed after summary → should be gone.
+        assert!(layer.session_metrics("sess_tool_1").is_none());
     }
 
     #[test]
@@ -528,12 +537,10 @@ mod tests {
         llm.record("gen_ai.usage.cache_read_input_tokens", 20u64);
         llm.record("gen_ai.usage.cache_creation_input_tokens", 10u64);
         llm.record("visp.llm.cost_usd", 0.0025f64);
+        // LLM updates are finalized in on_close, so drop llm first.
         drop(llm);
 
-        drop(_enter);
-        drop(parent);
-        drop(_guard);
-
+        // Snapshot while alive
         let metrics = layer.session_metrics("sess_llm_1").unwrap();
         assert_eq!(metrics.total_tokens_input, 100);
         assert_eq!(metrics.total_tokens_output, 50);
@@ -541,6 +548,12 @@ mod tests {
         assert_eq!(metrics.cache_creation_input, 10);
         assert!((metrics.total_cost_usd - 0.0025).abs() < 1e-9);
         assert_eq!(metrics.llm_calls, 1);
+
+        drop(_enter);
+        drop(parent);
+        drop(_guard);
+
+        assert!(layer.session_metrics("sess_llm_1").is_none());
     }
 
     #[test]
@@ -552,6 +565,8 @@ mod tests {
             .set_default();
 
         // Session A: two tool calls + one LLM call
+        // Capture metrics while span is alive (before close removes bucket).
+        let metrics_a;
         {
             let parent = tracing::info_span!(
                 "visp.agent.run",
@@ -589,11 +604,13 @@ mod tests {
             llm.record("visp.llm.cost_usd", 0.001f64);
             drop(llm);
 
+            metrics_a = layer.session_metrics("sess_a").unwrap();
             drop(_enter);
             drop(parent);
         }
 
         // Session B: one tool call + two LLM calls
+        let metrics_b;
         {
             let parent = tracing::info_span!(
                 "visp.agent.run",
@@ -635,20 +652,19 @@ mod tests {
             llm2.record("gen_ai.usage.output_tokens", 35u64);
             drop(llm2);
 
+            metrics_b = layer.session_metrics("sess_b").unwrap();
             drop(_enter);
             drop(parent);
         }
 
         drop(_guard);
 
-        let metrics_a = layer.session_metrics("sess_a").unwrap();
         assert_eq!(metrics_a.tool_duration_ms, 150);
         assert_eq!(metrics_a.tool_calls, 2);
         assert_eq!(metrics_a.total_tokens_input, 50);
         assert_eq!(metrics_a.total_tokens_output, 25);
         assert_eq!(metrics_a.llm_calls, 1);
 
-        let metrics_b = layer.session_metrics("sess_b").unwrap();
         assert_eq!(metrics_b.tool_duration_ms, 200);
         assert_eq!(metrics_b.tool_calls, 1);
         assert_eq!(metrics_b.total_tokens_input, 100);
@@ -719,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn test_metrics_layer_emits_only_once_per_session() {
+    fn test_metrics_layer_emits_per_run_after_bucket_removal() {
         let layer = MetricsLayer::new();
         let collector = TestMetricsEventCollector::new();
 
@@ -728,12 +744,12 @@ mod tests {
             .with(collector.clone())
             .set_default();
 
-        // First agent run
+        // First agent run → summary emitted, bucket removed.
         {
             let parent = tracing::info_span!(
                 "visp.agent.run",
-                session.id = "sess_once",
-                session.short_id = "sess_on",
+                session.id = "sess_multi",
+                session.short_id = "sess_mu",
                 visp.agent.kind = "primary",
                 visp.agent.depth = 0u64,
             );
@@ -748,14 +764,14 @@ mod tests {
             drop(parent);
         }
 
-        // Simulate: another close of the same session (no second agent.run
-        // close in practice, but the layer uses an ended_at marker to
-        // prevent re-emission if it happens).
+        assert_eq!(collector.count_summary_events(), 1);
+
+        // Second agent run with same session.id → new bucket, new summary.
         {
             let parent = tracing::info_span!(
                 "visp.agent.run",
-                session.id = "sess_once",
-                session.short_id = "sess_on",
+                session.id = "sess_multi",
+                session.short_id = "sess_mu",
                 visp.agent.kind = "primary",
                 visp.agent.depth = 0u64,
             );
@@ -774,8 +790,8 @@ mod tests {
 
         assert_eq!(
             collector.count_summary_events(),
-            1,
-            "summary should be emitted only once per session"
+            2,
+            "each visp.agent.run close produces a summary since bucket is removed"
         );
     }
 
@@ -794,6 +810,8 @@ mod tests {
             .with(layer.clone())
             .set_default();
 
+        // Capture metrics while span is alive (before close removes bucket).
+        let metrics_snapshot;
         {
             let parent = tracing::info_span!(
                 "visp.agent.run",
@@ -809,15 +827,21 @@ mod tests {
             );
             tool.record("visp.tool.duration_ms", 75i64);
             drop(tool);
+
+            metrics_snapshot = layer.session_metrics("sess_access");
             drop(_enter);
             drop(parent);
         }
 
         drop(_guard);
 
-        let metrics = layer.session_metrics("sess_access");
-        assert!(metrics.is_some(), "expected metrics for sess_access");
-        assert_eq!(metrics.unwrap().tool_calls, 1);
+        assert!(
+            metrics_snapshot.is_some(),
+            "expected metrics for sess_access"
+        );
+        assert_eq!(metrics_snapshot.unwrap().tool_calls, 1);
+        // After close, bucket is removed.
+        assert!(layer.session_metrics("sess_access").is_none());
     }
 
     #[test]
@@ -828,7 +852,8 @@ mod tests {
             .with(layer.clone())
             .set_default();
 
-        // Create two sessions
+        // Capture sessions before they close (after close, bucket is removed).
+        let mut snapshot_session_count = 0;
         for sid in &["sess_all_a", "sess_all_b"] {
             let parent = tracing::info_span!(
                 "visp.agent.run",
@@ -844,16 +869,131 @@ mod tests {
             );
             tool.record("visp.tool.duration_ms", 10i64);
             drop(tool);
+
+            // Snapshot before close
+            let metrics = layer.session_metrics(sid);
+            if metrics.is_some() {
+                snapshot_session_count += 1;
+            }
+
             drop(_enter);
             drop(parent);
         }
 
         drop(_guard);
 
+        assert_eq!(snapshot_session_count, 2, "expected 2 sessions while alive");
+
+        // After all sessions closed, all_sessions should be empty.
         let all = layer.all_sessions();
-        assert_eq!(all.len(), 2, "expected 2 sessions");
-        let sids: Vec<&str> = all.iter().map(|(k, _)| k.as_str()).collect();
-        assert!(sids.contains(&"sess_all_a"));
-        assert!(sids.contains(&"sess_all_b"));
+        assert!(all.is_empty(), "expected no sessions after all were closed");
+    }
+
+    // ── P0-4: bucket cleanup on summary ─────────────────────────────────
+
+    #[test]
+    fn test_metrics_layer_removes_bucket_after_summary() {
+        let layer = MetricsLayer::new();
+        let collector = TestMetricsEventCollector::new();
+
+        let _guard = tracing_subscriber::registry()
+            .with(layer.clone())
+            .with(collector.clone())
+            .set_default();
+
+        {
+            let parent = tracing::info_span!(
+                "visp.agent.run",
+                session.id = "sess_cleanup",
+                session.short_id = "sess_cl",
+                visp.agent.kind = "primary",
+                visp.agent.depth = 0u64,
+            );
+            let _enter = parent.enter();
+            let tool = tracing::info_span!(
+                "visp.tool.execute",
+                visp.tool.duration_ms = tracing::field::Empty
+            );
+            tool.record("visp.tool.duration_ms", 50i64);
+            drop(tool);
+            drop(_enter);
+            drop(parent);
+        }
+
+        // Summary should have been emitted
+        assert_eq!(collector.count_summary_events(), 1);
+
+        // Bucket should be removed
+        assert!(
+            layer.session_metrics("sess_cleanup").is_none(),
+            "bucket should be removed after summary emission"
+        );
+    }
+
+    #[test]
+    fn test_metrics_layer_no_pollution_on_session_rerun() {
+        let layer = MetricsLayer::new();
+        let collector = TestMetricsEventCollector::new();
+
+        let _guard = tracing_subscriber::registry()
+            .with(layer.clone())
+            .with(collector.clone())
+            .set_default();
+
+        // First run: emits summary, bucket is removed.
+        {
+            let parent = tracing::info_span!(
+                "visp.agent.run",
+                session.id = "sess_rerun",
+                session.short_id = "sess_re",
+                visp.agent.kind = "primary",
+                visp.agent.depth = 0u64,
+            );
+            let _enter = parent.enter();
+            let tool = tracing::info_span!(
+                "visp.tool.execute",
+                visp.tool.duration_ms = tracing::field::Empty
+            );
+            tool.record("visp.tool.duration_ms", 30i64);
+            drop(tool);
+            drop(_enter);
+            drop(parent);
+        }
+
+        assert_eq!(collector.count_summary_events(), 1);
+        assert!(layer.session_metrics("sess_rerun").is_none());
+
+        // Second run with same session.id: new bucket, fresh summary.
+        {
+            let parent = tracing::info_span!(
+                "visp.agent.run",
+                session.id = "sess_rerun",
+                session.short_id = "sess_re",
+                visp.agent.kind = "primary",
+                visp.agent.depth = 0u64,
+            );
+            let _enter = parent.enter();
+            let tool = tracing::info_span!(
+                "visp.tool.execute",
+                visp.tool.duration_ms = tracing::field::Empty
+            );
+            tool.record("visp.tool.duration_ms", 60i64);
+            drop(tool);
+            drop(_enter);
+            drop(parent);
+        }
+
+        // Should emit a second summary (fresh bucket, no duplicate guard)
+        assert_eq!(
+            collector.count_summary_events(),
+            2,
+            "second run should emit its own summary"
+        );
+
+        // Second bucket should also be removed
+        assert!(
+            layer.session_metrics("sess_rerun").is_none(),
+            "second bucket should also be removed"
+        );
     }
 }
