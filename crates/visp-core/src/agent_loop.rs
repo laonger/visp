@@ -99,6 +99,7 @@ async fn send_event(
             .send(Envelope {
                 session_id: session_id.to_string(),
                 message: msg,
+                trace_context: None,
             })
             .await;
     }
@@ -843,7 +844,9 @@ async fn execute_tool_calls(
                         subagent_type: subagent_type.clone(),
                         description: description.clone(),
                         task_id: task_id.clone(),
+                        trace_context: None,
                     },
+                    trace_context: None,
                 });
             }
 
@@ -875,6 +878,7 @@ async fn execute_tool_calls(
                         let _ = gtx.try_send(Envelope {
                             session_id: sid2.clone(),
                             message: $msg,
+                            trace_context: None,
                         });
                     }
                 };
@@ -1528,6 +1532,7 @@ pub async fn run_agent_loop(
                     code: AgentErrorCode::Internal,
                     message: format!("agent loop panicked: {panic_msg}"),
                 },
+                trace_context: None,
             };
             match global_tx.try_send(envelope) {
                 Ok(()) => {

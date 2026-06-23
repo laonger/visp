@@ -229,6 +229,7 @@ impl Orchestrator {
                 subagent_type,
                 description,
                 task_id,
+                ..
             } => {
                 self.spawn_sub_agent(
                     &envelope.session_id,
@@ -911,6 +912,7 @@ mod tests {
             .send(Envelope {
                 session_id: "s-1".to_string(),
                 message: AgentMessage::TextDelta("hello".to_string()),
+                trace_context: None,
             })
             .await
             .unwrap();
@@ -943,6 +945,7 @@ mod tests {
                 allow_other: false,
                 respond,
             },
+            trace_context: None,
         })
         .await;
 
@@ -978,7 +981,9 @@ mod tests {
                 subagent_type: "default".to_string(),
                 description: "do something".to_string(),
                 task_id: None,
+                trace_context: None,
             },
+            trace_context: None,
         };
         orch.handle_agent_message(envelope).await;
 
@@ -1248,6 +1253,7 @@ mod tests {
                 code: AgentErrorCode::Internal,
                 message: "agent loop panicked: provider panic".to_string(),
             },
+            trace_context: None,
         };
         orch.handle_agent_message(envelope).await;
 
@@ -1314,6 +1320,7 @@ mod tests {
                 code: AgentErrorCode::Cancelled,
                 message: "Agent loop cancelled".to_string(),
             },
+            trace_context: None,
         };
         orch.handle_agent_message(envelope).await;
 

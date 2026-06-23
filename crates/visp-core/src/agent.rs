@@ -128,6 +128,7 @@ pub enum AgentMessage {
         subagent_type: String,
         description: String,
         task_id: Option<String>,
+        trace_context: Option<crate::TraceContext>,
     },
     Done,
 }
@@ -150,6 +151,7 @@ pub enum OrchestratorMessage {
 pub struct Envelope {
     pub session_id: String,
     pub message: AgentMessage,
+    pub trace_context: Option<crate::TraceContext>,
 }
 
 /// Agent 循环上下文
@@ -531,6 +533,7 @@ pub(crate) fn dump_prompt_to_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TraceContext;
     use crate::context::ContextTrimmer;
     use crate::session::InMemorySessionStore;
     use crate::tool::Tool;
@@ -2078,5 +2081,75 @@ mod tests {
             history[2].skip_context,
             "orphan tool result should be skip_context"
         );
+    }
+
+    // ── W1-S1-3: TraceContext on SpawnRequest & Envelope ────────────────
+
+    #[test]
+    fn test_spawn_request_carries_trace_context() {
+        let tc = TraceContext::new(
+            "0af7651916cd43dd8448eb211c80319c".to_string(),
+            "b7ad6b7169203331".to_string(),
+            1,
+            None,
+        )
+        .unwrap();
+        let spawn = AgentMessage::SpawnRequest {
+            call_id: "call-1".into(),
+            subagent_type: "default".into(),
+            description: "do work".into(),
+            task_id: None,
+            trace_context: Some(tc.clone()),
+        };
+        match &spawn {
+            AgentMessage::SpawnRequest { trace_context, .. } => {
+                assert_eq!(trace_context, &Some(tc));
+            }
+            _ => panic!("expected SpawnRequest"),
+        }
+    }
+
+    #[test]
+    fn test_spawn_request_backward_compat_default_none() {
+        let spawn = AgentMessage::SpawnRequest {
+            call_id: "call-1".into(),
+            subagent_type: "default".into(),
+            description: "do work".into(),
+            task_id: None,
+            trace_context: None,
+        };
+        match &spawn {
+            AgentMessage::SpawnRequest { trace_context, .. } => {
+                assert!(trace_context.is_none());
+            }
+            _ => panic!("expected SpawnRequest"),
+        }
+    }
+
+    #[test]
+    fn test_envelope_carries_trace_context() {
+        let tc = TraceContext::new(
+            "0af7651916cd43dd8448eb211c80319c".to_string(),
+            "b7ad6b7169203331".to_string(),
+            1,
+            None,
+        )
+        .unwrap();
+        let envelope = Envelope {
+            session_id: "sess-1".into(),
+            message: AgentMessage::Done,
+            trace_context: Some(tc.clone()),
+        };
+        assert_eq!(envelope.trace_context, Some(tc));
+    }
+
+    #[test]
+    fn test_envelope_backward_compat_default_none() {
+        let envelope = Envelope {
+            session_id: "sess-1".into(),
+            message: AgentMessage::Done,
+            trace_context: None,
+        };
+        assert!(envelope.trace_context.is_none());
     }
 }

@@ -12,6 +12,7 @@ pub mod rules;
 pub mod session;
 pub mod tool;
 pub mod tool_registry;
+pub mod trace_context;
 
 // Re-export 常用类型
 pub use error::{CoreError, LlmError, SessionError};
@@ -19,3 +20,4 @@ pub use message::{Message, MessageType, Role, ToolCallRequest, ToolDefinition};
 pub use provider::{ChatEvent, LlmConfig, LlmProvider};
 pub use provider_metadata::ProviderMetadata;
 pub use tool::{Tool, ToolContext, ToolResult};
+pub use trace_context::{TraceContext, TraceContextError};
