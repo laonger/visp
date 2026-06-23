@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use visp_mcp::config::McpConfig;
@@ -16,6 +16,9 @@ pub struct DaemonConfig {
     pub mcp: McpConfig,
     #[serde(default = "default_storage_section")]
     pub storage: StorageSection,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub observability: ObservabilityConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -135,6 +138,35 @@ pub struct StorageSection {
     pub path: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObservabilityConfig {
+    #[serde(default = "default_observability_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_observability_level")]
+    pub level: String,
+    #[serde(default = "default_observability_format")]
+    pub format: String,
+    #[serde(default = "default_observability_parent_link")]
+    pub parent_link: bool,
+    #[serde(default = "default_observability_metrics_summary")]
+    pub metrics_summary: bool,
+    #[serde(default = "default_observability_log_file")]
+    pub log_file: Option<String>,
+}
+
+impl Default for ObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_observability_enabled(),
+            level: default_observability_level(),
+            format: default_observability_format(),
+            parent_link: default_observability_parent_link(),
+            metrics_summary: default_observability_metrics_summary(),
+            log_file: default_observability_log_file(),
+        }
+    }
+}
+
 fn default_listen_addr() -> String {
     "[::1]:50051".into()
 }
@@ -180,6 +212,25 @@ fn default_storage_section() -> StorageSection {
         driver: default_storage_driver(),
         path: default_storage_path(),
     }
+}
+
+fn default_observability_enabled() -> bool {
+    true
+}
+fn default_observability_level() -> String {
+    "info".into()
+}
+fn default_observability_format() -> String {
+    "json".into()
+}
+fn default_observability_parent_link() -> bool {
+    true
+}
+fn default_observability_metrics_summary() -> bool {
+    true
+}
+fn default_observability_log_file() -> Option<String> {
+    None
 }
 
 pub fn load_config(config_path: Option<&Path>) -> Result<DaemonConfig, String> {
@@ -237,6 +288,7 @@ fn default_config() -> DaemonConfig {
             driver: default_storage_driver(),
             path: default_storage_path(),
         },
+        observability: ObservabilityConfig::default(),
     }
 }
 
@@ -551,5 +603,94 @@ path = "/tmp/custom/visp.db"
 "#;
         let config: DaemonConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.storage.path, "/tmp/custom/visp.db");
+    }
+
+    #[test]
+    fn test_observability_config_default() {
+        let config = default_config();
+        assert!(config.observability.enabled);
+        assert_eq!(config.observability.level, "info");
+        assert_eq!(config.observability.format, "json");
+        assert!(config.observability.parent_link);
+        assert!(config.observability.metrics_summary);
+        assert_eq!(config.observability.log_file, None);
+    }
+
+    #[test]
+    fn test_observability_config_disabled_via_toml() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+
+[tools]
+
+[agent]
+
+[observability]
+enabled = false
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert!(!config.observability.enabled);
+        assert_eq!(config.observability.level, "info");
+        assert_eq!(config.observability.format, "json");
+        assert!(config.observability.parent_link);
+        assert!(config.observability.metrics_summary);
+        assert_eq!(config.observability.log_file, None);
+    }
+
+    #[test]
+    fn test_observability_config_full_override_via_toml() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+
+[tools]
+
+[agent]
+
+[observability]
+enabled = false
+level = "debug"
+format = "text"
+parent_link = false
+metrics_summary = false
+log_file = "/tmp/test.log"
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert!(!config.observability.enabled);
+        assert_eq!(config.observability.level, "debug");
+        assert_eq!(config.observability.format, "text");
+        assert!(!config.observability.parent_link);
+        assert!(!config.observability.metrics_summary);
+        assert_eq!(config.observability.log_file, Some("/tmp/test.log".into()));
+    }
+
+    #[test]
+    fn test_observability_config_log_file_path() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+
+[tools]
+
+[agent]
+
+[observability]
+log_file = "/tmp/test.log"
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.observability.log_file, Some("/tmp/test.log".into()));
+    }
+
+    #[test]
+    fn test_daemon_config_default_includes_observability() {
+        let config = default_config();
+        assert_eq!(config.observability, ObservabilityConfig::default());
     }
 }
