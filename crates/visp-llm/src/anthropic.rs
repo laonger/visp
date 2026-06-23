@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use futures::stream::{self, Stream, StreamExt};
 use std::pin::Pin;
+use tracing::Instrument;
+use tracing::field;
 use visp_core::error::LlmError;
 use visp_core::message::{Message, Role, ToolDefinition};
 use visp_core::provider::{ChatEvent, LlmConfig, LlmProvider};
@@ -460,6 +462,35 @@ impl LlmProvider for AnthropicProvider {
         config: &LlmConfig,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError> {
+        // 提取 system 文本用于 span field
+        let system_text: String = messages
+            .iter()
+            .filter(|m| m.role == Role::System)
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        // 创建 gen_ai.client.operation span（OTel Semantic Conventions 标准命名）
+        let span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.system = field::Empty,
+            gen_ai.request.model = %config.model,
+            gen_ai.operation.name = "chat",
+            gen_ai.request.max_tokens = field::Empty,
+            gen_ai.request.temperature = field::Empty,
+            visp.llm.attempt = 0u64,
+            gen_ai.usage.input_tokens = field::Empty,
+            gen_ai.usage.output_tokens = field::Empty,
+            gen_ai.usage.cache_read_input_tokens = field::Empty,
+            gen_ai.usage.cache_creation_input_tokens = field::Empty,
+            gen_ai.response.finish_reasons = field::Empty,
+            gen_ai.response.model = field::Empty,
+            visp.llm.cost_usd = field::Empty,
+        );
+        span.record("gen_ai.system", &system_text);
+        span.record("gen_ai.request.max_tokens", config.max_tokens);
+        span.record("gen_ai.request.temperature", config.temperature);
+
         let url = format!("{}/v1/messages", self.api_url.trim_end_matches('/'));
         let body = build_anthropic_request(messages, tools, config);
         let headers = build_anthropic_headers(&self.api_key);
@@ -476,7 +507,7 @@ impl LlmProvider for AnthropicProvider {
         let status = response.status();
         if status.is_success() {
             let byte_stream = response.bytes_stream();
-            Ok(byte_stream_to_chat_events(byte_stream, start_time))
+            Ok(byte_stream_to_chat_events(byte_stream, start_time, span))
         } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             let retry_after = parse_retry_after(response.headers()).unwrap_or(60);
             Err(LlmError::RateLimit {
@@ -504,6 +535,7 @@ impl LlmProvider for AnthropicProvider {
 fn byte_stream_to_chat_events(
     byte_stream: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
     start_time: std::time::Instant,
+    span: tracing::Span,
 ) -> Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>> {
     use std::collections::HashMap;
 
@@ -539,6 +571,10 @@ fn byte_stream_to_chat_events(
         usage_emitted: bool,
         /// OutputMetadata 已发射
         metadata_emitted: bool,
+        /// gen_ai.client.operation span（用于 record 完成时字段）
+        span: tracing::Span,
+        /// 是否已发射首 token 事件
+        first_content_emitted: bool,
     }
 
     let state = StreamState {
@@ -556,274 +592,335 @@ fn byte_stream_to_chat_events(
         done_pending: false,
         usage_emitted: false,
         metadata_emitted: false,
+        span,
+        first_content_emitted: false,
     };
 
-    let event_stream = stream::unfold(state, |mut state| async move {
-        // 第 1 阶段：所有 SSE 处理完毕，发射 UsageInfo
-        if state.done_pending && !state.usage_emitted {
-            state.usage_emitted = true;
-            return Some((
-                Ok(ChatEvent::UsageInfo {
+    /// 标记首 token 已到达（幂等，仅首次有效）
+    fn emit_first_token(state: &mut StreamState) {
+        if !state.first_content_emitted {
+            state.first_content_emitted = true;
+            tracing::info!(target: "gen_ai.client.first_token", "first token received");
+        }
+    }
+
+    let event_stream = stream::unfold(state, |mut state| {
+        let span = state.span.clone();
+        async move {
+            // 第 1 阶段：所有 SSE 处理完毕，发射 UsageInfo
+            if state.done_pending && !state.usage_emitted {
+                state.usage_emitted = true;
+                return Some((
+                    Ok(ChatEvent::UsageInfo {
+                        input_tokens: state.input_tokens,
+                        output_tokens: state.output_tokens,
+                        tool_calls: 0,
+                        cache_creation_input_tokens: state.cache_creation_input_tokens,
+                        cache_read_input_tokens: state.cache_read_input_tokens,
+                    }),
+                    state,
+                ));
+            }
+            // 第 2 阶段：发射 OutputMetadata（包含 ProviderMetadata）
+            if state.usage_emitted && !state.metadata_emitted {
+                state.metadata_emitted = true;
+                let latency = state.start_time.elapsed().as_millis() as u64;
+                let finish_reasons = if state.stop_reason.is_empty() {
+                    vec![]
+                } else {
+                    vec![state.stop_reason.clone()]
+                };
+
+                // 在 span 上 record usage / model / finish_reasons / cost
+                state
+                    .span
+                    .record("gen_ai.usage.input_tokens", state.input_tokens);
+                state
+                    .span
+                    .record("gen_ai.usage.output_tokens", state.output_tokens);
+                if state.cache_read_input_tokens > 0 {
+                    state.span.record(
+                        "gen_ai.usage.cache_read_input_tokens",
+                        state.cache_read_input_tokens,
+                    );
+                }
+                if state.cache_creation_input_tokens > 0 {
+                    state.span.record(
+                        "gen_ai.usage.cache_creation_input_tokens",
+                        state.cache_creation_input_tokens,
+                    );
+                }
+                let finish_reasons_str = finish_reasons.join(",");
+                state
+                    .span
+                    .record("gen_ai.response.finish_reasons", &finish_reasons_str);
+                state.span.record("gen_ai.response.model", &state.model);
+                let cost = crate::cost::anthropic_cost_usd(
+                    &state.model,
+                    state.input_tokens,
+                    state.output_tokens,
+                );
+                state.span.record("visp.llm.cost_usd", cost);
+
+                return Some((
+                    Ok(ChatEvent::OutputMetadata(visp_core::ProviderMetadata {
+                        model: state.model.clone(),
+                        finish_reasons,
+                        input_tokens: state.input_tokens,
+                        output_tokens: state.output_tokens,
+                        cache_read_input_tokens: if state.cache_read_input_tokens > 0 {
+                            Some(state.cache_read_input_tokens)
+                        } else {
+                            None
+                        },
+                        cache_creation_input_tokens: if state.cache_creation_input_tokens > 0 {
+                            Some(state.cache_creation_input_tokens)
+                        } else {
+                            None
+                        },
+                        latency_ms: latency,
+                    })),
+                    state,
+                ));
+            }
+            // 第 3 阶段：发射 Done + completed event
+            if state.metadata_emitted {
+                state.done_pending = false;
+                state.usage_emitted = false;
+                state.metadata_emitted = false;
+                tracing::info!(
+                    target: "gen_ai.client.completed",
+                    input_tokens = state.input_tokens,
+                    output_tokens = state.output_tokens,
+                    model = %state.model,
+                    "LLM request completed"
+                );
+                return Some((Ok(ChatEvent::Done), state));
+            }
+
+            /// 更新 token 计数及消息元数据
+            fn update_anthropic_usage(
+                state: &mut StreamState,
+                input_tokens: u32,
+                output_tokens: u32,
+                cache_creation_input_tokens: u32,
+                cache_read_input_tokens: u32,
+                model: Option<String>,
+                stop_reason: Option<String>,
+            ) {
+                if input_tokens > 0 {
+                    state.input_tokens = input_tokens;
+                }
+                if output_tokens > 0 {
+                    state.output_tokens = output_tokens;
+                }
+                if cache_creation_input_tokens > 0 {
+                    state.cache_creation_input_tokens = cache_creation_input_tokens;
+                }
+                if cache_read_input_tokens > 0 {
+                    state.cache_read_input_tokens = cache_read_input_tokens;
+                }
+                if let Some(m) = model
+                    && !m.is_empty()
+                {
+                    state.model = m;
+                }
+                if let Some(sr) = stop_reason
+                    && !sr.is_empty()
+                {
+                    state.stop_reason = sr;
+                }
+            }
+
+            /// 构建 UsageInfo（表示 Done 事件）
+            fn build_done_usage_info(state: &StreamState) -> ChatEvent {
+                ChatEvent::UsageInfo {
                     input_tokens: state.input_tokens,
                     output_tokens: state.output_tokens,
                     tool_calls: 0,
                     cache_creation_input_tokens: state.cache_creation_input_tokens,
                     cache_read_input_tokens: state.cache_read_input_tokens,
-                }),
-                state,
-            ));
-        }
-        // 第 2 阶段：发射 OutputMetadata（包含 ProviderMetadata）
-        if state.usage_emitted && !state.metadata_emitted {
-            state.metadata_emitted = true;
-            let latency = state.start_time.elapsed().as_millis() as u64;
-            let finish_reasons = if state.stop_reason.is_empty() {
-                vec![]
-            } else {
-                vec![state.stop_reason.clone()]
-            };
-            return Some((
-                Ok(ChatEvent::OutputMetadata(visp_core::ProviderMetadata {
-                    model: state.model.clone(),
-                    finish_reasons,
-                    input_tokens: state.input_tokens,
-                    output_tokens: state.output_tokens,
-                    cache_read_input_tokens: if state.cache_read_input_tokens > 0 {
-                        Some(state.cache_read_input_tokens)
-                    } else {
-                        None
-                    },
-                    cache_creation_input_tokens: if state.cache_creation_input_tokens > 0 {
-                        Some(state.cache_creation_input_tokens)
-                    } else {
-                        None
-                    },
-                    latency_ms: latency,
-                })),
-                state,
-            ));
-        }
-        // 第 3 阶段：发射 Done
-        if state.metadata_emitted {
-            state.done_pending = false;
-            state.usage_emitted = false;
-            state.metadata_emitted = false;
-            return Some((Ok(ChatEvent::Done), state));
-        }
+                }
+            }
 
-        /// 更新 token 计数及消息元数据
-        fn update_anthropic_usage(
-            state: &mut StreamState,
-            input_tokens: u32,
-            output_tokens: u32,
-            cache_creation_input_tokens: u32,
-            cache_read_input_tokens: u32,
-            model: Option<String>,
-            stop_reason: Option<String>,
-        ) {
-            if input_tokens > 0 {
-                state.input_tokens = input_tokens;
-            }
-            if output_tokens > 0 {
-                state.output_tokens = output_tokens;
-            }
-            if cache_creation_input_tokens > 0 {
-                state.cache_creation_input_tokens = cache_creation_input_tokens;
-            }
-            if cache_read_input_tokens > 0 {
-                state.cache_read_input_tokens = cache_read_input_tokens;
-            }
-            if let Some(m) = model
-                && !m.is_empty()
-            {
-                state.model = m;
-            }
-            if let Some(sr) = stop_reason
-                && !sr.is_empty()
-            {
-                state.stop_reason = sr;
-            }
-        }
+            loop {
+                if let Some(pos) = state.buf.find("\n\n") {
+                    let chunk = state.buf[..pos].to_string();
+                    state.buf = state.buf[pos + 2..].to_string();
 
-        /// 构建 UsageInfo（表示 Done 事件）
-        fn build_done_usage_info(state: &StreamState) -> ChatEvent {
-            ChatEvent::UsageInfo {
-                input_tokens: state.input_tokens,
-                output_tokens: state.output_tokens,
-                tool_calls: 0,
-                cache_creation_input_tokens: state.cache_creation_input_tokens,
-                cache_read_input_tokens: state.cache_read_input_tokens,
-            }
-        }
-
-        loop {
-            if let Some(pos) = state.buf.find("\n\n") {
-                let chunk = state.buf[..pos].to_string();
-                state.buf = state.buf[pos + 2..].to_string();
-
-                let sse_events = crate::streaming::parse_sse_events(&chunk);
-                for sse in sse_events {
-                    let event_name = sse.event.as_deref().unwrap_or("");
-                    let data = sse.data.as_deref().unwrap_or("");
-                    match parse_anthropic_event(event_name, data) {
-                        Ok(ParsedEvent::Emit(chat_event)) => {
-                            // message_stop → 先标记 pending，返回后发 UsageInfo
-                            if matches!(chat_event, ChatEvent::Done) {
-                                state.done_pending = true;
-                                state.usage_emitted = true;
-                                return Some((Ok(build_done_usage_info(&state)), state));
+                    let sse_events = crate::streaming::parse_sse_events(&chunk);
+                    for sse in sse_events {
+                        let event_name = sse.event.as_deref().unwrap_or("");
+                        let data = sse.data.as_deref().unwrap_or("");
+                        match parse_anthropic_event(event_name, data) {
+                            Ok(ParsedEvent::Emit(chat_event)) => {
+                                // message_stop → 先标记 pending，返回后发 UsageInfo
+                                if matches!(chat_event, ChatEvent::Done) {
+                                    state.done_pending = true;
+                                    state.usage_emitted = true;
+                                    return Some((Ok(build_done_usage_info(&state)), state));
+                                }
+                                emit_first_token(&mut state);
+                                return Some((Ok(chat_event), state));
                             }
-                            return Some((Ok(chat_event), state));
-                        }
-                        Ok(ParsedEvent::Usage {
-                            input_tokens,
-                            output_tokens,
-                            cache_creation_input_tokens,
-                            cache_read_input_tokens,
-                            model,
-                            stop_reason,
-                        }) => {
-                            update_anthropic_usage(
-                                &mut state,
+                            Ok(ParsedEvent::Usage {
                                 input_tokens,
                                 output_tokens,
                                 cache_creation_input_tokens,
                                 cache_read_input_tokens,
                                 model,
                                 stop_reason,
-                            );
-                        }
-                        Ok(ParsedEvent::ThinkingDelta {
-                            index,
-                            partial,
-                            signature,
-                        }) => {
-                            let key = format!("thinking_{}", index);
-                            let entry =
-                                state
-                                    .thinking_acc
-                                    .entry(key)
-                                    .or_insert_with(|| ThinkingAcc {
-                                        signature: String::new(),
-                                        thinking: String::new(),
-                                    });
-                            if !signature.is_empty() {
-                                entry.signature = signature;
-                            }
-                            entry.thinking.push_str(&partial);
-                            // 流式发射 partial ThinkingBlock
-                            let block = serde_json::json!({
-                                "type": "thinking",
-                                "thinking": entry.thinking.clone(),
-                                "signature": entry.signature.clone(),
-                            });
-                            return Some((Ok(ChatEvent::ThinkingBlock(block)), state));
-                        }
-                        Ok(ParsedEvent::ToolInputDelta {
-                            index,
-                            id,
-                            name,
-                            partial,
-                        }) => {
-                            let key = index.to_string();
-                            if !name.is_empty() {
-                                state.tools.insert(
-                                    key,
-                                    ToolAcc {
-                                        id,
-                                        name,
-                                        input: partial,
-                                    },
-                                );
-                            } else if let Some(acc) = state.tools.get_mut(&key) {
-                                acc.input.push_str(&partial);
-                            }
-                        }
-                        Ok(ParsedEvent::BlockStop { index }) => {
-                            let tkey = index.to_string();
-                            if let Some(acc) = state.thinking_acc.remove(&tkey) {
-                                let block = serde_json::json!({
-                                    "type": "thinking",
-                                    "thinking": acc.thinking,
-                                    "signature": acc.signature,
-                                });
-                                return Some((Ok(ChatEvent::ThinkingBlock(block)), state));
-                            }
-                            let key = index.to_string();
-                            if let Some(acc) = state.tools.remove(&key) {
-                                let evt = ChatEvent::ToolCall {
-                                    id: acc.id,
-                                    name: acc.name,
-                                    arguments: acc.input,
-                                };
-                                return Some((Ok(evt), state));
-                            }
-                        }
-                        Ok(ParsedEvent::Skip) => continue,
-                        Err(e) => {
-                            return Some((Err(e), state));
-                        }
-                    }
-                }
-                continue;
-            }
-
-            match state.stream.next().await {
-                Some(Ok(bytes)) => {
-                    if let Ok(s) = std::str::from_utf8(&bytes) {
-                        state.buf.push_str(s);
-                    } else {
-                        return Some((Err(LlmError::Stream("Invalid UTF-8".into())), state));
-                    }
-                }
-                Some(Err(e)) => {
-                    return Some((Err(LlmError::Stream(e.to_string())), state));
-                }
-                None => {
-                    if !state.buf.is_empty() {
-                        let sse_events = crate::streaming::parse_sse_events(&state.buf);
-                        for sse in sse_events {
-                            let event_name = sse.event.as_deref().unwrap_or("");
-                            let data = sse.data.as_deref().unwrap_or("");
-                            match parse_anthropic_event(event_name, data) {
-                                Ok(ParsedEvent::Emit(chat_event)) => {
-                                    if matches!(chat_event, ChatEvent::Done) {
-                                        state.done_pending = true;
-                                        state.usage_emitted = true;
-                                        return Some((Ok(build_done_usage_info(&state)), state));
-                                    }
-                                    return Some((Ok(chat_event), state));
-                                }
-                                Ok(ParsedEvent::Usage {
+                            }) => {
+                                update_anthropic_usage(
+                                    &mut state,
                                     input_tokens,
                                     output_tokens,
                                     cache_creation_input_tokens,
                                     cache_read_input_tokens,
                                     model,
                                     stop_reason,
-                                }) => {
-                                    update_anthropic_usage(
-                                        &mut state,
+                                );
+                            }
+                            Ok(ParsedEvent::ThinkingDelta {
+                                index,
+                                partial,
+                                signature,
+                            }) => {
+                                let key = format!("thinking_{}", index);
+                                let entry =
+                                    state
+                                        .thinking_acc
+                                        .entry(key)
+                                        .or_insert_with(|| ThinkingAcc {
+                                            signature: String::new(),
+                                            thinking: String::new(),
+                                        });
+                                if !signature.is_empty() {
+                                    entry.signature = signature;
+                                }
+                                entry.thinking.push_str(&partial);
+                                // 流式发射 partial ThinkingBlock
+                                let block = serde_json::json!({
+                                    "type": "thinking",
+                                    "thinking": entry.thinking.clone(),
+                                    "signature": entry.signature.clone(),
+                                });
+                                emit_first_token(&mut state);
+                                return Some((Ok(ChatEvent::ThinkingBlock(block)), state));
+                            }
+                            Ok(ParsedEvent::ToolInputDelta {
+                                index,
+                                id,
+                                name,
+                                partial,
+                            }) => {
+                                let key = index.to_string();
+                                if !name.is_empty() {
+                                    state.tools.insert(
+                                        key,
+                                        ToolAcc {
+                                            id,
+                                            name,
+                                            input: partial,
+                                        },
+                                    );
+                                } else if let Some(acc) = state.tools.get_mut(&key) {
+                                    acc.input.push_str(&partial);
+                                }
+                            }
+                            Ok(ParsedEvent::BlockStop { index }) => {
+                                let tkey = index.to_string();
+                                if let Some(acc) = state.thinking_acc.remove(&tkey) {
+                                    let block = serde_json::json!({
+                                        "type": "thinking",
+                                        "thinking": acc.thinking,
+                                        "signature": acc.signature,
+                                    });
+                                    emit_first_token(&mut state);
+                                    return Some((Ok(ChatEvent::ThinkingBlock(block)), state));
+                                }
+                                let key = index.to_string();
+                                if let Some(acc) = state.tools.remove(&key) {
+                                    let evt = ChatEvent::ToolCall {
+                                        id: acc.id,
+                                        name: acc.name,
+                                        arguments: acc.input,
+                                    };
+                                    emit_first_token(&mut state);
+                                    return Some((Ok(evt), state));
+                                }
+                            }
+                            Ok(ParsedEvent::Skip) => continue,
+                            Err(e) => {
+                                return Some((Err(e), state));
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                match state.stream.next().await {
+                    Some(Ok(bytes)) => {
+                        if let Ok(s) = std::str::from_utf8(&bytes) {
+                            state.buf.push_str(s);
+                        } else {
+                            return Some((Err(LlmError::Stream("Invalid UTF-8".into())), state));
+                        }
+                    }
+                    Some(Err(e)) => {
+                        return Some((Err(LlmError::Stream(e.to_string())), state));
+                    }
+                    None => {
+                        if !state.buf.is_empty() {
+                            let sse_events = crate::streaming::parse_sse_events(&state.buf);
+                            for sse in sse_events {
+                                let event_name = sse.event.as_deref().unwrap_or("");
+                                let data = sse.data.as_deref().unwrap_or("");
+                                match parse_anthropic_event(event_name, data) {
+                                    Ok(ParsedEvent::Emit(chat_event)) => {
+                                        if matches!(chat_event, ChatEvent::Done) {
+                                            state.done_pending = true;
+                                            state.usage_emitted = true;
+                                            return Some((
+                                                Ok(build_done_usage_info(&state)),
+                                                state,
+                                            ));
+                                        }
+                                        emit_first_token(&mut state);
+                                        return Some((Ok(chat_event), state));
+                                    }
+                                    Ok(ParsedEvent::Usage {
                                         input_tokens,
                                         output_tokens,
                                         cache_creation_input_tokens,
                                         cache_read_input_tokens,
                                         model,
                                         stop_reason,
-                                    );
-                                    continue;
-                                }
-                                Ok(_) => continue,
-                                Err(e) => {
-                                    return Some((Err(e), state));
+                                    }) => {
+                                        update_anthropic_usage(
+                                            &mut state,
+                                            input_tokens,
+                                            output_tokens,
+                                            cache_creation_input_tokens,
+                                            cache_read_input_tokens,
+                                            model,
+                                            stop_reason,
+                                        );
+                                        continue;
+                                    }
+                                    Ok(_) => continue,
+                                    Err(e) => {
+                                        return Some((Err(e), state));
+                                    }
                                 }
                             }
                         }
+                        return None;
                     }
-                    return None;
                 }
             }
         }
+        .instrument(span)
     });
 
     Box::pin(event_stream)
@@ -1119,7 +1216,8 @@ mod tests {
         let byte_stream =
             futures::stream::iter(chunks.into_iter().map(|s| Ok(bytes::Bytes::from(s))));
         let start = std::time::Instant::now();
-        let event_stream = byte_stream_to_chat_events(byte_stream, start);
+        let span = tracing::Span::current();
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span);
         event_stream
             .filter_map(|e| futures::future::ready(e.ok()))
             .collect()
@@ -1251,7 +1349,8 @@ mod tests {
         );
         let byte_stream =
             futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
-        let event_stream = byte_stream_to_chat_events(byte_stream, start);
+        let span = tracing::Span::current();
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span);
         let events: Vec<ChatEvent> = event_stream
             .filter_map(|e| futures::future::ready(e.ok()))
             .collect()
@@ -1272,6 +1371,482 @@ mod tests {
             meta.latency_ms >= 20,
             "latency_ms ({}) should be >= 20",
             meta.latency_ms
+        );
+    }
+
+    // ── Tracing / gen_ai.client.operation span tests ────────────────────────
+
+    use std::sync::{Arc, Mutex};
+    use tracing::Event;
+    use tracing::Subscriber;
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::registry::LookupSpan;
+
+    #[derive(Debug, Clone)]
+    struct CapturedSpan {
+        name: String,
+        fields: Vec<(String, String)>,
+        id: u64,
+    }
+
+    struct SpanFieldVisitor {
+        fields: Vec<(String, String)>,
+    }
+
+    impl Visit for SpanFieldVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .push((field.name().to_string(), format!("{value:?}")));
+        }
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+    }
+
+    struct TestLayer {
+        spans: Arc<Mutex<Vec<CapturedSpan>>>,
+        events: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl TestLayer {
+        fn new(
+            spans: Arc<Mutex<Vec<CapturedSpan>>>,
+            events: Arc<Mutex<Vec<(String, String)>>>,
+        ) -> Self {
+            Self { spans, events }
+        }
+    }
+
+    impl<S> Layer<S> for TestLayer
+    where
+        S: Subscriber + for<'a> LookupSpan<'a>,
+    {
+        fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, _ctx: Context<'_, S>) {
+            let mut visitor = SpanFieldVisitor { fields: Vec::new() };
+            attrs.record(&mut visitor);
+            self.spans.lock().unwrap().push(CapturedSpan {
+                name: attrs.metadata().name().to_string(),
+                fields: visitor.fields,
+                id: id.into_u64(),
+            });
+        }
+
+        fn on_record(&self, id: &Id, values: &Record<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = SpanFieldVisitor { fields: Vec::new() };
+            values.record(&mut visitor);
+            let mut spans = self.spans.lock().unwrap();
+            if let Some(span) = spans.iter_mut().find(|s| s.id == id.into_u64()) {
+                span.fields.extend(visitor.fields);
+            }
+        }
+
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            let target = event.metadata().target().to_string();
+            let name = event.metadata().name().to_string();
+            self.events.lock().unwrap().push((target, name));
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn setup_tracing() -> (
+        Arc<Mutex<Vec<CapturedSpan>>>,
+        Arc<Mutex<Vec<(String, String)>>>,
+    ) {
+        let spans = Arc::new(Mutex::new(Vec::new()));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        (spans, events)
+    }
+
+    fn make_guard(
+        spans: &Arc<Mutex<Vec<CapturedSpan>>>,
+        events: &Arc<Mutex<Vec<(String, String)>>>,
+    ) -> tracing::subscriber::DefaultGuard {
+        tracing_subscriber::registry()
+            .with(TestLayer::new(spans.clone(), events.clone()))
+            .set_default()
+    }
+
+    #[test]
+    fn test_gen_ai_client_operation_span_created() {
+        let (spans, _events) = setup_tracing();
+        let _guard = make_guard(&spans, &_events);
+
+        // 模拟 byte_stream_to_chat_events 传 span 的处理
+        let span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.system = tracing::field::Empty,
+            gen_ai.request.model = "claude-sonnet-4",
+            gen_ai.operation.name = "chat",
+            gen_ai.request.max_tokens = tracing::field::Empty,
+            gen_ai.request.temperature = tracing::field::Empty,
+            visp.llm.attempt = 0u64,
+            gen_ai.usage.input_tokens = tracing::field::Empty,
+            gen_ai.usage.output_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
+            gen_ai.response.finish_reasons = tracing::field::Empty,
+            gen_ai.response.model = tracing::field::Empty,
+            visp.llm.cost_usd = tracing::field::Empty,
+        );
+        span.record("gen_ai.request.max_tokens", 4096u64);
+        span.record("gen_ai.request.temperature", 0.7f64);
+
+        drop(_guard);
+        let spans = spans.lock().unwrap();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].name, "gen_ai.client.operation");
+    }
+
+    #[test]
+    fn test_gen_ai_request_fields_at_span_start() {
+        let (spans, _events) = setup_tracing();
+        let _guard = make_guard(&spans, &_events);
+
+        let span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.system = tracing::field::Empty,
+            gen_ai.request.model = "claude-sonnet-4",
+            gen_ai.operation.name = "chat",
+            gen_ai.request.max_tokens = tracing::field::Empty,
+            gen_ai.request.temperature = tracing::field::Empty,
+            visp.llm.attempt = 0u64,
+            gen_ai.usage.input_tokens = tracing::field::Empty,
+            gen_ai.usage.output_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
+            gen_ai.response.finish_reasons = tracing::field::Empty,
+            gen_ai.response.model = tracing::field::Empty,
+            visp.llm.cost_usd = tracing::field::Empty,
+        );
+
+        // 模拟 chat_stream 中在 span 创建后的 record
+        span.record("gen_ai.system", "You are a helpful AI.");
+        span.record("gen_ai.request.max_tokens", 4096u64);
+        span.record("gen_ai.request.temperature", 0.7f64);
+
+        drop(_guard);
+        let spans = spans.lock().unwrap();
+        assert_eq!(spans.len(), 1);
+        let fields = &spans[0].fields;
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.request.model" && v == "claude-sonnet-4")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.operation.name" && v == "chat")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "visp.llm.attempt" && v == "0")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.system" && v == "You are a helpful AI.")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.request.max_tokens" && v == "4096")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.request.temperature" && v == "0.7")
+        );
+    }
+
+    #[test]
+    fn test_max_tokens_field_aligned_with_anthropic_api() {
+        let (spans, _events) = setup_tracing();
+        let _guard = make_guard(&spans, &_events);
+
+        let span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.request.max_tokens = tracing::field::Empty,
+        );
+        span.record("gen_ai.request.max_tokens", 8192u64);
+
+        drop(_guard);
+        let spans = spans.lock().unwrap();
+        // 验证字段名为 gen_ai.request.max_tokens（不是 max_output_tokens）
+        let has_field = spans[0]
+            .fields
+            .iter()
+            .any(|(k, v)| k == "gen_ai.request.max_tokens" && v == "8192");
+        assert!(has_field, "field name should be gen_ai.request.max_tokens");
+    }
+
+    /// 生成一组完整的 SSE 事件，用于测试 usage 字段记录
+    fn make_complete_sse(model: &str, stop_reason: &str) -> String {
+        let message_start = format!(
+            r#"{{"type":"message_start","message":{{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"{}","stop_reason":null,"stop_sequence":null,"usage":{{"input_tokens":105,"output_tokens":0,"cache_creation_input_tokens":52,"cache_read_input_tokens":200}}}}}}"#,
+            model
+        );
+        let block_start =
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        let text_delta = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
+        let block_stop = r#"{"type":"content_block_stop","index":0}"#;
+        let message_delta = format!(
+            r#"{{"type":"message_delta","delta":{{"stop_reason":"{}","stop_sequence":null}},"usage":{{"output_tokens":420}}}}"#,
+            stop_reason
+        );
+        let message_stop = r#"{"type":"message_stop"}"#;
+
+        fn sse_line(event: &str, data: &str) -> String {
+            format!("event: {}\ndata: {}\n\n", event, data)
+        }
+
+        format!(
+            "{}{}{}{}{}{}",
+            sse_line("message_start", &message_start),
+            sse_line("content_block_start", block_start),
+            sse_line("content_block_delta", text_delta),
+            sse_line("content_block_stop", block_stop),
+            sse_line("message_delta", &message_delta),
+            sse_line("message_stop", message_stop),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_gen_ai_usage_fields_recorded_on_completion() {
+        let (spans, _events) = setup_tracing();
+        let _guard = make_guard(&spans, &_events);
+
+        let span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.system = tracing::field::Empty,
+            gen_ai.request.model = "claude-sonnet-4-6",
+            gen_ai.operation.name = "chat",
+            gen_ai.request.max_tokens = tracing::field::Empty,
+            gen_ai.request.temperature = tracing::field::Empty,
+            visp.llm.attempt = 0u64,
+            gen_ai.usage.input_tokens = tracing::field::Empty,
+            gen_ai.usage.output_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
+            gen_ai.response.finish_reasons = tracing::field::Empty,
+            gen_ai.response.model = tracing::field::Empty,
+            visp.llm.cost_usd = tracing::field::Empty,
+        );
+        span.record("gen_ai.request.max_tokens", 4096u64);
+        span.record("gen_ai.request.temperature", 0.7f64);
+
+        let sse = make_complete_sse("claude-sonnet-4-6", "end_turn");
+        let byte_stream =
+            futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
+        let start = std::time::Instant::now();
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span);
+        let _events: Vec<ChatEvent> = event_stream
+            .filter_map(|e| futures::future::ready(e.ok()))
+            .collect()
+            .await;
+
+        // Wait for stream completion
+        drop(_guard);
+
+        let spans = spans.lock().unwrap();
+        assert_eq!(spans.len(), 1);
+        let fields = &spans[0].fields;
+
+        // 验证 usage 字段
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.usage.input_tokens" && v == "105")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.usage.output_tokens" && v == "420")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.usage.cache_read_input_tokens" && v == "200")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.usage.cache_creation_input_tokens" && v == "52")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.response.finish_reasons" && v == "end_turn")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.response.model" && v == "claude-sonnet-4-6")
+        );
+
+        // cost_usd 应为正数
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "visp.llm.cost_usd" && v.parse::<f64>().unwrap_or(0.0) > 0.0)
+        );
+    }
+
+    #[test]
+    fn test_finish_reasons_serialized_as_comma_separated_string() {
+        // 验证逗号分隔逻辑（独立于 span 层）
+        let reasons = ["end_turn".to_string(), "stop".to_string()];
+        let serialized = reasons.join(",");
+        assert_eq!(serialized, "end_turn,stop");
+
+        let single = ["end_turn".to_string()];
+        assert_eq!(single.join(","), "end_turn");
+
+        let empty: Vec<String> = vec![];
+        assert_eq!(empty.join(","), "");
+    }
+
+    #[tokio::test]
+    async fn test_cost_usd_computed_from_usage_and_pricing() {
+        let (spans, _events) = setup_tracing();
+        let _guard = make_guard(&spans, &_events);
+
+        let span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.usage.input_tokens = tracing::field::Empty,
+            gen_ai.usage.output_tokens = tracing::field::Empty,
+            gen_ai.response.model = tracing::field::Empty,
+            visp.llm.cost_usd = tracing::field::Empty,
+        );
+
+        let sse = make_complete_sse("claude-sonnet-4-6", "end_turn");
+        let byte_stream =
+            futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
+        let start = std::time::Instant::now();
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span);
+        let _: Vec<ChatEvent> = event_stream
+            .filter_map(|e| futures::future::ready(e.ok()))
+            .collect()
+            .await;
+
+        drop(_guard);
+
+        let spans = spans.lock().unwrap();
+        let fields = &spans[0].fields;
+
+        // claude-sonnet-4-6: input $3/MTok, output $15/MTok
+        // input_tokens=105, output_tokens=420
+        let expected = (105.0 / 1_000_000.0 * 3.0) + (420.0 / 1_000_000.0 * 15.0);
+        let cost_field = fields
+            .iter()
+            .find(|(k, _)| k == "visp.llm.cost_usd")
+            .expect("cost_usd field should exist");
+        let actual: f64 = cost_field.1.parse().expect("cost_usd should be a float");
+        assert!(
+            (actual - expected).abs() < 1e-10,
+            "cost_usd {actual} != expected {expected}"
+        );
+    }
+
+    #[test]
+    fn test_gen_ai_client_retry_event_emitted() {
+        let (_spans, events) = setup_tracing();
+        let _guard = make_guard(&_spans, &events);
+
+        // 模拟重试事件
+        tracing::warn!(
+            target: "gen_ai.client.retry",
+            reason = "rate_limit",
+            "retrying LLM request"
+        );
+
+        drop(_guard);
+        let evts = events.lock().unwrap();
+        assert!(
+            evts.iter().any(|(t, _)| t == "gen_ai.client.retry"),
+            "should find retry event"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gen_ai_client_first_token_event() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        let span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.usage.input_tokens = tracing::field::Empty,
+            gen_ai.usage.output_tokens = tracing::field::Empty,
+            gen_ai.response.model = tracing::field::Empty,
+            visp.llm.cost_usd = tracing::field::Empty,
+        );
+
+        let sse = make_complete_sse("claude-sonnet-4-6", "end_turn");
+        let byte_stream =
+            futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
+        let start = std::time::Instant::now();
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span);
+        let _: Vec<ChatEvent> = event_stream
+            .filter_map(|e| futures::future::ready(e.ok()))
+            .collect()
+            .await;
+
+        drop(_guard);
+
+        let evts = events.lock().unwrap();
+        assert!(
+            evts.iter().any(|(t, _)| t == "gen_ai.client.first_token"),
+            "should find first_token event"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gen_ai_client_completed_event() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        let span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.usage.input_tokens = tracing::field::Empty,
+            gen_ai.usage.output_tokens = tracing::field::Empty,
+            gen_ai.response.model = tracing::field::Empty,
+            visp.llm.cost_usd = tracing::field::Empty,
+        );
+
+        let sse = make_complete_sse("claude-sonnet-4-6", "end_turn");
+        let byte_stream =
+            futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
+        let start = std::time::Instant::now();
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span);
+        let _: Vec<ChatEvent> = event_stream
+            .filter_map(|e| futures::future::ready(e.ok()))
+            .collect()
+            .await;
+
+        drop(_guard);
+
+        let evts = events.lock().unwrap();
+        assert!(
+            evts.iter().any(|(t, _)| t == "gen_ai.client.completed"),
+            "should find completed event; found: {:?}",
+            evts,
         );
     }
 }

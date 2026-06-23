@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use futures::stream::{self, Stream, StreamExt};
 use std::collections::HashMap;
 use std::pin::Pin;
+use tracing::Instrument;
+use tracing::field;
 use visp_core::error::LlmError;
 use visp_core::message::{Message, Role, ToolDefinition};
 use visp_core::provider::{ChatEvent, LlmConfig, LlmProvider};
@@ -401,6 +403,7 @@ fn truncate_for_log(s: &str, max_chars: usize) -> &str {
 fn byte_stream_to_chat_events(
     byte_stream: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
     start_time: std::time::Instant,
+    span: tracing::Span,
 ) -> Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>> {
     struct StreamState {
         stream: Pin<Box<dyn Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send>>,
@@ -431,6 +434,10 @@ fn byte_stream_to_chat_events(
         metadata_emitted: bool,
         /// 是否已发射 Done
         done_emitted: bool,
+        /// gen_ai.client.operation span
+        span: tracing::Span,
+        /// 是否已发射首 token 事件
+        first_content_emitted: bool,
     }
 
     /// 将累积的工具调用（tool_acc）转移到 pending_tool_calls
@@ -443,6 +450,14 @@ fn byte_stream_to_chat_events(
                 .map(|(_, (id, name, args))| (id, name, args))
                 .collect();
             state.pending_tool_calls = calls.into_iter().rev().collect();
+        }
+    }
+
+    /// 标记首 token 已到达（幂等，仅首次有效）
+    fn emit_first_token(state: &mut StreamState) {
+        if !state.first_content_emitted {
+            state.first_content_emitted = true;
+            tracing::info!(target: "gen_ai.client.first_token", "first token received");
         }
     }
 
@@ -464,9 +479,13 @@ fn byte_stream_to_chat_events(
         usage_emitted: false,
         metadata_emitted: false,
         done_emitted: false,
+        span,
+        first_content_emitted: false,
     };
 
-    let event_stream = stream::unfold(state, |mut state| async move {
+    let event_stream = stream::unfold(state, |mut state| {
+        let span = state.span.clone();
+        async move {
         loop {
             // [A] 优先处理缓冲区中完整的 SSE 消息（一次一条）
             if let Some(pos) = state.buf.find("\n\n") {
@@ -484,6 +503,7 @@ fn byte_stream_to_chat_events(
                         }
                         match parse_openai_sse_data(data) {
                             Ok(OpenAiStreamEvent::TextDelta(text)) => {
+                                emit_first_token(&mut state);
                                 return Some((Ok(ChatEvent::TextDelta(text)), state));
                             }
                             Ok(OpenAiStreamEvent::ReasoningDelta(text)) => {
@@ -493,6 +513,7 @@ fn byte_stream_to_chat_events(
                                     "type": "thinking",
                                     "thinking": state.reasoning_text.clone(),
                                 });
+                                emit_first_token(&mut state);
                                 return Some((Ok(ChatEvent::ThinkingBlock(block)), state));
                             }
                             Ok(OpenAiStreamEvent::ToolCallStart { index, id, name }) => {
@@ -574,6 +595,7 @@ fn byte_stream_to_chat_events(
 
             // [B] 发射待处理的工具调用
             if let Some((id, name, args)) = state.pending_tool_calls.pop() {
+                emit_first_token(&mut state);
                 tracing::debug!(
                     %name,
                     args_len = args.len(),
@@ -613,6 +635,22 @@ fn byte_stream_to_chat_events(
                     } else {
                         vec![state.finish_reason.clone()]
                     };
+
+                    // 在 span 上 record usage / model / finish_reasons / cost
+                    state.span.record("gen_ai.usage.input_tokens", state.input_tokens);
+                    state.span.record("gen_ai.usage.output_tokens", state.output_tokens);
+                    if state.cache_read_input_tokens > 0 {
+                        state.span.record("gen_ai.usage.cache_read_input_tokens", state.cache_read_input_tokens);
+                    }
+                    if state.cache_creation_input_tokens > 0 {
+                        state.span.record("gen_ai.usage.cache_creation_input_tokens", state.cache_creation_input_tokens);
+                    }
+                    let finish_reasons_str = finish_reasons.join(",");
+                    state.span.record("gen_ai.response.finish_reasons", &finish_reasons_str);
+                    state.span.record("gen_ai.response.model", &state.model);
+                    let cost = crate::cost::openai_cost_usd(&state.model, state.input_tokens, state.output_tokens);
+                    state.span.record("visp.llm.cost_usd", cost);
+
                     return Some((
                         Ok(ChatEvent::OutputMetadata(visp_core::ProviderMetadata {
                             model: state.model.clone(),
@@ -636,6 +674,13 @@ fn byte_stream_to_chat_events(
                 }
                 if !state.done_emitted {
                     state.done_emitted = true;
+                    tracing::info!(
+                        target: "gen_ai.client.completed",
+                        input_tokens = state.input_tokens,
+                        output_tokens = state.output_tokens,
+                        model = %state.model,
+                        "LLM request completed"
+                    );
                     return Some((Ok(ChatEvent::Done), state));
                 }
                 return None;
@@ -657,6 +702,7 @@ fn byte_stream_to_chat_events(
                 }
             }
         }
+        }.instrument(span)
     });
 
     Box::pin(event_stream)
@@ -696,6 +742,35 @@ impl LlmProvider for OpenAiProvider {
         config: &LlmConfig,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError> {
+        // 提取 system 文本用于 span field
+        let system_text: String = messages
+            .iter()
+            .filter(|m| m.role == Role::System)
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        // 创建 gen_ai.client.operation span
+        let span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.system = field::Empty,
+            gen_ai.request.model = %config.model,
+            gen_ai.operation.name = "chat",
+            gen_ai.request.max_tokens = field::Empty,
+            gen_ai.request.temperature = field::Empty,
+            visp.llm.attempt = 0u64,
+            gen_ai.usage.input_tokens = field::Empty,
+            gen_ai.usage.output_tokens = field::Empty,
+            gen_ai.usage.cache_read_input_tokens = field::Empty,
+            gen_ai.usage.cache_creation_input_tokens = field::Empty,
+            gen_ai.response.finish_reasons = field::Empty,
+            gen_ai.response.model = field::Empty,
+            visp.llm.cost_usd = field::Empty,
+        );
+        span.record("gen_ai.system", &system_text);
+        span.record("gen_ai.request.max_tokens", config.max_tokens);
+        span.record("gen_ai.request.temperature", config.temperature);
+
         let url = format!("{}/v1/chat/completions", self.api_url.trim_end_matches('/'));
         let body = build_openai_request(messages, tools, config);
         let headers = build_openai_headers(&self.api_key);
@@ -712,7 +787,7 @@ impl LlmProvider for OpenAiProvider {
         let status = response.status();
         if status.is_success() {
             let byte_stream = response.bytes_stream();
-            Ok(byte_stream_to_chat_events(byte_stream, start_time))
+            Ok(byte_stream_to_chat_events(byte_stream, start_time, span))
         } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             let retry_after = parse_retry_after(response.headers()).unwrap_or(60);
             Err(LlmError::RateLimit {
@@ -1164,7 +1239,8 @@ mod tests {
     async fn collect_events(chunks: Vec<String>) -> Vec<ChatEvent> {
         let byte_stream =
             futures::stream::iter(chunks.into_iter().map(|s| Ok(bytes::Bytes::from(s))));
-        let event_stream = byte_stream_to_chat_events(byte_stream, std::time::Instant::now());
+        let span = tracing::Span::current();
+        let event_stream = byte_stream_to_chat_events(byte_stream, std::time::Instant::now(), span);
         event_stream
             .filter_map(|e| futures::future::ready(e.ok()))
             .collect()
@@ -1475,5 +1551,408 @@ mod tests {
     #[test]
     fn truncate_for_log_zero_limit() {
         assert_eq!(truncate_for_log("中文", 0), "");
+    }
+
+    // ── Tracing / gen_ai.client.operation span tests ────────────────────────
+
+    use std::sync::{Arc, Mutex};
+    use tracing::Event;
+    use tracing::Subscriber;
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::registry::LookupSpan;
+
+    #[derive(Debug, Clone)]
+    struct CapturedSpan {
+        name: String,
+        fields: Vec<(String, String)>,
+        id: u64,
+    }
+
+    struct SpanFieldVisitor {
+        fields: Vec<(String, String)>,
+    }
+
+    impl Visit for SpanFieldVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .push((field.name().to_string(), format!("{value:?}")));
+        }
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+    }
+
+    struct TestLayer {
+        spans: Arc<Mutex<Vec<CapturedSpan>>>,
+        events: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl TestLayer {
+        fn new(
+            spans: Arc<Mutex<Vec<CapturedSpan>>>,
+            events: Arc<Mutex<Vec<(String, String)>>>,
+        ) -> Self {
+            Self { spans, events }
+        }
+    }
+
+    impl<S> Layer<S> for TestLayer
+    where
+        S: Subscriber + for<'a> LookupSpan<'a>,
+    {
+        fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, _ctx: Context<'_, S>) {
+            let mut visitor = SpanFieldVisitor { fields: Vec::new() };
+            attrs.record(&mut visitor);
+            self.spans.lock().unwrap().push(CapturedSpan {
+                name: attrs.metadata().name().to_string(),
+                fields: visitor.fields,
+                id: id.into_u64(),
+            });
+        }
+
+        fn on_record(&self, id: &Id, values: &Record<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = SpanFieldVisitor { fields: Vec::new() };
+            values.record(&mut visitor);
+            let mut spans = self.spans.lock().unwrap();
+            if let Some(span) = spans.iter_mut().find(|s| s.id == id.into_u64()) {
+                span.fields.extend(visitor.fields);
+            }
+        }
+
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            let target = event.metadata().target().to_string();
+            let name = event.metadata().name().to_string();
+            self.events.lock().unwrap().push((target, name));
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn setup_tracing() -> (
+        Arc<Mutex<Vec<CapturedSpan>>>,
+        Arc<Mutex<Vec<(String, String)>>>,
+    ) {
+        let spans = Arc::new(Mutex::new(Vec::new()));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        (spans, events)
+    }
+
+    fn make_guard(
+        spans: &Arc<Mutex<Vec<CapturedSpan>>>,
+        events: &Arc<Mutex<Vec<(String, String)>>>,
+    ) -> tracing::subscriber::DefaultGuard {
+        tracing_subscriber::registry()
+            .with(TestLayer::new(spans.clone(), events.clone()))
+            .set_default()
+    }
+
+    /// 生成一组完整的 OpenAI SSE 事件（包含 usage 和 finish_reason）
+    fn make_openai_complete_sse(model: &str, finish_reason: &str) -> String {
+        let text_chunk = serde_json::json!({
+            "id": "chatcmpl",
+            "object": "chat.completion.chunk",
+            "choices": [{
+                "index": 0,
+                "delta": { "content": "Hello" },
+                "finish_reason": null
+            }]
+        });
+        let usage_chunk = serde_json::json!({
+            "id": "chatcmpl",
+            "object": "chat.completion.chunk",
+            "choices": [],
+            "model": model,
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150
+            }
+        });
+        let stop_chunk = serde_json::json!({
+            "id": "chatcmpl",
+            "object": "chat.completion.chunk",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": finish_reason
+            }]
+        });
+
+        fn sse_line(data: &str) -> String {
+            format!("data: {}\n\n", data)
+        }
+
+        format!(
+            "{}{}{}",
+            sse_line(&text_chunk.to_string()),
+            sse_line(&usage_chunk.to_string()),
+            sse_line(&stop_chunk.to_string()),
+        )
+    }
+
+    #[test]
+    fn test_gen_ai_client_operation_span_created_openai() {
+        let (spans, _events) = setup_tracing();
+        let _guard = make_guard(&spans, &_events);
+
+        let span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.system = tracing::field::Empty,
+            gen_ai.request.model = "gpt-4o",
+            gen_ai.operation.name = "chat",
+            gen_ai.request.max_tokens = tracing::field::Empty,
+            gen_ai.request.temperature = tracing::field::Empty,
+            visp.llm.attempt = 0u64,
+            gen_ai.usage.input_tokens = tracing::field::Empty,
+            gen_ai.usage.output_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
+            gen_ai.response.finish_reasons = tracing::field::Empty,
+            gen_ai.response.model = tracing::field::Empty,
+            visp.llm.cost_usd = tracing::field::Empty,
+        );
+        span.record("gen_ai.request.max_tokens", 4096u64);
+        span.record("gen_ai.request.temperature", 0.7f64);
+
+        drop(_guard);
+        let spans = spans.lock().unwrap();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].name, "gen_ai.client.operation");
+    }
+
+    #[test]
+    fn test_gen_ai_request_fields_at_span_start_openai() {
+        let (spans, _events) = setup_tracing();
+        let _guard = make_guard(&spans, &_events);
+
+        let span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.system = tracing::field::Empty,
+            gen_ai.request.model = "gpt-4o",
+            gen_ai.operation.name = "chat",
+            gen_ai.request.max_tokens = tracing::field::Empty,
+            gen_ai.request.temperature = tracing::field::Empty,
+            visp.llm.attempt = 0u64,
+            gen_ai.usage.input_tokens = tracing::field::Empty,
+            gen_ai.usage.output_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
+            gen_ai.response.finish_reasons = tracing::field::Empty,
+            gen_ai.response.model = tracing::field::Empty,
+            visp.llm.cost_usd = tracing::field::Empty,
+        );
+
+        span.record("gen_ai.system", "You are a helpful AI.");
+        span.record("gen_ai.request.max_tokens", 4096u64);
+        span.record("gen_ai.request.temperature", 0.7f64);
+
+        drop(_guard);
+        let spans = spans.lock().unwrap();
+        assert_eq!(spans.len(), 1);
+        let fields = &spans[0].fields;
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.request.model" && v == "gpt-4o")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.operation.name" && v == "chat")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "visp.llm.attempt" && v == "0")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.system" && v == "You are a helpful AI.")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.request.max_tokens" && v == "4096")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.request.temperature" && v == "0.7")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gen_ai_usage_fields_recorded_on_completion_openai() {
+        let (spans, _events) = setup_tracing();
+        let _guard = make_guard(&spans, &_events);
+
+        let span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.system = tracing::field::Empty,
+            gen_ai.request.model = "gpt-4o",
+            gen_ai.operation.name = "chat",
+            gen_ai.request.max_tokens = tracing::field::Empty,
+            gen_ai.request.temperature = tracing::field::Empty,
+            visp.llm.attempt = 0u64,
+            gen_ai.usage.input_tokens = tracing::field::Empty,
+            gen_ai.usage.output_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
+            gen_ai.response.finish_reasons = tracing::field::Empty,
+            gen_ai.response.model = tracing::field::Empty,
+            visp.llm.cost_usd = tracing::field::Empty,
+        );
+        span.record("gen_ai.request.max_tokens", 4096u64);
+        span.record("gen_ai.request.temperature", 0.7f64);
+
+        let sse = make_openai_complete_sse("gpt-4o", "stop");
+        let byte_stream =
+            futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
+        let start = std::time::Instant::now();
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span);
+        let _: Vec<ChatEvent> = event_stream
+            .filter_map(|e| futures::future::ready(e.ok()))
+            .collect()
+            .await;
+
+        drop(_guard);
+
+        let spans = spans.lock().unwrap();
+        assert_eq!(spans.len(), 1);
+        let fields = &spans[0].fields;
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.usage.input_tokens" && v == "100")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.usage.output_tokens" && v == "50")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.response.finish_reasons" && v == "stop")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.response.model" && v == "gpt-4o")
+        );
+
+        // cost_usd 应为正数
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "visp.llm.cost_usd" && v.parse::<f64>().unwrap_or(0.0) > 0.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openai_client_first_token_event() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        let span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.usage.input_tokens = tracing::field::Empty,
+            gen_ai.usage.output_tokens = tracing::field::Empty,
+            gen_ai.response.model = tracing::field::Empty,
+            visp.llm.cost_usd = tracing::field::Empty,
+        );
+
+        let sse = make_openai_complete_sse("gpt-4o", "stop");
+        let byte_stream =
+            futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
+        let start = std::time::Instant::now();
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span);
+        let _: Vec<ChatEvent> = event_stream
+            .filter_map(|e| futures::future::ready(e.ok()))
+            .collect()
+            .await;
+
+        drop(_guard);
+        let evts = events.lock().unwrap();
+        assert!(
+            evts.iter().any(|(t, _)| t == "gen_ai.client.first_token"),
+            "should find first_token event"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openai_client_completed_event() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        let span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.usage.input_tokens = tracing::field::Empty,
+            gen_ai.usage.output_tokens = tracing::field::Empty,
+            gen_ai.response.model = tracing::field::Empty,
+            visp.llm.cost_usd = tracing::field::Empty,
+        );
+
+        let sse = make_openai_complete_sse("gpt-4o", "stop");
+        let byte_stream =
+            futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
+        let start = std::time::Instant::now();
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span);
+        let _: Vec<ChatEvent> = event_stream
+            .filter_map(|e| futures::future::ready(e.ok()))
+            .collect()
+            .await;
+
+        drop(_guard);
+        let evts = events.lock().unwrap();
+        assert!(
+            evts.iter().any(|(t, _)| t == "gen_ai.client.completed"),
+            "should find completed event; found: {:?}",
+            evts,
+        );
+    }
+
+    #[test]
+    fn test_gen_ai_client_retry_event_emitted_openai() {
+        let (_spans, events) = setup_tracing();
+        let _guard = make_guard(&_spans, &events);
+
+        tracing::warn!(
+            target: "gen_ai.client.retry",
+            reason = "rate_limit",
+            "retrying LLM request"
+        );
+
+        drop(_guard);
+        let evts = events.lock().unwrap();
+        assert!(
+            evts.iter().any(|(t, _)| t == "gen_ai.client.retry"),
+            "should find retry event"
+        );
+    }
+
+    #[test]
+    fn test_openai_cost_usd_computed_from_usage() {
+        use crate::cost::openai_cost_usd;
+        // gpt-4o: $2.5/MTok input, $10/MTok output
+        let cost = openai_cost_usd("gpt-4o", 1000, 500);
+        let expected = (1000.0 / 1_000_000.0 * 2.5) + (500.0 / 1_000_000.0 * 10.0);
+        assert!((cost - expected).abs() < 1e-10);
     }
 }
