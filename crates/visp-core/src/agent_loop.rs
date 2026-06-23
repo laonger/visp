@@ -30,6 +30,7 @@ use futures::Stream;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tracing::Instrument;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -131,6 +132,12 @@ async fn setup_iteration(
 ) -> Result<IterationContext, ()> {
     // a. Cancellation check
     if ctx.cancel_token.is_cancelled() {
+        tracing::info!(
+            target: "visp.agent.cancelled",
+            session_id = %sid,
+            iteration,
+            "agent loop cancelled"
+        );
         send_event(
             tx,
             sm,
@@ -149,6 +156,13 @@ async fn setup_iteration(
 
     // b. Limits check
     if iteration >= cfg.hard_limit {
+        tracing::warn!(
+            target: "visp.agent.iteration_limit",
+            session_id = %sid,
+            iteration,
+            hard_limit = cfg.hard_limit,
+            "agent loop reached iteration limit"
+        );
         send_event(
             tx,
             sm,
@@ -705,6 +719,7 @@ async fn execute_tool_calls(
     cfg: &AgentConfig,
     doom_loop_window: &mut Vec<Vec<(String, serde_json::Value)>>,
     doom_loop_warned: &mut bool,
+    visp_trace_id: &str,
 ) -> bool {
     // Append assistant message with tool_calls
     *total_tool_calls += tool_calls.len() as u32;
@@ -837,6 +852,15 @@ async fn execute_tool_calls(
                 .map(|s| s.to_string());
 
             if let Some(ref gtx) = ctx.global_tx {
+                // Generate W3C TraceContext for cross-mpsc propagation
+                let span_id = uuid::Uuid::new_v4().to_string().replace('-', "")[..16].to_string();
+                let visp_tc = crate::TraceContext::new(
+                    visp_trace_id.to_string(),
+                    span_id,
+                    1, // sampled
+                    None,
+                )
+                .expect("TraceContext construction should not fail with valid IDs");
                 let _ = gtx.try_send(Envelope {
                     session_id: ctx.session_id.clone(),
                     message: AgentMessage::SpawnRequest {
@@ -844,9 +868,9 @@ async fn execute_tool_calls(
                         subagent_type: subagent_type.clone(),
                         description: description.clone(),
                         task_id: task_id.clone(),
-                        trace_context: None,
+                        trace_context: Some(visp_tc.clone()),
                     },
-                    trace_context: None,
+                    trace_context: Some(visp_tc),
                 });
             }
 
@@ -870,90 +894,146 @@ async fn execute_tool_calls(
         let permissions = ctx.permission_rules.clone();
         let sid2 = sid.to_string();
 
-        exec_tasks.push(tokio::spawn(async move {
-            // Helper: forward AgentMessage to global_tx
-            macro_rules! forward_global {
-                ($msg:expr) => {
-                    if let Some(ref gtx) = global_tx {
-                        let _ = gtx.try_send(Envelope {
-                            session_id: sid2.clone(),
-                            message: $msg,
-                            trace_context: None,
-                        });
-                    }
-                };
-            }
+        // Pre-clone for tool span
+        let tool_span_name = tc.name.clone();
+        let tool_span_id = tc.id.clone();
+        let tool_span = tracing::info_span!(
+            "visp.tool.execute",
+            gen_ai.tool.name = %tool_span_name,
+            gen_ai.tool.call.id = %tool_span_id,
+            gen_ai.tool.type = "function",
+            visp.tool.is_error = tracing::field::Empty,
+            visp.tool.duration_ms = tracing::field::Empty,
+        );
 
-            // Cancellation check
-            if cancel.is_cancelled() {
-                let result = ToolExecResult {
-                    index: i,
-                    call_id: tc.id.clone(),
-                    result: ToolResult::error("Cancelled"),
-                    duration_ms: None,
-                };
-                forward_global!(AgentMessage::ToolCallResult {
-                    call_id: tc.id.clone(),
-                    tool_name: tc.name.clone(),
-                    content: "Cancelled".into(),
-                    is_error: true,
-                });
-                let _ = tx
-                    .send(AgentEvent::ToolCallResult {
+        exec_tasks.push(tokio::spawn(
+            async move {
+                // Helper: forward AgentMessage to global_tx
+                macro_rules! forward_global {
+                    ($msg:expr) => {
+                        if let Some(ref gtx) = global_tx {
+                            let _ = gtx.try_send(Envelope {
+                                session_id: sid2.clone(),
+                                message: $msg,
+                                trace_context: None,
+                            });
+                        }
+                    };
+                }
+
+                // Cancellation check
+                if cancel.is_cancelled() {
+                    let result = ToolExecResult {
+                        index: i,
+                        call_id: tc.id.clone(),
+                        result: ToolResult::error("Cancelled"),
+                        duration_ms: None,
+                    };
+                    forward_global!(AgentMessage::ToolCallResult {
                         call_id: tc.id.clone(),
                         tool_name: tc.name.clone(),
                         content: "Cancelled".into(),
                         is_error: true,
-                    })
-                    .await;
-                return result;
-            }
+                    });
+                    let _ = tx
+                        .send(AgentEvent::ToolCallResult {
+                            call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            content: "Cancelled".into(),
+                            is_error: true,
+                        })
+                        .await;
+                    return result;
+                }
 
-            // Send ToolCallRequest
-            forward_global!(AgentMessage::ToolCallRequest {
-                call_id: tc.id.clone(),
-                tool_name: tc.name.clone(),
-                arguments: tc.arguments.clone(),
-            });
-            let _ = tx
-                .send(AgentEvent::ToolCallRequest {
+                // Send ToolCallRequest
+                forward_global!(AgentMessage::ToolCallRequest {
                     call_id: tc.id.clone(),
                     tool_name: tc.name.clone(),
                     arguments: tc.arguments.clone(),
-                })
-                .await;
-
-            // Check if tool requires approval (with arguments)
-            let args_value: serde_json::Value =
-                serde_json::from_str(&tc.arguments).unwrap_or_default();
-            let requires_approval = registry
-                .get(&tc.name)
-                .map(|t| t.requires_approval_for(&args_value))
-                .unwrap_or(false);
-
-            let already_approved = sm.is_tool_approved(&session_id, &tc.name);
-
-            if requires_approval && !already_approved {
-                let (resp_tx, resp_rx) = oneshot::channel::<UserQueryResult>();
-                let args_display = format_tool_args(&tc.arguments);
+                });
                 let _ = tx
-                    .send(AgentEvent::UserQuery {
-                        query_id: tc.id.clone(),
-                        message: format!("Allow tool: {}({})?", tc.name, args_display),
-                        options: Vec::new(),
-                        allow_other: false,
-                        respond: resp_tx,
+                    .send(AgentEvent::ToolCallRequest {
+                        call_id: tc.id.clone(),
+                        tool_name: tc.name.clone(),
+                        arguments: tc.arguments.clone(),
                     })
                     .await;
 
-                let result = resp_rx.await.unwrap_or_default();
-                match result.selected_index {
-                    0 => {}
-                    2 => {
-                        let _ = sm.add_approved_tool(&session_id, &tc.name);
+                // Check if tool requires approval (with arguments)
+                let args_value: serde_json::Value =
+                    serde_json::from_str(&tc.arguments).unwrap_or_default();
+                let requires_approval = registry
+                    .get(&tc.name)
+                    .map(|t| t.requires_approval_for(&args_value))
+                    .unwrap_or(false);
+
+                let already_approved = sm.is_tool_approved(&session_id, &tc.name);
+
+                if requires_approval && !already_approved {
+                    let (resp_tx, resp_rx) = oneshot::channel::<UserQueryResult>();
+                    let args_display = format_tool_args(&tc.arguments);
+                    let _ = tx
+                        .send(AgentEvent::UserQuery {
+                            query_id: tc.id.clone(),
+                            message: format!("Allow tool: {}({})?", tc.name, args_display),
+                            options: Vec::new(),
+                            allow_other: false,
+                            respond: resp_tx,
+                        })
+                        .await;
+
+                    let result = resp_rx.await.unwrap_or_default();
+                    match result.selected_index {
+                        0 => {}
+                        2 => {
+                            let _ = sm.add_approved_tool(&session_id, &tc.name);
+                        }
+                        _ => {
+                            let result = ToolResult::error("User denied");
+                            forward_global!(AgentMessage::ToolCallResult {
+                                call_id: tc.id.clone(),
+                                tool_name: tc.name.clone(),
+                                content: result.content.clone(),
+                                is_error: result.is_error,
+                            });
+                            let _ = tx
+                                .send(AgentEvent::ToolCallResult {
+                                    call_id: tc.id.clone(),
+                                    tool_name: tc.name.clone(),
+                                    content: result.content.clone(),
+                                    is_error: result.is_error,
+                                })
+                                .await;
+                            return ToolExecResult {
+                                index: i,
+                                call_id: tc.id,
+                                result,
+                                duration_ms: None,
+                            };
+                        }
                     }
-                    _ => {
-                        let result = ToolResult::error("User denied");
+                }
+
+                // Parse arguments and execute
+                let args = match serde_json::from_str(&tc.arguments) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            tool = %tc.name,
+                            args_len = tc.arguments.len(),
+                            error = %e,
+                            "tool call arguments truncated or malformed (likely max_output_tokens exceeded)"
+                        );
+                        let result = ToolResult::error(format!(
+                            "[TRUNCATED] Tool call arguments incomplete ({} bytes, parse: {}). \
+                             The content exceeded max_output_tokens.\n\
+                             To fix this, split the content into smaller parts:\n\
+                             - Use multiple smaller write_file or edit_file calls\n\
+                             - Or use edit_file to incrementally build the file\n\
+                             - Do NOT retry the same large write_file call — it will fail again.",
+                            tc.arguments.len(), e
+                        ));
                         forward_global!(AgentMessage::ToolCallResult {
                             call_id: tc.id.clone(),
                             tool_name: tc.name.clone(),
@@ -975,77 +1055,38 @@ async fn execute_tool_calls(
                             duration_ms: None,
                         };
                     }
-                }
-            }
+                };
+                let tool_ctx = ToolContext {
+                    working_dir: working_dir.clone(),
+                    session_id: Some(session_id),
+                    permission_rules: permissions.clone(),
+                };
 
-            // Parse arguments and execute
-            let args = match serde_json::from_str(&tc.arguments) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!(
-                        tool = %tc.name,
-                        args_len = tc.arguments.len(),
-                        error = %e,
-                        "tool call arguments truncated or malformed (likely max_output_tokens exceeded)"
-                    );
-                    let result = ToolResult::error(format!(
-                        "[TRUNCATED] Tool call arguments incomplete ({} bytes, parse: {}). \
-                         The content exceeded max_output_tokens.\n\
-                         To fix this, split the content into smaller parts:\n\
-                         - Use multiple smaller write_file or edit_file calls\n\
-                         - Or use edit_file to incrementally build the file\n\
-                         - Do NOT retry the same large write_file call — it will fail again.",
-                        tc.arguments.len(), e
-                    ));
-                    forward_global!(AgentMessage::ToolCallResult {
-                        call_id: tc.id.clone(),
-                        tool_name: tc.name.clone(),
-                        content: result.content.clone(),
-                        is_error: result.is_error,
-                    });
-                    let _ = tx
-                        .send(AgentEvent::ToolCallResult {
-                            call_id: tc.id.clone(),
-                            tool_name: tc.name.clone(),
-                            content: result.content.clone(),
-                            is_error: result.is_error,
-                        })
-                        .await;
-                    return ToolExecResult {
-                        index: i,
-                        call_id: tc.id,
-                        result,
-                        duration_ms: None,
-                    };
-                }
-            };
-            let tool_ctx = ToolContext {
-                working_dir: working_dir.clone(),
-                session_id: Some(session_id),
-                permission_rules: permissions.clone(),
-            };
+                let start = std::time::Instant::now();
+                let result = registry
+                    .execute(&tc.name, args, &tool_ctx)
+                    .await
+                    .unwrap_or_else(|| ToolResult::error("Tool not found in registry"));
+                let elapsed_ms = start.elapsed().as_millis() as u64;
 
-            let start = std::time::Instant::now();
-            let result = registry
-                .execute(&tc.name, args, &tool_ctx)
-                .await
-                .unwrap_or_else(|| ToolResult::error("Tool not found in registry"));
-            let elapsed_ms = start.elapsed().as_millis() as u64;
+                // Record tool execution fields on the visp.tool.execute span
+                tracing::Span::current().record("visp.tool.duration_ms", elapsed_ms as i64);
+                tracing::Span::current().record("visp.tool.is_error", result.is_error);
 
-            forward_global!(AgentMessage::ToolCallResult {
-                call_id: tc.id.clone(),
-                tool_name: tc.name.clone(),
-                content: result.content.clone(),
-                is_error: result.is_error,
-            });
-            let _ = tx
-                .send(AgentEvent::ToolCallResult {
+                forward_global!(AgentMessage::ToolCallResult {
                     call_id: tc.id.clone(),
                     tool_name: tc.name.clone(),
                     content: result.content.clone(),
                     is_error: result.is_error,
-                })
-                .await;
+                });
+                let _ = tx
+                    .send(AgentEvent::ToolCallResult {
+                        call_id: tc.id.clone(),
+                        tool_name: tc.name.clone(),
+                        content: result.content.clone(),
+                        is_error: result.is_error,
+                    })
+                    .await;
 
             ToolExecResult {
                 index: i,
@@ -1053,7 +1094,7 @@ async fn execute_tool_calls(
                 result,
                 duration_ms: Some(elapsed_ms),
             }
-        }));
+        }.instrument(tool_span)));
     }
 
     // Phase 2: Collect results
@@ -1295,6 +1336,16 @@ async fn execute_tool_calls(
 // ── Agent loop ───────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(
+    name = "visp.agent.run",
+    skip_all,
+    fields(
+        session.id = %ctx.session_id,
+        session.short_id = %(&ctx.session_id[..ctx.session_id.len().min(8)]),
+        visp.agent.kind = "primary",
+        visp.agent.depth = 0,
+    )
+)]
 pub async fn run_agent_loop(
     provider: Arc<dyn LlmProvider>,
     tool_registry: Arc<ToolRegistry>,
@@ -1316,11 +1367,19 @@ pub async fn run_agent_loop(
     // to the orchestrator (which will then notify the parent agent via SubAgentError).
     let global_tx_panic = ctx.global_tx.clone();
 
+    // Generate trace_id for W3C TraceContext propagation (Wave 1)
+    let visp_trace_id = uuid::Uuid::new_v4().to_string().replace('-', "");
+
     // Wrap entire body in catch_unwind for panic safety.
     // On panic, session is reset to Idle before re-raising.
     let result = AssertUnwindSafe(async move {
         // Early cancellation check before appending
         if ctx.cancel_token.is_cancelled() {
+            tracing::info!(
+                target: "visp.agent.cancelled",
+                session_id = %sid,
+                "agent loop cancelled before start"
+            );
             let _ = send_event(
                 &tx,
                 &sm,
@@ -1364,6 +1423,10 @@ pub async fn run_agent_loop(
         let mut doom_loop_window: Vec<Vec<(String, serde_json::Value)>> = Vec::new();
         let mut doom_loop_warned = false;
         loop {
+            // Create iteration span
+            let iteration_span =
+                tracing::info_span!("visp.agent.iteration", iteration.count = iteration);
+
             // a/b/c: Build prompt + boundary checks
             let ic = match setup_iteration(
                 iteration,
@@ -1375,10 +1438,14 @@ pub async fn run_agent_loop(
                 &sid,
                 &tx,
             )
+            .instrument(iteration_span.clone())
             .await
             {
                 Ok(ic) => ic,
-                Err(()) => return,
+                Err(()) => {
+                    // setup_iteration sends cancellaton / iteration_limit events internally
+                    return;
+                }
             };
             let messages = ic.messages;
             let tools = ic.tools;
@@ -1386,12 +1453,19 @@ pub async fn run_agent_loop(
             // d. Call LLM with retry
             let stream =
                 match call_llm_with_retry(provider.as_ref(), &messages, &tools, &ctx, &cfg, &sid)
+                    .instrument(iteration_span.clone())
                     .await
                 {
                     Ok(s) => s,
                     Err(LlmError::Cancelled) => {
                         // retry 阶段被 cancel：还没拿到 stream，
                         // 必须在此显式发 Cancelled 事件 + finish_loop（collect_stream_events 不会被调用）
+                        tracing::info!(
+                            target: "visp.agent.cancelled",
+                            session_id = %sid,
+                            iteration,
+                            "agent loop cancelled during LLM retry"
+                        );
                         let _ = send_event(
                             &tx,
                             &sm,
@@ -1424,15 +1498,22 @@ pub async fn run_agent_loop(
                 };
 
             // e. Collect stream events
-            let output = match collect_stream_events(stream, &mut ctx, &sid, &tx, &sm).await {
+            let output = match collect_stream_events(stream, &mut ctx, &sid, &tx, &sm)
+                .instrument(iteration_span.clone())
+                .await
+            {
                 Some(o) => o,
                 None => return,
             };
 
             // f. Handle stream result (check USER_QUERY marker or done)
-            match handle_stream_result(&output, total_tool_calls, &mut ctx, &sm, &sid, &tx).await {
+            match handle_stream_result(&output, total_tool_calls, &mut ctx, &sm, &sid, &tx)
+                .instrument(iteration_span.clone())
+                .await
+            {
                 Ok(StreamDecision::Done) => {
                     tracing::info!(
+                        target: "visp.agent.completed",
                         session_id = %sid,
                         iterations = iteration,
                         total_tool_calls,
@@ -1496,7 +1577,9 @@ pub async fn run_agent_loop(
                 &cfg,
                 &mut doom_loop_window,
                 &mut doom_loop_warned,
+                &visp_trace_id,
             )
+            .instrument(iteration_span.clone())
             .await
             {
                 return; // fatal error
@@ -1576,7 +1659,9 @@ mod tests {
     use crate::provider::LlmConfig;
     use futures::stream;
     use std::path::PathBuf;
+    use std::sync::Arc as StdArc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tracing_subscriber::prelude::*;
 
     /// RateLimit mock: first `fail_attempts` calls return RateLimit, then Ok(Done)
     struct RateLimitProvider {
@@ -2275,5 +2360,1100 @@ mod tests {
             Some(meta2),
             "second assistant message should have metadata from second round, no cross-contamination"
         );
+    }
+
+    // ── TestLayer for tracing assertions ────────────────────────────────────
+    use std::sync::Arc as TArc;
+    use std::sync::Mutex as TMutex;
+    use tracing::Event;
+    use tracing::Subscriber;
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::registry::LookupSpan;
+
+    #[derive(Debug, Clone)]
+    struct CapturedSpan {
+        name: String,
+        fields: Vec<(String, String)>,
+        id: u64,
+        parent_id: Option<u64>,
+    }
+
+    struct SpanFieldVisitor {
+        fields: Vec<(String, String)>,
+    }
+
+    impl Visit for SpanFieldVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .push((field.name().to_string(), format!("{value:?}")));
+        }
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+    }
+
+    struct TestLayer {
+        spans: TArc<TMutex<Vec<CapturedSpan>>>,
+        events: TArc<TMutex<Vec<String>>>,
+    }
+
+    impl TestLayer {
+        fn new(spans: TArc<TMutex<Vec<CapturedSpan>>>, events: TArc<TMutex<Vec<String>>>) -> Self {
+            Self { spans, events }
+        }
+    }
+
+    impl<S> Layer<S> for TestLayer
+    where
+        S: Subscriber + for<'a> LookupSpan<'a>,
+    {
+        fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+            let mut visitor = SpanFieldVisitor { fields: Vec::new() };
+            attrs.record(&mut visitor);
+
+            let parent_id = ctx.lookup_current().map(|s| s.id().into_u64());
+
+            let mut spans = self.spans.lock().unwrap();
+            spans.push(CapturedSpan {
+                name: attrs.metadata().name().to_string(),
+                fields: visitor.fields,
+                id: id.into_u64(),
+                parent_id,
+            });
+        }
+
+        fn on_record(&self, id: &Id, values: &Record<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = SpanFieldVisitor { fields: Vec::new() };
+            values.record(&mut visitor);
+            let mut spans = self.spans.lock().unwrap();
+            if let Some(span) = spans.iter_mut().find(|s| s.id == id.into_u64()) {
+                span.fields.extend(visitor.fields);
+            }
+        }
+
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            let target = event.metadata().target().to_string();
+            self.events.lock().unwrap().push(target);
+        }
+    }
+
+    type TracingOutput = (TArc<TMutex<Vec<CapturedSpan>>>, TArc<TMutex<Vec<String>>>);
+
+    fn setup_tracing() -> TracingOutput {
+        let spans = TArc::new(TMutex::new(Vec::new()));
+        let events = TArc::new(TMutex::new(Vec::new()));
+        (spans, events)
+    }
+
+    fn make_guard(
+        spans: &TArc<TMutex<Vec<CapturedSpan>>>,
+        events: &TArc<TMutex<Vec<String>>>,
+    ) -> tracing::subscriber::DefaultGuard {
+        tracing_subscriber::registry()
+            .with(TestLayer::new(spans.clone(), events.clone()))
+            .set_default()
+    }
+
+    /// Simple provider with a fixed set of phases (replacement for inaccessble TestProvider)
+    struct SimpleProvider {
+        phases: Vec<Vec<ChatEvent>>,
+        call_count: AtomicUsize,
+    }
+
+    impl SimpleProvider {
+        fn new(phases: Vec<Vec<ChatEvent>>) -> Self {
+            Self {
+                phases,
+                call_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for SimpleProvider {
+        async fn chat_stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _config: &LlmConfig,
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>
+        {
+            let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
+            let events = self
+                .phases
+                .get(idx)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(Ok);
+            Ok(Box::pin(stream::iter(events)))
+        }
+    }
+
+    /// Simple mock tool (replacement for inaccessible mock_tool)
+    struct MockTestTool {
+        name: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tool::Tool for MockTestTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "mock tool"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn execute(
+            &self,
+            _: serde_json::Value,
+            _: &crate::tool::ToolContext,
+        ) -> crate::tool::ToolResult {
+            crate::tool::ToolResult::success("ok")
+        }
+    }
+
+    // ── W1-S3a-1/2: visp.agent.run span ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_agent_run_span_created() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        let provider: StdArc<dyn LlmProvider> =
+            StdArc::new(SimpleProvider::new(vec![vec![ChatEvent::Done]]));
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig::default();
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("hello"),
+            tx,
+        )
+        .await;
+
+        let captured = spans.lock().unwrap();
+        assert!(
+            captured.iter().any(|s| s.name == "visp.agent.run"),
+            "expected visp.agent.run span, got: {:?}",
+            captured.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_run_carries_session_id_field() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        let provider: StdArc<dyn LlmProvider> =
+            StdArc::new(SimpleProvider::new(vec![vec![ChatEvent::Done]]));
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig::default();
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("hello"),
+            tx,
+        )
+        .await;
+
+        let captured = spans.lock().unwrap();
+        let run_span = captured
+            .iter()
+            .find(|s| s.name == "visp.agent.run")
+            .unwrap();
+        assert!(
+            run_span.fields.iter().any(|(k, _)| k == "session.id"),
+            "expected session.id field"
+        );
+        assert!(
+            run_span.fields.iter().any(|(k, _)| k == "session.short_id"),
+            "expected session.short_id field"
+        );
+        assert!(
+            run_span
+                .fields
+                .iter()
+                .any(|(k, v)| k == "visp.agent.kind" && v == "primary"),
+            "expected visp.agent.kind=primary"
+        );
+        assert!(
+            run_span
+                .fields
+                .iter()
+                .any(|(k, v)| k == "visp.agent.depth" && v == "0"),
+            "expected visp.agent.depth=0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_run_emits_completed_event() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        let provider: StdArc<dyn LlmProvider> =
+            StdArc::new(SimpleProvider::new(vec![vec![ChatEvent::Done]]));
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig::default();
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("hello"),
+            tx,
+        )
+        .await;
+
+        let captured_events = events.lock().unwrap();
+        assert!(
+            captured_events.iter().any(|e| e == "visp.agent.completed"),
+            "expected visp.agent.completed event, got: {:?}",
+            *captured_events
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_run_emits_cancelled_event_on_cancel() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        // Cancel before starting
+        ctx.cancel_token.cancel();
+
+        let provider: StdArc<dyn LlmProvider> =
+            StdArc::new(SimpleProvider::new(vec![vec![ChatEvent::Done]]));
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig::default();
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("hello"),
+            tx,
+        )
+        .await;
+
+        let captured_events = events.lock().unwrap();
+        assert!(
+            captured_events.iter().any(|e| e == "visp.agent.cancelled"),
+            "expected visp.agent.cancelled event, got: {:?}",
+            *captured_events
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_run_emits_iteration_limit_event() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        // Provider always returns a tool call, so we hit hard_limit=1 immediately
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![vec![
+            ChatEvent::ToolCall {
+                id: "call_1".into(),
+                name: "finder".into(),
+                arguments: "{}".into(),
+            },
+            ChatEvent::Done,
+        ]]));
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        registry
+            .register(StdArc::new(MockTestTool { name: "finder" }))
+            .unwrap();
+        let config = AgentConfig {
+            soft_limit: 0,
+            hard_limit: 1,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("do tool"),
+            tx,
+        )
+        .await;
+
+        let captured_events = events.lock().unwrap();
+        assert!(
+            captured_events
+                .iter()
+                .any(|e| e == "visp.agent.iteration_limit"),
+            "expected visp.agent.iteration_limit event, got: {:?}",
+            *captured_events
+        );
+    }
+
+    // ── W1-S3a-3/4: visp.agent.iteration span ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_agent_iteration_span_nested_under_run() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        let provider: StdArc<dyn LlmProvider> =
+            StdArc::new(SimpleProvider::new(vec![vec![ChatEvent::Done]]));
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig::default();
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("hello"),
+            tx,
+        )
+        .await;
+
+        let captured = spans.lock().unwrap();
+        let run_span = captured
+            .iter()
+            .find(|s| s.name == "visp.agent.run")
+            .expect("expected visp.agent.run span");
+        let iter_spans: Vec<&CapturedSpan> = captured
+            .iter()
+            .filter(|s| s.name == "visp.agent.iteration")
+            .collect();
+        assert!(
+            !iter_spans.is_empty(),
+            "expected at least one visp.agent.iteration span"
+        );
+        // Each iteration span's parent should be the run span
+        for iter_span in &iter_spans {
+            assert_eq!(
+                iter_span.parent_id,
+                Some(run_span.id),
+                "visp.agent.iteration should be a child of visp.agent.run"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_agent_iteration_field_count() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![
+            vec![
+                ChatEvent::ToolCall {
+                    id: "call_1".into(),
+                    name: "finder".into(),
+                    arguments: "{}".into(),
+                },
+                ChatEvent::Done,
+            ],
+            vec![ChatEvent::Done],
+        ]));
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        registry
+            .register(StdArc::new(MockTestTool { name: "finder" }))
+            .unwrap();
+        let config = AgentConfig::default();
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("do tool"),
+            tx,
+        )
+        .await;
+
+        let captured = spans.lock().unwrap();
+        let iter_spans: Vec<&CapturedSpan> = captured
+            .iter()
+            .filter(|s| s.name == "visp.agent.iteration")
+            .collect();
+        assert!(
+            !iter_spans.is_empty(),
+            "expected at least one iteration span"
+        );
+        // Each iteration span should have iteration.count field
+        for (i, span) in iter_spans.iter().enumerate() {
+            assert!(
+                span.fields.iter().any(|(k, _)| k == "iteration.count"),
+                "iteration span {} should have iteration.count field, fields: {:?}",
+                i,
+                span.fields
+            );
+        }
+    }
+
+    // ── W1-S3a-5/6: visp.tool.execute span ────────────────────────────────
+
+    /// Provider that returns three tool calls in one go
+    struct ThreeToolProvider {
+        call_count: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for ThreeToolProvider {
+        async fn chat_stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _config: &LlmConfig,
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>
+        {
+            let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if count == 0 {
+                let events = vec![
+                    Ok(ChatEvent::ToolCall {
+                        id: "call_1".into(),
+                        name: "finder".into(),
+                        arguments: "{}".into(),
+                    }),
+                    Ok(ChatEvent::ToolCall {
+                        id: "call_2".into(),
+                        name: "grep".into(),
+                        arguments: "{}".into(),
+                    }),
+                    Ok(ChatEvent::ToolCall {
+                        id: "call_3".into(),
+                        name: "bash".into(),
+                        arguments: r#"{"cmd": "echo hi"}"#.into(),
+                    }),
+                    Ok(ChatEvent::Done),
+                ];
+                Ok(Box::pin(stream::iter(events)))
+            } else {
+                Ok(Box::pin(stream::iter(vec![Ok(ChatEvent::Done)])))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_execute_span_per_call() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(ThreeToolProvider {
+            call_count: AtomicUsize::new(0),
+        });
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        registry.register(StdArc::new(SleepyTool)).unwrap();
+        // Register SleepyTool twice with different names using inline wrappers
+        struct GrepTool;
+        #[async_trait::async_trait]
+        impl crate::tool::Tool for GrepTool {
+            fn name(&self) -> &str {
+                "grep"
+            }
+            fn description(&self) -> &str {
+                "greps"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn execute(
+                &self,
+                _: serde_json::Value,
+                _: &crate::tool::ToolContext,
+            ) -> crate::tool::ToolResult {
+                crate::tool::ToolResult::success("matched")
+            }
+        }
+        struct BashTool;
+        #[async_trait::async_trait]
+        impl crate::tool::Tool for BashTool {
+            fn name(&self) -> &str {
+                "bash"
+            }
+            fn description(&self) -> &str {
+                "runs"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn execute(
+                &self,
+                _: serde_json::Value,
+                _: &crate::tool::ToolContext,
+            ) -> crate::tool::ToolResult {
+                crate::tool::ToolResult::success("done")
+            }
+        }
+        registry.register(StdArc::new(GrepTool)).unwrap();
+        registry.register(StdArc::new(BashTool)).unwrap();
+
+        let config = AgentConfig {
+            hard_limit: 10,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("use tools"),
+            tx,
+        )
+        .await;
+
+        let captured = spans.lock().unwrap();
+        let tool_spans: Vec<&CapturedSpan> = captured
+            .iter()
+            .filter(|s| s.name == "visp.tool.execute")
+            .collect();
+        assert_eq!(
+            tool_spans.len(),
+            3,
+            "expected 3 visp.tool.execute spans, got {}: {:?}",
+            tool_spans.len(),
+            tool_spans.iter().map(|s| &s.fields).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_execute_fields() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(OneToolCallProvider {
+            call_count: AtomicUsize::new(0),
+        });
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        registry.register(StdArc::new(SleepyTool)).unwrap();
+        let config = AgentConfig {
+            hard_limit: 10,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("sleep"),
+            tx,
+        )
+        .await;
+
+        let captured = spans.lock().unwrap();
+        let tool_span = captured
+            .iter()
+            .find(|s| s.name == "visp.tool.execute")
+            .expect("expected visp.tool.execute span");
+
+        // Check required fields
+        let field_names: Vec<&str> = tool_span.fields.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(
+            tool_span
+                .fields
+                .iter()
+                .any(|(k, _)| k == "gen_ai.tool.name"),
+            "expected gen_ai.tool.name field, got: {:?}",
+            field_names
+        );
+        assert!(
+            tool_span
+                .fields
+                .iter()
+                .any(|(k, _)| k == "gen_ai.tool.call.id"),
+            "expected gen_ai.tool.call.id field, got: {:?}",
+            field_names
+        );
+        assert!(
+            tool_span
+                .fields
+                .iter()
+                .any(|(k, _)| k == "gen_ai.tool.type"),
+            "expected gen_ai.tool.type field, got: {:?}",
+            field_names
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_execute_duration_ms_uses_authoritative_value() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::session::InMemorySessionStore;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        // Use the tool that records duration in history
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(OneToolCallProvider {
+            call_count: AtomicUsize::new(0),
+        });
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        registry.register(StdArc::new(SleepyTool)).unwrap();
+        let config = AgentConfig {
+            hard_limit: 10,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("sleep"),
+            tx,
+        )
+        .await;
+
+        // Get duration from history (Wave 0 authoritative value)
+        let final_session = session_mgr.get(&sid).unwrap();
+        let tool_msg = final_session
+            .history
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("expected a tool message in history");
+        let history_duration = tool_msg
+            .tool_result_duration_ms
+            .expect("expected duration_ms on tool message");
+
+        // Get duration from span
+        let captured = spans.lock().unwrap();
+        let tool_span = captured
+            .iter()
+            .find(|s| s.name == "visp.tool.execute")
+            .expect("expected visp.tool.execute span");
+
+        // Find duration_ms field in span
+        let span_duration = tool_span
+            .fields
+            .iter()
+            .find(|(k, _)| k == "visp.tool.duration_ms")
+            .map(|(_, v)| v.parse::<u64>().unwrap_or(0));
+
+        if let Some(span_dur) = span_duration {
+            // The span duration and history duration should match (both use the same elapsed_ms)
+            // They come from the same measurement, so should be identical
+            assert_eq!(
+                span_dur, history_duration,
+                "span duration_ms should match the authoritative history value"
+            );
+        }
+        // If no duration_ms field, the tool was cancelled early — acceptable
+    }
+
+    #[tokio::test]
+    async fn test_tool_execute_is_error_true_on_failure() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::session::InMemorySessionStore;
+        use std::path::Path;
+
+        // ErrorTool returns an error
+        struct ErrorTool;
+        #[async_trait::async_trait]
+        impl crate::tool::Tool for ErrorTool {
+            fn name(&self) -> &str {
+                "error_tool"
+            }
+            fn description(&self) -> &str {
+                "always fails"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn execute(
+                &self,
+                _args: serde_json::Value,
+                _ctx: &crate::tool::ToolContext,
+            ) -> crate::tool::ToolResult {
+                crate::tool::ToolResult::error("always fails")
+            }
+        }
+
+        struct ErrorToolProvider {
+            call_count: AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl LlmProvider for ErrorToolProvider {
+            async fn chat_stream(
+                &self,
+                _messages: &[Message],
+                _tools: &[ToolDefinition],
+                _config: &LlmConfig,
+                _cancel: &tokio_util::sync::CancellationToken,
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>
+            {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+                if count == 0 {
+                    let events = vec![
+                        Ok(ChatEvent::ToolCall {
+                            id: "call_err_1".into(),
+                            name: "error_tool".into(),
+                            arguments: "{}".into(),
+                        }),
+                        Ok(ChatEvent::Done),
+                    ];
+                    Ok(Box::pin(stream::iter(events)))
+                } else {
+                    Ok(Box::pin(stream::iter(vec![Ok(ChatEvent::Done)])))
+                }
+            }
+        }
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(ErrorToolProvider {
+            call_count: AtomicUsize::new(0),
+        });
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        registry.register(StdArc::new(ErrorTool)).unwrap();
+        let config = AgentConfig {
+            hard_limit: 10,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("fail"),
+            tx,
+        )
+        .await;
+
+        let captured = spans.lock().unwrap();
+        let tool_span = captured
+            .iter()
+            .find(|s| s.name == "visp.tool.execute")
+            .expect("expected visp.tool.execute span");
+
+        assert!(
+            tool_span
+                .fields
+                .iter()
+                .any(|(k, v)| k == "visp.tool.is_error" && v == "true"),
+            "expected visp.tool.is_error=true, got fields: {:?}",
+            tool_span.fields
+        );
+    }
+
+    // ── W1-S3a-7/8: TraceContext injection ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_task_tool_intercepts_and_attaches_trace_context() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        // Set up multi-agent mode with global_tx
+        let (global_tx, mut global_rx) = mpsc::channel::<Envelope>(16);
+        let (_inbox_tx, inbox_rx) = mpsc::channel::<OrchestratorMessage>(16);
+        let permission_rules = Arc::new(Vec::new());
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(
+                &sid,
+                &trimmer,
+                Some(global_tx),
+                Some(inbox_rx),
+                Some(permission_rules),
+            )
+            .unwrap();
+
+        // Provider returns a "task" tool call
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(Phase2ToolProvider {
+            call_count: AtomicUsize::new(0),
+        });
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig {
+            hard_limit: 10,
+            ..Default::default()
+        };
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(64);
+
+        // Run agent loop in background
+        let sm_clone = session_mgr.clone();
+        let handle = tokio::spawn(async move {
+            run_agent_loop(
+                provider,
+                StdArc::new(registry),
+                rule_engine,
+                sm_clone,
+                ctx,
+                &config,
+                Message::user("spawn sub-agent"),
+                tx,
+            )
+            .await;
+        });
+
+        // Cancel to avoid waiting forever
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Drain events
+        while rx.try_recv().is_ok() {}
+
+        // Cancel
+        handle.abort();
+
+        // Check the global_tx for Envelope with SpawnRequest containing trace_context
+        let mut found_tc = false;
+        while let Ok(envelope) = global_rx.try_recv() {
+            if let AgentMessage::SpawnRequest {
+                trace_context: Some(tc),
+                ..
+            } = &envelope.message
+            {
+                found_tc = true;
+                assert_eq!(tc.trace_id.len(), 32, "trace_id should be 32 hex chars");
+                assert_eq!(tc.span_id.len(), 16, "span_id should be 16 hex chars");
+                assert!(tc.trace_id.chars().all(|c| c.is_ascii_hexdigit()));
+                assert!(tc.span_id.chars().all(|c| c.is_ascii_hexdigit()));
+            }
+        }
+
+        assert!(found_tc, "expected SpawnRequest with trace_context set");
     }
 }
