@@ -25,6 +25,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 toml = "0.8"
 uuid.workspace = true
+dashmap = "5"
 futures.workspace = true
 
 [dev-dependencies]

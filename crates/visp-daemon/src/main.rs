@@ -1,5 +1,6 @@
 mod command;
 mod config;
+mod observability;
 mod server;
 mod service;
 
