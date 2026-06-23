@@ -1348,6 +1348,8 @@ async fn execute_tool_calls(
         visp.agent.kind = %ctx.agent_kind,
         visp.agent.depth = ctx.depth,
         visp.span.w3c_id = tracing::field::Empty,
+        trace_id = tracing::field::Empty,
+        parent_span_id = tracing::field::Empty,
     )
 )]
 pub async fn run_agent_loop(
@@ -1674,6 +1676,7 @@ mod tests {
     use crate::context::NoopTrimmer;
     use crate::provider::LlmConfig;
     use futures::stream;
+    use serial_test::serial;
     use std::path::PathBuf;
     use std::sync::Arc as StdArc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2551,6 +2554,7 @@ mod tests {
 
     // ── W1-S3a-1/2: visp.agent.run span ────────────────────────────────────
 
+    #[serial]
     #[tokio::test]
     async fn test_agent_run_span_created() {
         let (spans, events) = setup_tracing();
@@ -2599,6 +2603,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[tokio::test]
     async fn test_agent_run_carries_session_id_field() {
         let (spans, events) = setup_tracing();
@@ -2668,6 +2673,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[tokio::test]
     async fn test_agent_run_emits_completed_event() {
         let (spans, events) = setup_tracing();
@@ -2716,6 +2722,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[tokio::test]
     async fn test_agent_run_emits_cancelled_event_on_cancel() {
         let (spans, events) = setup_tracing();
@@ -2767,6 +2774,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[tokio::test]
     async fn test_agent_run_emits_iteration_limit_event() {
         let (spans, events) = setup_tracing();
@@ -2833,6 +2841,7 @@ mod tests {
 
     // ── W1-S3a-3/4: visp.agent.iteration span ─────────────────────────────
 
+    #[serial]
     #[tokio::test]
     async fn test_agent_iteration_span_nested_under_run() {
         let (spans, events) = setup_tracing();
@@ -2896,6 +2905,7 @@ mod tests {
         }
     }
 
+    #[serial]
     #[tokio::test]
     async fn test_agent_iteration_field_count() {
         let (spans, events) = setup_tracing();
@@ -3012,6 +3022,7 @@ mod tests {
         }
     }
 
+    #[serial]
     #[tokio::test]
     async fn test_tool_execute_span_per_call() {
         let (spans, events) = setup_tracing();
@@ -3115,6 +3126,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[tokio::test]
     async fn test_tool_execute_fields() {
         let (spans, events) = setup_tracing();
@@ -3194,6 +3206,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[tokio::test]
     async fn test_tool_execute_duration_ms_uses_authoritative_value() {
         let (spans, events) = setup_tracing();
@@ -3274,6 +3287,7 @@ mod tests {
         // If no duration_ms field, the tool was cancelled early — acceptable
     }
 
+    #[serial]
     #[tokio::test]
     async fn test_tool_execute_is_error_true_on_failure() {
         let (spans, events) = setup_tracing();
@@ -3387,6 +3401,7 @@ mod tests {
 
     // ── W1-S3a-7/8: TraceContext injection ─────────────────────────────────
 
+    #[serial]
     #[tokio::test]
     async fn test_task_tool_intercepts_and_attaches_trace_context() {
         let (spans, events) = setup_tracing();

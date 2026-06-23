@@ -100,6 +100,11 @@ impl ParentLinkLayer {
     }
 }
 
+/// Marker inserted into span extension after fields have been recorded
+/// via `on_enter`, to prevent re-recording on subsequent enters.
+#[derive(Clone)]
+struct ParentLinkFieldsRecorded;
+
 // ---------------------------------------------------------------------------
 // W3C ID field extractor (used in on_record)
 // ---------------------------------------------------------------------------
@@ -211,6 +216,42 @@ where
             self.inner.mapping.remove(&w3c_id);
         }
     }
+
+    /// Record `trace_id` and `parent_span_id` from [`ParentLinkFields`] onto
+    /// the span so that the JSON fmt layer outputs them (Approach A).
+    ///
+    /// This fires on first entry only; subsequent entries are no-ops thanks
+    /// to [`ParentLinkFieldsRecorded`] marker.
+    fn on_enter(&self, id: &tracing::span::Id, ctx: Context<'_, S>) {
+        let span_ref = match ctx.span(id) {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Already recorded on a previous enter.
+        if span_ref
+            .extensions()
+            .get::<ParentLinkFieldsRecorded>()
+            .is_some()
+        {
+            return;
+        }
+
+        let plf = match span_ref.extensions().get::<ParentLinkFields>() {
+            Some(f) => f.clone(),
+            None => return,
+        };
+
+        // Record fields on the current span (which should be the same as
+        // the entered span). This makes the JSON fmt layer output them.
+        let current = tracing::Span::current();
+        current.record("trace_id", plf.trace_id.as_str());
+        if let Some(ref psid) = plf.parent_span_id {
+            current.record("parent_span_id", psid.as_str());
+        }
+
+        span_ref.extensions_mut().insert(ParentLinkFieldsRecorded);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +262,7 @@ where
 mod tests {
     use std::sync::Mutex;
 
+    use serial_test::serial;
     use tracing::span::{Attributes, Id};
     use tracing_subscriber::Layer;
     use tracing_subscriber::layer::Context;
@@ -351,6 +393,7 @@ mod tests {
     // ── W1-S4a-1: Layer skeleton ──────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn test_parent_link_layer_compiles_and_registers() {
         let _guard = tracing_subscriber::registry()
             .with(ParentLinkLayer::new())
@@ -359,6 +402,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_parent_link_layer_no_op_when_no_trace_context() {
         let _guard = tracing_subscriber::registry()
             .with(ParentLinkLayer::new())
@@ -372,6 +416,7 @@ mod tests {
     // ── W1-S4a-3 (rewritten): extension fields ────────────────────────────
 
     #[test]
+    #[serial]
     fn test_parent_link_layer_inserts_parent_link_fields_extension() {
         let tc = make_tc("b7ad6b7169203331");
         let collector = TestFieldsCollector::new();
@@ -397,6 +442,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_parent_link_layer_no_fields_when_no_trace_context() {
         let collector = TestFieldsCollector::new();
 
@@ -418,6 +464,7 @@ mod tests {
     // ── P0-3: parent_span_id via mapping ──────────────────────────────────
 
     #[test]
+    #[serial]
     fn test_parent_link_writes_parent_span_id_when_parent_in_mapping() {
         let layer = ParentLinkLayer::new();
         let collector = TestFieldsCollector::new();
@@ -461,6 +508,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_parent_link_increments_unmatched_when_parent_missing() {
         let layer = ParentLinkLayer::new();
 
@@ -484,6 +532,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_parent_link_registers_w3c_id_from_span_w3c_id_extension() {
         let layer = ParentLinkLayer::new();
         let collector = TestFieldsCollector::new();
@@ -524,6 +573,7 @@ mod tests {
     // ── P1-2: mapping cleanup on span close ───────────────────────────────
 
     #[test]
+    #[serial]
     fn test_parent_link_cleans_mapping_on_span_close() {
         let layer = ParentLinkLayer::new();
 
@@ -559,6 +609,7 @@ mod tests {
     // ── W1-S4a-5: unmatched parent + metric ──────────────────────────────
 
     #[test]
+    #[serial]
     fn test_parent_link_layer_unmatched_parent_recorded() {
         let layer = ParentLinkLayer::new();
         let layer_clone = layer.clone();
@@ -586,6 +637,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_parent_link_layer_exposes_unmatched_count() {
         let layer = ParentLinkLayer::new();
         // Fresh layer: count must be 0.

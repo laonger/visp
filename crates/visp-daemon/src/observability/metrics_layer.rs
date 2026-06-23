@@ -389,6 +389,7 @@ where
 mod tests {
     use std::sync::Mutex;
 
+    use serial_test::serial;
     use tracing::Event;
     use tracing_subscriber::prelude::*;
 
@@ -452,6 +453,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
+    #[serial]
     fn test_metrics_layer_collects_tool_durations_per_session() {
         let layer = MetricsLayer::new();
 
@@ -499,6 +501,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_metrics_layer_collects_llm_tokens_per_session() {
         let layer = MetricsLayer::new();
 
@@ -557,6 +560,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_metrics_layer_aggregates_per_session_id() {
         let layer = MetricsLayer::new();
 
@@ -677,6 +681,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
+    #[serial]
     fn test_metrics_layer_emits_session_summary_on_agent_run_close() {
         let layer = MetricsLayer::new();
         let collector = TestMetricsEventCollector::new();
@@ -735,6 +740,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_metrics_layer_emits_per_run_after_bucket_removal() {
         let layer = MetricsLayer::new();
         let collector = TestMetricsEventCollector::new();
@@ -800,6 +806,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
+    #[serial]
     fn test_metrics_layer_session_metrics_accessor() {
         let layer = MetricsLayer::new();
 
@@ -845,6 +852,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_metrics_layer_all_sessions_accessor() {
         let layer = MetricsLayer::new();
 
@@ -892,6 +900,7 @@ mod tests {
     // ── P0-4: bucket cleanup on summary ─────────────────────────────────
 
     #[test]
+    #[serial]
     fn test_metrics_layer_removes_bucket_after_summary() {
         let layer = MetricsLayer::new();
         let collector = TestMetricsEventCollector::new();
@@ -931,6 +940,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_metrics_layer_no_pollution_on_session_rerun() {
         let layer = MetricsLayer::new();
         let collector = TestMetricsEventCollector::new();
