@@ -171,6 +171,15 @@ impl Message {
     }
 
     pub fn tool(content: impl Into<String>, call_id: impl Into<String>) -> Self {
+        Self::tool_with_duration(content, call_id, None)
+    }
+
+    /// 构造 tool 结果消息，并附带工具执行耗时（毫秒）
+    pub fn tool_with_duration(
+        content: impl Into<String>,
+        call_id: impl Into<String>,
+        duration_ms: Option<u64>,
+    ) -> Self {
         let mut msg = Self {
             role: Role::Tool,
             kind: MessageType::ToolResult,
@@ -188,7 +197,7 @@ impl Message {
             actual_cost: None,
             provider_metadata: None,
             tool_result_is_error: None,
-            tool_result_duration_ms: None,
+            tool_result_duration_ms: duration_ms,
             created_at: None,
         };
         msg.estimated_tokens = estimate_message_tokens(&msg);
@@ -363,6 +372,28 @@ mod tests {
     fn test_tool_message_kind() {
         let msg = Message::tool("out", "id");
         assert_eq!(msg.kind, MessageType::ToolResult);
+    }
+
+    // ── Wave 0 Task 0A: tool_result_duration_ms 构造接口 ──
+
+    #[test]
+    fn test_message_tool_accepts_duration_ms() {
+        // 新构造接口：tool_with_duration 接受 duration_ms 参数并填入字段
+        let msg = Message::tool_with_duration("out", "call_42", Some(123));
+        assert_eq!(msg.kind, MessageType::ToolResult);
+        assert_eq!(msg.role, Role::Tool);
+        assert_eq!(msg.tool_call_id.as_deref(), Some("call_42"));
+        assert_eq!(msg.tool_result_duration_ms, Some(123));
+    }
+
+    #[test]
+    fn test_message_tool_duration_none_when_not_supplied() {
+        // 旧路径 Message::tool 不传 duration，字段保持 None（向后兼容）
+        let msg = Message::tool("out", "call_1");
+        assert_eq!(msg.tool_result_duration_ms, None);
+        // 新接口传 None 也应保持 None
+        let msg2 = Message::tool_with_duration("out", "call_2", None);
+        assert_eq!(msg2.tool_result_duration_ms, None);
     }
 
     #[test]

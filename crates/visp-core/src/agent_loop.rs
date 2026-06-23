@@ -442,6 +442,7 @@ fn drain_pending_spawns(pending: &mut Vec<PendingSpawn>, reason: &str) -> Vec<To
             index: ps.index,
             call_id: ps.call_id,
             result: ToolResult::error(reason),
+            duration_ms: None,
         })
         .collect()
 }
@@ -875,6 +876,7 @@ async fn execute_tool_calls(
                     index: i,
                     call_id: tc.id.clone(),
                     result: ToolResult::error("Cancelled"),
+                    duration_ms: None,
                 };
                 forward_global!(AgentMessage::ToolCallResult {
                     call_id: tc.id.clone(),
@@ -956,6 +958,7 @@ async fn execute_tool_calls(
                             index: i,
                             call_id: tc.id,
                             result,
+                            duration_ms: None,
                         };
                     }
                 }
@@ -998,6 +1001,7 @@ async fn execute_tool_calls(
                         index: i,
                         call_id: tc.id,
                         result,
+                        duration_ms: None,
                     };
                 }
             };
@@ -1007,10 +1011,12 @@ async fn execute_tool_calls(
                 permission_rules: permissions.clone(),
             };
 
+            let start = std::time::Instant::now();
             let result = registry
                 .execute(&tc.name, args, &tool_ctx)
                 .await
                 .unwrap_or_else(|| ToolResult::error("Tool not found in registry"));
+            let elapsed_ms = start.elapsed().as_millis() as u64;
 
             forward_global!(AgentMessage::ToolCallResult {
                 call_id: tc.id.clone(),
@@ -1031,6 +1037,7 @@ async fn execute_tool_calls(
                 index: i,
                 call_id: tc.id,
                 result,
+                duration_ms: Some(elapsed_ms),
             }
         }));
     }
@@ -1085,6 +1092,7 @@ async fn execute_tool_calls(
                                         index: ps.index,
                                         call_id,
                                         result: ToolResult::success(content),
+                                        duration_ms: None,
                                     });
                                 }
                             }
@@ -1095,6 +1103,7 @@ async fn execute_tool_calls(
                                         index: ps.index,
                                         call_id,
                                         result: ToolResult::error(error),
+                                        duration_ms: None,
                                     });
                                 }
                             }
@@ -1161,6 +1170,7 @@ async fn execute_tool_calls(
                                         index: ps.index,
                                         call_id,
                                         result: ToolResult::success(content),
+                                        duration_ms: None,
                                     });
                                 }
                             }
@@ -1172,6 +1182,7 @@ async fn execute_tool_calls(
                                         index: ps.index,
                                         call_id,
                                         result: ToolResult::error(error),
+                                        duration_ms: None,
                                     });
                                 }
                             }
@@ -1231,6 +1242,7 @@ async fn execute_tool_calls(
                             index: idx,
                             call_id,
                             result: ToolResult::error(format!("Tool execution panicked: {e}")),
+                            duration_ms: None,
                         })
                     }
                 }).collect()
@@ -1243,7 +1255,7 @@ async fn execute_tool_calls(
     sorted_results.sort_by_key(|r| r.index);
 
     for tr in sorted_results {
-        let tool_msg = Message::tool(tr.result.content, &tr.call_id);
+        let tool_msg = Message::tool_with_duration(tr.result.content, &tr.call_id, tr.duration_ms);
         ctx.history.push(tool_msg.clone());
         if let Err(e) = sm.append_message(sid, tool_msg) {
             let _ = send_event(
@@ -1883,6 +1895,129 @@ mod tests {
             msg.actual_cache_write,
             Some(5),
             "actual_cache_write should be 5"
+        );
+    }
+
+    // ── W0A-3: tool execution duration ─────────────────────────────────────
+
+    /// Tool that sleeps ~30ms before returning success — used to measure duration.
+    struct SleepyTool;
+
+    #[async_trait::async_trait]
+    impl crate::tool::Tool for SleepyTool {
+        fn name(&self) -> &str {
+            "sleepy"
+        }
+        fn description(&self) -> &str {
+            "sleeps then returns"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &crate::tool::ToolContext,
+        ) -> crate::tool::ToolResult {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            crate::tool::ToolResult::success("done")
+        }
+    }
+
+    /// Provider: first call returns a `sleepy` tool_use, next call returns Done.
+    struct OneToolCallProvider {
+        call_count: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for OneToolCallProvider {
+        async fn chat_stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _config: &LlmConfig,
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>
+        {
+            let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if count == 0 {
+                let events: Vec<Result<ChatEvent, LlmError>> = vec![
+                    Ok(ChatEvent::ToolCall {
+                        id: "call_sleepy_1".into(),
+                        name: "sleepy".into(),
+                        arguments: "{}".into(),
+                    }),
+                    Ok(ChatEvent::Done),
+                ];
+                Ok(Box::pin(stream::iter(events)))
+            } else {
+                Ok(Box::pin(stream::iter(vec![Ok(ChatEvent::Done)])))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_execution_records_duration_ms_in_history() {
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = std::sync::Arc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: std::sync::Arc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            std::sync::Arc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::new(OneToolCallProvider {
+            call_count: AtomicUsize::new(0),
+        });
+        let rule_engine = std::sync::Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        registry.register(std::sync::Arc::new(SleepyTool)).unwrap();
+        let config = AgentConfig {
+            hard_limit: 2,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            std::sync::Arc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("invoke sleepy"),
+            tx,
+        )
+        .await;
+
+        let final_session = session_mgr.get(&sid).unwrap();
+        let tool_msgs: Vec<_> = final_session
+            .history
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .collect();
+        assert_eq!(
+            tool_msgs.len(),
+            1,
+            "expected exactly one tool result message"
+        );
+        let dur = tool_msgs[0].tool_result_duration_ms;
+        assert!(
+            dur.is_some(),
+            "tool_result_duration_ms should be set after tool execution, got None"
+        );
+        assert!(
+            dur.unwrap() >= 25,
+            "tool_result_duration_ms should be >= 25ms (slept 30ms), got {:?}",
+            dur
         );
     }
 }

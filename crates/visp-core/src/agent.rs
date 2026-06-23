@@ -216,6 +216,7 @@ pub(crate) struct ToolExecResult {
     pub(crate) index: usize,
     pub(crate) call_id: String,
     pub(crate) result: ToolResult,
+    pub(crate) duration_ms: Option<u64>,
 }
 
 /// Pending sub-agent spawn (for multi-agent mode)
