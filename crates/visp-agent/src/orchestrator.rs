@@ -14,7 +14,6 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing;
 use tracing::Instrument;
-use tracing_subscriber::registry::LookupSpan;
 
 use visp_core::agent::run_agent_loop;
 use visp_core::agent::{
@@ -598,19 +597,20 @@ impl Orchestrator {
             visp.subagent.call_id = %call_id,
             visp.subagent.task_id = tracing::field::Empty,
             visp.subagent.depth = depth,
+            trace_id = tracing::field::Empty,
+            parent_span_id = tracing::field::Empty,
+            trace_state = tracing::field::Empty,
         );
 
-        // 将 TraceContext 写入 span extension（供 ParentLinkLayer 使用）
+        // 通过 span field 传递 TraceContext（ParentLinkLayer 在 on_record 中读取）
         if let Some(tc) = trace_context {
-            spawn_span.with_subscriber(|(_id, dispatch)| {
-                #[allow(unused_imports)]
-                use tracing_subscriber::Registry;
-                if let Some(registry) = dispatch.downcast_ref::<tracing_subscriber::Registry>()
-                    && let Some(span_ref) = registry.span(_id)
-                {
-                    span_ref.extensions_mut().insert(tc);
-                }
-            });
+            spawn_span.record("trace_id", tc.trace_id.as_str());
+            if let Some(ref psid) = tc.parent_span_id {
+                spawn_span.record("parent_span_id", psid.as_str());
+            }
+            if let Some(ref ts) = tc.trace_state {
+                spawn_span.record("trace_state", ts.as_str());
+            }
         }
 
         let loop_handle = tokio::spawn(
@@ -1649,16 +1649,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_orchestrator_reads_trace_context_from_envelope() {
-        let (spans, _events, tcs) = setup_tracing();
-        let _guard = make_tracing_guard(&spans, &_events, &tcs);
+        let (spans, _events, _tcs) = setup_tracing();
+        let _guard = make_tracing_guard(&spans, &_events, &_tcs);
         let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
 
         let tc = visp_core::TraceContext::new(
             "0af7651916cd43dd8448eb211c80319c".to_string(),
             "b7ad6b7169203331".to_string(),
             1,
-            None,
-            None,
+            Some("congo=toto".to_string()),
+            Some("aaaaaaaaaaaaaaaa".to_string()),
         )
         .unwrap();
 
@@ -1675,22 +1675,40 @@ mod tests {
         };
         orch.handle_agent_message(envelope).await;
 
-        // 给 spawned task 时间启动，使子 span 创建时触发 extension 读取
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // 验证 visp.subagent.spawn span 通过 field recording 携带了 TraceContext 字段
+        let captured = spans.lock().unwrap();
+        let spawn_span = captured
+            .iter()
+            .find(|s| s.name == "visp.subagent.spawn")
+            .expect("expected 'visp.subagent.spawn' span");
 
-        let captured_tcs = tcs.lock().unwrap();
-        assert!(
-            !captured_tcs.is_empty(),
-            "expected TraceContext to be captured from span extension, got empty"
+        let field_map: std::collections::HashMap<&str, &str> = spawn_span
+            .fields
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        assert_eq!(
+            field_map.get("trace_id"),
+            Some(&"0af7651916cd43dd8448eb211c80319c"),
+            "trace_id should be recorded from envelope TraceContext"
         );
-        assert_eq!(captured_tcs[0].trace_id, tc.trace_id);
-        assert_eq!(captured_tcs[0].span_id, tc.span_id);
+        assert_eq!(
+            field_map.get("parent_span_id"),
+            Some(&"aaaaaaaaaaaaaaaa"),
+            "parent_span_id should be recorded from envelope TraceContext"
+        );
+        assert_eq!(
+            field_map.get("trace_state"),
+            Some(&"congo=toto"),
+            "trace_state should be recorded from envelope TraceContext"
+        );
     }
 
     #[tokio::test]
     async fn test_orchestrator_missing_trace_context_falls_back_to_orphan() {
-        let (spans, _events, tcs) = setup_tracing();
-        let _guard = make_tracing_guard(&spans, &_events, &tcs);
+        let (spans, _events, _tcs) = setup_tracing();
+        let _guard = make_tracing_guard(&spans, &_events, &_tcs);
         let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
 
         // Envelope 不带 trace_context（None）
@@ -1714,11 +1732,85 @@ mod tests {
             "'visp.subagent.spawn' span should be created even without trace_context"
         );
 
-        // 验证未捕获任何 TraceContext extension
-        let captured_tcs = tcs.lock().unwrap();
+        // 验证 span 未记录 trace_id / parent_span_id / trace_state 字段
+        let spawn_span = captured
+            .iter()
+            .find(|s| s.name == "visp.subagent.spawn")
+            .expect("expected 'visp.subagent.spawn' span");
+        let field_map: std::collections::HashMap<&str, &str> = spawn_span
+            .fields
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
         assert!(
-            captured_tcs.is_empty(),
-            "should not capture any TraceContext when envelope has trace_context=None"
+            !field_map.contains_key("trace_id"),
+            "trace_id should NOT be recorded when envelope has trace_context=None"
+        );
+        assert!(
+            !field_map.contains_key("parent_span_id"),
+            "parent_span_id should NOT be recorded when envelope has trace_context=None"
+        );
+        assert!(
+            !field_map.contains_key("trace_state"),
+            "trace_state should NOT be recorded when envelope has trace_context=None"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subagent_spawn_span_records_trace_fields_for_observation() {
+        let (spans, _events, _tcs) = setup_tracing();
+        let _guard = make_tracing_guard(&spans, &_events, &_tcs);
+        let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+
+        let tc = visp_core::TraceContext::new(
+            "0af7651916cd43dd8448eb211c80319c".to_string(),
+            "b7ad6b7169203331".to_string(),
+            1,
+            Some("congo=toto".to_string()),
+            Some("aaaaaaaaaaaaaaaa".to_string()),
+        )
+        .unwrap();
+
+        let envelope = Envelope {
+            session_id: parent_id.clone(),
+            message: AgentMessage::SpawnRequest {
+                call_id: "call-tc-field".to_string(),
+                subagent_type: "default".to_string(),
+                description: "task with trace".to_string(),
+                task_id: None,
+                trace_context: Some(tc.clone()),
+            },
+            trace_context: Some(tc.clone()),
+        };
+        orch.handle_agent_message(envelope).await;
+
+        let captured = spans.lock().unwrap();
+        let spawn_span = captured
+            .iter()
+            .find(|s| s.name == "visp.subagent.spawn")
+            .expect("expected 'visp.subagent.spawn' span");
+
+        let field_map: std::collections::HashMap<&str, &str> = spawn_span
+            .fields
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        assert_eq!(
+            field_map.get("trace_id"),
+            Some(&"0af7651916cd43dd8448eb211c80319c"),
+            "trace_id should be recorded on visp.subagent.spawn from envelope TraceContext"
+        );
+        assert_eq!(
+            field_map.get("parent_span_id"),
+            Some(&"aaaaaaaaaaaaaaaa"),
+            "parent_span_id should be recorded on visp.subagent.spawn from envelope TraceContext"
+        );
+        assert_eq!(
+            field_map.get("trace_state"),
+            Some(&"congo=toto"),
+            "trace_state should be recorded on visp.subagent.spawn from envelope TraceContext"
         );
     }
 
