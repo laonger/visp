@@ -18,8 +18,8 @@ use tracing_subscriber::registry::LookupSpan;
 
 use visp_core::agent::run_agent_loop;
 use visp_core::agent::{
-    AgentConfig, AgentEvent, AgentEventFrame, AgentMessage, Envelope, OrchestratorMessage,
-    UserQueryResult,
+    AgentConfig, AgentEvent, AgentEventFrame, AgentKind, AgentMessage, Envelope,
+    OrchestratorMessage, UserQueryResult,
 };
 use visp_core::agent_definition::{AgentDefinition, merge_permissions};
 use visp_core::agent_registry::AgentRegistry;
@@ -517,7 +517,7 @@ impl Orchestrator {
         });
 
         // 8. Start loop context (consumes inbox_rx)
-        let ctx = match self.session_mgr.start_loop(
+        let mut ctx = match self.session_mgr.start_loop(
             &sub_session_id,
             &self.context_trimmer,
             Some(self.global_tx.clone()),
@@ -537,6 +537,9 @@ impl Orchestrator {
                 return;
             }
         };
+        // Set agent kind and depth for observability
+        ctx.agent_kind = AgentKind::Sub;
+        ctx.depth = depth;
 
         // 9. Resolve provider
         let provider = match self.resolve_provider(Some(&agent_def), &sub_session_id) {
@@ -1655,6 +1658,7 @@ mod tests {
             "b7ad6b7169203331".to_string(),
             1,
             None,
+            None,
         )
         .unwrap();
 
@@ -1665,7 +1669,7 @@ mod tests {
                 subagent_type: "default".to_string(),
                 description: "task with trace".to_string(),
                 task_id: None,
-                trace_context: None,
+                trace_context: Some(tc.clone()),
             },
             trace_context: Some(tc.clone()),
         };

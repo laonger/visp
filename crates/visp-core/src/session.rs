@@ -537,6 +537,8 @@ impl SessionManager {
             global_tx,
             inbox_rx,
             permission_rules,
+            agent_kind: crate::agent::AgentKind::Primary,
+            depth: 0,
         })
     }
 

@@ -154,6 +154,26 @@ pub struct Envelope {
     pub trace_context: Option<crate::TraceContext>,
 }
 
+/// Agent kind (primary vs sub).
+///
+/// Used for observability fields (`visp.agent.kind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentKind {
+    /// Root agent handling the user's session.
+    Primary,
+    /// Sub-agent spawned by a parent agent.
+    Sub,
+}
+
+impl std::fmt::Display for AgentKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentKind::Primary => write!(f, "primary"),
+            AgentKind::Sub => write!(f, "sub"),
+        }
+    }
+}
+
 /// Agent 循环上下文
 pub struct AgentLoopContext {
     /// 会话 ID
@@ -174,6 +194,10 @@ pub struct AgentLoopContext {
     pub inbox_rx: Option<mpsc::Receiver<OrchestratorMessage>>,
     /// 权限规则集
     pub permission_rules: Option<Arc<Vec<PermissionRule>>>,
+    /// Agent kind (Primary or Sub), used for observability.
+    pub agent_kind: AgentKind,
+    /// Nesting depth (0 for root, incremented per sub-agent level).
+    pub depth: u32,
 }
 
 /// Agent 执行配置
@@ -812,6 +836,8 @@ mod tests {
             global_tx: None,
             inbox_rx: None,
             permission_rules: None,
+            agent_kind: AgentKind::Primary,
+            depth: 0,
         };
         assert_eq!(ctx.session_id, "sess-1");
         assert!(ctx.history.is_empty());
@@ -2092,6 +2118,7 @@ mod tests {
             "b7ad6b7169203331".to_string(),
             1,
             None,
+            None,
         )
         .unwrap();
         let spawn = AgentMessage::SpawnRequest {
@@ -2132,6 +2159,7 @@ mod tests {
             "0af7651916cd43dd8448eb211c80319c".to_string(),
             "b7ad6b7169203331".to_string(),
             1,
+            None,
             None,
         )
         .unwrap();

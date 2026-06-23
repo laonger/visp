@@ -24,6 +24,7 @@ use crate::session::SessionStatus;
 use crate::tool::ToolContext;
 use crate::tool::ToolResult;
 use crate::tool_registry::ToolRegistry;
+use crate::trace_context::generate_w3c_span_id;
 
 use futures::FutureExt;
 use futures::Stream;
@@ -720,6 +721,7 @@ async fn execute_tool_calls(
     doom_loop_window: &mut Vec<Vec<(String, serde_json::Value)>>,
     doom_loop_warned: &mut bool,
     visp_trace_id: &str,
+    iter_span_w3c_id: &str,
 ) -> bool {
     // Append assistant message with tool_calls
     *total_tool_calls += tool_calls.len() as u32;
@@ -853,12 +855,13 @@ async fn execute_tool_calls(
 
             if let Some(ref gtx) = ctx.global_tx {
                 // Generate W3C TraceContext for cross-mpsc propagation
-                let span_id = uuid::Uuid::new_v4().to_string().replace('-', "")[..16].to_string();
+                let span_id = generate_w3c_span_id();
                 let visp_tc = crate::TraceContext::new(
                     visp_trace_id.to_string(),
                     span_id,
                     1, // sampled
                     None,
+                    Some(iter_span_w3c_id.to_string()),
                 )
                 .expect("TraceContext construction should not fail with valid IDs");
                 let _ = gtx.try_send(Envelope {
@@ -1342,8 +1345,9 @@ async fn execute_tool_calls(
     fields(
         session.id = %ctx.session_id,
         session.short_id = %(&ctx.session_id[..ctx.session_id.len().min(8)]),
-        visp.agent.kind = "primary",
-        visp.agent.depth = 0,
+        visp.agent.kind = %ctx.agent_kind,
+        visp.agent.depth = ctx.depth,
+        visp.span.w3c_id = tracing::field::Empty,
     )
 )]
 pub async fn run_agent_loop(
@@ -1369,6 +1373,11 @@ pub async fn run_agent_loop(
 
     // Generate trace_id for W3C TraceContext propagation (Wave 1)
     let visp_trace_id = uuid::Uuid::new_v4().to_string().replace('-', "");
+    // Generate W3C span ID for this run span and record as field.
+    // A downstream layer (SpanW3CIdInjector or ParentLinkLayer) reads this
+    // via on_record and writes it into the span extension.
+    let run_span_w3c_id = generate_w3c_span_id();
+    tracing::Span::current().record("visp.span.w3c_id", &run_span_w3c_id);
 
     // Wrap entire body in catch_unwind for panic safety.
     // On panic, session is reset to Idle before re-raising.
@@ -1423,9 +1432,14 @@ pub async fn run_agent_loop(
         let mut doom_loop_window: Vec<Vec<(String, serde_json::Value)>> = Vec::new();
         let mut doom_loop_warned = false;
         loop {
-            // Create iteration span
-            let iteration_span =
-                tracing::info_span!("visp.agent.iteration", iteration.count = iteration);
+            // Create iteration span with W3C ID placeholder.
+            let iter_span_w3c_id = generate_w3c_span_id();
+            let iteration_span = tracing::info_span!(
+                "visp.agent.iteration",
+                visp.span.w3c_id = tracing::field::Empty,
+                iteration.count = iteration,
+            );
+            iteration_span.record("visp.span.w3c_id", &iter_span_w3c_id);
 
             // a/b/c: Build prompt + boundary checks
             let ic = match setup_iteration(
@@ -1578,6 +1592,7 @@ pub async fn run_agent_loop(
                 &mut doom_loop_window,
                 &mut doom_loop_warned,
                 &visp_trace_id,
+                &iter_span_w3c_id,
             )
             .instrument(iteration_span.clone())
             .await
@@ -1655,6 +1670,7 @@ pub async fn run_agent_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentKind;
     use crate::context::NoopTrimmer;
     use crate::provider::LlmConfig;
     use futures::stream;
@@ -1708,6 +1724,8 @@ mod tests {
             global_tx: None,
             inbox_rx: None,
             permission_rules: None,
+            agent_kind: AgentKind::Primary,
+            depth: 0,
         };
         let cfg = AgentConfig {
             llm_retry_attempts: 5,
