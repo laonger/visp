@@ -1,3 +1,4 @@
+use crate::ProviderMetadata;
 use serde::{Deserialize, Serialize};
 
 /// 消息子类型，与 role 正交
@@ -146,6 +147,16 @@ impl Message {
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
+        Self::assistant_with_metadata(content, None)
+    }
+
+    /// 构造 assistant 消息，同时附带 provider 元数据
+    ///
+    /// `provider_metadata` 会被序列化为 JSON 存入 `Message.provider_metadata` 字段。
+    pub fn assistant_with_metadata(
+        content: impl Into<String>,
+        provider_metadata: Option<ProviderMetadata>,
+    ) -> Self {
         let mut msg = Self {
             role: Role::Assistant,
             kind: MessageType::Text,
@@ -161,7 +172,8 @@ impl Message {
             actual_cache_read: None,
             actual_cache_write: None,
             actual_cost: None,
-            provider_metadata: None,
+            provider_metadata: provider_metadata
+                .map(|pm| serde_json::to_value(pm).expect("ProviderMetadata serialization")),
             tool_result_is_error: None,
             tool_result_duration_ms: None,
             created_at: None,

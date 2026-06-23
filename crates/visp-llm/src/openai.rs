@@ -400,6 +400,7 @@ fn truncate_for_log(s: &str, max_chars: usize) -> &str {
 /// - 每个 data 行可能包含 usage、choices 中的 text delta 或 tool calls delta
 fn byte_stream_to_chat_events(
     byte_stream: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+    start_time: std::time::Instant,
 ) -> Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>> {
     struct StreamState {
         stream: Pin<Box<dyn Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send>>,
@@ -416,10 +417,18 @@ fn byte_stream_to_chat_events(
         output_tokens: u32,
         cache_creation_input_tokens: u32,
         cache_read_input_tokens: u32,
+        /// 响应模型名称（从 chunk 顶层 model 字段提取）
+        model: String,
+        /// 结束原因（从 Finish 事件提取）
+        finish_reason: String,
+        /// 请求开始时刻（用于计算端到端 latency）
+        state_start_time: std::time::Instant,
         /// 标记流是否已结束
         stream_ended: bool,
         /// 是否已发射 UsageInfo
         usage_emitted: bool,
+        /// 是否已发射 OutputMetadata
+        metadata_emitted: bool,
         /// 是否已发射 Done
         done_emitted: bool,
     }
@@ -448,8 +457,12 @@ fn byte_stream_to_chat_events(
         output_tokens: 0,
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 0,
+        model: String::new(),
+        finish_reason: String::new(),
+        state_start_time: start_time,
         stream_ended: false,
         usage_emitted: false,
+        metadata_emitted: false,
         done_emitted: false,
     };
 
@@ -462,6 +475,13 @@ fn byte_stream_to_chat_events(
 
                 for line in raw.lines() {
                     if let Some(data) = line.strip_prefix("data: ") {
+                        // 从 chunk 顶层提取 model 字段
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(data)
+                            && let Some(m) = v.get("model").and_then(|m| m.as_str())
+                            && !m.is_empty()
+                        {
+                            state.model = m.to_string();
+                        }
                         match parse_openai_sse_data(data) {
                             Ok(OpenAiStreamEvent::TextDelta(text)) => {
                                 return Some((Ok(ChatEvent::TextDelta(text)), state));
@@ -492,6 +512,7 @@ fn byte_stream_to_chat_events(
                             }
                             Ok(OpenAiStreamEvent::Finish { reason, .. }) => {
                                 if let Some(ref r) = reason {
+                                    state.finish_reason = r.clone();
                                     if r == "content_filter" {
                                         tracing::warn!("OpenAI response blocked by content filter");
                                     }
@@ -584,6 +605,35 @@ fn byte_stream_to_chat_events(
                         state,
                     ));
                 }
+                if !state.metadata_emitted {
+                    state.metadata_emitted = true;
+                    let latency = state.state_start_time.elapsed().as_millis() as u64;
+                    let finish_reasons = if state.finish_reason.is_empty() {
+                        vec![]
+                    } else {
+                        vec![state.finish_reason.clone()]
+                    };
+                    return Some((
+                        Ok(ChatEvent::OutputMetadata(visp_core::ProviderMetadata {
+                            model: state.model.clone(),
+                            finish_reasons,
+                            input_tokens: state.input_tokens,
+                            output_tokens: state.output_tokens,
+                            cache_read_input_tokens: if state.cache_read_input_tokens > 0 {
+                                Some(state.cache_read_input_tokens)
+                            } else {
+                                None
+                            },
+                            cache_creation_input_tokens: if state.cache_creation_input_tokens > 0 {
+                                Some(state.cache_creation_input_tokens)
+                            } else {
+                                None
+                            },
+                            latency_ms: latency,
+                        })),
+                        state,
+                    ));
+                }
                 if !state.done_emitted {
                     state.done_emitted = true;
                     return Some((Ok(ChatEvent::Done), state));
@@ -651,6 +701,7 @@ impl LlmProvider for OpenAiProvider {
         let headers = build_openai_headers(&self.api_key);
 
         tracing::debug!(url = %url, model = %config.model, "OpenAI request");
+        let start_time = std::time::Instant::now();
         let send_fut = self.client.post(&url).headers(headers).json(&body).send();
         let response = tokio::select! {
             biased;
@@ -661,7 +712,7 @@ impl LlmProvider for OpenAiProvider {
         let status = response.status();
         if status.is_success() {
             let byte_stream = response.bytes_stream();
-            Ok(byte_stream_to_chat_events(byte_stream))
+            Ok(byte_stream_to_chat_events(byte_stream, start_time))
         } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             let retry_after = parse_retry_after(response.headers()).unwrap_or(60);
             Err(LlmError::RateLimit {
@@ -1113,7 +1164,7 @@ mod tests {
     async fn collect_events(chunks: Vec<String>) -> Vec<ChatEvent> {
         let byte_stream =
             futures::stream::iter(chunks.into_iter().map(|s| Ok(bytes::Bytes::from(s))));
-        let event_stream = byte_stream_to_chat_events(byte_stream);
+        let event_stream = byte_stream_to_chat_events(byte_stream, std::time::Instant::now());
         event_stream
             .filter_map(|e| futures::future::ready(e.ok()))
             .collect()
@@ -1129,10 +1180,15 @@ mod tests {
         );
         let events = collect_events(vec![sse]).await;
 
-        assert_eq!(events.len(), 3, "expect TextDelta + UsageInfo + Done");
+        assert_eq!(
+            events.len(),
+            4,
+            "expect TextDelta + UsageInfo + OutputMetadata + Done"
+        );
         assert!(matches!(&events[0], ChatEvent::TextDelta(t) if t == "Hello"));
         assert!(matches!(&events[1], ChatEvent::UsageInfo { .. }));
-        assert!(matches!(&events[2], ChatEvent::Done));
+        assert!(matches!(&events[2], ChatEvent::OutputMetadata(_)));
+        assert!(matches!(&events[3], ChatEvent::Done));
     }
 
     #[tokio::test]
@@ -1145,11 +1201,16 @@ mod tests {
         );
         let events = collect_events(vec![sse]).await;
 
-        assert_eq!(events.len(), 4, "expect TextDelta x2 + UsageInfo + Done");
+        assert_eq!(
+            events.len(),
+            5,
+            "expect TextDelta x2 + UsageInfo + OutputMetadata + Done"
+        );
         assert!(matches!(&events[0], ChatEvent::TextDelta(t) if t == "Hello"));
         assert!(matches!(&events[1], ChatEvent::TextDelta(t) if t == " World"));
         assert!(matches!(&events[2], ChatEvent::UsageInfo { .. }));
-        assert!(matches!(&events[3], ChatEvent::Done));
+        assert!(matches!(&events[3], ChatEvent::OutputMetadata(_)));
+        assert!(matches!(&events[4], ChatEvent::Done));
     }
 
     #[tokio::test]
@@ -1198,7 +1259,11 @@ mod tests {
         );
         let events = collect_events(vec![sse]).await;
 
-        assert_eq!(events.len(), 3, "expect ToolCall + UsageInfo + Done");
+        assert_eq!(
+            events.len(),
+            4,
+            "expect ToolCall + UsageInfo + OutputMetadata + Done"
+        );
         match &events[0] {
             ChatEvent::ToolCall {
                 id,
@@ -1215,7 +1280,8 @@ mod tests {
             _ => panic!("expected ToolCall, got {:?}", events[0]),
         }
         assert!(matches!(&events[1], ChatEvent::UsageInfo { .. }));
-        assert!(matches!(&events[2], ChatEvent::Done));
+        assert!(matches!(&events[2], ChatEvent::OutputMetadata(_)));
+        assert!(matches!(&events[3], ChatEvent::Done));
     }
 
     #[tokio::test]
@@ -1224,10 +1290,15 @@ mod tests {
         let sse = make_sse(&make_text_chunk("Hello"));
         let events = collect_events(vec![sse]).await;
 
-        assert_eq!(events.len(), 3, "expect TextDelta + UsageInfo + Done");
+        assert_eq!(
+            events.len(),
+            4,
+            "expect TextDelta + UsageInfo + OutputMetadata + Done"
+        );
         assert!(matches!(&events[0], ChatEvent::TextDelta(t) if t == "Hello"));
         assert!(matches!(&events[1], ChatEvent::UsageInfo { .. }));
-        assert!(matches!(&events[2], ChatEvent::Done));
+        assert!(matches!(&events[2], ChatEvent::OutputMetadata(_)));
+        assert!(matches!(&events[3], ChatEvent::Done));
     }
 
     #[tokio::test]
@@ -1237,19 +1308,25 @@ mod tests {
         let part2 = "lo\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n".to_string();
         let events = collect_events(vec![part1.to_string(), part2]).await;
 
-        assert_eq!(events.len(), 3, "expect TextDelta + UsageInfo + Done");
+        assert_eq!(
+            events.len(),
+            4,
+            "expect TextDelta + UsageInfo + OutputMetadata + Done"
+        );
         assert!(matches!(&events[0], ChatEvent::TextDelta(t) if t == "Hello"));
         assert!(matches!(&events[1], ChatEvent::UsageInfo { .. }));
-        assert!(matches!(&events[2], ChatEvent::Done));
+        assert!(matches!(&events[2], ChatEvent::OutputMetadata(_)));
+        assert!(matches!(&events[3], ChatEvent::Done));
     }
 
     #[tokio::test]
     async fn test_byte_stream_empty_stream() {
         let events = collect_events(vec![]).await;
 
-        assert_eq!(events.len(), 2, "expect UsageInfo + Done");
+        assert_eq!(events.len(), 3, "expect UsageInfo + OutputMetadata + Done");
         assert!(matches!(&events[0], ChatEvent::UsageInfo { .. }));
-        assert!(matches!(&events[1], ChatEvent::Done));
+        assert!(matches!(&events[1], ChatEvent::OutputMetadata(_)));
+        assert!(matches!(&events[2], ChatEvent::Done));
     }
 
     #[tokio::test]
@@ -1282,11 +1359,11 @@ mod tests {
         );
         let events = collect_events(vec![sse]).await;
 
-        // Expect: ThinkingBlock (step1) + ThinkingBlock (step1+step2) + TextDelta + UsageInfo + Done
+        // Expect: ThinkingBlock (step1) + ThinkingBlock (step1+step2) + TextDelta + UsageInfo + OutputMetadata + Done
         assert_eq!(
             events.len(),
-            5,
-            "expect 2 ThinkingBlocks + TextDelta + UsageInfo + Done in streaming mode"
+            6,
+            "expect 2 ThinkingBlocks + TextDelta + UsageInfo + OutputMetadata + Done in streaming mode"
         );
         match &events[0] {
             ChatEvent::ThinkingBlock(block) => {
@@ -1304,7 +1381,8 @@ mod tests {
         }
         assert!(matches!(&events[2], ChatEvent::TextDelta(t) if t == "The answer is 42."));
         assert!(matches!(&events[3], ChatEvent::UsageInfo { .. }));
-        assert!(matches!(&events[4], ChatEvent::Done));
+        assert!(matches!(&events[4], ChatEvent::OutputMetadata(_)));
+        assert!(matches!(&events[5], ChatEvent::Done));
     }
 
     #[tokio::test]
@@ -1338,8 +1416,12 @@ mod tests {
         );
         let events = collect_events(vec![sse]).await;
 
-        // Expect: ThinkingBlock + UsageInfo + Done (no TextDelta)
-        assert_eq!(events.len(), 3, "expect ThinkingBlock + UsageInfo + Done");
+        // Expect: ThinkingBlock + UsageInfo + OutputMetadata + Done (no TextDelta)
+        assert_eq!(
+            events.len(),
+            4,
+            "expect ThinkingBlock + UsageInfo + OutputMetadata + Done"
+        );
         match &events[0] {
             ChatEvent::ThinkingBlock(block) => {
                 assert_eq!(block["type"], "thinking");
@@ -1348,7 +1430,8 @@ mod tests {
             _ => panic!("expected ThinkingBlock, got {:?}", events[0]),
         }
         assert!(matches!(&events[1], ChatEvent::UsageInfo { .. }));
-        assert!(matches!(&events[2], ChatEvent::Done));
+        assert!(matches!(&events[2], ChatEvent::OutputMetadata(_)));
+        assert!(matches!(&events[3], ChatEvent::Done));
     }
 
     // --- truncate_for_log 测试（回归：UTF-8 char boundary panic） ---

@@ -377,6 +377,9 @@ async fn collect_stream_events(
                     Some(Ok(ChatEvent::ToolCall { id, name, arguments })) => {
                         tool_calls.push(ToolCallRequest { id, name, arguments });
                     }
+                    Some(Ok(ChatEvent::OutputMetadata(_))) => {
+                        // Reserved for W0B-6/7: inject metadata into assistant message
+                    }
                     Some(Ok(ChatEvent::Done)) => break,
                     Some(Err(e)) => {
                         let (code, msg) = llm_error_to_code(&e);

@@ -249,12 +249,16 @@ pub(crate) enum ParsedEvent {
         partial: String,
         signature: String,
     },
-    /// token 用量信息
+    /// token 用量信息及消息元数据
     Usage {
         input_tokens: u32,
         output_tokens: u32,
         cache_creation_input_tokens: u32,
         cache_read_input_tokens: u32,
+        /// 模型名称（仅 message_start 有值）
+        model: Option<String>,
+        /// 结束原因（仅 message_delta 有值；message_start 中通常为 null）
+        stop_reason: Option<String>,
     },
     Skip,
 }
@@ -281,22 +285,29 @@ pub(crate) fn parse_anthropic_event(event_name: &str, data: &str) -> Result<Pars
             let cache_read = v["message"]["usage"]["cache_read_input_tokens"]
                 .as_u64()
                 .unwrap_or(0) as u32;
+            let model = v["message"]["model"].as_str().map(|s| s.to_string());
+            let stop_reason = v["message"]["stop_reason"].as_str().map(|s| s.to_string());
             Ok(ParsedEvent::Usage {
                 input_tokens,
                 output_tokens,
                 cache_creation_input_tokens: cache_creation,
                 cache_read_input_tokens: cache_read,
+                model,
+                stop_reason,
             })
         }
         "message_delta" => {
             let v: serde_json::Value = serde_json::from_str(data)
                 .map_err(|e| LlmError::Stream(format!("parse message_delta: {e}")))?;
             let output_tokens = v["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
+            let stop_reason = v["delta"]["stop_reason"].as_str().map(|s| s.to_string());
             Ok(ParsedEvent::Usage {
                 input_tokens: 0,
                 output_tokens,
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
+                model: None,
+                stop_reason,
             })
         }
         "message_stop" => Ok(ParsedEvent::Emit(ChatEvent::Done)),
@@ -454,6 +465,7 @@ impl LlmProvider for AnthropicProvider {
         let headers = build_anthropic_headers(&self.api_key);
 
         tracing::debug!(url = %url, model = %config.model, "Anthropic request");
+        let start_time = std::time::Instant::now();
         let send_fut = self.client.post(&url).headers(headers).json(&body).send();
         let response = tokio::select! {
             biased;
@@ -464,7 +476,7 @@ impl LlmProvider for AnthropicProvider {
         let status = response.status();
         if status.is_success() {
             let byte_stream = response.bytes_stream();
-            Ok(byte_stream_to_chat_events(byte_stream))
+            Ok(byte_stream_to_chat_events(byte_stream, start_time))
         } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             let retry_after = parse_retry_after(response.headers()).unwrap_or(60);
             Err(LlmError::RateLimit {
@@ -491,6 +503,7 @@ impl LlmProvider for AnthropicProvider {
 /// 每个完整的 SSE 事件，最后用 `parse_anthropic_event` 映射为 ChatEvent。
 fn byte_stream_to_chat_events(
     byte_stream: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+    start_time: std::time::Instant,
 ) -> Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>> {
     use std::collections::HashMap;
 
@@ -514,10 +527,18 @@ fn byte_stream_to_chat_events(
         output_tokens: u32,
         cache_creation_input_tokens: u32,
         cache_read_input_tokens: u32,
-        /// 设为 true 后，下次 unfold 迭代发射 UsageInfo，再下次发射 Done
+        /// 响应模型名称（从 message_start 提取）
+        model: String,
+        /// 响应结束原因（从 message_delta 提取）
+        stop_reason: String,
+        /// 请求开始时刻（用于计算端到端 latency）
+        start_time: std::time::Instant,
+        /// 设为 true 后，下次 unfold 迭代发射 UsageInfo，再下次发射 OutputMetadata，再下次发射 Done
         done_pending: bool,
-        /// UsageInfo 已发射，下次返回 Done
+        /// UsageInfo 已发射
         usage_emitted: bool,
+        /// OutputMetadata 已发射
+        metadata_emitted: bool,
     }
 
     let state = StreamState {
@@ -529,12 +550,16 @@ fn byte_stream_to_chat_events(
         output_tokens: 0,
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 0,
+        model: String::new(),
+        stop_reason: String::new(),
+        start_time,
         done_pending: false,
         usage_emitted: false,
+        metadata_emitted: false,
     };
 
     let event_stream = stream::unfold(state, |mut state| async move {
-        // 如果已经处理完 SSE 但还没发射 UsageInfo/Done
+        // 第 1 阶段：所有 SSE 处理完毕，发射 UsageInfo
         if state.done_pending && !state.usage_emitted {
             state.usage_emitted = true;
             return Some((
@@ -548,19 +573,53 @@ fn byte_stream_to_chat_events(
                 state,
             ));
         }
-        if state.usage_emitted {
+        // 第 2 阶段：发射 OutputMetadata（包含 ProviderMetadata）
+        if state.usage_emitted && !state.metadata_emitted {
+            state.metadata_emitted = true;
+            let latency = state.start_time.elapsed().as_millis() as u64;
+            let finish_reasons = if state.stop_reason.is_empty() {
+                vec![]
+            } else {
+                vec![state.stop_reason.clone()]
+            };
+            return Some((
+                Ok(ChatEvent::OutputMetadata(visp_core::ProviderMetadata {
+                    model: state.model.clone(),
+                    finish_reasons,
+                    input_tokens: state.input_tokens,
+                    output_tokens: state.output_tokens,
+                    cache_read_input_tokens: if state.cache_read_input_tokens > 0 {
+                        Some(state.cache_read_input_tokens)
+                    } else {
+                        None
+                    },
+                    cache_creation_input_tokens: if state.cache_creation_input_tokens > 0 {
+                        Some(state.cache_creation_input_tokens)
+                    } else {
+                        None
+                    },
+                    latency_ms: latency,
+                })),
+                state,
+            ));
+        }
+        // 第 3 阶段：发射 Done
+        if state.metadata_emitted {
             state.done_pending = false;
             state.usage_emitted = false;
+            state.metadata_emitted = false;
             return Some((Ok(ChatEvent::Done), state));
         }
 
-        /// 更新 token 计数
+        /// 更新 token 计数及消息元数据
         fn update_anthropic_usage(
             state: &mut StreamState,
             input_tokens: u32,
             output_tokens: u32,
             cache_creation_input_tokens: u32,
             cache_read_input_tokens: u32,
+            model: Option<String>,
+            stop_reason: Option<String>,
         ) {
             if input_tokens > 0 {
                 state.input_tokens = input_tokens;
@@ -573,6 +632,16 @@ fn byte_stream_to_chat_events(
             }
             if cache_read_input_tokens > 0 {
                 state.cache_read_input_tokens = cache_read_input_tokens;
+            }
+            if let Some(m) = model
+                && !m.is_empty()
+            {
+                state.model = m;
+            }
+            if let Some(sr) = stop_reason
+                && !sr.is_empty()
+            {
+                state.stop_reason = sr;
             }
         }
 
@@ -611,6 +680,8 @@ fn byte_stream_to_chat_events(
                             output_tokens,
                             cache_creation_input_tokens,
                             cache_read_input_tokens,
+                            model,
+                            stop_reason,
                         }) => {
                             update_anthropic_usage(
                                 &mut state,
@@ -618,6 +689,8 @@ fn byte_stream_to_chat_events(
                                 output_tokens,
                                 cache_creation_input_tokens,
                                 cache_read_input_tokens,
+                                model,
+                                stop_reason,
                             );
                         }
                         Ok(ParsedEvent::ThinkingDelta {
@@ -726,6 +799,8 @@ fn byte_stream_to_chat_events(
                                     output_tokens,
                                     cache_creation_input_tokens,
                                     cache_read_input_tokens,
+                                    model,
+                                    stop_reason,
                                 }) => {
                                     update_anthropic_usage(
                                         &mut state,
@@ -733,6 +808,8 @@ fn byte_stream_to_chat_events(
                                         output_tokens,
                                         cache_creation_input_tokens,
                                         cache_read_input_tokens,
+                                        model,
+                                        stop_reason,
                                     );
                                     continue;
                                 }
@@ -845,7 +922,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_message_start_returns_usage() {
+    fn test_parse_message_start_returns_usage_and_model() {
         let data = r#"{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":105,"output_tokens":0,"cache_creation_input_tokens":52,"cache_read_input_tokens":200}}}"#;
         let result = parse_anthropic_event("message_start", data).unwrap();
         match result {
@@ -854,11 +931,15 @@ mod tests {
                 output_tokens,
                 cache_creation_input_tokens,
                 cache_read_input_tokens,
+                model,
+                stop_reason,
             } => {
                 assert_eq!(input_tokens, 105);
                 assert_eq!(output_tokens, 0);
                 assert_eq!(cache_creation_input_tokens, 52);
                 assert_eq!(cache_read_input_tokens, 200);
+                assert_eq!(model.as_deref(), Some("claude-sonnet-4-6"));
+                assert_eq!(stop_reason, None);
             }
             _ => panic!("expected Usage, got {:?}", result),
         }
@@ -1024,5 +1105,173 @@ mod tests {
         let content = msgs_arr[1]["content"].as_array().unwrap();
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["text"], "First response\n\nSecond response");
+    }
+
+    // ── byte_stream_to_chat_events 集成测试 ──────────────────────────
+
+    /// 构造一条 Anthropic SSE 文本行（自动追加 \n\n）
+    fn sse_line(event: &str, data: &str) -> String {
+        format!("event: {}\ndata: {}\n\n", event, data)
+    }
+
+    /// 收集 ChatEvent 流到 Vec（使用 Instant::now 作为 start_time）
+    async fn collect_anthropic_events(chunks: Vec<String>) -> Vec<ChatEvent> {
+        let byte_stream =
+            futures::stream::iter(chunks.into_iter().map(|s| Ok(bytes::Bytes::from(s))));
+        let start = std::time::Instant::now();
+        let event_stream = byte_stream_to_chat_events(byte_stream, start);
+        event_stream
+            .filter_map(|e| futures::future::ready(e.ok()))
+            .collect()
+            .await
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_response_carries_metadata() {
+        let message_start = r#"{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":105,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#;
+        let block_start =
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        let text_delta = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
+        let block_stop = r#"{"type":"content_block_stop","index":0}"#;
+        let message_delta = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":125}}"#;
+        let message_stop = r#"{"type":"message_stop"}"#;
+
+        let sse = format!(
+            "{}{}{}{}{}{}",
+            sse_line("message_start", message_start),
+            sse_line("content_block_start", block_start),
+            sse_line("content_block_delta", text_delta),
+            sse_line("content_block_stop", block_stop),
+            sse_line("message_delta", message_delta),
+            sse_line("message_stop", message_stop),
+        );
+        let events = collect_anthropic_events(vec![sse]).await;
+
+        // 提取 OutputMetadata
+        let metadata_events: Vec<&ChatEvent> = events
+            .iter()
+            .filter(|e| matches!(e, ChatEvent::OutputMetadata(_)))
+            .collect();
+        assert_eq!(
+            metadata_events.len(),
+            1,
+            "should have exactly one OutputMetadata event"
+        );
+
+        let meta = &metadata_events[0];
+        if let ChatEvent::OutputMetadata(m) = meta {
+            assert_eq!(m.model, "claude-sonnet-4-6");
+            assert_eq!(m.finish_reasons, vec!["end_turn"]);
+            assert_eq!(m.input_tokens, 105);
+            assert_eq!(m.output_tokens, 125);
+            assert_eq!(m.cache_read_input_tokens, None);
+            assert_eq!(m.cache_creation_input_tokens, None);
+            // latency_ms is u64, always non-negative
+        } else {
+            panic!("expected OutputMetadata");
+        }
+
+        // 验证事件顺序：TextDelta → UsageInfo → OutputMetadata → Done
+        let type_names: Vec<&str> = events
+            .iter()
+            .map(|e| match e {
+                ChatEvent::TextDelta(_) => "TextDelta",
+                ChatEvent::UsageInfo { .. } => "UsageInfo",
+                ChatEvent::OutputMetadata(_) => "OutputMetadata",
+                ChatEvent::Done => "Done",
+                _ => "Other",
+            })
+            .collect();
+        assert_eq!(
+            type_names,
+            vec!["TextDelta", "UsageInfo", "OutputMetadata", "Done"],
+            "event order should be TextDelta → UsageInfo → OutputMetadata → Done"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_cache_tokens_extracted() {
+        // message_start 包含 cache tokens
+        let message_start = r#"{"type":"message_start","message":{"id":"msg_02","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-5","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":200,"output_tokens":0,"cache_creation_input_tokens":80,"cache_read_input_tokens":300}}}"#;
+        let block_start =
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        let text_delta =
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#;
+        let block_stop = r#"{"type":"content_block_stop","index":0}"#;
+        let message_delta = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":50}}"#;
+        let message_stop = r#"{"type":"message_stop"}"#;
+
+        let sse = format!(
+            "{}{}{}{}{}{}",
+            sse_line("message_start", message_start),
+            sse_line("content_block_start", block_start),
+            sse_line("content_block_delta", text_delta),
+            sse_line("content_block_stop", block_stop),
+            sse_line("message_delta", message_delta),
+            sse_line("message_stop", message_stop),
+        );
+        let events = collect_anthropic_events(vec![sse]).await;
+
+        // 提取 OutputMetadata
+        let meta = events
+            .iter()
+            .find_map(|e| {
+                if let ChatEvent::OutputMetadata(m) = e {
+                    Some(m.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("should have OutputMetadata event");
+
+        assert_eq!(meta.model, "claude-sonnet-4-5");
+        assert_eq!(meta.input_tokens, 200);
+        assert_eq!(meta.output_tokens, 50);
+        assert_eq!(meta.cache_read_input_tokens, Some(300));
+        assert_eq!(meta.cache_creation_input_tokens, Some(80));
+        assert_eq!(meta.finish_reasons, vec!["end_turn"]);
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_latency_ms_recorded() {
+        // 人为延迟 ≥ 20ms 后创建流，断言 latency_ms >= 20
+        let message_start = r#"{"type":"message_start","message":{"id":"msg_03","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#;
+        let message_delta = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":20}}"#;
+        let message_stop = r#"{"type":"message_stop"}"#;
+
+        // 先在 start_time 前 sleep，确保延迟包含在测量中
+        let start = std::time::Instant::now();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let sse = format!(
+            "{}{}{}",
+            sse_line("message_start", message_start),
+            sse_line("message_delta", message_delta),
+            sse_line("message_stop", message_stop),
+        );
+        let byte_stream =
+            futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
+        let event_stream = byte_stream_to_chat_events(byte_stream, start);
+        let events: Vec<ChatEvent> = event_stream
+            .filter_map(|e| futures::future::ready(e.ok()))
+            .collect()
+            .await;
+
+        let meta = events
+            .iter()
+            .find_map(|e| {
+                if let ChatEvent::OutputMetadata(m) = e {
+                    Some(m.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("should have OutputMetadata event");
+
+        assert!(
+            meta.latency_ms >= 20,
+            "latency_ms ({}) should be >= 20",
+            meta.latency_ms
+        );
     }
 }

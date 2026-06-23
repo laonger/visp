@@ -90,6 +90,9 @@ pub enum ChatEvent {
         cache_creation_input_tokens: u32,
         cache_read_input_tokens: u32,
     },
+    /// LLM 响应完成时携带的 ProviderMetadata
+    /// 由 provider 在响应全部接收完毕后发射，位于 UsageInfo 之后、Done 之前
+    OutputMetadata(crate::ProviderMetadata),
     /// 流结束
     Done,
 }
