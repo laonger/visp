@@ -38,4 +38,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry", "f
 reqwest = { version = "0.12", features = ["json", "stream"] }
 bytes = "1"
 futures = "0.3"
+opentelemetry = "0.32"
+opentelemetry_sdk = "0.32"
+tracing-opentelemetry = "0.33"
 notify = { version = "7", features = ["macos_kqueue"] }
