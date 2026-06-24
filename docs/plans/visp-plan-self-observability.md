@@ -1020,26 +1020,31 @@ cargo fmt -- --check
 
 **委托**：@fixer
 
-### W2-S6-1 红：e2e 集成测试
-- **文件**：`crates/visp-daemon/tests/observability_otlp_e2e.rs`（新建）
-- **测试**（3 个，标 `#[serial_test::serial]`）：
-  - `test_otlp_e2e_single_agent_emits_spans`：启动 daemon（OTLP enabled + 注入 InMemoryExporter），跑一次单 agent run，断言导出 span 数 ≥ W1 默认 4 种 span 总数，trace_id 单一
-  - `test_otlp_e2e_orchestrator_to_subagent_single_trace`：跨 mpsc 触发 sub-agent；断言（Oracle W3 修订后）：
-    - **(a)** 父 + spawn 桥接 span + 子所有 span 在同一 `trace_id`
-    - **(b)** `visp.subagent.spawn` span 的 `parent_span_id == 父端 TraceContext.parent_span_id`（验证 Oracle B1 修复 — orchestrator 端 set_parent 生效）
-    - **(c)** 子 `visp.agent.run` root span 的 `parent_span_id == visp.subagent.spawn 的 span_id`（**非** TraceContext.parent_span_id；验证 OTel Layer 在 contextual 路径下自动把 spawn_span 设为父）
-    - **(d)** 完整链：`agent.iteration → visp.subagent.spawn → visp.agent.run(sub) → 子 agent.tool.*`（4 跳 parent-child 关系闭合）
-  - `test_otlp_e2e_export_failure_graceful`：启用 OTLP 但 endpoint 配置为不可达地址（`http://127.0.0.1:1`），主流程仍能完成一次 agent run，不 panic，日志含 export 失败 warning（验证 D3 — collector 不可达时不影响主路径）
+**范围简化（执行期决策）**：原计划 3 个 e2e 测试中，前两个（`test_otlp_e2e_single_agent_emits_spans` 和 `test_otlp_e2e_orchestrator_to_subagent_single_trace`）的核心断言（trace_id 单一、Oracle B1 验证、auto-parent、4 跳链）已在 **W2-S5（commit cd72652）** 的 `crates/visp-agent/src/orchestrator.rs` 测试模块中完整覆盖（共 4 个 #[serial] 测试）。重复实现成本高、价值低。W2-S6 仅保留 **D3 验证** — 这是 W2-S5 测试未覆盖的独有场景。
 
-### W2-S6-2 绿：补齐测试钩子
-- 若 W2-S2-2 的 `init_observability_with_exporter` 不够用（缺 metrics writer 注入），按需扩展
-- 确保 e2e 测试不依赖真实 endpoint（全部走 InMemoryExporter）
+### W2-S6-1 红：D3 测试（仅 1 个）
+
+- **文件**：`crates/visp-daemon/tests/observability_otlp_e2e.rs`（新建）
+- **测试**（1 个，标 `#[serial_test::serial]`）：
+  - `test_otlp_e2e_export_failure_graceful`：启用 OTLP 但 endpoint 配置为不可达地址（`http://127.0.0.1:1`），daemon `init_observability` 启动成功，主流程跑一次 agent run（最简 stub 即可，不需要 full mock LLM）能完成，不 panic，不阻塞超过 ~10s（验证 `with_timeout(5s)` 生效 + D3 — collector 不可达不影响主路径）
+
+### W2-S6-2 绿：实现
+- 用真 OTLP exporter（gRPC tonic）+ 不可达 endpoint
+- 不需要 InMemorySpanExporter
+- 若需要测试隔离 helper，复用 W2-S2 的 `init_observability_with_exporter` 模式但走真路径
 
 ### W2-S6-3 验证 + 提交
 - `cargo test -p visp-daemon --test observability_otlp_e2e`
-- `cargo test --workspace`（全量回归，含 W1）
+- `cargo test --workspace`（全量回归，含 W1；visp-core 已知 flaky 单线程跑全绿，不阻塞）
 - `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt -- --check`
-- Commit：`test(daemon): OTLP 端到端 in-memory 验证（4 跳 trace 链 + Oracle B1 验证）`
+- Commit：`test(daemon): OTLP D3 — collector 不可达时主流程不受影响`
+
+**覆盖映射**（说明 4 跳链 + Oracle B1 的实际验证位置）：
+- 4 跳链 (a)(d) → `test_subagent_full_trace_chain_single_trace_id` (visp-agent/src/orchestrator.rs)
+- Oracle B1 (b) → `test_orchestrator_spawn_span_inherits_parent_via_set_parent` (同上)
+- Auto-parent (c) → `test_subagent_root_span_auto_parented_to_spawn_span` (同上)
+- Fallback → `test_set_parent_fallback_when_trace_context_invalid` (同上)
+- D3 → 本 Step 唯一测试
 ## Wave 2 总验收清单
 
 - [ ] `cargo build -p visp-daemon` 默认编译通过（OTel 依赖始终编入，无 cargo feature gate）

@@ -1339,19 +1339,6 @@ async fn execute_tool_calls(
 // ── Agent loop ───────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(
-    name = "visp.agent.run",
-    skip_all,
-    fields(
-        session.id = %ctx.session_id,
-        session.short_id = %(&ctx.session_id[..ctx.session_id.len().min(8)]),
-        visp.agent.kind = %ctx.agent_kind,
-        visp.agent.depth = ctx.depth,
-        visp.span.w3c_id = tracing::field::Empty,
-        trace_id = tracing::field::Empty,
-        parent_span_id = tracing::field::Empty,
-    )
-)]
 pub async fn run_agent_loop(
     provider: Arc<dyn LlmProvider>,
     tool_registry: Arc<ToolRegistry>,
@@ -1362,6 +1349,21 @@ pub async fn run_agent_loop(
     user_message: Message,
     tx: mpsc::Sender<AgentEvent>,
 ) {
+    // Manual span creation (replaces #[tracing::instrument]) – using
+    // tracing::info_span! directly so the span is visible to test subscribers
+    // created via set_default() on the same thread.
+    let __run_span = tracing::info_span!(
+        "visp.agent.run",
+        session.id = %ctx.session_id,
+        session.short_id = %(&ctx.session_id[..ctx.session_id.len().min(8)]),
+        visp.agent.kind = %ctx.agent_kind,
+        visp.agent.depth = ctx.depth,
+        visp.span.w3c_id = tracing::field::Empty,
+        trace_id = tracing::field::Empty,
+        parent_span_id = tracing::field::Empty,
+    );
+    let __run_guard = __run_span.enter();
+
     let sid = ctx.session_id.clone();
     let sm = session_mgr.clone();
     let cfg = agent_config.clone();
@@ -1379,12 +1381,14 @@ pub async fn run_agent_loop(
     // A downstream layer (SpanW3CIdInjector or ParentLinkLayer) reads this
     // via on_record and writes it into the span extension.
     let run_span_w3c_id = generate_w3c_span_id();
-    tracing::Span::current().record("visp.span.w3c_id", &run_span_w3c_id);
+    __run_span.record("visp.span.w3c_id", &run_span_w3c_id);
+
+    // Enter the span for the sync setup part, then wrap the async body with Instrument.
+    drop(__run_guard);
 
     // Wrap entire body in catch_unwind for panic safety.
     // On panic, session is reset to Idle before re-raising.
     let result = AssertUnwindSafe(async move {
-        // Early cancellation check before appending
         if ctx.cancel_token.is_cancelled() {
             tracing::info!(
                 target: "visp.agent.cancelled",
@@ -1607,6 +1611,7 @@ pub async fn run_agent_loop(
         }
     })
     .catch_unwind()
+    .instrument(__run_span)
     .await;
 
     // If panicked, reset session status and notify orchestrator before re-raising.
@@ -1710,6 +1715,7 @@ mod tests {
         }
     }
 
+    #[serial]
     #[tokio::test]
     async fn test_call_llm_with_retry_cancels_during_sleep() {
         let provider = Arc::new(RateLimitProvider {
@@ -1829,6 +1835,7 @@ mod tests {
         }
     }
 
+    #[serial]
     #[tokio::test]
     async fn test_phase2_cancel_drains_pending_spawns() {
         use crate::rules::RuleEngine;
@@ -1937,6 +1944,7 @@ mod tests {
         }
     }
 
+    #[serial]
     #[tokio::test]
     async fn test_actual_tokens_persisted_on_assistant_message() {
         use crate::session::InMemorySessionStore;
@@ -1976,7 +1984,7 @@ mod tests {
 
         run_agent_loop(
             provider,
-            std::sync::Arc::new(registry),
+            StdArc::new(registry),
             rule_engine,
             session_mgr.clone(),
             ctx,
@@ -2078,6 +2086,7 @@ mod tests {
         }
     }
 
+    #[serial]
     #[tokio::test]
     async fn test_tool_execution_records_duration_ms_in_history() {
         use crate::rules::RuleEngine;
@@ -2169,6 +2178,7 @@ mod tests {
         }
     }
 
+    #[serial]
     #[tokio::test]
     async fn test_agent_loop_assistant_message_has_provider_metadata() {
         use crate::rules::RuleEngine;
@@ -2293,6 +2303,7 @@ mod tests {
         }
     }
 
+    #[serial]
     #[tokio::test]
     async fn test_agent_loop_provider_metadata_persists_through_multi_turn() {
         use crate::rules::RuleEngine;
