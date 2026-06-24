@@ -391,6 +391,7 @@ mod tests {
             parent_link: false,
             metrics_summary: false,
             log_file: None,
+            ..Default::default()
         };
         let _guard = make_test_subscriber(writer.clone(), &cfg);
 

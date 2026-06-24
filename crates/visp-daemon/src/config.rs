@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use visp_mcp::config::McpConfig;
 
@@ -152,6 +152,8 @@ pub struct ObservabilityConfig {
     pub metrics_summary: bool,
     #[serde(default = "default_observability_log_file")]
     pub log_file: Option<String>,
+    #[serde(default)]
+    pub otlp: OtlpConfig,
 }
 
 impl Default for ObservabilityConfig {
@@ -163,8 +165,62 @@ impl Default for ObservabilityConfig {
             parent_link: default_observability_parent_link(),
             metrics_summary: default_observability_metrics_summary(),
             log_file: default_observability_log_file(),
+            otlp: OtlpConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OtlpConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_otlp_endpoint")]
+    pub endpoint: String,
+    #[serde(default = "default_otlp_protocol")]
+    pub protocol: String,
+    #[serde(default = "default_otlp_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    #[serde(
+        default = "default_sample_rate",
+        deserialize_with = "deserialize_clamped_sample_rate"
+    )]
+    pub sample_rate: f64,
+}
+
+impl Default for OtlpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: default_otlp_endpoint(),
+            protocol: default_otlp_protocol(),
+            timeout_secs: default_otlp_timeout_secs(),
+            headers: BTreeMap::new(),
+            sample_rate: default_sample_rate(),
+        }
+    }
+}
+
+fn default_otlp_endpoint() -> String {
+    "http://localhost:4317".into()
+}
+fn default_otlp_protocol() -> String {
+    "grpc".into()
+}
+fn default_otlp_timeout_secs() -> u64 {
+    10
+}
+fn default_sample_rate() -> f64 {
+    1.0
+}
+
+fn deserialize_clamped_sample_rate<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = f64::deserialize(deserializer)?;
+    Ok(value.clamp(0.0, 1.0))
 }
 
 fn default_listen_addr() -> String {
@@ -692,5 +748,150 @@ log_file = "/tmp/test.log"
     fn test_daemon_config_default_includes_observability() {
         let config = default_config();
         assert_eq!(config.observability, ObservabilityConfig::default());
+    }
+
+    #[test]
+    fn test_otlp_config_defaults_disabled() {
+        let cfg = OtlpConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.endpoint, "http://localhost:4317");
+        assert_eq!(cfg.protocol, "grpc");
+        assert_eq!(cfg.timeout_secs, 10);
+        assert!(cfg.headers.is_empty());
+        assert!((cfg.sample_rate - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_otlp_config_deserializes_from_toml() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+
+[tools]
+
+[agent]
+
+[observability]
+enabled = true
+
+[observability.otlp]
+enabled = true
+endpoint = "http://otel.example.com:4318"
+protocol = "http/protobuf"
+timeout_secs = 30
+sample_rate = 0.1
+
+[observability.otlp.headers]
+x-api-key = "abc123"
+environment = "test"
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert!(config.observability.otlp.enabled);
+        assert_eq!(
+            config.observability.otlp.endpoint,
+            "http://otel.example.com:4318"
+        );
+        assert_eq!(config.observability.otlp.protocol, "http/protobuf");
+        assert_eq!(config.observability.otlp.timeout_secs, 30);
+        assert!((config.observability.otlp.sample_rate - 0.1).abs() < f64::EPSILON);
+        assert_eq!(
+            config.observability.otlp.headers.get("x-api-key").unwrap(),
+            "abc123"
+        );
+        assert_eq!(
+            config
+                .observability
+                .otlp
+                .headers
+                .get("environment")
+                .unwrap(),
+            "test"
+        );
+    }
+
+    #[test]
+    fn test_otlp_config_omitted_section_is_default() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+
+[tools]
+
+[agent]
+
+[observability]
+enabled = true
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.observability.otlp, OtlpConfig::default());
+    }
+
+    #[test]
+    fn test_otlp_config_headers_kv_pairs() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+
+[tools]
+
+[agent]
+
+[observability.otlp.headers]
+a = "1"
+b = "2"
+c = "3"
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        let keys: Vec<&str> = config
+            .observability
+            .otlp
+            .headers
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
+        assert_eq!(keys, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_otlp_config_sample_rate_clamped() {
+        // Below 0.0 should clamp to 0.0
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+
+[tools]
+
+[agent]
+
+[observability.otlp]
+sample_rate = -0.5
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert!((config.observability.otlp.sample_rate - 0.0).abs() < f64::EPSILON);
+
+        // Above 1.0 should clamp to 1.0
+        let toml2 = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+
+[tools]
+
+[agent]
+
+[observability.otlp]
+sample_rate = 2.5
+"#;
+        let config2: DaemonConfig = toml::from_str(toml2).unwrap();
+        assert!((config2.observability.otlp.sample_rate - 1.0).abs() < f64::EPSILON);
     }
 }
