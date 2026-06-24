@@ -70,8 +70,8 @@ struct Inner {
 pub struct ParentLinkLayer {
     inner: Arc<Inner>,
     /// When `true`, [`on_enter`](Layer::on_enter) reads the real OTel span ID
-    /// via [`tracing_opentelemetry::get_otel_context`] and records it onto
-    /// the span as `visp.span.w3c_id`, overwriting any W1 uuid.
+    /// from [`opentelemetry::Context::current()`] (thread-local) and records
+    /// it onto the span as `visp.span.w3c_id`, overwriting any W1 uuid.
     ///
     /// When `false` (default), the W1 uuid path is used unchanged.
     otel_mode: bool,
@@ -229,8 +229,21 @@ where
         // `on_enter` callback may record `visp.span.w3c_id` a second time
         // (via `Span::current().record`), which triggers this `on_record`
         // callback again.  `insert` would panic on the second call.
+        //
+        // When OTel mode overwrites the W1 UUID with the real OTel span_id,
+        // remove the stale UUID entry from the forward mapping to prevent
+        // a leak (Oracle P1).
         if let Some(w3c_id) = extractor.w3c_id {
             span_ref.extensions_mut().replace(SpanW3CId(w3c_id.clone()));
+            // Remove stale forward mapping entry if this span's reverse
+            // already points to a different W3C ID (e.g. OTel overwrite).
+            if let Some(old_rev) = self.inner.reverse.get(id) {
+                let old_w3c = old_rev.value().clone();
+                drop(old_rev);
+                if old_w3c != w3c_id {
+                    self.inner.mapping.remove(&old_w3c);
+                }
+            }
             self.inner.mapping.insert(w3c_id.clone(), id.clone());
             self.inner.reverse.insert(id.clone(), w3c_id);
         }
@@ -297,14 +310,14 @@ where
     /// # OTel mode
     ///
     /// When [`otel_mode`](Self::otel_mode) is `true`, additionally reads the
-    /// real OTel [`SpanContext`] via
-    /// [`tracing_opentelemetry::get_otel_context`] and records
-    /// `visp.span.w3c_id` onto the current span, overwriting any W1 uuid
-    /// that was set at span creation time.
+    /// real OTel [`SpanContext`] from the thread-local
+    /// [`opentelemetry::Context::current()`] and records `visp.span.w3c_id`
+    /// onto the current span, overwriting any W1 uuid that was set at span
+    /// creation time.
     ///
-    /// The `SpanRef` from the `Context` is dropped before calling
-    /// `get_otel_context` to avoid a deadlock (the latter internally tries
-    /// to lock [`Extensions`](tracing_subscriber::registry::Extensions)).
+    /// The `SpanRef` from the `Context` is dropped before
+    /// thread-local OTel context access to keep the pattern consistent
+    /// (the original deadlock concern was with `get_otel_context`).
     fn on_enter(&self, id: &tracing::span::Id, ctx: Context<'_, S>) {
         let span_ref = match ctx.span(id) {
             Some(s) => s,
@@ -321,12 +334,13 @@ where
             return;
         }
 
-        // Clone ParentLinkFields so we can drop span_ref before calling
-        // get_otel_context (which tries to lock Extensions internally).
+        // Clone ParentLinkFields and set the guard before dropping span_ref,
+        // avoiding a redundant ctx.span(id) re-acquisition later.
         let plf = span_ref.extensions().get::<ParentLinkFields>().cloned();
+        span_ref.extensions_mut().insert(ParentLinkFieldsRecorded);
 
-        // Drop span_ref — we MUST NOT hold Extensions when calling
-        // get_otel_context (potential deadlock).
+        // Drop span_ref to release Extensions before OTel context access
+        // (keeps pattern consistent even though thread-local avoids deadlock).
         drop(span_ref);
 
         // W1 path: record trace_id and parent_span_id from ParentLinkFields.
@@ -355,11 +369,6 @@ where
                 let hex = span_ctx.span_id().to_string();
                 tracing::Span::current().record("visp.span.w3c_id", hex.as_str());
             }
-        }
-
-        // Set guard (re-acquire span_ref for extensions_mut access).
-        if let Some(span_ref) = ctx.span(id) {
-            span_ref.extensions_mut().insert(ParentLinkFieldsRecorded);
         }
     }
 }
@@ -1104,6 +1113,103 @@ mod tests {
         }
         panic!(
             "visp.span.w3c_id not found in any JSON line.\nOutput:\n{}",
+            output
+        );
+    }
+
+    /// Recursively collect all `visp.span.w3c_id` values from a JSON line.
+    /// Searches nested objects and arrays (covers both `span.*` and `spans[]`).
+    fn collect_w3c_ids_from_json(line: &str) -> Vec<String> {
+        fn recurse(val: &serde_json::Value, ids: &mut Vec<String>) {
+            match val {
+                serde_json::Value::Object(map) => {
+                    for (k, v) in map {
+                        if k == "visp.span.w3c_id" {
+                            if let Some(s) = v.as_str() {
+                                ids.push(s.to_string());
+                            }
+                        } else {
+                            recurse(v, ids);
+                        }
+                    }
+                }
+                serde_json::Value::Array(arr) => {
+                    for v in arr {
+                        recurse(v, ids);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Ok(val) = serde_json::from_str(line) else {
+            return vec![];
+        };
+        let mut ids = Vec::new();
+        recurse(&val, &mut ids);
+        ids
+    }
+
+    #[test]
+    #[serial]
+    fn test_otel_mode_nested_spans_each_span_id_matches() {
+        // Nested spans: outer and inner must each have visp.span.w3c_id equal
+        // to their own OTel span_id (not a duplicate or cross-wired).
+        let writer = TestSpanWriter::new();
+        let (_guard, exporter, _layer) = build_otel_subscriber(writer.clone());
+
+        let outer = tracing::info_span!("outer", visp.span.w3c_id = tracing::field::Empty);
+        outer.in_scope(|| {
+            let inner = tracing::info_span!("inner", visp.span.w3c_id = tracing::field::Empty);
+            inner.in_scope(|| {
+                tracing::info!("nested");
+            });
+        });
+        drop(outer);
+
+        let finished = exporter
+            .get_finished_spans()
+            .expect("get_finished_spans should succeed");
+        assert_eq!(
+            finished.len(),
+            2,
+            "expected two finished spans (outer + inner)"
+        );
+
+        // Index span data by name (order is not guaranteed).
+        let spans_by_name: std::collections::HashMap<&str, &opentelemetry_sdk::trace::SpanData> =
+            finished.iter().map(|s| (s.name.as_ref(), s)).collect();
+        assert!(spans_by_name.contains_key("outer"), "missing outer span");
+        assert!(spans_by_name.contains_key("inner"), "missing inner span");
+
+        let outer_span_id = spans_by_name["outer"].span_context.span_id().to_string();
+        let inner_span_id = spans_by_name["inner"].span_context.span_id().to_string();
+
+        assert_ne!(
+            outer_span_id, inner_span_id,
+            "outer and inner spans must have distinct span IDs"
+        );
+
+        // Parse JSON output and verify each span's visp.span.w3c_id matches
+        // its own OTel span_id.  We use a recursive search because the
+        // tracing-subscriber fmt layer puts the active span's fields under
+        // `span` and ancestor spans under `spans[]`.
+        let output = writer.into_string();
+        let all_ids: Vec<String> = output
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .flat_map(collect_w3c_ids_from_json)
+            .collect();
+
+        assert!(
+            all_ids.contains(&outer_span_id),
+            "outer span's visp.span.w3c_id ({}) not found in JSON.\nOutput:\n{}",
+            outer_span_id,
+            output
+        );
+        assert!(
+            all_ids.contains(&inner_span_id),
+            "inner span's visp.span.w3c_id ({}) not found in JSON.\nOutput:\n{}",
+            inner_span_id,
             output
         );
     }
