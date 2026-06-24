@@ -6,11 +6,15 @@
 
 use std::sync::Arc;
 
+use opentelemetry::trace::TracerProvider;
+use opentelemetry_sdk::trace::SdkTracerProvider;
+use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
 use crate::config::ObservabilityConfig;
 use crate::observability::metrics_layer::MetricsLayer;
+use crate::observability::otlp;
 use crate::observability::parent_link::ParentLinkLayer;
 
 /// Output of [`init_observability`]; held for the lifetime of the program.
@@ -19,6 +23,8 @@ use crate::observability::parent_link::ParentLinkLayer;
 pub struct ObservabilityGuard {
     pub metrics: Option<Arc<MetricsLayer>>,
     pub parent_link: Option<Arc<ParentLinkLayer>>,
+    /// OTel tracer provider; shut down on drop if set.
+    pub tracer_provider: Option<SdkTracerProvider>,
     _file_guard: Option<tracing_appender::non_blocking::WorkerGuard>,
     _set_default: Option<tracing::subscriber::DefaultGuard>,
 }
@@ -39,6 +45,7 @@ pub fn init_observability(cfg: &ObservabilityConfig) -> ObservabilityGuard {
         return ObservabilityGuard {
             metrics: None,
             parent_link: None,
+            tracer_provider: None,
             _file_guard: None,
             _set_default: None,
         };
@@ -64,10 +71,27 @@ pub fn init_observability(cfg: &ObservabilityConfig) -> ObservabilityGuard {
         fmt_writer = Box::new(|| -> Box<dyn std::io::Write + Send> { Box::new(std::io::stdout()) });
     }
 
-    // 4. Assemble subscriber (json vs pretty produce different concrete types).
+    // 4. Build OTel layer conditionally.
+    let tracer_provider: Option<SdkTracerProvider>;
+    let otel_layer = if cfg.otlp.enabled {
+        let provider = otlp::build_tracer_provider(&cfg.otlp);
+        let tracer = provider.tracer("visp-daemon");
+        tracer_provider = Some(provider);
+        Some(OpenTelemetryLayer::new(tracer).with_context_activation(true))
+    } else {
+        tracer_provider = None;
+        None::<OpenTelemetryLayer<_, _>>
+    };
+
+    // 5. Assemble subscriber (json vs pretty produce different concrete types).
+    //
+    // Assembly order: EnvFilter → OTelLayer? → ParentLinkLayer → MetricsLayer → fmt.
+    // OTel layer must be outer to ParentLinkLayer (registered first = outer),
+    // so ParentLinkLayer.on_enter sees the OTel-fixed SpanContext.
     let _set_default = if cfg.format == "json" {
         tracing_subscriber::registry()
             .with(filter)
+            .with(otel_layer)
             .with(parent_link.clone())
             .with(metrics.clone())
             .with(
@@ -79,6 +103,7 @@ pub fn init_observability(cfg: &ObservabilityConfig) -> ObservabilityGuard {
     } else {
         tracing_subscriber::registry()
             .with(filter)
+            .with(otel_layer)
             .with(parent_link.clone())
             .with(metrics.clone())
             .with(
@@ -92,6 +117,7 @@ pub fn init_observability(cfg: &ObservabilityConfig) -> ObservabilityGuard {
     ObservabilityGuard {
         metrics: cfg.metrics_summary.then(|| Arc::new(metrics)),
         parent_link: cfg.parent_link.then(|| Arc::new(parent_link)),
+        tracer_provider,
         _file_guard,
         _set_default: Some(_set_default),
     }
@@ -117,6 +143,7 @@ where
         return ObservabilityGuard {
             metrics: None,
             parent_link: None,
+            tracer_provider: None,
             _file_guard: None,
             _set_default: None,
         };
@@ -126,9 +153,21 @@ where
     let parent_link = ParentLinkLayer::new();
     let metrics = MetricsLayer::new();
 
+    let tracer_provider: Option<SdkTracerProvider>;
+    let otel_layer = if cfg.otlp.enabled {
+        let provider = otlp::build_tracer_provider(&cfg.otlp);
+        let tracer = provider.tracer("visp-daemon");
+        tracer_provider = Some(provider);
+        Some(OpenTelemetryLayer::new(tracer).with_context_activation(true))
+    } else {
+        tracer_provider = None;
+        None::<OpenTelemetryLayer<_, _>>
+    };
+
     let _set_default = if cfg.format == "json" {
         tracing_subscriber::registry()
             .with(filter)
+            .with(otel_layer)
             .with(parent_link.clone())
             .with(metrics.clone())
             .with(tracing_subscriber::fmt::layer().json().with_writer(writer))
@@ -136,6 +175,7 @@ where
     } else {
         tracing_subscriber::registry()
             .with(filter)
+            .with(otel_layer)
             .with(parent_link.clone())
             .with(metrics.clone())
             .with(
@@ -149,6 +189,89 @@ where
     ObservabilityGuard {
         metrics: cfg.metrics_summary.then(|| Arc::new(metrics)),
         parent_link: cfg.parent_link.then(|| Arc::new(parent_link)),
+        tracer_provider,
+        _file_guard: None,
+        _set_default: Some(_set_default),
+    }
+}
+
+impl Drop for ObservabilityGuard {
+    fn drop(&mut self) {
+        if let Some(provider) = self.tracer_provider.take() {
+            let _ = provider.shutdown();
+        }
+    }
+}
+
+/// Test-only entry point that accepts a custom exporter for verifying OTel integration.
+///
+/// Mirrors [`init_observability_with_writer`] but additionally wires an OTel
+/// layer using the given exporter (via [`otlp::build_tracer_provider_with_exporter`]).
+/// The exporter is expected to be an `InMemorySpanExporter` in tests.
+///
+/// Returns a guard whose `tracer_provider` field holds the constructed provider.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn init_observability_with_exporter<W, E>(
+    cfg: &ObservabilityConfig,
+    writer: W,
+    exporter: E,
+) -> ObservabilityGuard
+where
+    W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
+    E: opentelemetry_sdk::trace::SpanExporter + 'static,
+{
+    if !cfg.enabled {
+        return ObservabilityGuard {
+            metrics: None,
+            parent_link: None,
+            tracer_provider: None,
+            _file_guard: None,
+            _set_default: None,
+        };
+    }
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.level));
+    let parent_link = ParentLinkLayer::new();
+    let metrics = MetricsLayer::new();
+
+    let tracer_provider: Option<SdkTracerProvider>;
+    let otel_layer = if cfg.otlp.enabled {
+        let provider = otlp::build_tracer_provider_with_exporter(exporter, &cfg.otlp);
+        let tracer = provider.tracer("visp-daemon");
+        tracer_provider = Some(provider);
+        Some(OpenTelemetryLayer::new(tracer).with_context_activation(true))
+    } else {
+        tracer_provider = None;
+        None::<OpenTelemetryLayer<_, _>>
+    };
+
+    let _set_default = if cfg.format == "json" {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(otel_layer)
+            .with(parent_link.clone())
+            .with(metrics.clone())
+            .with(tracing_subscriber::fmt::layer().json().with_writer(writer))
+            .set_default()
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(otel_layer)
+            .with(parent_link.clone())
+            .with(metrics.clone())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .pretty()
+                    .with_writer(writer),
+            )
+            .set_default()
+    };
+
+    ObservabilityGuard {
+        metrics: cfg.metrics_summary.then(|| Arc::new(metrics)),
+        parent_link: cfg.parent_link.then(|| Arc::new(parent_link)),
+        tracer_provider,
         _file_guard: None,
         _set_default: Some(_set_default),
     }
@@ -169,7 +292,7 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::*;
-    use crate::config::ObservabilityConfig;
+    use crate::config::{ObservabilityConfig, OtlpConfig};
 
     /// In-memory writer that captures bytes via `Arc<Mutex<Vec<u8>>>`.
     #[derive(Clone)]
@@ -462,6 +585,200 @@ mod tests {
         assert!(
             parent_span_id_found,
             "expected parent_span_id in JSON output.\nOutput:\n{}",
+            output
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // W2-S2-2 红: 测试钩子 — 编译通过即视为通过
+    // ------------------------------------------------------------------
+
+    #[test]
+    #[serial]
+    fn test_init_with_exporter_function_exists() {
+        // Simply verifying that `init_observability_with_exporter` exists and
+        // compiles is sufficient for this test.
+        let cfg = ObservabilityConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        let writer = TestVecWriter::new();
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let guard = init_observability_with_exporter(&cfg, writer, exporter);
+        assert!(guard.tracer_provider.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // W2-S2-1: OTel 装配链单元测试
+    // ------------------------------------------------------------------
+
+    #[test]
+    #[serial]
+    fn test_otlp_disabled_no_otel_layer() {
+        let cfg = ObservabilityConfig {
+            enabled: true,
+            otlp: OtlpConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            format: "json".into(),
+            parent_link: false,
+            metrics_summary: false,
+            log_file: None,
+            ..Default::default()
+        };
+        let guard = init_observability(&cfg);
+        assert!(
+            guard.tracer_provider.is_none(),
+            "tracer_provider should be None when OTel is disabled"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_otlp_enabled_attaches_otel_layer() {
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let writer = TestVecWriter::new();
+        let cfg = ObservabilityConfig {
+            enabled: true,
+            otlp: OtlpConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            format: "json".into(),
+            parent_link: false,
+            metrics_summary: false,
+            log_file: None,
+            ..Default::default()
+        };
+        let guard = init_observability_with_exporter(&cfg, writer, exporter.clone());
+
+        assert!(
+            guard.tracer_provider.is_some(),
+            "expected tracer_provider when OTel is enabled"
+        );
+
+        // Emit a span; with SimpleSpanProcessor it is exported synchronously.
+        let span = tracing::info_span!("test_otel_span");
+        drop(span);
+
+        let finished = exporter
+            .get_finished_spans()
+            .expect("get_finished_spans should succeed");
+        assert!(
+            !finished.is_empty(),
+            "expected at least one finished span with OTel enabled"
+        );
+        assert_eq!(
+            finished[0].name.as_ref(),
+            "test_otel_span",
+            "span name should match"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_otlp_resource_has_service_name() {
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let writer = TestVecWriter::new();
+        let cfg = ObservabilityConfig {
+            enabled: true,
+            otlp: OtlpConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            format: "json".into(),
+            parent_link: false,
+            metrics_summary: false,
+            log_file: None,
+            ..Default::default()
+        };
+        let _guard = init_observability_with_exporter(&cfg, writer, exporter.clone());
+
+        let span = tracing::info_span!("otel_resource_test");
+        drop(span);
+
+        let finished = exporter
+            .get_finished_spans()
+            .expect("get_finished_spans should succeed");
+        assert!(!finished.is_empty(), "expected at least one finished span");
+
+        // Verify resource attributes via build_resource() directly,
+        // since SpanData in opentelemetry_sdk 0.32 does not carry a `resource`
+        // field on individual spans (resource is attached at the exporter level).
+        let resource = otlp::build_resource();
+        let attrs: Vec<_> = resource
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+
+        assert!(
+            attrs
+                .iter()
+                .any(|(k, v)| k == "service.name" && v == "visp-daemon"),
+            "expected service.name='visp-daemon' in resource, got: {:?}",
+            attrs
+        );
+        assert!(
+            attrs
+                .iter()
+                .any(|(k, v)| k == "service.version" && v == env!("CARGO_PKG_VERSION")),
+            "expected service.version='{}' in resource, got: {:?}",
+            env!("CARGO_PKG_VERSION"),
+            attrs
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_otlp_w1_layers_still_attached_when_enabled() {
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let writer = TestVecWriter::new();
+        let cfg = ObservabilityConfig {
+            enabled: true,
+            otlp: OtlpConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            format: "json".into(),
+            parent_link: true,
+            metrics_summary: false, // No metrics layer handle needed
+            log_file: None,
+            ..Default::default()
+        };
+        let guard = init_observability_with_exporter(&cfg, writer.clone(), exporter);
+
+        // W1: ParentLinkLayer handle is still available.
+        assert!(
+            guard.parent_link.is_some(),
+            "parent_link handle should be Some when parent_link=true"
+        );
+
+        // Emit a span with visp.span.w3c_id field to exercise ParentLinkLayer.
+        let span = tracing::info_span!(
+            "visp.subagent.spawn",
+            visp.span.w3c_id = tracing::field::Empty,
+            trace_id = tracing::field::Empty,
+            parent_span_id = tracing::field::Empty,
+        );
+        span.record("visp.span.w3c_id", "w2_w1_test_12345678");
+        span.record("trace_id", "0af7651916cd43dd8448eb211c80319c");
+        span.record("parent_span_id", "aaaaaaaaaaaaaaaa");
+        {
+            let _enter = span.enter();
+            tracing::info!("inside W1+OTel span");
+        }
+        drop(span);
+
+        // Verify fmt JSON output still contains ParentLinkLayer fields.
+        let output = writer.into_string();
+        assert!(!output.is_empty(), "expected JSON output");
+
+        // visp.span.w3c_id should appear in JSON fmt output
+        // (ParentLinkLayer records it onto the span during on_enter).
+        assert!(
+            output.contains("visp.span.w3c_id"),
+            "visp.span.w3c_id should appear in JSON output when ParentLinkLayer is attached.\nOutput:\n{}",
             output
         );
     }

@@ -1,13 +1,15 @@
 // OTel attach Context POC — 验证 3 种 trace_id 继承方案
 // 独立 binary，不进生产代码
 
-use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState, TracerProvider};
 use opentelemetry::Context;
+use opentelemetry::trace::{
+    SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState, TracerProvider,
+};
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SimpleSpanProcessor};
 use tracing::{info, info_span};
 use tracing_opentelemetry::OpenTelemetryLayer;
-use tracing_subscriber::prelude::*;
 use tracing_subscriber::Registry;
+use tracing_subscriber::prelude::*;
 
 fn make_subscriber(
     exporter: InMemorySpanExporter,
