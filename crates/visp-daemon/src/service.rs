@@ -1835,9 +1835,9 @@ mod tests {
         let result = collect_descendants(&mgr, "root");
         assert_eq!(result.len(), 50, "soft limit should cap at 50");
         // First 50 by created_at order = c000..c049
-        for i in 0..50 {
+        for (i, item) in result.iter().enumerate().take(50) {
             let expected = format!("c{i:03}");
-            assert_eq!(result[i].id, expected, "index {i} should be {expected}");
+            assert_eq!(item.id, expected, "index {i} should be {expected}");
         }
     }
 
@@ -2390,12 +2390,12 @@ mod tests {
         for _ in 0..10 {
             match tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await {
                 Ok(Some(Ok(msg))) => {
-                    if let Some(proto::server_message::Payload::StatusUpdate(ref s)) = msg.payload {
-                        if s.session_id == "child-1" {
-                            assert!(s.view_only, "child session should have view_only=true");
-                            child_status_found = true;
-                            break;
-                        }
+                    if let Some(proto::server_message::Payload::StatusUpdate(ref s)) = msg.payload
+                        && s.session_id == "child-1"
+                    {
+                        assert!(s.view_only, "child session should have view_only=true");
+                        child_status_found = true;
+                        break;
                     }
                 }
                 _ => break,
@@ -2433,11 +2433,12 @@ mod tests {
         for _ in 0..105 {
             match tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await {
                 Ok(Some(Ok(msg))) => {
-                    if let Some(proto::server_message::Payload::TextDelta(ref t)) = msg.payload {
-                        if t.delta.contains("descendants") && t.session_id == rid {
-                            warning_found = true;
-                            break;
-                        }
+                    if let Some(proto::server_message::Payload::TextDelta(ref t)) = msg.payload
+                        && t.delta.contains("descendants")
+                        && t.session_id == rid
+                    {
+                        warning_found = true;
+                        break;
                     }
                 }
                 _ => break,
