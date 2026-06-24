@@ -79,12 +79,20 @@ cargo fmt -- --check
 │ 手工 cargo run + tail 日志验证 → 用户审核                             │
 └───────────────────────────────────────────────────────────────────────┘
         ↓ Wave 1 验收通过
-┌──────────────────────── Wave 2（按需）──────────────────────────────┐
-│ Librarian 查询 ②：opentelemetry-otlp / SpanContext / set_parent       │
-│ W2-S1 (fixer-otlp-1, feature gate)                                    │
-│ W2-S2 (fixer-otlp-2, Tracer + Exporter 装配)                          │
-│ W2-S3 (fixer-otlp-3, 跨 mpsc 重建 OTel parent) → @oracle review       │
-│ W2-S4 (fixer-otlp-4, OTel Metrics)  ⫽ 与 S3 并行                      │
+┌──────────────────────── Wave 2（按需，6 步分 5 波）─────────────────┐
+│ Librarian 查询 ②（已完成 2 轮）：opentelemetry-otlp / SpanContext     │
+│ ─── 2-A（2 路并行）───                                                │
+│   Step 1 (fixer-w2s1, visp-daemon config + otlp dep)                  │
+│   Step 4 (fixer-w2s4, visp-agent OTel context 父端注入)               │
+│ ─── 2-B（串行 gate）───                                               │
+│   Step 2 (fixer-w2s2, OTel TracerProvider + Layer 装配)               │
+│ ─── 2-C（串行 gate）───                                               │
+│   Step 2.5 (orchestrator 自跑 W1 基线回归 — Oracle 风险防线)          │
+│ ─── 2-D（2 路并行）───                                                │
+│   Step 3 (fixer-w2s3, ParentLinkLayer 双模式) → @oracle review ③      │
+│   Step 5 (fixer-w2s5, orchestrator 端 set_parent + helper)            │
+│ ─── 2-E（串行）───                                                    │
+│   Step 6 (fixer-w2s6, OTLP in-memory e2e 验证)                        │
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -105,9 +113,13 @@ cargo fmt -- --check
 | W1 Step 5-sub | @fixer-5sub | Step 4a / 4b / 5-cfg | — |
 | W1 Step 5-e2e | @fixer-5e2e | Step 3 / Step 5-sub | — |
 | W1 Step 5 跨 mpsc 调试（如需） | @oracle | unmatched_count > 0 | — |
-| W2 Step 1 | @fixer-otlp-1 | Wave 1 | — |
-| W2 Step 2 / Step 4 | @fixer-otlp-2 / otlp-4（并行） | W2 S1 | 互相并行 |
-| W2 Step 3 | @fixer-otlp-3 + @oracle review | W2 S2 | — |
+| W2 Step 1（OtlpConfig + otlp dep） | @fixer-w2s1 | — | W2 Step 4 |
+| W2 Step 4（orchestrator OTel 父端注入） | @fixer-w2s4 | — | W2 Step 1 |
+| W2 Step 2（TracerProvider + Layer 装配） | @fixer-w2s2 | W2 Step 1 | — |
+| W2 Step 2.5（W1 基线回归门） | orchestrator 自跑 | W2 Step 2 | — |
+| W2 Step 3（ParentLinkLayer 双模式） | @fixer-w2s3 + @oracle review ③ | W2 Step 2.5 | W2 Step 5 |
+| W2 Step 5（orchestrator 端 set_parent + helper） | @fixer-w2s5 | W2 Step 4 | W2 Step 3 |
+| W2 Step 6（OTLP in-memory e2e） | @fixer-w2s6 | W2 Step 3 + W2 Step 5 | — |
 | 所有 librarian 查询 | @librarian | 各 Step 启动前一次性查询 | 与 fixer 工作并行（先查询后开工） |
 
 ### 3.4 预估并行节省
@@ -116,7 +128,7 @@ cargo fmt -- --check
 |---|---|---|---|---|
 | Wave 0 | 6h（A 串 B） | 3.5h（A ⫽ B 前半, B 后半 1h） | 2.5h | 42% |
 | Wave 1 | 24h（5 步串行） | 13h（阶段 A 3h ⫽ + 阶段 B 6h ⫽ + 阶段 C 4h 串） | 11h | 46% |
-| Wave 2 | 8h | 5h（S2 ⫽ S4） | 3h | 38% |
+| Wave 2 | ~12.5h（6 步全串行） | ~9.5h（2-A 1.5h ⫽ + 2-B 2h + 2-C 0.5h + 2-D 3.5h ⫽ + 2-E 2h） | ~3h | 24% |
 
 数字为粗略量级估计，不作为承诺；目的是辅助判断「该不该并行」。
 
@@ -677,6 +689,77 @@ cargo fmt -- --check
 **前置**：Wave 1 全部完成（commit `06b3b8d`）；测试基线 visp-core 211 / visp-llm 88 / visp-agent 36 / visp-daemon 144（1 ignored）。
 
 **预估测试新增**：~24 用例（含 Step 2.5 基线回归门 + Step 5 双端 set_parent 测试 4 个）。
+
+## Wave 2 并行依赖与执行计划
+
+### 阶段切分（6 步分 5 波）
+
+```
+┌─── 2-A（2 路并行，约 1.5h）────────────────────────────────────┐
+│ Step 1 (fixer-w2s1)            Step 4 (fixer-w2s4)              │
+│ visp-daemon config             visp-agent orchestrator          │
+│ + opentelemetry-otlp dep       父端 OTel context 注入           │
+│ 文件：daemon/src/config.rs     文件：agent/src/orchestrator.rs  │
+└─────────────────────────────────────────────────────────────────┘
+         ↓ Step 1 完成
+┌─── 2-B（串行 gate，约 2h）─────────────────────────────────────┐
+│ Step 2 (fixer-w2s2) — OTel TracerProvider + Layer 装配          │
+│ 文件：daemon/src/observability/{init.rs, otlp.rs(新)}           │
+└─────────────────────────────────────────────────────────────────┘
+         ↓
+┌─── 2-C（串行 gate，约 0.5h）───────────────────────────────────┐
+│ Step 2.5 (orchestrator 自跑) — W1 基线回归门                    │
+│ 无代码变更；cargo test --workspace 必须 100% 全绿               │
+└─────────────────────────────────────────────────────────────────┘
+         ↓ Step 2.5 通过 + Step 4 完成
+┌─── 2-D（2 路并行，约 3.5h）────────────────────────────────────┐
+│ Step 3 (fixer-w2s3)              Step 5 (fixer-w2s5)            │
+│ ParentLinkLayer 双模式           orchestrator 端 set_parent     │
+│ + @oracle review ③              + rebuild_parent_context helper │
+│ 文件：daemon/parent_link.rs      文件：agent/observability.rs   │
+│                                  (新) + orchestrator.rs         │
+└─────────────────────────────────────────────────────────────────┘
+         ↓ Step 3 + Step 5 完成
+┌─── 2-E（串行，约 2h）──────────────────────────────────────────┐
+│ Step 6 (fixer-w2s6) — OTLP in-memory e2e（4 跳 trace 链）       │
+│ 文件：daemon/tests/observability_otlp_e2e.rs（新建）            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 并行依据
+
+- **2-A 双路无冲突**：Step 1 改 `visp-daemon`，Step 4 改 `visp-agent`，跨 crate 无文件交集；Step 4 用的 OTel workspace dep（`opentelemetry` / `tracing-opentelemetry`）已在 POC commit `10b6c36` 引入，不依赖 Step 1 新加的 `opentelemetry-otlp`
+- **2-D 双路无冲突**：Step 3 改 `visp-daemon/src/observability/parent_link.rs`，Step 5 改 `visp-agent/src/orchestrator.rs` + 新建 `visp-agent/src/observability.rs`；Step 3 的 Oracle review 触点 ③ 可与 Step 5 实施并行（review 期间 fixer-w2s5 继续推进，review 反馈在 Step 6 启动前消化）
+- **2-B / 2-C 必须串行**：Step 2 需要 Step 1 的 `OtlpConfig` 类型；Step 2.5 是 Oracle 推荐的风险防线，必须在 Step 3 双模式改造前确认 W1 基线无退化（降低后续多 Layer 改造时的回归调试成本）
+- **2-E 必须串行**：e2e 测试断言依赖 Step 3 双模式（fmt JSON `visp.span.w3c_id` 与 OTel span_id 一致）+ Step 5 完整 4 跳 trace 链
+
+### 子任务委托矩阵
+
+| 阶段 | 执行者 | 输入依赖 | 输出 commit | 验收门 |
+|---|---|---|---|---|
+| 2-A · Step 1 | @fixer-w2s1 | — | `feat(daemon): ObservabilityConfig.otlp 子段（含 sample_rate）+ otlp exporter 依赖` | `cargo test -p visp-daemon config::` 5 测试转绿 + `cargo build -p visp-daemon` 通过 |
+| 2-A · Step 4 | @fixer-w2s4 | — | `feat(agent): orchestrator spawn 时注入 OTel SpanContext 到 TraceContext（含 parent_span_id + trace_flags）` | `cargo test -p visp-agent` W1 全绿 + 新增 4 测试转绿 |
+| 2-B · Step 2 | @fixer-w2s2 | 2-A · Step 1 | `feat(daemon): OTel TracerProvider 装配 + OpenTelemetryLayer 接入` | `cargo test -p visp-daemon observability::init::tests` 4 + 1 钩子转绿 |
+| 2-C · Step 2.5 | orchestrator 自跑 | 2-B · Step 2 | （若无代码变更则无 commit；否则 `fix(daemon): Step 2 W1 基线回归修正`） | `cargo test --workspace` 100% 全绿（基线：visp-core 211 / visp-llm 88 / visp-agent 36 / visp-daemon 144（1 ignored）） |
+| 2-D · Step 3 | @fixer-w2s3 + @oracle review ③ | 2-C · Step 2.5 | `feat(daemon): ParentLinkLayer 双模式（OTLP 启用时用 OTel ID 源，on_enter 时机）` | `cargo test -p visp-daemon` W1 + 新增 6 测试转绿 + Oracle review 通过 |
+| 2-D · Step 5 | @fixer-w2s5 | 2-A · Step 4 | `feat(agent): orchestrator spawn_span 用 set_parent 重建 OTel parent（修 Oracle B1；子端走 OTel 自动传播）` | `cargo test -p visp-agent` W1 + 新增 4 测试转绿 + `cargo test -p visp-core` W1 全绿（验证子端零修改） |
+| 2-E · Step 6 | @fixer-w2s6 | 2-D · Step 3 + 2-D · Step 5 | `test(daemon): OTLP 端到端 in-memory 验证（4 跳 trace 链 + Oracle B1 验证）` | `cargo test -p visp-daemon --test observability_otlp_e2e` 3 测试转绿 + `cargo test --workspace` 全量回归 + clippy/fmt 通过 |
+
+### 并行节省
+
+- **串行预估**：~12.5h（6 步顺序 + 2.5 风险防线）
+- **并行预估**：~9.5h（2-A ⫽ 1.5h + 2-B 2h + 2-C 0.5h + 2-D ⫽ 3.5h + 2-E 2h）
+- **节省**：~3h（24%）
+- 数字为粗略量级估计，不作为承诺；目的是辅助判断「该不该并行」
+
+### 风险与回滚点
+
+- **2-A 失败回滚**：Step 1 / Step 4 任一失败，单独 revert 该 commit，另一路不受影响
+- **2-C 基线回归**：若 Step 2.5 发现 W1 测试退化，必须 `fix(daemon)` 修复后再进入 2-D；不得带着退化进入双模式改造
+- **2-D Oracle review FAIL**：Step 3 在 review 通过前不得进入 2-E；Step 5 已 commit 不回滚（独立可用）；按 review 反馈 amend Step 3
+- **2-E 失败兜底**：4 跳 trace 链断链时按 Oracle 第 3 轮 review 的根因清单逐项检查（D2 set_parent 时机 / Layer 顺序 / TraceFlags / Sampler）
+
+---
 
 ## Wave 2 三大设计决策（用户已确认）
 
