@@ -1506,7 +1506,7 @@ mod tests {
 
         // empty query -> pattern "%%" -> matches everything
         let results = store.search_like("", 10).unwrap();
-        assert!(results.len() >= 1, "empty LIKE should match all");
+        assert!(!results.is_empty(), "empty LIKE should match all");
     }
 
     #[test]

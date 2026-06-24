@@ -53,7 +53,7 @@ mod tests {
 
     #[test]
     fn test_symbol_kind_variants() {
-        let variants = vec![
+        let variants = [
             SymbolKind::Function,
             SymbolKind::Method,
             SymbolKind::Class,
@@ -74,7 +74,7 @@ mod tests {
 
     #[test]
     fn test_edge_kind_variants() {
-        let variants = vec![
+        let variants = [
             EdgeKind::Call,
             EdgeKind::Reference,
             EdgeKind::Implementation,

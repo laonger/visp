@@ -986,8 +986,10 @@ mod tests {
             .create(Path::new("/tmp"), LlmConfig::default())
             .unwrap();
 
-        let mut new_config = LlmConfig::default();
-        new_config.model = "gpt-4".into();
+        let new_config = LlmConfig {
+            model: "gpt-4".into(),
+            ..Default::default()
+        };
         manager
             .update_config(&session.id, new_config.clone())
             .unwrap();

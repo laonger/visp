@@ -170,7 +170,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await; // let watcher settle
 
         let file_path = project.join("a.ts");
-        std::fs::write(&file_path, &valid_ts("created_fn")).unwrap();
+        std::fs::write(&file_path, valid_ts("created_fn")).unwrap();
 
         // Wait for debounce (500 ms) + processing time
         tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -196,11 +196,11 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         let file_path = project.join("a.ts");
-        std::fs::write(&file_path, &valid_ts("original")).unwrap();
+        std::fs::write(&file_path, valid_ts("original")).unwrap();
         tokio::time::sleep(Duration::from_millis(1500)).await;
 
         // Modify the file with a new symbol
-        std::fs::write(&file_path, &valid_ts("modified_fn")).unwrap();
+        std::fs::write(&file_path, valid_ts("modified_fn")).unwrap();
         tokio::time::sleep(Duration::from_millis(1500)).await;
 
         let symbols = store.search_symbols("", 100).unwrap();
@@ -230,11 +230,11 @@ mod tests {
         let file_path = project.join("a.ts");
 
         // Three rapid writes within the 500 ms debounce window
-        std::fs::write(&file_path, &valid_ts("v1")).unwrap();
+        std::fs::write(&file_path, valid_ts("v1")).unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
-        std::fs::write(&file_path, &valid_ts("v2")).unwrap();
+        std::fs::write(&file_path, valid_ts("v2")).unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
-        std::fs::write(&file_path, &valid_ts("v3")).unwrap();
+        std::fs::write(&file_path, valid_ts("v3")).unwrap();
 
         // Without debounce each event would be processed after its own
         // 500 ms sleep → at least 3×500=1500 ms to finish all three.
@@ -275,11 +275,11 @@ mod tests {
 
         // File inside node_modules should be ignored
         let ignored_path = project.join("node_modules").join("ignored.ts");
-        std::fs::write(&ignored_path, &valid_ts("ignored_fn")).unwrap();
+        std::fs::write(&ignored_path, valid_ts("ignored_fn")).unwrap();
 
         // Valid file outside excluded dirs should be picked up
         let valid_path = project.join("src").join("valid.ts");
-        std::fs::write(&valid_path, &valid_ts("valid_fn")).unwrap();
+        std::fs::write(&valid_path, valid_ts("valid_fn")).unwrap();
 
         tokio::time::sleep(Duration::from_millis(1500)).await;
 
@@ -314,7 +314,7 @@ mod tests {
 
         // .ts file should be picked up
         let ts_path = project.join("main.ts");
-        std::fs::write(&ts_path, &valid_ts("main_fn")).unwrap();
+        std::fs::write(&ts_path, valid_ts("main_fn")).unwrap();
 
         tokio::time::sleep(Duration::from_millis(1500)).await;
 

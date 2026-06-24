@@ -528,6 +528,7 @@ mod tests {
         (store, dir)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_symbol(
         store: &Store,
         name: &str,
