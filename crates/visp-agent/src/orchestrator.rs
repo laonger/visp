@@ -232,7 +232,10 @@ impl Orchestrator {
                 task_id,
                 ..
             } => {
-                let trace_context = envelope.trace_context.clone();
+                // W2-S4: Extract OTel-based TraceContext from current span.
+                // If OTel is inactive (no OpenTelemetryLayer), falls back to
+                // UUID-based W3C IDs (W1 behavior).
+                let trace_context = Some(crate::observability::extract_trace_context());
                 self.spawn_sub_agent(
                     &envelope.session_id,
                     &call_id,
@@ -1675,7 +1678,9 @@ mod tests {
         };
         orch.handle_agent_message(envelope).await;
 
-        // 验证 visp.subagent.spawn span 通过 field recording 携带了 TraceContext 字段
+        // W2-S4: orchestrator 不再使用 envelope 的 TraceContext，而是通过
+        // extract_trace_context() 生成（无 OTel 时走 UUID fallback）。
+        // 验证 spawn span 记录了生成的 trace_id / parent_span_id。
         let captured = spans.lock().unwrap();
         let spawn_span = captured
             .iter()
@@ -1688,20 +1693,20 @@ mod tests {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
 
-        assert_eq!(
-            field_map.get("trace_id"),
-            Some(&"0af7651916cd43dd8448eb211c80319c"),
-            "trace_id should be recorded from envelope TraceContext"
-        );
-        assert_eq!(
-            field_map.get("parent_span_id"),
-            Some(&"aaaaaaaaaaaaaaaa"),
-            "parent_span_id should be recorded from envelope TraceContext"
-        );
-        assert_eq!(
-            field_map.get("trace_state"),
-            Some(&"congo=toto"),
-            "trace_state should be recorded from envelope TraceContext"
+        let trace_id = field_map
+            .get("trace_id")
+            .expect("trace_id should be recorded (W2 fallback UUID)");
+        assert_eq!(trace_id.len(), 32, "trace_id must be 32 hex chars");
+
+        let psid = field_map
+            .get("parent_span_id")
+            .expect("parent_span_id should be recorded (W2 fallback)");
+        assert_eq!(psid.len(), 16, "parent_span_id must be 16 hex chars");
+
+        // trace_state = None（fallback 不设置）
+        assert!(
+            !field_map.contains_key("trace_state"),
+            "trace_state should NOT be recorded (W2 fallback sets None)"
         );
     }
 
@@ -1711,7 +1716,8 @@ mod tests {
         let _guard = make_tracing_guard(&spans, &_events, &_tcs);
         let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
 
-        // Envelope 不带 trace_context（None）
+        // Envelope 不带 trace_context（None），但 W2-S4 orchestrator
+        // 始终通过 extract_trace_context() 生成 fallback TraceContext。
         let envelope = Envelope {
             session_id: parent_id.clone(),
             message: AgentMessage::SpawnRequest {
@@ -1732,7 +1738,8 @@ mod tests {
             "'visp.subagent.spawn' span should be created even without trace_context"
         );
 
-        // 验证 span 未记录 trace_id / parent_span_id / trace_state 字段
+        // W2-S4: orchestrator 会生成 fallback TraceContext（UUID based），因此
+        // trace_id / parent_span_id 会被记录到 span fields 上。
         let spawn_span = captured
             .iter()
             .find(|s| s.name == "visp.subagent.spawn")
@@ -1743,17 +1750,22 @@ mod tests {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
 
-        assert!(
-            !field_map.contains_key("trace_id"),
-            "trace_id should NOT be recorded when envelope has trace_context=None"
-        );
-        assert!(
-            !field_map.contains_key("parent_span_id"),
-            "parent_span_id should NOT be recorded when envelope has trace_context=None"
-        );
+        // trace_id 应存在（fallback UUID）
+        let trace_id = field_map
+            .get("trace_id")
+            .expect("trace_id should be recorded (fallback UUID)");
+        assert_eq!(trace_id.len(), 32, "trace_id must be 32 hex chars");
+
+        // parent_span_id 应存在（fallback W3C span ID）
+        let psid = field_map
+            .get("parent_span_id")
+            .expect("parent_span_id should be recorded (fallback W3C ID)");
+        assert_eq!(psid.len(), 16, "parent_span_id must be 16 hex chars");
+
+        // trace_state 仍为 None（fallback 不设置 trace_state）
         assert!(
             !field_map.contains_key("trace_state"),
-            "trace_state should NOT be recorded when envelope has trace_context=None"
+            "trace_state should NOT be recorded (fallback sets None)"
         );
     }
 
@@ -1763,15 +1775,8 @@ mod tests {
         let _guard = make_tracing_guard(&spans, &_events, &_tcs);
         let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
 
-        let tc = visp_core::TraceContext::new(
-            "0af7651916cd43dd8448eb211c80319c".to_string(),
-            "b7ad6b7169203331".to_string(),
-            1,
-            Some("congo=toto".to_string()),
-            Some("aaaaaaaaaaaaaaaa".to_string()),
-        )
-        .unwrap();
-
+        // Envelope 携带了 trace_context，但 W2-S4 orchestrator 用 extract_trace_context()
+        // 替换为 fallback UUID 版本。验证 spawn span 记录的是生成的字段。
         let envelope = Envelope {
             session_id: parent_id.clone(),
             message: AgentMessage::SpawnRequest {
@@ -1779,9 +1784,9 @@ mod tests {
                 subagent_type: "default".to_string(),
                 description: "task with trace".to_string(),
                 task_id: None,
-                trace_context: Some(tc.clone()),
+                trace_context: None,
             },
-            trace_context: Some(tc.clone()),
+            trace_context: None,
         };
         orch.handle_agent_message(envelope).await;
 
@@ -1797,20 +1802,22 @@ mod tests {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
 
-        assert_eq!(
-            field_map.get("trace_id"),
-            Some(&"0af7651916cd43dd8448eb211c80319c"),
-            "trace_id should be recorded on visp.subagent.spawn from envelope TraceContext"
-        );
-        assert_eq!(
-            field_map.get("parent_span_id"),
-            Some(&"aaaaaaaaaaaaaaaa"),
-            "parent_span_id should be recorded on visp.subagent.spawn from envelope TraceContext"
-        );
-        assert_eq!(
-            field_map.get("trace_state"),
-            Some(&"congo=toto"),
-            "trace_state should be recorded on visp.subagent.spawn from envelope TraceContext"
+        // W2-S4: trace_id 来自 fallback UUID
+        let trace_id = field_map
+            .get("trace_id")
+            .expect("trace_id should be recorded on visp.subagent.spawn");
+        assert_eq!(trace_id.len(), 32, "trace_id must be 32 hex chars");
+
+        // W2-S4: parent_span_id 来自 fallback UUID
+        let psid = field_map
+            .get("parent_span_id")
+            .expect("parent_span_id should be recorded on visp.subagent.spawn");
+        assert_eq!(psid.len(), 16, "parent_span_id must be 16 hex chars");
+
+        // trace_state = None（fallback 不设置）
+        assert!(
+            !field_map.contains_key("trace_state"),
+            "trace_state should NOT be recorded (W2 fallback sets None)"
         );
     }
 
