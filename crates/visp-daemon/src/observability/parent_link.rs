@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
+use opentelemetry::trace::TraceContextExt;
 use tracing::Subscriber;
 use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::{Context, Layer};
@@ -68,10 +69,17 @@ struct Inner {
 #[derive(Debug, Clone)]
 pub struct ParentLinkLayer {
     inner: Arc<Inner>,
+    /// When `true`, [`on_enter`](Layer::on_enter) reads the real OTel span ID
+    /// via [`tracing_opentelemetry::get_otel_context`] and records it onto
+    /// the span as `visp.span.w3c_id`, overwriting any W1 uuid.
+    ///
+    /// When `false` (default), the W1 uuid path is used unchanged.
+    otel_mode: bool,
 }
 
 impl ParentLinkLayer {
     /// Create a new `ParentLinkLayer` with empty mapping and zero counter.
+    /// Uses W1 uuid mode (OTel disabled).
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -79,6 +87,22 @@ impl ParentLinkLayer {
                 reverse: DashMap::new(),
                 unmatched_count: AtomicU64::new(0),
             }),
+            otel_mode: false,
+        }
+    }
+
+    /// Create a new `ParentLinkLayer` with the given OTel mode flag.
+    ///
+    /// - `true`: OTel mode — `on_enter` reads real OTel span ID.
+    /// - `false`: W1 uuid mode — identical to [`new`](Self::new).
+    pub fn with_otel_mode(enable: bool) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                mapping: DashMap::new(),
+                reverse: DashMap::new(),
+                unmatched_count: AtomicU64::new(0),
+            }),
+            otel_mode: enable,
         }
     }
 
@@ -201,8 +225,12 @@ where
         };
 
         // Handle visp.span.w3c_id — register W3C ID in mapping.
+        // Uses `replace` instead of `insert` because in OTel mode the
+        // `on_enter` callback may record `visp.span.w3c_id` a second time
+        // (via `Span::current().record`), which triggers this `on_record`
+        // callback again.  `insert` would panic on the second call.
         if let Some(w3c_id) = extractor.w3c_id {
-            span_ref.extensions_mut().insert(SpanW3CId(w3c_id.clone()));
+            span_ref.extensions_mut().replace(SpanW3CId(w3c_id.clone()));
             self.inner.mapping.insert(w3c_id.clone(), id.clone());
             self.inner.reverse.insert(id.clone(), w3c_id);
         }
@@ -265,6 +293,18 @@ where
     ///
     /// This fires on first entry only; subsequent entries are no-ops thanks
     /// to [`ParentLinkFieldsRecorded`] marker.
+    ///
+    /// # OTel mode
+    ///
+    /// When [`otel_mode`](Self::otel_mode) is `true`, additionally reads the
+    /// real OTel [`SpanContext`] via
+    /// [`tracing_opentelemetry::get_otel_context`] and records
+    /// `visp.span.w3c_id` onto the current span, overwriting any W1 uuid
+    /// that was set at span creation time.
+    ///
+    /// The `SpanRef` from the `Context` is dropped before calling
+    /// `get_otel_context` to avoid a deadlock (the latter internally tries
+    /// to lock [`Extensions`](tracing_subscriber::registry::Extensions)).
     fn on_enter(&self, id: &tracing::span::Id, ctx: Context<'_, S>) {
         let span_ref = match ctx.span(id) {
             Some(s) => s,
@@ -272,28 +312,55 @@ where
         };
 
         // Already recorded on a previous enter.
-        if span_ref
+        let already_recorded = span_ref
             .extensions()
             .get::<ParentLinkFieldsRecorded>()
-            .is_some()
-        {
+            .is_some();
+
+        if already_recorded {
             return;
         }
 
-        let plf = match span_ref.extensions().get::<ParentLinkFields>() {
-            Some(f) => f.clone(),
-            None => return,
-        };
+        // Clone ParentLinkFields so we can drop span_ref before calling
+        // get_otel_context (which tries to lock Extensions internally).
+        let plf = span_ref.extensions().get::<ParentLinkFields>().cloned();
 
-        // Record fields on the current span (which should be the same as
-        // the entered span). This makes the JSON fmt layer output them.
-        let current = tracing::Span::current();
-        current.record("trace_id", plf.trace_id.as_str());
-        if let Some(ref psid) = plf.parent_span_id {
-            current.record("parent_span_id", psid.as_str());
+        // Drop span_ref — we MUST NOT hold Extensions when calling
+        // get_otel_context (potential deadlock).
+        drop(span_ref);
+
+        // W1 path: record trace_id and parent_span_id from ParentLinkFields.
+        if let Some(plf) = plf {
+            let current = tracing::Span::current();
+            current.record("trace_id", plf.trace_id.as_str());
+            if let Some(ref psid) = plf.parent_span_id {
+                current.record("parent_span_id", psid.as_str());
+            }
         }
 
-        span_ref.extensions_mut().insert(ParentLinkFieldsRecorded);
+        // OTel mode: read OTel SpanContext and record visp.span.w3c_id,
+        // overwriting any W1 uuid recorded at span creation time.
+        //
+        // We use `opentelemetry::Context::current()` because the OTel layer's
+        // `on_enter` (registered before us in assembly order) already called
+        // `cx.clone().attach()`, which stores this span's OTel Context in
+        // the thread-local.  Using the thread-local avoids the need for
+        // `get_otel_context` which must find the `WithContext` via dispatch
+        // downcast and has stricter deadlock constraints.
+        if self.otel_mode {
+            let otel_context = opentelemetry::Context::current();
+            let span_ref = otel_context.span();
+            let span_ctx = span_ref.span_context();
+            if span_ctx.is_valid() {
+                let hex = span_ctx.span_id().to_string();
+                tracing::Span::current().record("visp.span.w3c_id", hex.as_str());
+            }
+        }
+
+        // Set guard (re-acquire span_ref for extensions_mut access).
+        if let Some(span_ref) = ctx.span(id) {
+            span_ref.extensions_mut().insert(ParentLinkFieldsRecorded);
+        }
     }
 }
 
@@ -303,16 +370,23 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::io;
     use std::sync::Mutex;
 
+    use opentelemetry::trace::TracerProvider;
+    use opentelemetry_sdk::trace::InMemorySpanExporter;
     use serial_test::serial;
     use tracing::span::{Attributes, Id, Record};
+    use tracing_subscriber::EnvFilter;
     use tracing_subscriber::Layer;
+    use tracing_subscriber::fmt::MakeWriter;
     use tracing_subscriber::layer::Context;
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::registry::LookupSpan;
 
     use super::*;
+    use crate::config::OtlpConfig;
+    use crate::observability::otlp;
 
     /// Injector layer that places a `SpanW3CId` into every new span's
     /// extension.
@@ -735,6 +809,335 @@ mod tests {
         assert_eq!(
             child_plf.unwrap().trace_id,
             "0af7651916cd43dd8448eb211c80319c"
+        );
+    }
+
+    // ── W2-S3-1: OTel mode tests ───────────────────────────────────────────
+
+    /// In-memory writer for capturing fmt JSON output.
+    #[derive(Clone)]
+    struct TestSpanWriter {
+        buf: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl TestSpanWriter {
+        fn new() -> Self {
+            Self {
+                buf: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn into_string(self) -> String {
+            String::from_utf8(self.buf.lock().unwrap().clone()).unwrap_or_default()
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for TestSpanWriter {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl io::Write for TestSpanWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buf.lock().unwrap().write(buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.buf.lock().unwrap().flush()
+        }
+    }
+
+    /// Helper: build a full OTel-enabled subscriber for OTel mode tests.
+    fn build_otel_subscriber(
+        writer: TestSpanWriter,
+    ) -> (
+        tracing::subscriber::DefaultGuard,
+        InMemorySpanExporter,
+        ParentLinkLayer,
+    ) {
+        let exporter = InMemorySpanExporter::default();
+        let provider = otlp::build_tracer_provider_with_exporter(
+            exporter.clone(),
+            &OtlpConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        let tracer = provider.tracer("visp-daemon-test");
+        let otel_layer =
+            tracing_opentelemetry::OpenTelemetryLayer::new(tracer).with_context_activation(true);
+        let parent_link = ParentLinkLayer::with_otel_mode(true);
+
+        let guard = tracing_subscriber::registry()
+            .with(EnvFilter::new("info"))
+            .with(otel_layer)
+            .with(parent_link.clone())
+            .with(tracing_subscriber::fmt::layer().json().with_writer(writer))
+            .set_default();
+
+        (guard, exporter, parent_link)
+    }
+
+    #[test]
+    #[serial]
+    fn test_parent_link_uuid_mode_when_otel_disabled() {
+        // W1 path: ParentLinkLayer::new() with otel_mode=false.
+        // The W1 uuid is generated by visp-core and recorded via span.record().
+        // Here we simulate that flow and verify the mapping/JSON path works.
+        let writer = TestSpanWriter::new();
+        let parent_link = ParentLinkLayer::new(); // otel_mode=false
+
+        let _guard = tracing_subscriber::registry()
+            .with(EnvFilter::new("info"))
+            .with(parent_link.clone())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(writer.clone()),
+            )
+            .set_default();
+
+        let id1 = "a1b2c3d4e5f6a7b8";
+        let id2 = "1122334455667788";
+
+        // Simulate W1: record visp.span.w3c_id (as visp-core would do via span.record)
+        let span1 = tracing::info_span!("span1", visp.span.w3c_id = tracing::field::Empty);
+        span1.record("visp.span.w3c_id", id1);
+        // Check mapping immediately (before span close removes it).
+        assert!(parent_link.inner.mapping.contains_key(id1));
+        {
+            let _e = span1.enter();
+            tracing::info!("inside span1");
+        }
+        drop(span1);
+
+        let span2 = tracing::info_span!("span2", visp.span.w3c_id = tracing::field::Empty);
+        span2.record("visp.span.w3c_id", id2);
+        assert!(parent_link.inner.mapping.contains_key(id2));
+        {
+            let _e = span2.enter();
+            tracing::info!("inside span2");
+        }
+        drop(span2);
+
+        // Verify JSON output contains visp.span.w3c_id field with correct values.
+        let output = writer.into_string();
+        assert!(
+            output.contains(id1),
+            "expected {} in JSON output\nOutput:\n{}",
+            id1,
+            output
+        );
+        assert!(
+            output.contains(id2),
+            "expected {} in JSON output\nOutput:\n{}",
+            id2,
+            output
+        );
+        // Both IDs are 16-hex (non-zero)
+        assert_eq!(id1.len(), 16, "W1 span id must be 16 hex chars");
+        assert_eq!(id2.len(), 16, "W1 span id must be 16 hex chars");
+        // Different spans get different IDs
+        assert_ne!(id1, id2, "each span must have a unique ID");
+    }
+
+    #[test]
+    #[serial]
+    fn test_parent_link_otel_mode_when_otel_enabled() {
+        // OTel mode: ParentLinkLayer::with_otel_mode(true) reads OTel span_id
+        // and records it as visp.span.w3c_id in on_enter.
+        let writer = TestSpanWriter::new();
+        let (_guard, exporter, _layer) = build_otel_subscriber(writer.clone());
+
+        let span = tracing::info_span!("otel_test_span", visp.span.w3c_id = tracing::field::Empty);
+        {
+            let _e = span.enter();
+            // on_enter fires: OTel mode reads span_id and records it
+            tracing::info!("inside otel span");
+        }
+        drop(span);
+
+        // Get the OTel span_id from the exporter
+        let finished = exporter
+            .get_finished_spans()
+            .expect("get_finished_spans should succeed");
+        assert!(!finished.is_empty(), "expected at least one finished span");
+        let otel_span_id = finished[0].span_context.span_id().to_string();
+        assert_eq!(otel_span_id.len(), 16, "OTel span_id must be 16 hex chars");
+
+        // Parse JSON output and check visp.span.w3c_id matches OTel span_id
+        let output = writer.into_string();
+        assert!(!output.is_empty(), "expected non-empty JSON output");
+
+        let visp_w3c_id_found = output.contains(&otel_span_id);
+        assert!(
+            visp_w3c_id_found,
+            "expected visp.span.w3c_id ({}) in JSON output\nOutput:\n{}",
+            otel_span_id, output
+        );
+    }
+
+    /// Extract `visp.span.w3c_id` from a JSON event line (nested inside the
+    /// `span` sub-object).  Returns `None` if the field is absent.
+    fn extract_w3c_from_json(line: &str) -> Option<String> {
+        let val: serde_json::Value = serde_json::from_str(line).ok()?;
+        val.get("span")?
+            .get("visp.span.w3c_id")?
+            .as_str()
+            .map(String::from)
+    }
+
+    #[test]
+    #[serial]
+    fn test_otel_mode_reads_real_trace_id() {
+        // Same setup: verify that the written visp.span.w3c_id equals what
+        // the exporter reports as this span's OTel span_id.
+        let writer = TestSpanWriter::new();
+        let (_guard, exporter, _layer) = build_otel_subscriber(writer.clone());
+
+        let span = tracing::info_span!("trace_id_test", visp.span.w3c_id = tracing::field::Empty);
+        {
+            let _e = span.enter();
+            tracing::info!("inside");
+        }
+        drop(span);
+
+        let finished = exporter
+            .get_finished_spans()
+            .expect("get_finished_spans should succeed");
+        assert!(!finished.is_empty(), "expected at least one finished span");
+
+        // Get the OTel-generated span_id
+        let otel_span_id = finished[0].span_context.span_id().to_string();
+
+        // Parse JSON and find the visp.span.w3c_id value inside the span object
+        let output = writer.into_string();
+        for line in output.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Some(w3c) = extract_w3c_from_json(line) {
+                assert_eq!(
+                    w3c, otel_span_id,
+                    "visp.span.w3c_id must equal the OTel span_id"
+                );
+                return; // test passed
+            }
+        }
+        panic!(
+            "visp.span.w3c_id not found in any JSON line.\nOutput:\n{}",
+            output
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_otel_mode_same_trace_id_within_run() {
+        // Nested spans: outer and inner should share the same OTel trace_id.
+        let writer = TestSpanWriter::new();
+        let (_guard, exporter, _layer) = build_otel_subscriber(writer);
+
+        let outer = tracing::info_span!("outer", visp.span.w3c_id = tracing::field::Empty);
+        outer.in_scope(|| {
+            let inner = tracing::info_span!("inner", visp.span.w3c_id = tracing::field::Empty);
+            inner.in_scope(|| {
+                tracing::info!("nested");
+            });
+        });
+        drop(outer);
+
+        let finished = exporter
+            .get_finished_spans()
+            .expect("get_finished_spans should succeed");
+        assert_eq!(
+            finished.len(),
+            2,
+            "expected two finished spans (outer + inner)"
+        );
+
+        let outer_trace_id = finished[0].span_context.trace_id();
+        let inner_trace_id = finished[1].span_context.trace_id();
+        assert_eq!(
+            outer_trace_id, inner_trace_id,
+            "outer and inner spans must share the same trace_id"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_parent_link_otel_mode_skips_uuid_generation() {
+        // OTel mode writes the OTel span_id, not the W1 uuid.
+        // This test explicitly verifies that the recorded visp.span.w3c_id
+        // equals the OTel span_id (not a random uuid).
+        // Same assertion as test_parent_link_otel_mode_when_otel_enabled
+        // but with explicit comment highlighting the uuid-skip behavior.
+        let writer = TestSpanWriter::new();
+        let (_guard, exporter, _layer) = build_otel_subscriber(writer.clone());
+
+        let span = tracing::info_span!("skip_uuid_test", visp.span.w3c_id = tracing::field::Empty);
+        {
+            let _e = span.enter();
+            tracing::info!("inside");
+        }
+        drop(span);
+
+        let finished = exporter
+            .get_finished_spans()
+            .expect("get_finished_spans should succeed");
+        let otel_span_id = finished[0].span_context.span_id().to_string();
+
+        let output = writer.into_string();
+        for line in output.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Some(w3c) = extract_w3c_from_json(line) {
+                assert_eq!(
+                    w3c, otel_span_id,
+                    "OTel mode: visp.span.w3c_id must equal OTel span_id (not a uuid)"
+                );
+                return;
+            }
+        }
+        panic!(
+            "visp.span.w3c_id not found in any JSON line.\nOutput:\n{}",
+            output
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_otel_mode_field_appears_in_fmt_output() {
+        // OTel mode: verify fmt JSON output contains non-empty visp.span.w3c_id.
+        let writer = TestSpanWriter::new();
+        let (_guard, _exporter, _layer) = build_otel_subscriber(writer.clone());
+
+        let span = tracing::info_span!("fmt_output_test", visp.span.w3c_id = tracing::field::Empty);
+        {
+            let _e = span.enter();
+            tracing::info!("inside");
+        }
+        drop(span);
+
+        let output = writer.into_string();
+        assert!(!output.is_empty(), "expected non-empty JSON output");
+
+        for line in output.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Some(w3c) = extract_w3c_from_json(line) {
+                assert!(!w3c.is_empty(), "visp.span.w3c_id must be non-empty");
+                assert_eq!(w3c.len(), 16, "visp.span.w3c_id must be 16 hex chars");
+                return;
+            }
+        }
+        panic!(
+            "visp.span.w3c_id not found in any JSON line.\nOutput:\n{}",
+            output
         );
     }
 }

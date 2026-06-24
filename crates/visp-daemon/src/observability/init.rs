@@ -55,7 +55,11 @@ pub fn init_observability(cfg: &ObservabilityConfig) -> ObservabilityGuard {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.level));
 
     // 2. Always create layers (lightweight noops when unused).
-    let parent_link = ParentLinkLayer::new();
+    let parent_link = if cfg.otlp.enabled {
+        ParentLinkLayer::with_otel_mode(true)
+    } else {
+        ParentLinkLayer::new()
+    };
     let metrics = MetricsLayer::new();
 
     // 3. File output (optional).
@@ -150,7 +154,11 @@ where
     }
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.level));
-    let parent_link = ParentLinkLayer::new();
+    let parent_link = if cfg.otlp.enabled {
+        ParentLinkLayer::with_otel_mode(true)
+    } else {
+        ParentLinkLayer::new()
+    };
     let metrics = MetricsLayer::new();
 
     let tracer_provider: Option<SdkTracerProvider>;
@@ -232,7 +240,11 @@ where
     }
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.level));
-    let parent_link = ParentLinkLayer::new();
+    let parent_link = if cfg.otlp.enabled {
+        ParentLinkLayer::with_otel_mode(true)
+    } else {
+        ParentLinkLayer::new()
+    };
     let metrics = MetricsLayer::new();
 
     let tracer_provider: Option<SdkTracerProvider>;
