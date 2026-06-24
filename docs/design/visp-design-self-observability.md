@@ -563,11 +563,47 @@ file_retention = 7              # 文件日志保留份数
 - 子 agent span 正确挂载在 spawn span 下
 - gen_ai.* fields 符合 OTel Semantic Conventions
 
-## 9.4 Wave 3（可选 / 视用户反馈）
+## 9.4 Wave 3 — 采样收尾 & 其余项暂缓
 
-- 采样策略（高频 LLM 调用降采样）
-- TUI 内查看最近一次 session 的 trace 摘要
-- Metrics（OTel Metrics）补充
+以下为 Wave 3 候选子项的状态更新。
+
+### 9.4.1 采样策略 ✅ 已收尾（Wave 2 已实现，Wave 3 仅补文档 + fast-path）
+
+**SDK 端采样（已完成）**
+
+Wave 2 已在 `OtlpConfig` 中落地 `sample_rate: f64`（默认 1.0，反序列化 clamp 到 `[0.0, 1.0]`），采样器为：
+
+```
+Sampler::ParentBased(TraceIdRatioBased(sample_rate))
+```
+
+语义：以 trace_id 为哈希种子，root span 按比例采样；子 span 始终跟随 root 的决策（ParentBased）。Session 级粒度的 trace 采样已经覆盖 visp 的观测场景——单个 session 通常 ≤ 几十次 LLM 调用，trace 级比例采样不会产生过量数据。
+
+**`sample_rate = 0.0` 的 AlwaysOff fast-path**
+
+当用户显式设置 `sample_rate = 0.0` 时，`build_tracer_provider` 在函数入口处直接返回 `Sampler::AlwaysOff` 且不构造 gRPC exporter。收益：
+
+- 避免无意义的 tonic Channel 创建和 BatchSpanProcessor 后台 flush 任务
+- 避免 `env::set_var("OTEL_EXPORTER_OTLP_HEADERS", ...)` 的不安全环境变量变更
+- 仍可正常调用 `tracer.start()` 且 span 处于不可记录状态
+
+**为什么不做 LLM-only 降采样**
+
+"高频 LLM 调用降采样"指对单个 LLM span 进行独立采样（例如每 10 次 LLM 调用只导出 1 个 gen_ai span）。与现有 `ParentBased` 模型冲突：
+
+1. **Trace 完整性**：丢弃某些 LLM span 会导致 trace tree 出现 dangling spans（子 tool span 失去父节点），破坏 `agent.iteration → gen_ai → tool.execute` 链的完整性。
+2. **OTel 模型约束**：`ParentBased` 要求子 span 的采样决策跟随 root span，不允许中间层独立修改决策。
+3. **复杂度收益比不合理**：visp 不是高 QPS 服务，session 级采样（trace_id ratio）已足以控制数据量。
+
+**如果需要更细粒度策略**，应在 **OTLP collector 端**做 tail-based sampling（例如 `tailsamplingprocessor`），根据 span 属性（如 `gen_ai.usage.input_tokens > 10000`）在 collector 侧丢弃低价值 trace。这是 OTel 生态的标准做法，无需在 SDK 侧改造。
+
+### 9.4.2 TUI 内查看最近一次 session 的 trace 摘要 — ⏸️ 暂缓
+
+需要 CLI 新面板 + daemon 端缓存 span 树，工程量大，无当前需求驱动。等用户反馈后启动。
+
+### 9.4.3 OTel Metrics 补充 — ⏸️ 暂缓
+
+需要新引入 opentelemetry-otlp 的 metrics pipeline（目前仅 trace），选指标集 + 在 MetricsLayer 旁挂 instruments。暂无需驱动，等用户反馈。
 
 ## 9.5 Session 汇总日志样例
 

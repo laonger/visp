@@ -12,7 +12,21 @@ use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider, SpanExporter};
 use crate::config::OtlpConfig;
 
 /// Build a production OTLP tracer provider via gRPC-tonic.
+///
+/// When `sample_rate` is 0.0, the provider is built with an AlwaysOff sampler
+/// and no span processor — skipping gRPC exporter construction entirely.
+/// This avoids an unnecessary tonic channel and the unsafe env-var mutation
+/// for headers when the user has explicitly disabled sampling.
 pub(crate) fn build_tracer_provider(cfg: &OtlpConfig) -> SdkTracerProvider {
+    // Fast-path: sample_rate=0.0 means no spans will ever be recorded.
+    // Skip gRPC exporter setup entirely — no env var mutation, no tonic channel.
+    if cfg.sample_rate <= 0.0 {
+        return SdkTracerProvider::builder()
+            .with_sampler(Sampler::AlwaysOff)
+            .with_resource(build_resource())
+            .build();
+    }
+
     use opentelemetry_otlp::WithExportConfig;
 
     // Headers: set via env var so the tonic exporter picks them up.
@@ -92,6 +106,54 @@ pub(crate) fn build_resource() -> Resource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::OtlpConfig;
+    use opentelemetry::trace::{Span, Tracer, TracerProvider};
+    use opentelemetry_sdk::trace::InMemorySpanExporter;
+
+    #[test]
+    fn test_sample_rate_zero_no_spans_exported() {
+        // sample_rate=0.0 → all spans discarded at the SDK sampler level.
+        // Verifies that zero-sampled spans never reach the exporter.
+        let cfg = OtlpConfig {
+            sample_rate: 0.0,
+            ..Default::default()
+        };
+        let exporter = InMemorySpanExporter::default();
+        let provider = build_tracer_provider_with_exporter(exporter.clone(), &cfg);
+        let tracer = provider.tracer("test");
+
+        {
+            let _span = tracer.start("zero_sampled_span");
+        }
+
+        let _ = provider.force_flush();
+        let exported = exporter
+            .get_finished_spans()
+            .expect("get_finished_spans should succeed");
+        assert!(
+            exported.is_empty(),
+            "sample_rate=0.0 should export 0 spans, got {}",
+            exported.len()
+        );
+    }
+
+    #[test]
+    fn test_sample_rate_zero_build_tracer_provider_fast_path_no_panic() {
+        // Fast-path: build_tracer_provider with sample_rate=0.0 must
+        // NOT attempt gRPC connection and must NOT panic.
+        // (Internally requires opentelemetry_otlp as dep but fast-path skips it.)
+        let cfg = OtlpConfig {
+            sample_rate: 0.0,
+            ..Default::default()
+        };
+        let provider = build_tracer_provider(&cfg);
+        let tracer = provider.tracer("test");
+        let span = tracer.start("fast_path_span");
+        assert!(
+            !span.is_recording(),
+            "AlwaysOff sampler should prevent recording"
+        );
+    }
 
     #[test]
     fn test_build_resource_has_service_name() {

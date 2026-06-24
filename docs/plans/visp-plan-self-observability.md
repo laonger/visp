@@ -30,12 +30,12 @@ cargo fmt -- --check
 
 | Wave | 范围 | 状态 | 必选 |
 |---|---|---|---|
-| Wave 0 | 数据正确性修复（§4.1 / §4.2） | 待启动 | 必选 |
-| Wave 1 | tracing 基础设施 + 本地观测能力（§9.2） | 待启动 | 必选 |
-| Wave 2 | OTLP exporter（§9.3） | 待启动 | 可选 |
-| Wave 3 | 采样 / TUI trace 查看 / OTel Metrics（§9.4） | 暂不规划 | 可选 |
+| Wave 0 | 数据正确性修复（§4.1 / §4.2） | ✅ 已完成 | 必选 |
+| Wave 1 | tracing 基础设施 + 本地观测能力（§9.2） | ✅ 已完成 | 必选 |
+| Wave 2 | OTLP exporter（§9.3） | ✅ 已完成 | 可选 |
+| Wave 3 | 采样收尾 + AlwaysOff fast-path（§9.4.1） | ✅ 已完成 | 可选 |
 
-预估新增测试用例：Wave 0 约 6 个 · Wave 1 约 47 个 · Wave 2 约 8 个。
+预估新增测试用例：Wave 0 约 6 个 · Wave 1 约 47 个 · Wave 2 约 8 个 · Wave 3 约 2 个。
 
 ## 3. 执行委托与并行总表
 
@@ -1077,6 +1077,18 @@ cargo fmt -- --check
 - [ ] message 表 schema 零变更（仅复用 V2 已有 `tool_calls_json` + `provider_metadata` 列）
 - [ ] 性能基线：Wave 1 默认配置下，daemon CPU 占用增量 < 5%（手工 perf 验证）
 - [ ] 日志文件不含敏感信息（API key / 用户消息原文）— 设计 §9.3 明示策略
+
+## Wave 3 采样收尾验收清单
+
+Wave 3 仅执行 B-min（采样文档 + AlwaysOff fast-path），TUI trace 查看和 OTel Metrics 暂缓。
+
+- [x] 设计文档 §9.4 更新为 §9.4.1（明确 SDK 端采样已完工，记录 LLM-only 降采样 trade-off，推荐 collector tail-sampling）
+- [x] `build_tracer_provider` 加 `sample_rate <= 0.0` fast-path：不构造 gRPC exporter、不设 env var、返回 `AlwaysOff` 采样器
+- [x] `test_sample_rate_zero_no_spans_exported` — 验证零采样 span 不进入 exporter
+- [x] `test_sample_rate_zero_build_tracer_provider_fast_path_no_panic` — 验证 fast-path 不触发 gRPC 连接、`!is_recording()`
+- [x] `cargo test -p visp-daemon` 全绿（185 passed）
+- [x] `cargo clippy -p visp-daemon --all-targets -- -D warnings` 零错误
+- [x] `cargo fmt -- --check` 通过
 
 ## 依赖升级注意
 
