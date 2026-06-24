@@ -688,45 +688,58 @@ cargo fmt -- --check
 
 ## 跨步骤架构要点
 
-- **装配链顺序**：`registry → EnvFilter → OpenTelemetryLayer(条件) → ParentLinkLayer → MetricsLayer → fmt`。OTel 层必须在 ParentLinkLayer **之前**（更外层），这样 ParentLinkLayer 在 `on_new_span` 内才能从 span extension 读到 OTel 已写入的 `OtelData`
-- **shutdown**：`SdkTracerProvider::shutdown()` 同步阻塞冲刷 BatchSpanProcessor，必须在 `ObservabilityGuard::drop` 内调用且在其他 layer guard 之前
+- **装配链顺序**：`registry → EnvFilter → OpenTelemetryLayer(条件, with_context_activation=true) → ParentLinkLayer → MetricsLayer → fmt`。OTel 层必须在 ParentLinkLayer **之前**（更外层），这样 ParentLinkLayer 在 `on_enter` 时能拿到 OTel 已固化的 SpanContext
+- **`with_context_activation(true)` 强制声明**：tracing-opentelemetry 0.33 默认值为 `true`，仍显式声明以避免上游默认值变化（POC 已实测有此 API）；这是 Step 5 子 agent attach Context 方案能工作的硬前提
+- **采样器**：`Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(cfg.sample_rate)))`，默认 `sample_rate = 1.0`（本地自用全采样）；ParentBased 确保子 span 跟随父决策，避免半采样导致 trace 断裂
+- **shutdown**：`SdkTracerProvider::shutdown()` 同步阻塞冲刷 BatchSpanProcessor，无 `shutdown_with_timeout` API（已 librarian 确认）；export timeout 改在 `SpanExporter::builder().with_tonic().with_timeout(Duration::from_secs(5))` 设置，间接限制 shutdown 阻塞时长
 - **runtime**：`init_observability` 在 `#[tokio::main]` 内调用（main.rs:90），BatchSpanProcessor 可直接 spawn tonic 后台任务
+- **Layer 内读 OTel SpanContext 的公开 API**：用 `tracing_opentelemetry::get_otel_context(&span_id, &dispatch) -> Option<opentelemetry::Context>`（POC 验证 + librarian 源码确认）。**不**直接读 `OtelData`（非 pub，存储类型为私有 `OtelDataLock`）；不在 Layer 回调内调 `OpenTelemetrySpanExt::context()`（需 `tracing::Span` 句柄，Layer 拿不到）
 - **测试通道**：用 `opentelemetry_sdk::testing::trace::InMemorySpanExporter` 注入；新增 `init_observability_with_exporter` 测试钩子（`pub(crate)` + `cfg(test)`）
-- **依赖版本绑定**：`opentelemetry 0.32` / `opentelemetry_sdk 0.32` / `opentelemetry-otlp 0.32` / `tracing-opentelemetry 0.33`（四者 minor 版本必须配套）
+- **依赖版本绑定**：`opentelemetry 0.32` / `opentelemetry_sdk 0.32` / `opentelemetry-otlp 0.32` / `tracing-opentelemetry 0.33`（四者 minor 版本必须配套）；workspace 依赖已在 commit `10b6c36`（POC 阶段）引入
+
+**POC 触点（已完成）**：Wave 2 启动前 3 项关键技术验证已通过 POC `crates/visp-daemon/src/bin/otel_poc.rs` 实测：
+- ✅ B1：Layer 内用 `get_otel_context` 可读真实 SpanContext（替代失败的 `OtelData` 路径）
+- ✅ B2：attach Context 方案 trace_id 继承（aa→aa）；对照实验中 set_parent 方案同样成功，但 attach 是 OTel 标准、无 `Result` 处理、语义更清晰，**Step 5 采用 attach 方案**
+- ✅ `with_context_activation(true)` 在 0.33 存在，签名 `pub fn with_context_activation(self, bool) -> Self`，默认 true
 
 **Librarian 触点 ②**：已完成（要点合并入上方"跨步骤架构要点"，不另出文档）。
 
-**Oracle review 触点 ③**：W2-S3 完成后由 orchestrator 派 @oracle 做架构 review，重点检查切换逻辑是否破坏 W1 测试、跨 mpsc trace_id 一致性、`OtelData` 类型可见性与 fallback 路径。
+**Oracle review 触点 ③**：W2-S3 完成后由 orchestrator 派 @oracle 做架构 review，重点检查切换逻辑是否破坏 W1 测试、跨 mpsc trace_id 一致性、`on_enter` 时机下 fmt 是否能捕获 `span.record` 写入的 field。
 
-## Step 1：依赖引入 + `ObservabilityConfig.otlp` 扩展
+## Step 1：`ObservabilityConfig.otlp` 扩展（依赖已在 POC 阶段引入）
 
 **委托**：@fixer
 
+**前置说明**：4 项 OTel workspace 依赖已在 POC 阶段（commit `10b6c36`）引入 — `opentelemetry 0.32` / `opentelemetry_sdk 0.32`（dev: features=["testing"]） / `tracing-opentelemetry 0.33`。本 Step **仅补 `opentelemetry-otlp 0.32` workspace 依赖**与配置项。
+
 ### W2-S1-1 红：`OtlpConfig` 默认值与反序列化测试
 - **文件**：`crates/visp-daemon/src/config.rs`（`#[cfg(test)] mod tests`）
-- **测试**（4 个）：
-  - `test_otlp_config_defaults_disabled`：默认 `enabled=false` / `endpoint="http://localhost:4317"` / `protocol="grpc"` / `timeout_secs=10` / `headers` 空
-  - `test_otlp_config_deserializes_from_toml`：完整 `[observability.otlp]` toml 段反序列化字段全部正确
+- **测试**（5 个）：
+  - `test_otlp_config_defaults_disabled`：默认 `enabled=false` / `endpoint="http://localhost:4317"` / `protocol="grpc"` / `timeout_secs=10` / `headers` 空 / `sample_rate=1.0`
+  - `test_otlp_config_deserializes_from_toml`：完整 `[observability.otlp]` toml 段反序列化字段全部正确（含 `sample_rate=0.1`）
   - `test_otlp_config_omitted_section_is_default`：`ObservabilityConfig` 无 `otlp` section 时走 `OtlpConfig::default()`
   - `test_otlp_config_headers_kv_pairs`：`headers` 为 `BTreeMap<String, String>`，反序列化保留 key 排序
-- 运行 `cargo test -p visp-daemon config::tests::test_otlp` 预期 4 个红
+  - `test_otlp_config_sample_rate_clamped`：`sample_rate` 越界值（< 0.0 或 > 1.0）需 clamp 到 `[0.0, 1.0]`（避免 OTel SDK panic）
+- 运行 `cargo test -p visp-daemon config::tests::test_otlp` 预期 5 个红
 
 ### W2-S1-2 绿：实现 `OtlpConfig` 结构体
-- 新增 `OtlpConfig`：字段 `enabled` / `endpoint` / `protocol` / `timeout_secs` / `headers`，全部 `#[serde(default)]`
+- 新增 `OtlpConfig`：字段 `enabled` / `endpoint` / `protocol` / `timeout_secs` / `headers` / `sample_rate`，全部 `#[serde(default)]`
+- `OtlpConfig::default()` 中 `sample_rate = 1.0`
+- 反序列化后调用 `clamp` helper 保证 `sample_rate ∈ [0.0, 1.0]`
 - `ObservabilityConfig` 增加 `pub otlp: OtlpConfig` 字段（`#[serde(default)]`）
 - 运行 W2-S1-1 全部转绿
 
-### W2-S1-3 绿：依赖引入
-- workspace 根 `Cargo.toml [workspace.dependencies]` 加 4 项：`opentelemetry = "0.32"` / `opentelemetry_sdk = "0.32"` / `opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "tls"] }` / `tracing-opentelemetry = "0.33"`
-- `crates/visp-daemon/Cargo.toml [dependencies]` 引入 4 项（继承 workspace）
-- `crates/visp-daemon/Cargo.toml [dev-dependencies]` 加 `opentelemetry_sdk = { workspace = true, features = ["testing"] }` 覆盖默认 feature
+### W2-S1-3 绿：补充 `opentelemetry-otlp` 依赖
+- workspace 根 `Cargo.toml [workspace.dependencies]` 加 1 项：`opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "tls"] }`
+- `crates/visp-daemon/Cargo.toml [dependencies]` 加 `opentelemetry-otlp = { workspace = true }`
 - 跑 `cargo build -p visp-daemon` 验证编译通过
+- （注：`opentelemetry` / `opentelemetry_sdk` / `tracing-opentelemetry` 已由 commit `10b6c36` 引入）
 
 ### W2-S1-4 验证 + 提交
 - `cargo test -p visp-daemon config::`
 - `cargo clippy -p visp-daemon -- -D warnings`（零新增警告口径）
 - `cargo fmt -- --check`
-- Commit：`feat(daemon): 引入 OTel 依赖 + ObservabilityConfig.otlp 子段`
+- Commit：`feat(daemon): ObservabilityConfig.otlp 子段（含 sample_rate）+ otlp exporter 依赖`
 
 ## Step 2：OTel TracerProvider 装配 + `OpenTelemetryLayer` 接入
 
@@ -746,13 +759,13 @@ cargo fmt -- --check
 
 ### W2-S2-3 绿：实现 OTel 装配
 - 新建 `crates/visp-daemon/src/observability/otlp.rs` 模块
-  - `pub(crate) fn build_tracer_provider(cfg: &OtlpConfig) -> SdkTracerProvider`：生产路径，`SpanExporter::builder().with_tonic().with_endpoint(...).with_timeout(...).with_metadata(headers).build()` → `BatchSpanProcessor::builder(exporter).build()` → `SdkTracerProvider::builder().with_span_processor(...).with_resource(...).build()`
-  - `pub(crate) fn build_tracer_provider_with_exporter<E: SpanExporter + 'static>(exporter: E) -> SdkTracerProvider`：测试路径，复用 BatchProcessor + Resource 构造逻辑
-  - 共用 helper `build_resource()`：`Resource::builder().with_service_name("visp-daemon").with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION"))).build()`
-- 修改 `init.rs::init_observability_with_writer`：根据 `cfg.otlp.enabled` 条件性构造 tracer_provider；启用时追加 `tracing_opentelemetry::layer().with_tracer(provider.tracer("visp-daemon"))`
-- 装配链顺序：`registry → EnvFilter → OpenTelemetryLayer? → ParentLinkLayer → MetricsLayer → fmt`
-- `ObservabilityGuard` 新增字段 `tracer_provider: Option<SdkTracerProvider>`
-- `Drop for ObservabilityGuard` 实现：先 `self.tracer_provider.take().map(|p| p.shutdown())`，再 drop 其他字段
+  - `pub(crate) fn build_tracer_provider(cfg: &OtlpConfig) -> SdkTracerProvider`：生产路径，`SpanExporter::builder().with_tonic().with_endpoint(cfg.endpoint).with_timeout(Duration::from_secs(5)).with_metadata(headers).build()` → `BatchSpanProcessor::builder(exporter).build()` → `SdkTracerProvider::builder().with_span_processor(...).with_sampler(ParentBased(TraceIdRatioBased(cfg.sample_rate))).with_resource(...).build()`
+  - `pub(crate) fn build_tracer_provider_with_exporter<E: SpanExporter + 'static>(exporter: E, cfg: &OtlpConfig) -> SdkTracerProvider`：测试路径，复用 BatchProcessor + Sampler + Resource 构造逻辑
+  - 共用 helper `build_resource()`：`Resource::builder().with_service_name("visp-daemon").with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION"))).with_attribute(KeyValue::new("host.name", hostname)).with_attribute(KeyValue::new("process.pid", std::process::id() as i64)).build()`
+- 修改 `init.rs::init_observability_with_writer`：根据 `cfg.otlp.enabled` 条件性构造 tracer_provider；启用时追加 `tracing_opentelemetry::layer().with_tracer(provider.tracer("visp-daemon")).with_context_activation(true)`
+- 装配链顺序：`registry → EnvFilter → OpenTelemetryLayer?(with_context_activation=true) → ParentLinkLayer → MetricsLayer → fmt`
+- `ObservabilityGuard` 新增字段 `tracer_provider: Option<SdkTracerProvider>`（**字段声明顺序**：放在 `_file_guard` 之前，确保 Drop 时 tracer_provider 先 shutdown，再释放文件 writer）
+- `Drop for ObservabilityGuard` 实现：先 `self.tracer_provider.take().map(|p| p.shutdown())`，再 drop 其他字段；shutdown 阻塞时长由 exporter `with_timeout(5s)` 间接限制
 
 ### W2-S2-4 验证 + 提交
 - `cargo test -p visp-daemon observability::init::tests`
@@ -764,41 +777,52 @@ cargo fmt -- --check
 
 **委托**：@fixer 实现 → **Oracle review 触点 ③**（实现完成后必经）
 
-**关键变化**：Wave 2 的 ParentLinkLayer 不再单一从 uuid 生成器写 `visp.span.w3c_id`。OTLP 启用时切换到 OTel 权威源 — 从 span extension 读真实 trace_id/span_id 转 hex 后写入，确保 fmt JSON 输出与 OTel 后端记录的 ID 一致（设计 §7.3 Wave 2 段）。
+**关键变化**：Wave 2 的 ParentLinkLayer 不再单一从 uuid 生成器写 `visp.span.w3c_id`。OTLP 启用时切换到 OTel 权威源 — 在 **`on_enter` 回调**（不是 `on_new_span`，后者时 OTel SpanContext 尚未固化）用公开 API `tracing_opentelemetry::get_otel_context(&id, &dispatch)` 读真实 trace_id/span_id 转 hex 后写入，确保 fmt JSON 输出与 OTel 后端记录的 ID 一致（设计 §7.3 Wave 2 段）。
+
+**API 选择说明**（POC + librarian 双重确认）：
+- ❌ **不用** `OtelData`：非 pub 类型，存储类型实际是私有 `OtelDataLock`，0.33 起明确标注 "not part of public API"
+- ❌ **不用** `OpenTelemetrySpanExt::context()`：是 `tracing::Span` 句柄上的 extension trait，Layer 回调只有 `&Id` + `&Context<S>`，拿不到 `Span` 句柄
+- ✅ **用** `tracing_opentelemetry::get_otel_context(&span_id, &dispatch) -> Option<opentelemetry::Context>`：公开 pub 函数，签名匹配 Layer 回调，可在 `on_enter` 内直接调
+
+**field 预声明做法 A**：root span 用 `info_span!("agent.run", visp.span.w3c_id = tracing::field::Empty, ...)` 预声明该 field，在 `on_enter` 用 `span.record("visp.span.w3c_id", value)` 写入；fmt layer 在 span 关闭时序列化 field，能捕获 record 写入值。
 
 ### W2-S3-1 红：双模式单元测试
 - **文件**：`crates/visp-daemon/src/observability/parent_link.rs`（扩展现有 `#[cfg(test)] mod tests`）
-- **测试**（5 个）：
+- **测试**（6 个）：
   - `test_parent_link_uuid_mode_when_otel_disabled`：`ParentLinkLayer::new()` 走 W1 uuid 路径；复用现有 W1 断言（`visp.span.w3c_id` 为 16-hex 且每个 span 唯一）
   - `test_parent_link_otel_mode_when_otel_enabled`：`ParentLinkLayer::with_otel_mode(true)` 构造后，挂接到含 `OpenTelemetryLayer` 的 registry 上，emit span 后 `visp.span.w3c_id` 等于 OTel `SpanContext.span_id()` 的 hex
-  - `test_otel_mode_reads_real_trace_id`：同上变体，断言写入值与 OTel SDK 生成的 span_id（通过 `OpenTelemetrySpanExt::context()` 读取）逐字节相等
+  - `test_otel_mode_reads_real_trace_id`：同上变体，断言写入值与 OTel SDK 生成的 span_id（通过 InMemoryExporter 导出 SpanData 读取）逐字节相等
   - `test_otel_mode_same_trace_id_within_run`：单个 agent run 内多个 nested span 共享 OTel trace_id（验证 OTel 父子链已经接通）
   - `test_parent_link_otel_mode_skips_uuid_generation`：OTel 模式下不调 W1 的 uuid 生成函数（用 `AtomicUsize` 计数器或 mock counter 包装 `generate_w3c_span_id` 验证）
+  - `test_otel_mode_field_appears_in_fmt_output`：OTel 模式下，fmt JSON 输出中 `visp.span.w3c_id` field 非空且等于 OTel span_id hex（验证 `on_enter` + `record` 顺序与 fmt 兼容）
 
 ### W2-S3-2 绿：升级 `ParentLinkLayer`
 - 新增字段 `otel_mode: bool`
 - 新增构造器 `pub fn with_otel_mode(enable: bool) -> Self`，保留 `new()` 默认 `otel_mode=false`
-- `on_new_span` 分支：
-  - **OTel 模式**：从 `ctx.span(id).extensions()` 取 `tracing_opentelemetry::OtelData`（首选）或 `OpenTelemetrySpanExt::context()` 提取 `SpanContext`；将 `span_id` 转 16-hex lowercase；用 `span.record("visp.span.w3c_id", &hex_str)` 写入
-  - **非 OTel 模式**：保持 W1 uuid 生成原逻辑不变（不动现有代码路径）
+- **回调时机调整**：将 OTel 模式下的 ID 读取从 `on_new_span` 移到 `on_enter(&self, id: &Id, ctx: Context<S>)`
+- `on_enter` 分支：
+  - **OTel 模式**：用 `dispatcher::get_default(|dispatch| tracing_opentelemetry::get_otel_context(id, dispatch))` 取 `OtelContext`，从其 `span()` 取 `SpanContext`，若 `is_valid()` → `span_id` 转 16-hex lowercase → `ctx.span(id).map(|s| s.record_field("visp.span.w3c_id", &hex_str))`（用 `Span` ref + record API）；若 invalid（罕见，OTel layer 未挂或采样未命中）→ fallback 到 W1 uuid 路径
+  - **非 OTel 模式**：保持 W1 uuid 生成原逻辑不变（W1 路径仍在 `on_new_span` 内，回调时机不动）
 - 跨模式共用 unmatched parent 统计逻辑
+- root span 处（visp-core agent_loop.rs 的 3 个 `info_span!`）补加 `visp.span.w3c_id = tracing::field::Empty` 预声明 field（若 W1 已声明则跳过）
 
 ### W2-S3-3 绿：装配端选择构造器
 - `init.rs::init_observability_with_writer` 根据 `cfg.otlp.enabled` 选择 `ParentLinkLayer::new()` 或 `ParentLinkLayer::with_otel_mode(true)`
 
 ### W2-S3-4 Oracle review 触点 ③
-- @fixer 实现完成、本步 5 个测试转绿后，orchestrator 派 @oracle 做架构 review
+- @fixer 实现完成、本步 6 个测试转绿后，orchestrator 派 @oracle 做架构 review
 - review 重点：
-  - 切换逻辑是否破坏任何 W1 测试（uuid 路径完全不动？）
+  - 切换逻辑是否破坏任何 W1 测试（uuid 路径完全不动？回调时机 W1 仍在 `on_new_span`？）
   - 跨 mpsc 场景下 trace_id 一致性（orchestrator → sub-agent → 回 daemon 的链路）
-  - `OtelData` 类型可见性 / 在不同 `tracing-opentelemetry` 版本的稳定性 / 是否需要 fallback 到 `OpenTelemetrySpanExt::context()`
-  - `span.record` 在 `on_new_span` 内调用的时机是否会被 fmt layer 在同 span 周期内捕获（field 顺序问题）
+  - `get_otel_context` 在 `on_enter` 内调用是否有 deadlock 风险（librarian 标注：仅在不持有 `ExtensionsMut` 时安全，`on_enter` 的 `Context` 不暴露 mutable extensions，应该 OK，但需 review 确认）
+  - `span.record` 在 `on_enter` 内调用的时机是否会被 fmt layer 在同 span 周期内捕获（做法 A field 预声明顺序问题）
 - review 建议若涉及代码修改，由 @fixer 续做并补测试，**不直接提交**直至 review 通过
 
 ### W2-S3-5 验证 + 提交
-- `cargo test -p visp-daemon`（含 W1 全部 + 新增 5 个）
+- `cargo test -p visp-daemon`（含 W1 全部 + 新增 6 个）
 - `cargo clippy -p visp-daemon -- -D warnings` / `cargo fmt -- --check`
-- Commit：`feat(daemon): ParentLinkLayer 双模式（OTLP 启用时用 OTel ID 源）`
+- Commit：`feat(daemon): ParentLinkLayer 双模式（OTLP 启用时用 OTel ID 源，on_enter 时机）`
+
 
 ## Step 4：orchestrator OTel context 注入（D2 — 父端）
 
@@ -823,30 +847,37 @@ cargo fmt -- --check
 - `cargo clippy -p visp-agent -- -D warnings` / `cargo fmt -- --check`
 - Commit：`feat(agent): orchestrator spawn 时注入 OTel SpanContext 到 TraceContext`
 
-## Step 5：子 agent OTel parent 重建（D2 — 子端）
+## Step 5：子 agent OTel parent 重建（D2 — 子端，attach Context 方案）
 
 **委托**：@fixer
 
-**目标**：子 agent 接收 `SpawnRequest` 后，用 `TraceContext` 重建 `opentelemetry::trace::SpanContext`，挂到子 agent root span 上，使 OTel 后端看到完整跨 agent 父子链。
+**目标**：子 agent 接收 `SpawnRequest` 后，用 `TraceContext` 重建 `opentelemetry::trace::SpanContext`，**先 attach 到当前 Context，再创建子 agent root span**，让 OpenTelemetryLayer 在 `on_new_span` 时自动继承 trace_id（设计上不再使用 `set_parent`，避免"span 已分配 trace_id 再尝试覆盖"的内部状态歧义）。
 
-### W2-S5-1 红：子端 set_parent 测试
+**方案选择**（POC 实测对比）：
+- ✅ **attach Context 方案**：`Context::current().with_remote_span_context(remote_sc).attach()` → 创建 span。POC 验证 trace_id 继承成功（aa→aa）；OTel 标准做法，无 Result 处理，语义清晰
+- ⚠️ **set_parent 方案**：POC 实测也能成功覆盖 trace_id，但 oracle 仍对"先建后改"的语义有顾虑；保留为 fallback 注释，主路径不使用
+
+### W2-S5-1 红：子端 attach 测试
 - **文件**：子 agent 入口测试（与 W1 子 agent 测试同位）
 - **测试**（2 个，用 InMemoryExporter 验证）：
-  - `test_subagent_root_span_has_parent_set_to_orchestrator`：父 + 子两次 agent run；导出的子 agent root span `parent_span_id` 等于父端注入的 `TraceContext.span_id`，`trace_id` 等于父端 `trace_id`
-  - `test_subagent_falls_back_to_new_root_when_trace_context_invalid`：`TraceContext` 字段为空字符串或非 hex 时，子 agent root span 为独立新 trace（不报错，回退到 W1 行为）
+  - `test_subagent_root_span_inherits_trace_id_via_attach`：父 + 子两次 agent run；导出的子 agent root span `trace_id` 等于父端注入的 `TraceContext.trace_id`，`parent_span_id` 等于父端 `span_id`
+  - `test_subagent_falls_back_to_new_root_when_trace_context_invalid`：`TraceContext` 字段为空字符串或非 hex 时，子 agent root span 为独立新 trace（不报错，回退到 W1 行为，不调 attach）
 
-### W2-S5-2 绿：实现子端重建
-- 子 agent 入口在创建 root span 后：
-  - 解析 `TraceContext.trace_id` / `span_id` → `opentelemetry::trace::TraceId::from_hex` / `SpanId::from_hex`
-  - 构造 `SpanContext::new(trace_id, span_id, TraceFlags::SAMPLED, true (is_remote), TraceState::default())`
-  - 包装为 `OtelContext::new().with_remote_span_context(span_ctx)`
-  - 调 `tracing::Span::current().set_parent(otel_ctx)`
-- 解析失败 → log warn 并跳过（不 panic）
+### W2-S5-2 绿：实现子端 attach + 重建
+- 子 agent 入口（接收 SpawnRequest 后，**创建 root span 之前**）：
+  1. 解析 `TraceContext.trace_id` / `span_id` → `opentelemetry::trace::TraceId::from_hex` / `SpanId::from_hex`
+  2. 解析失败 → log warn 并跳过 attach，直接创建 span（W1 行为）
+  3. 解析成功 → 构造 `SpanContext::new(trace_id, span_id, TraceFlags::SAMPLED, /* is_remote */ true, TraceState::default())`
+  4. `let parent_ctx = opentelemetry::Context::current().with_remote_span_context(span_ctx);`
+  5. `let _attach_guard = parent_ctx.attach();`（**guard 必须覆盖整个 root span 生命周期**：放在 agent run 顶层 fn 内 `let span = info_span!(...)` 之前，guard 与 span 同 scope 持有）
+  6. 后续 `let span = info_span!("agent.run", ...); let _enter = span.enter();` 创建的 span 由 OpenTelemetryLayer 在 `on_new_span` 时读 `OtelContext::current()` 自动继承 trace_id（依赖装配链 `.with_context_activation(true)`，见 Step 2）
+- **不调** `OpenTelemetrySpanExt::set_parent`（避免 oracle 担忧的"span 已建再改"语义）
 
 ### W2-S5-3 验证 + 提交
 - `cargo test -p visp-agent`
 - `cargo clippy -p visp-agent -- -D warnings` / `cargo fmt -- --check`
-- Commit：`feat(agent): 子 agent 入口从 TraceContext 重建 OTel parent`
+- Commit：`feat(agent): 子 agent 入口 attach OTel Context 重建跨 mpsc trace`
+
 
 ## Step 6：端到端 OTLP 链路验证（in-memory）
 
@@ -854,9 +885,10 @@ cargo fmt -- --check
 
 ### W2-S6-1 红：e2e 集成测试
 - **文件**：`crates/visp-daemon/tests/observability_otlp_e2e.rs`（新建）
-- **测试**（2 个，标 `#[serial_test::serial]`）：
+- **测试**（3 个，标 `#[serial_test::serial]`）：
   - `test_otlp_e2e_single_agent_emits_spans`：启动 daemon（OTLP enabled + 注入 InMemoryExporter），跑一次单 agent run，断言导出 span 数 ≥ W1 默认 4 种 span 总数，trace_id 单一
   - `test_otlp_e2e_orchestrator_to_subagent_single_trace`：跨 mpsc 触发 sub-agent；断言父+子所有 span 在同一 trace_id，子 agent root span 的 parent_span_id 等于父端最内层 span_id
+  - `test_otlp_e2e_export_failure_graceful`：启用 OTLP 但 endpoint 配置为不可达地址（`http://127.0.0.1:1`），主流程仍能完成一次 agent run，不 panic，日志含 export 失败 warning（验证 D3 — collector 不可达时不影响主路径）
 
 ### W2-S6-2 绿：补齐测试钩子
 - 若 W2-S2-2 的 `init_observability_with_exporter` 不够用（缺 metrics writer 注入），按需扩展
@@ -871,15 +903,18 @@ cargo fmt -- --check
 ## Wave 2 总验收清单
 
 - [ ] `cargo build -p visp-daemon` 默认编译通过（OTel 依赖始终编入，无 cargo feature gate）
-- [ ] `cargo test --workspace` 全绿（W1 全部 + Wave 2 新增 ~14 用例）
+- [ ] `cargo test --workspace` 全绿（W1 全部 + Wave 2 新增 ~16 用例：Step1×5 + Step2×3 + Step3×6 + Step4×3 + Step5×2 + Step6×3 ≈ 22，含部分既有改造）
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` 零新增警告
 - [ ] `cargo fmt -- --check` 通过
 - [ ] 默认配置（`[observability.otlp] enabled = false`）下：OTel layer 不挂载，W1 行为完全不变；`ObservabilityGuard.tracer_provider` 为 `None`
 - [ ] 启用 OTLP（`enabled = true` + 本地 Jaeger / Tempo）：UI 可见单 trace 跨 orchestrator + sub-agent，子 agent root span `parent_span_id` 非 0 且等于父端最内层 span
-- [ ] OTLP 启用时 fmt JSON 输出的 `visp.span.w3c_id` 与 OTel 后端记录的 span_id 严格一致（D1 验证）
-- [ ] `SpawnRequest.trace_context` schema 不变（D2 验证）
-- [ ] daemon 关闭时 `SdkTracerProvider::shutdown` 被调用，无 BatchSpanProcessor 泄漏 warning
+- [ ] OTLP 启用时 fmt JSON 输出的 `visp.span.w3c_id` 与 OTel 后端记录的 span_id 严格一致（D1 验证：on_enter + get_otel_context）
+- [ ] `SpawnRequest.trace_context` schema 不变（D2 验证）；子端通过 **attach Context** 重建（非 set_parent）
+- [ ] 装配链含 `OpenTelemetryLayer::new(tracer).with_context_activation(true)`（默认即为 true，显式调用以防上游变更）
+- [ ] 采样器为 `ParentBased(TraceIdRatioBased(sample_rate))`，配置项 `sample_rate` 默认 1.0 且 clamp 到 `[0.0, 1.0]`
+- [ ] daemon 关闭时 `SdkTracerProvider::shutdown` 被调用；exporter `with_timeout(5s)` 间接限制 flush 时长，无 BatchSpanProcessor 泄漏 warning
 - [ ] 设置 `enabled = true` 但 collector 不可达：daemon 启动成功，仅后台 export 失败 warning，主流程不受影响（D3 验证）
+- [ ] `ObservabilityGuard` 字段顺序为 `tracer_provider` 在 `_file_guard` **之前**，确保 drop 顺序：先 flush spans → 再关日志文件
 
 ---
 
