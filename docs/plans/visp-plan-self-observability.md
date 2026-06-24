@@ -683,7 +683,7 @@ cargo fmt -- --check
 | 编号 | 决策 | 说明 |
 |---|---|---|
 | **D1** | ParentLinkLayer 双模式（Y 方案） | OTLP 未启用 → 走 W1 uuid 路径（W1 行为完全不变）；OTLP 启用 → 切换到 OTel 权威源，从 OTel span extension 读真实 trace_id/span_id 写入 `visp.span.w3c_id`，避免跨 mpsc 双源不一致 |
-| **D2** | TraceContext schema 保留 + **`set_parent` 重建（修订）** | visp-core 的 `SpawnRequest.trace_context` 字段不变。OTLP 启用时 trace_id/span_id 来自 OTel SDK；子 agent 端用 TraceContext 重建 `opentelemetry::trace::SpanContext` → 构造 `Context::new().with_remote_span_context(sc)` → 调 **`OpenTelemetrySpanExt::set_parent(parent_ctx)`**（在 `span.enter()` **之前**）。**不再使用 attach Context 方案**（见下文 POC 复盘） |
+| **D2** | TraceContext schema 保留 + **orchestrator 端单点 `set_parent` 重建（第 3 轮修订）** | visp-core 的 `SpawnRequest.trace_context` 字段不变。OTLP 启用时 trace_id/span_id 来自 OTel SDK；**仅 orchestrator 端** `visp.subagent.spawn` 桥接 span 用 TraceContext 重建 `opentelemetry::trace::SpanContext` → 构造 `Context::new().with_remote_span_context(sc)` → 调 **`OpenTelemetrySpanExt::set_parent(parent_ctx)`**（在 `span.enter()` 之前）。**子 agent 端不调 set_parent** — orchestrator 用 `.instrument(spawn_span.clone())` 让子 task 运行在 spawn_span 的 contextual 状态下，子端 `agent.run` 创建时 tracing-opentelemetry Layer 在 `is_contextual()=true` 路径下自动读 `OtelContext::current()` 把 spawn_span 设为父，**OTel 自动传播一跳**，无需 visp-core 引入 OTel 依赖（保持 IO-free 架构约束）。**不再使用 attach Context 方案**（见下文 POC 复盘） |
 | **D3** | 默认 disabled | `[observability.otlp] enabled = false` 默认值。无 collector 时不报错、不影响 W1 行为。不使用 cargo feature gate，纯运行时分支控制（依赖始终编译进 daemon） |
 
 ## 跨步骤架构要点
@@ -694,18 +694,20 @@ cargo fmt -- --check
 - **shutdown**：`SdkTracerProvider::shutdown()` 同步阻塞冲刷 BatchSpanProcessor，无 `shutdown_with_timeout` API；export timeout 改在 `SpanExporter::builder().with_tonic().with_timeout(Duration::from_secs(5))` 设置，间接限制 shutdown 阻塞时长
 - **runtime**：`init_observability` 在 `#[tokio::main]` 内调用（main.rs:90），BatchSpanProcessor 可直接 spawn tonic 后台任务
 - **Layer 内读 OTel SpanContext 的公开 API**：用 `tracing_opentelemetry::get_otel_context(&span_id, &dispatch) -> Option<opentelemetry::Context>`（POC 验证 + librarian 源码确认）。**不**直接读 `OtelData`（非 pub，存储类型为私有 `OtelDataLock`）；不在 Layer 回调内调 `OpenTelemetrySpanExt::context()`（需 `tracing::Span` 句柄，Layer 拿不到）
-- **跨 mpsc 子端 parent 重建用 `set_parent`，不用 `attach Context`**（librarian 二次源码追踪后修订）：
-  - tracing-opentelemetry Layer `parent_context()`（`tracing-opentelemetry/src/layer.rs`）在 `is_contextual()=false`（root span，无 tracing 父）时返回 `OtelContext::default()`，**完全忽略** `Context::attach()` 设置的远端 SpanContext → 导致 `parent_span_id=0`
-  - POC `otel_poc.rs` 实测 attach 方案 trace_id 继承成功，但导出 span 的 `parent_span_id=0000000000000000`（之前误读为正常）
-  - 正确做法：`Context::new().with_remote_span_context(sc)` → `OpenTelemetrySpanExt::set_parent(parent_ctx)`，**必须在 `span.enter()` 之前**调用（builder/未 entered 阶段），否则 builder 已被消费返回 `AlreadyStarted` 错误
-  - tracing-opentelemetry 文档明示 `set_parent` 是 "primarily used to inject distributed tracing context from external systems" 的官方 API
-  - `set_parent` 不依赖 `is_contextual()` gate，对 root span / contextual span 均生效，因此可同时用于 orchestrator 端 `visp.subagent.spawn` 桥接 span（修复 Oracle B1）和子 agent 端 `agent.run` root span
+- **跨 mpsc parent 重建：orchestrator 端单点 `set_parent`，子端走 OTel 自动传播**（Oracle 第 3 轮 review 后修订）：
+  - **attach Context 方案不可用**（librarian 二次源码追踪确认）：tracing-opentelemetry Layer `parent_context()`（`tracing-opentelemetry/src/layer.rs`）在 `is_contextual()=false`（root span，无 tracing 父）时返回 `OtelContext::default()`，**完全忽略** `Context::attach()` 设置的远端 SpanContext → 导致 `parent_span_id=0`；POC `otel_poc.rs` 实测 attach 方案 trace_id 继承成功，但导出 span 的 `parent_span_id=0000000000000000`
+  - **orchestrator 端用 `set_parent`**：在 `visp.subagent.spawn` 桥接 span 创建后、`tokio::spawn` 之前调 `spawn_span.set_parent(rebuild_parent_context(&tc))`。`set_parent` 必须在 `span.enter()` 之前调用（builder/未 entered 阶段），否则 builder 已被消费返回 `AlreadyStarted` 错误。tracing-opentelemetry 文档明示 `set_parent` 是 "primarily used to inject distributed tracing context from external systems" 的官方 API
+  - **子 agent 端不调 set_parent**（Oracle 第 3 轮 review 否决原"双端 set_parent"方案，根因三重）：
+    1. `run_agent_loop`（`crates/visp-core/src/agent_loop.rs:1343`）用 `#[instrument(name="visp.agent.run")]` 宏创建 root span，宏展开把 span 创建与 enter 合并为原子操作，**无处插入 `set_parent`**；
+    2. `visp-core` 必须 IO-free，引入 `tracing_opentelemetry::OpenTelemetrySpanExt` + `opentelemetry::Context` 类型违反核心架构约束；
+    3. 即便实现成功也会导致**扁平 trace 树**（子 agent.run 直接挂在 iteration 下，丢失 spawn_span 中间跳）
+  - **正确链 = OTel 自动传播一跳**：orchestrator 用 `.instrument(spawn_span.clone())` 把子 task 运行在 spawn_span 的 contextual 状态下；子端 `#[instrument]` 创建 `agent.run` 时 tracing-opentelemetry Layer 走 `is_contextual()=true` 路径，自动读 `OtelContext::current()` 把 spawn_span 设为父。最终 trace 树：`agent.iteration → visp.subagent.spawn → visp.agent.run(sub) → tools...`，无需子端 visp-core 修改
 - **测试通道**：用 `opentelemetry_sdk::testing::trace::InMemorySpanExporter` 注入；新增 `init_observability_with_exporter` 测试钩子（`pub(crate)` + `cfg(test)`）
 - **依赖版本绑定**：`opentelemetry 0.32` / `opentelemetry_sdk 0.32` / `opentelemetry-otlp 0.32` / `tracing-opentelemetry 0.33`（四者 minor 版本必须配套）；workspace 依赖已在 commit `10b6c36`（POC 阶段）引入
 
 **POC 触点（已完成 + 后续修订）**：Wave 2 启动前 3 项关键技术验证通过 POC `crates/visp-daemon/src/bin/otel_poc.rs` 实测，其中 B2 经 librarian 二次源码追踪后结论反转：
 - ✅ B1：Layer 内用 `get_otel_context` 可读真实 SpanContext（替代失败的 `OtelData` 路径）
-- ⚠️ B2：**POC 仅验证 trace_id 继承（成功），未验证 parent_span_id 传播**。librarian 二次源码追踪发现 attach 方案 `parent_span_id` 不传播（POC 实测确实是 `0000000000000000`，之前误读为正常）→ **Step 5 改用 `set_parent` 方案**（详见 Step 5 修订说明）
+- ⚠️ B2：**POC 仅验证 trace_id 继承（成功），未验证 parent_span_id 传播**。librarian 二次源码追踪发现 attach 方案 `parent_span_id` 不传播（POC 实测确实是 `0000000000000000`，之前误读为正常）→ **Step 5 改用 orchestrator 端单点 `set_parent` 方案**（Oracle 第 3 轮 review 定版：仅 orchestrator 端 set_parent，子端走 OTel 自动传播 — 因 visp-core IO-free 约束 + `#[instrument]` 宏不可拆分 + 避免扁平 trace 树；详见 Step 5）
 - ✅ `with_context_activation(true)` 在 0.33 存在，签名 `pub fn with_context_activation(self, bool) -> Self`，默认 true（librarian 源码 `tracing-opentelemetry/src/layer.rs:895` 确认）
 
 **Librarian 触点 ②**：已完成两轮源码追踪（首轮 + Wave 2 修订前复核），要点合并入上方"跨步骤架构要点"，不另出文档。
@@ -853,76 +855,84 @@ cargo fmt -- --check
 
 **委托**：@fixer
 
-**目标**：orchestrator 在 spawn 子 agent 时，从当前 OTel context 提取 `SpanContext`，填入 `SpawnRequest.trace_context`。OTel 未启用时保持 W1 行为（trace_id/span_id 由 uuid 生成）。**TraceContext schema 不变**。
+**目标**：orchestrator 在 spawn 子 agent 时，从当前 OTel context 提取 `SpanContext`，填入 `SpawnRequest.trace_context`（含 `parent_span_id`，供 Step 5 orchestrator 端 `set_parent` 重建 SpanContext 使用）。OTel 未启用时保持 W1 行为。**TraceContext schema 不变**。
 
 ### W2-S4-1 红：父端注入测试
 - **文件**：`crates/visp-agent/src/orchestrator.rs`（或对应 spawn 触发点测试模块）
-- **测试**（3 个）：
+- **测试**（4 个）：
   - `test_spawn_trace_context_carries_otel_ids_when_otel_active`：测试内套 `OpenTelemetryLayer`（注入 InMemoryExporter）+ 真实 tracing span；触发 spawn，验证 `SpawnRequest.trace_context.trace_id` / `span_id` 等于 OTel SDK 当前 span 的 ID（hex）
-  - `test_spawn_trace_context_carries_uuid_when_otel_inactive`：未挂 `OpenTelemetryLayer`，沿用 W1 uuid 行为（断言为 16/32-hex 且非全 0）
+  - `test_spawn_trace_context_parent_span_id_matches_current_otel_span`（**新增 — Oracle W1**）：测试内套 `OpenTelemetryLayer` + 真实 tracing span；触发 spawn，验证 `SpawnRequest.trace_context.parent_span_id == Some(current_otel_span.span_id().to_hex())`（OTel 启用模式下 `parent_span_id` 必须填当前 OTel span 的 span_id hex，供 Step 5 helper 重建 SpanContext 使用）
+  - `test_spawn_trace_context_carries_uuid_when_otel_inactive`：未挂 `OpenTelemetryLayer`，沿用 W1 uuid 行为（断言为 16/32-hex 且非全 0；parent_span_id 仍为 iteration W3C ID）
   - `test_spawn_trace_context_uses_current_otel_span_not_root`：在嵌套 span 内触发 spawn，断言 trace_context.span_id 来自最内层 span（验证 `OpenTelemetrySpanExt::context()` 取的是 current）
 
 ### W2-S4-2 绿：实现父端注入
 - spawn 触发点新增 helper：从 `tracing::Span::current()` 调用 `OpenTelemetrySpanExt::context()` 提取 `OtelContext`，从中读 `SpanContext`
-- 若 `SpanContext.is_valid() == true` → 用 OTel ID 填 `TraceContext`；否则走 W1 uuid 路径（fallback）
-- 不引入新依赖；该 helper 位于 visp-daemon 或 visp-agent（取实际 spawn 触发 crate）
+- 若 `SpanContext.is_valid() == true` → 用 OTel ID 填 `TraceContext`：
+  - `trace_id = otel_span_context.trace_id().to_string()`
+  - `span_id = otel_span_context.span_id().to_string()`（propagation ID，与当前 span 同 id 可接受）
+  - **`parent_span_id = Some(otel_span_context.span_id().to_string())`**（Oracle W1：必须是当前 OTel span_id hex，供 Step 5 重建 SpanContext）
+  - **`trace_flags = otel_span_context.trace_flags().to_u8()`**（Oracle W2：保留 sampled bit，供 Step 5 helper 使用 `TraceFlags::from_u8(...)` 而非硬编码 SAMPLED）
+- 否则走 W1 uuid 路径（fallback）
+- 不引入新依赖；该 helper 位于 visp-agent（与 Step 5 helper 同 crate — Oracle B2 修正：避免 visp-daemon → visp-agent 循环依赖）
 
 ### W2-S4-3 验证 + 提交
-- `cargo test -p visp-agent`（含 W1 全部 + 新增 3 个）
+- `cargo test -p visp-agent`（含 W1 全部 + 新增 4 个）
 - `cargo clippy -p visp-agent -- -D warnings` / `cargo fmt -- --check`
-- Commit：`feat(agent): orchestrator spawn 时注入 OTel SpanContext 到 TraceContext`
+- Commit：`feat(agent): orchestrator spawn 时注入 OTel SpanContext 到 TraceContext（含 parent_span_id + trace_flags）`
 
-## Step 5：跨 mpsc OTel parent 重建（D2，`set_parent` 方案 — librarian 复盘后修订）
+## Step 5：orchestrator 端 `set_parent` 重建 OTel 父链（D2，Oracle 第 3 轮 review 后定版）
 
 **委托**：@fixer
 
-**关键修订**：librarian 二次源码追踪 + POC 输出复盘后确认 — **attach Context 方案不能正确传播 `parent_span_id`**（tracing-opentelemetry Layer 的 `parent_context()` 在 root span 场景 `is_contextual()=false` 时返回 `OtelContext::default()`，完全忽略远端 attach 的 Context）。**改用 `OpenTelemetrySpanExt::set_parent(parent_ctx)`** — tracing-opentelemetry 官方标注的 distributed tracing 注入 API，对 root / contextual span 均生效。
+**关键修订（第 3 轮）**：librarian 二次源码追踪 + Oracle 第 3 轮 review 双重确认 — **attach Context 方案不能正确传播 `parent_span_id`**（tracing-opentelemetry Layer `parent_context()` 在 `is_contextual()=false` 时返回 `OtelContext::default()`，忽略 attach 的远端 Context）。同时 Oracle 第 3 轮 review 指出 **子 agent 端不可调 `set_parent`**（3 重冲突：`#[instrument]` 宏不可拆分 / visp-core IO-free 约束 / 扁平 trace 树）。
 
-**两处都要 set_parent**（同步修复 Oracle B1）：
-1. **orchestrator 端**：创建 `visp.subagent.spawn` 桥接 span 时（orchestrator.rs:593）— 该 span 当前运行在 orchestrator 主循环 Context 中，与父 agent 的 `agent.run` scope 无关。需用父端 TraceContext（已在 `spawn_sub_agent` 形参 `trace_context: Option<TraceContext>` 中）重建 SpanContext，对 spawn_span 调 `set_parent`
-2. **子 agent 端**：`run_agent_loop` 接收 SpawnRequest 后，创建 `agent.run` root span 时 — 用同一 TraceContext 重建 SpanContext，对 root span 调 `set_parent`
+**最终方案**：仅 orchestrator 端单点 `set_parent`，子端走 OTel 自动传播：
 
-### W2-S5-1 红：set_parent 双端测试
-- **测试文件**：
-  - `crates/visp-agent/src/orchestrator.rs` 内测试模块（spawn 端，Oracle B1 修复验证）
-  - `crates/visp-agent/src/agent_loop.rs` 内测试模块（子端，与 W1 子 agent 测试同位）
+1. **orchestrator 端**（修复 Oracle B1）：创建 `visp.subagent.spawn` 桥接 span（`orchestrator.rs:593`）后、`tokio::spawn` 之前，用父端 TraceContext 重建 SpanContext，对 spawn_span 调 `set_parent(parent_ctx)`
+2. **子 agent 端零改动**：orchestrator 已用 `.instrument(spawn_span.clone())` 让子 task 运行在 spawn_span 的 contextual 状态；子端 `run_agent_loop` 的 `#[instrument]` 在 `is_contextual()=true` 路径下，tracing-opentelemetry Layer 自动读 `OtelContext::current()` 把 spawn_span 设为 `agent.run` 的父；子 `agent.run` 的 `parent_span_id` 由 OTel SDK 自动分配为 spawn_span.span_id（**非** TraceContext.parent_span_id）
+
+**最终 trace 链**：`agent.iteration (parent) → visp.subagent.spawn → visp.agent.run (sub) → 子 agent.tool.* / agent.llm.*`
+
+### W2-S5-1 红：orchestrator 端 set_parent 测试
+- **测试文件**：`crates/visp-agent/src/orchestrator.rs` 内测试模块
 - **测试**（4 个，均标 `#[serial_test::serial]`；用 `init_observability_with_exporter` 注入 InMemorySpanExporter）：
-  - `test_orchestrator_spawn_span_inherits_parent_via_set_parent`：父 agent.run 触发 spawn；导出的 `visp.subagent.spawn` span 的 `trace_id` 等于父端 TraceContext.trace_id，`parent_span_id` 等于父端 TraceContext.parent_span_id（验证 Oracle B1 修复）
-  - `test_subagent_root_span_inherits_trace_id_and_parent_span_id`：子 agent run 启动后；导出的 `visp.agent.run` span 的 `trace_id` 等于 TraceContext.trace_id，**`parent_span_id` 严格等于 TraceContext.parent_span_id**（验证 `parent_span_id` 真正传播 — Oracle W1 风险点）
-  - `test_subagent_full_trace_chain_single_trace_id`：父 agent → orchestrator spawn → 子 agent → 子 agent 工具调用；所有 span 在同一 `trace_id`，parent-child 链完整（父 agent.run → visp.subagent.spawn → 子 agent.run → 子 agent.tool.* 等）
-  - `test_set_parent_fallback_when_trace_context_invalid`：TraceContext.trace_id 为空字符串或非 hex 时，spawn span / 子 agent root span 均成为新 trace（不报错，不调 set_parent，自动回退 W1 行为）
+  - `test_orchestrator_spawn_span_inherits_parent_via_set_parent`：父 agent.run scope 内触发 spawn；导出的 `visp.subagent.spawn` span 的 `trace_id` 等于父端 TraceContext.trace_id，`parent_span_id` 等于父端 TraceContext.parent_span_id（验证 Oracle B1 修复 — spawn_span 不再成为孤立 trace）
+  - `test_subagent_root_span_auto_parented_to_spawn_span`：父 agent → orchestrator spawn → 子 agent 启动；导出的子 `visp.agent.run` span `trace_id` 等于父 trace_id，**`parent_span_id` 等于 `visp.subagent.spawn` 的 span_id**（验证 OTel Layer 在 contextual 路径下自动传播 — 而非等于 TraceContext.parent_span_id）
+  - `test_subagent_full_trace_chain_single_trace_id`：父 agent → orchestrator spawn → 子 agent → 子 agent 工具调用；所有 span 在同一 `trace_id`，链结构严格为 `agent.iteration → visp.subagent.spawn → visp.agent.run (sub) → 子 agent.tool.*`（验证完整 4 跳）
+  - `test_set_parent_fallback_when_trace_context_invalid`：TraceContext.trace_id 为空字符串或非 hex 时，`rebuild_parent_context` 返回 `None`，spawn_span 不调 `set_parent`，自然成为新 trace 根（不报错，回退合理行为）
 
-### W2-S5-2 绿：实现 set_parent 双端注入
+### W2-S5-2 绿：实现 orchestrator 端 set_parent
 
-**helper 函数位置**：新增 `crates/visp-daemon/src/observability/otel_parent.rs`（或合并入 init.rs / parent_link.rs，由 fixer 决定）：
+**helper 函数位置**：新增 `crates/visp-agent/src/observability.rs`（或合并入 orchestrator 模块内部，由 fixer 决定 — 不放 visp-daemon 避免循环依赖，不放 visp-core 因 OTel 依赖违反 IO-free 约束）：
 - `pub(crate) fn rebuild_parent_context(tc: &TraceContext) -> Option<opentelemetry::Context>`：
   1. 解析 `tc.trace_id` → `TraceId::from_hex(...)`；失败 → 返回 `None`
   2. 解析 `tc.parent_span_id` → `SpanId::from_hex(...)`；缺失或失败 → 返回 `None`
   3. 解析 `tc.trace_state` → `TraceState::from_str`；失败 → 用 `TraceState::default()`
-  4. 构造 `SpanContext::new(trace_id, span_id, TraceFlags::SAMPLED, /* is_remote */ true, trace_state)`
-  5. 返回 `Some(Context::new().with_remote_span_context(sc))`
+  4. **`let flags = TraceFlags::from_u8(tc.trace_flags);`**（Oracle W2：从 TraceContext 读 trace_flags 而非硬编码 SAMPLED，保留父 trace 采样位以兼容 ParentBased 采样器）
+  5. 构造 `SpanContext::new(trace_id, span_id, flags, /* is_remote */ true, trace_state)`
+  6. 返回 `Some(Context::new().with_remote_span_context(sc))`
 
-**orchestrator 端**（`crates/visp-agent/src/orchestrator.rs` 内 `spawn_sub_agent` 函数）：
+**workspace 依赖更新**：`crates/visp-agent/Cargo.toml` 新增：
+- `opentelemetry = { workspace = true }`
+- `tracing-opentelemetry = { workspace = true }`
+（visp-agent 不属于 visp-core，可以引入 OTel 依赖；helper 与调用方同 crate，无循环依赖问题）
+
+**orchestrator 端调用点**（`crates/visp-agent/src/orchestrator.rs` 内 `spawn_sub_agent`）：
 - 在 `let spawn_span = tracing::info_span!("visp.subagent.spawn", ...)` 之后，**在 `tokio::spawn` 之前**，调：
   - `if let Some(tc) = trace_context.as_ref() { if let Some(parent_ctx) = rebuild_parent_context(tc) { spawn_span.set_parent(parent_ctx); } }`
-- 时机要点：`set_parent` 必须在该 span 被任何 `.enter()` / `.in_scope()` 之前调用；当前代码 spawn_span 创建后未立即 enter，故安全
-- W1 已有的 `spawn_span.record("trace_id", ...)` 等 field recording **保留**（OTel 模式下 fmt 输出仍需这些 field）
-- helper 依赖：orchestrator 端调用 `rebuild_parent_context` 需 `visp-daemon` 导出该函数为 `pub` 或将 helper 下沉到 visp-agent / 提取到共享位置（由 fixer 评估，原则：visp-core 保持 IO-free，optl 依赖 OTel SDK 故不能放 visp-core）
+- 时机要点：`set_parent` 必须在该 span 被任何 `.enter()` / `.in_scope()` 之前调用；当前代码 spawn_span 创建后未立即 enter，安全
+- W1 已有的 `spawn_span.record("trace_id", ...)` / `spawn_span.record("parent_span_id", ...)` field recording **保留**（OTel 模式下 fmt JSON 输出仍需这些 field）
+- 顺序建议（同一闭包内）：①创建 spawn_span → ②set_parent → ③`spawn_span.record(...)` 多个 field → ④`tokio::spawn(... .instrument(spawn_span.clone()))`
+- **子 agent 端零改动**：不修改 `crates/visp-core/src/agent_loop.rs`，不引入 OTel 依赖
 
-**子端**（`crates/visp-agent/src/agent_loop.rs` 或 run_agent_loop 入口）：
-- 在创建 `agent.run` root span **之前**，先调 `rebuild_parent_context(&trace_context)` 拿 `Option<Context>`
-- 创建 span 后立即 `set_parent`，再 `enter()`：
-  - 步骤：`let span = info_span!("agent.run", ...);` → `if let Some(parent_ctx) = maybe_parent_ctx { span.set_parent(parent_ctx); }` → `let _enter = span.enter();`
-- TraceContext 解析失败 → 跳过 set_parent，root span 自然成为新 trace（fallback W1 行为，与 `test_set_parent_fallback_when_trace_context_invalid` 对齐）
+**Risk R1 顺手清理**（Oracle 风险点）：`orchestrator.rs:637` 现有 `spawn_span.record("visp.subagent.task_id", task_id)` 时机在 `tokio::spawn` 之后，存在 clone handle 竞态嫌疑。本 Step 在调整 record 时机时一并将 task_id record 前移到 `tokio::spawn` 之前，与 trace_id / parent_span_id 等并列。
 
 ### W2-S5-3 验证 + 提交
 - `cargo test -p visp-agent`（含 W1 全部 + 新增 4 个）
-- `cargo test -p visp-daemon`（确保 helper 位置变动不影响 W1 daemon 测试）
+- `cargo test -p visp-core`（确认 visp-core 零修改 → W1 测试全绿）
+- `cargo test -p visp-daemon`（确认 helper 位置变动不影响 W1 daemon 测试）
 - `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt -- --check`
-- Commit：`feat(agent): orchestrator spawn 与子 agent root span 用 set_parent 重建 OTel parent（修 Oracle B1）`
-
-
-
+- Commit：`feat(agent): orchestrator spawn_span 用 set_parent 重建 OTel parent（修 Oracle B1；子端走 OTel 自动传播）`
 ## Step 6：端到端 OTLP 链路验证（in-memory）
 
 **委托**：@fixer
@@ -931,7 +941,11 @@ cargo fmt -- --check
 - **文件**：`crates/visp-daemon/tests/observability_otlp_e2e.rs`（新建）
 - **测试**（3 个，标 `#[serial_test::serial]`）：
   - `test_otlp_e2e_single_agent_emits_spans`：启动 daemon（OTLP enabled + 注入 InMemoryExporter），跑一次单 agent run，断言导出 span 数 ≥ W1 默认 4 种 span 总数，trace_id 单一
-  - `test_otlp_e2e_orchestrator_to_subagent_single_trace`：跨 mpsc 触发 sub-agent；断言（a）父 + spawn 桥接 span + 子所有 span 在同一 `trace_id`；（b）`visp.subagent.spawn` span 的 `parent_span_id` 等于父端最内层 span_id（验证 Oracle B1 修复）；（c）子 `agent.run` root span 的 `parent_span_id` 等于父端注入的 TraceContext.parent_span_id（验证 Oracle W1 — parent_span_id 真正传播）
+  - `test_otlp_e2e_orchestrator_to_subagent_single_trace`：跨 mpsc 触发 sub-agent；断言（Oracle W3 修订后）：
+    - **(a)** 父 + spawn 桥接 span + 子所有 span 在同一 `trace_id`
+    - **(b)** `visp.subagent.spawn` span 的 `parent_span_id == 父端 TraceContext.parent_span_id`（验证 Oracle B1 修复 — orchestrator 端 set_parent 生效）
+    - **(c)** 子 `visp.agent.run` root span 的 `parent_span_id == visp.subagent.spawn 的 span_id`（**非** TraceContext.parent_span_id；验证 OTel Layer 在 contextual 路径下自动把 spawn_span 设为父）
+    - **(d)** 完整链：`agent.iteration → visp.subagent.spawn → visp.agent.run(sub) → 子 agent.tool.*`（4 跳 parent-child 关系闭合）
   - `test_otlp_e2e_export_failure_graceful`：启用 OTLP 但 endpoint 配置为不可达地址（`http://127.0.0.1:1`），主流程仍能完成一次 agent run，不 panic，日志含 export 失败 warning（验证 D3 — collector 不可达时不影响主路径）
 
 ### W2-S6-2 绿：补齐测试钩子
@@ -942,20 +956,22 @@ cargo fmt -- --check
 - `cargo test -p visp-daemon --test observability_otlp_e2e`
 - `cargo test --workspace`（全量回归，含 W1）
 - `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt -- --check`
-- Commit：`test(daemon): OTLP 端到端 in-memory 验证（含跨 mpsc 单 trace_id + parent_span_id 严格断言）`
-
-
+- Commit：`test(daemon): OTLP 端到端 in-memory 验证（4 跳 trace 链 + Oracle B1 验证）`
 ## Wave 2 总验收清单
 
 - [ ] `cargo build -p visp-daemon` 默认编译通过（OTel 依赖始终编入，无 cargo feature gate）
-- [ ] `cargo test --workspace` 全绿（W1 全部 + Wave 2 新增 ~16 用例：Step1×5 + Step2×3 + Step2.5×0 + Step3×6 + Step4×3 + Step5×4 + Step6×3 ≈ 24，含部分既有改造）
+- [ ] `cargo test --workspace` 全绿（W1 全部 + Wave 2 新增 ~24 用例：Step1×5 + Step2×3 + Step2.5×0 + Step3×6 + Step4×4 + Step5×4 + Step6×3 = 25，含部分既有改造）
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` 零新增警告
 - [ ] `cargo fmt -- --check` 通过
 - [ ] 默认配置（`[observability.otlp] enabled = false`）下：OTel layer 不挂载，W1 行为完全不变；`ObservabilityGuard.tracer_provider` 为 `None`
-- [ ] 启用 OTLP（`enabled = true` + 本地 Jaeger / Tempo）：UI 可见单 trace 跨 orchestrator + sub-agent，子 agent root span `parent_span_id` 非 0 且严格等于父端 TraceContext.parent_span_id
-- [ ] `visp.subagent.spawn` 桥接 span 与父 `agent.run` 同 `trace_id`，且 `parent_span_id` 非 0（Oracle B1 修复验证）
+- [ ] 启用 OTLP（`enabled = true` + 本地 Jaeger / Tempo）：UI 可见单 trace 跨 orchestrator + sub-agent，`visp.subagent.spawn` 桥接 span 的 `parent_span_id` 严格等于父端 TraceContext.parent_span_id（验证 Oracle B1 修复），子 `agent.run` root span 的 `parent_span_id` 严格等于 spawn_span 的 span_id（验证 OTel Layer 自动传播 — 非 TraceContext.parent_span_id）
+- [ ] 4 跳 trace 链结构完整：`agent.iteration → visp.subagent.spawn → visp.agent.run(sub) → 子 agent.tool.*`，parent-child 关系闭合
 - [ ] OTLP 启用时 fmt JSON 输出的 `visp.span.w3c_id` 与 OTel 后端记录的 span_id 严格一致（D1 验证：on_enter + get_otel_context）
-- [ ] `SpawnRequest.trace_context` schema 不变（D2 验证）；orchestrator 端 `visp.subagent.spawn` span 与子端 `agent.run` root span 均通过 **`set_parent`** 重建（不再使用 attach Context 方案）
+- [ ] `SpawnRequest.trace_context` schema 不变（D2 验证）；**仅 orchestrator 端** `visp.subagent.spawn` 桥接 span 通过 `set_parent` 重建 OTel 父链（子端走 OTel 自动传播，零修改 — Oracle 第 3 轮 review 修订）
+- [ ] `visp-core` 未引入 OTel 依赖（`cargo tree -p visp-core | grep -E "opentelemetry|tracing-opentelemetry"` 输出为空）— 验证 visp-core IO-free 架构约束
+- [ ] `visp-agent` 新增 `opentelemetry` + `tracing-opentelemetry` workspace 依赖（用于 `rebuild_parent_context` helper），无循环依赖
+- [ ] `rebuild_parent_context` helper 使用 `TraceFlags::from_u8(tc.trace_flags)` 而非硬编码 `TraceFlags::SAMPLED`（Oracle W2 修复）
+- [ ] Step 4 父端注入：OTel 启用时 `SpawnRequest.trace_context.parent_span_id == Some(current_otel_span.span_id().to_hex())`（Oracle W1 修复）
 - [ ] 装配链含 `OpenTelemetryLayer::new(tracer).with_context_activation(true)`（默认即为 true，显式调用以防上游变更）
 - [ ] 采样器为 `ParentBased(TraceIdRatioBased(sample_rate))`，配置项 `sample_rate` 默认 1.0 且 clamp 到 `[0.0, 1.0]`
 - [ ] daemon 关闭时 `SdkTracerProvider::shutdown` 被调用；exporter `with_timeout(5s)` 间接限制 flush 时长，无 BatchSpanProcessor 泄漏 warning
