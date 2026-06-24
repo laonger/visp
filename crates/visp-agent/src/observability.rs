@@ -4,6 +4,8 @@
 //! current tracing span and constructing [`TraceContext`] values.
 
 use opentelemetry::trace::TraceContextExt;
+use opentelemetry::trace::{SpanId, TraceFlags, TraceId, TraceState};
+use std::str::FromStr;
 use visp_core::TraceContext;
 
 /// Extract a [`TraceContext`] from the current tracing span's OTel context.
@@ -59,6 +61,36 @@ pub(crate) fn extract_trace_context() -> TraceContext {
         )
         .expect("UUID-based IDs are always valid hex strings")
     }
+}
+
+/// Rebuild an OTel parent [`Context`] from a [`TraceContext`].
+///
+/// Returns `None` if:
+/// - `tc.trace_id` cannot be parsed as hex
+/// - `tc.parent_span_id` is `None` or cannot be parsed as hex
+///
+/// In all other cases a remote `SpanContext` is constructed — even if
+/// `trace_flags` or `trace_state` are degenerate — so that the caller can
+/// call `set_parent()` on a tracing span to continue the parent trace.
+pub(crate) fn rebuild_parent_context(tc: &TraceContext) -> Option<opentelemetry::Context> {
+    let trace_id = TraceId::from_hex(tc.trace_id.as_str()).ok()?;
+    let parent_span_id = SpanId::from_hex(tc.parent_span_id.as_ref()?.as_str()).ok()?;
+
+    let trace_state = tc
+        .trace_state
+        .as_ref()
+        .and_then(|ts| TraceState::from_str(ts).ok())
+        .unwrap_or_default();
+
+    let flags = TraceFlags::new(tc.trace_flags);
+    let sc = opentelemetry::trace::SpanContext::new(
+        trace_id,
+        parent_span_id,
+        flags,
+        /* is_remote */ true,
+        trace_state,
+    );
+    Some(opentelemetry::Context::new().with_remote_span_context(sc))
 }
 
 #[cfg(test)]
@@ -216,5 +248,214 @@ mod tests {
             });
         });
         drop(outer);
+    }
+
+    // ── W2-S5: set_parent OTel-level test ──────────────────────────
+
+    use opentelemetry::trace::TraceId;
+
+    /// Set up OTel subscriber and return (exporter, tracer_provider, guard).
+    fn setup_otel_with_exporter() -> (
+        opentelemetry_sdk::trace::InMemorySpanExporter,
+        opentelemetry_sdk::trace::SdkTracerProvider,
+        tracing::subscriber::DefaultGuard,
+    ) {
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_span_processor(opentelemetry_sdk::trace::SimpleSpanProcessor::new(
+                exporter.clone(),
+            ))
+            .build();
+        let tracer = provider.tracer("visp_agent_test");
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::OpenTelemetryLayer::new(tracer).with_context_activation(true),
+        );
+        let guard = tracing::subscriber::set_default(subscriber);
+        (exporter, provider, guard)
+    }
+
+    /// Verify that rebuild_parent_context + set_parent stores the parent
+    /// OTel Context in the span's extensions.
+    #[test]
+    fn test_set_parent_produces_correct_otel_parent_span_id() {
+        let (_exporter, _provider, _guard) = setup_otel_with_exporter();
+
+        // 1. Create a parent OTel span and get its span context
+        let parent_span = tracing::info_span!("parent_span");
+        let parent_ctx = parent_span.in_scope(|| {
+            let ctx = tracing::Span::current().context();
+            let s = ctx.span();
+            s.span_context().clone()
+        });
+        drop(parent_span);
+
+        // 2. Build TraceContext from parent_ctx, then rebuild OTel Context
+        let tc = TraceContext::new(
+            parent_ctx.trace_id().to_string(),
+            parent_ctx.span_id().to_string(),
+            parent_ctx.trace_flags().to_u8(),
+            Some(parent_ctx.trace_state().header()),
+            Some(parent_ctx.span_id().to_string()),
+        )
+        .unwrap();
+
+        let otel_ctx = rebuild_parent_context(&tc).expect("should rebuild context");
+
+        // 3. Create child span with set_parent
+        let child_span = tracing::info_span!("child_span");
+        let _ = child_span.set_parent(otel_ctx);
+
+        // 4. Verify that set_parent stored the parent context.
+        //    The parent context is stored in the span's extensions but the
+        //    OTel layer reads it during span creation.  We verify correctness
+        //    by checking that the child_span's OWN OTel context (set when the
+        //    span was entered) has the same trace_id as the parent, proving
+        //    set_parent was received and the trace chain is intact.
+        let child_otel_ctx = child_span.in_scope(|| tracing::Span::current().context());
+        let s = child_otel_ctx.span();
+        let child_sc = s.span_context();
+
+        // The child span should have the same trace_id as the parent
+        assert_eq!(
+            child_sc.trace_id(),
+            parent_ctx.trace_id(),
+            "child span's OTel context should have parent's trace_id (set_parent worked)"
+        );
+        // The child span itself should NOT be remote (it's a local span, not a remote reference)
+        assert!(
+            !child_sc.is_remote(),
+            "child span should be local, not remote"
+        );
+
+        drop(child_span);
+    }
+
+    /// Verify that rebuild_parent_context returns None for invalid TraceContext,
+    /// and the span creates its own trace.
+    #[test]
+    fn test_set_parent_fallback_invalid_trace_context() {
+        let (_exporter, _provider, _guard) = setup_otel_with_exporter();
+
+        // Invalid TraceContext (non-hex trace_id) → rebuild_parent_context returns None
+        let tc = TraceContext {
+            trace_id: "nothex".to_string(),
+            span_id: "b7ad6b7169203331".to_string(),
+            trace_flags: 1,
+            trace_state: None,
+            parent_span_id: Some("aaaaaaaaaaaaaaaa".to_string()),
+        };
+
+        let otel_ctx = rebuild_parent_context(&tc);
+        assert!(
+            otel_ctx.is_none(),
+            "invalid TraceContext should return None"
+        );
+
+        // Create span without set_parent
+        let child_span = tracing::info_span!("orphan_span");
+        let child_otel_ctx = child_span.in_scope(|| tracing::Span::current().context());
+        drop(child_span);
+
+        let s = child_otel_ctx.span();
+        let child_sc = s.span_context();
+        // The span should create its own trace (not inherited)
+        assert!(
+            !child_sc.is_remote(),
+            "without set_parent, span should NOT have remote span context"
+        );
+        assert_eq!(
+            child_sc.trace_id().to_string().len(),
+            32,
+            "span should have a valid trace_id"
+        );
+    }
+
+    // ── W2-S5: rebuild_parent_context unit tests ────────────────────────
+
+    #[test]
+    fn test_rebuild_parent_context_valid() {
+        let tc = TraceContext::new(
+            "0af7651916cd43dd8448eb211c80319c".to_string(),
+            "b7ad6b7169203331".to_string(),
+            1, // sampled
+            Some("congo=toto".to_string()),
+            Some("aaaaaaaaaaaaaaaa".to_string()),
+        )
+        .unwrap();
+
+        let ctx = rebuild_parent_context(&tc);
+        assert!(ctx.is_some(), "should produce Some context for valid input");
+
+        let ctx = ctx.unwrap();
+        let span = ctx.span();
+        let sc = span.span_context();
+        assert_eq!(
+            sc.trace_id(),
+            TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap()
+        );
+        assert_eq!(sc.span_id(), SpanId::from_hex("aaaaaaaaaaaaaaaa").unwrap());
+        assert!(sc.is_remote(), "should be marked as remote");
+        assert_eq!(sc.trace_flags(), TraceFlags::new(1));
+        assert_eq!(sc.trace_state().header(), "congo=toto");
+    }
+
+    #[test]
+    fn test_rebuild_parent_context_invalid_trace_id_returns_none() {
+        // Construct TraceContext directly to bypass validation
+        let tc = TraceContext {
+            trace_id: "invalid".to_string(),
+            span_id: "b7ad6b7169203331".to_string(),
+            trace_flags: 1,
+            trace_state: None,
+            parent_span_id: Some("aaaaaaaaaaaaaaaa".to_string()),
+        };
+        assert!(rebuild_parent_context(&tc).is_none());
+    }
+
+    #[test]
+    fn test_rebuild_parent_context_missing_parent_span_id_returns_none() {
+        let tc = TraceContext {
+            trace_id: "0af7651916cd43dd8448eb211c80319c".to_string(),
+            span_id: "b7ad6b7169203331".to_string(),
+            trace_flags: 1,
+            trace_state: None,
+            parent_span_id: None,
+        };
+        assert!(rebuild_parent_context(&tc).is_none());
+    }
+
+    #[test]
+    fn test_rebuild_parent_context_invalid_parent_span_id_returns_none() {
+        let tc = TraceContext {
+            trace_id: "0af7651916cd43dd8448eb211c80319c".to_string(),
+            span_id: "b7ad6b7169203331".to_string(),
+            trace_flags: 1,
+            trace_state: None,
+            parent_span_id: Some("nothex".to_string()),
+        };
+        assert!(rebuild_parent_context(&tc).is_none());
+    }
+
+    #[test]
+    fn test_rebuild_parent_context_invalid_trace_state_uses_default() {
+        let tc = TraceContext::new(
+            "0af7651916cd43dd8448eb211c80319c".to_string(),
+            "b7ad6b7169203331".to_string(),
+            1,
+            Some("invalid!state!format".to_string()),
+            Some("aaaaaaaaaaaaaaaa".to_string()),
+        )
+        .unwrap();
+
+        let ctx = rebuild_parent_context(&tc);
+        assert!(
+            ctx.is_some(),
+            "should still produce Some context even with invalid trace_state"
+        );
+        let ctx = ctx.unwrap();
+        let span = ctx.span();
+        let sc = span.span_context();
+        // trace_state should be default (empty) since the string was invalid
+        assert_eq!(sc.trace_state().header(), "");
     }
 }

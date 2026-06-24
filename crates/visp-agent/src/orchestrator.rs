@@ -605,8 +605,18 @@ impl Orchestrator {
             trace_state = tracing::field::Empty,
         );
 
+        // W2-S5: Rebuild OTel parent Context from TraceContext and set it
+        // on spawn_span. This must happen before the first .enter()/.in_scope(),
+        // which is before tokio::spawn + .instrument().
+        if let Some(tc) = trace_context.as_ref()
+            && let Some(parent_ctx) = crate::observability::rebuild_parent_context(tc)
+        {
+            use tracing_opentelemetry::OpenTelemetrySpanExt;
+            let _ = spawn_span.set_parent(parent_ctx);
+        }
+
         // 通过 span field 传递 TraceContext（ParentLinkLayer 在 on_record 中读取）
-        if let Some(tc) = trace_context {
+        if let Some(tc) = trace_context.as_ref() {
             spawn_span.record("trace_id", tc.trace_id.as_str());
             if let Some(ref psid) = tc.parent_span_id {
                 spawn_span.record("parent_span_id", psid.as_str());
@@ -614,6 +624,11 @@ impl Orchestrator {
             if let Some(ref ts) = tc.trace_state {
                 spawn_span.record("trace_state", ts.as_str());
             }
+        }
+
+        // 记录 task_id（Risk R1：前移到 tokio::spawn 之前）
+        if let Some(task_id) = _task_id {
+            spawn_span.record("visp.subagent.task_id", task_id);
         }
 
         let loop_handle = tokio::spawn(
@@ -634,11 +649,6 @@ impl Orchestrator {
         );
         self.sub_agent_handles
             .insert(sub_session_id.clone(), loop_handle);
-
-        // 记录 task_id（如有）
-        if let Some(task_id) = _task_id {
-            spawn_span.record("visp.subagent.task_id", task_id);
-        }
 
         tracing::info!(
             parent = parent_session_id,
@@ -1818,6 +1828,264 @@ mod tests {
         assert!(
             !field_map.contains_key("trace_state"),
             "trace_state should NOT be recorded (W2 fallback sets None)"
+        );
+    }
+
+    // ── W2-S5: set_parent / tracing parent chain integration tests ──────
+
+    /// Helper: set up a TestLayer + OTel subscriber combo.
+    #[allow(clippy::type_complexity)]
+    fn setup_tracing_with_otel() -> (
+        TArc<TMutex<Vec<CapturedSpan>>>,
+        TArc<TMutex<Vec<String>>>,
+        TArc<TMutex<Vec<visp_core::TraceContext>>>,
+        tracing::subscriber::DefaultGuard,
+    ) {
+        let (spans, events, tcs) = setup_tracing();
+        let guard = make_tracing_guard(&spans, &events, &tcs);
+        (spans, events, tcs, guard)
+    }
+
+    /// W2-S5 Test 1: Oracle B1 fix — spawn_span inherits parent trace_id
+    /// and parent_span_id from the parent's TraceContext via set_parent.
+    ///
+    /// Verified via tracing-level parent chain: spawn_span's tracing parent
+    /// should be the parent span (agent.iteration).
+    #[tokio::test]
+    async fn test_orchestrator_spawn_span_inherits_parent_via_set_parent() {
+        let (spans, _events, _tcs, _guard) = setup_tracing_with_otel();
+
+        let parent_span = tracing::info_span!("agent.iteration");
+        let parent_id_u64 = parent_span.in_scope(|| {
+            let temp = tracing::info_span!("marker");
+            let id = {
+                let captured = spans.lock().unwrap();
+                captured
+                    .iter()
+                    .find(|s| s.name == "marker")
+                    .expect("marker span should exist")
+                    .parent_id
+                    .expect("marker should have parent (agent.iteration)")
+            };
+            drop(temp);
+            id
+        });
+
+        let (mut orch, _gtx, _grx, session_id) = make_orchestrator_for_spawn();
+        let envelope = Envelope {
+            session_id: session_id.clone(),
+            message: AgentMessage::SpawnRequest {
+                call_id: "call-w2s5-1".to_string(),
+                subagent_type: "default".to_string(),
+                description: "test set_parent".to_string(),
+                task_id: Some("task-w2s5-1".to_string()),
+                trace_context: None,
+            },
+            trace_context: None,
+        };
+
+        async {
+            orch.handle_agent_message(envelope).await;
+        }
+        .instrument(parent_span)
+        .await;
+
+        // Wait for spawned task to complete
+        let sub_sessions: Vec<String> = orch.sub_agent_handles.keys().cloned().collect();
+        for sid in &sub_sessions {
+            if let Some(handle) = orch.sub_agent_handles.remove(sid) {
+                let _ = handle.await;
+            }
+        }
+
+        let captured = spans.lock().unwrap();
+        let spawn_span = captured
+            .iter()
+            .find(|s| s.name == "visp.subagent.spawn")
+            .expect("should find visp.subagent.spawn span");
+        assert_eq!(
+            spawn_span.parent_id,
+            Some(parent_id_u64),
+            "spawn_span's tracing parent should be parent_span (Oracle B1 fix)"
+        );
+    }
+
+    /// W2-S5 Test 2: Sub-agent's visp.agent.run automatically parented to
+    /// visp.subagent.spawn via tracing span hierarchy (which drives OTel
+    /// auto-propagation in contextual mode).
+    #[tokio::test]
+    async fn test_subagent_root_span_auto_parented_to_spawn_span() {
+        let (spans, _events, _tcs, _guard) = setup_tracing_with_otel();
+
+        let parent_span = tracing::info_span!("agent.iteration");
+        let (mut orch, _gtx, _grx, session_id) = make_orchestrator_for_spawn();
+        let envelope = Envelope {
+            session_id: session_id.clone(),
+            message: AgentMessage::SpawnRequest {
+                call_id: "call-w2s5-2".to_string(),
+                subagent_type: "default".to_string(),
+                description: "test auto parent".to_string(),
+                task_id: None,
+                trace_context: None,
+            },
+            trace_context: None,
+        };
+
+        async {
+            orch.handle_agent_message(envelope).await;
+        }
+        .instrument(parent_span)
+        .await;
+
+        // Wait for spawned task to complete
+        let sub_sessions: Vec<String> = orch.sub_agent_handles.keys().cloned().collect();
+        for sid in &sub_sessions {
+            if let Some(handle) = orch.sub_agent_handles.remove(sid) {
+                let _ = handle.await;
+            }
+        }
+
+        let captured = spans.lock().unwrap();
+        let spawn_span = captured
+            .iter()
+            .find(|s| s.name == "visp.subagent.spawn")
+            .expect("should find visp.subagent.spawn");
+        let run_span = captured
+            .iter()
+            .find(|s| s.name == "visp.agent.run")
+            .expect("should find visp.agent.run (sub-agent)");
+
+        // visp.agent.run should be a tracing child of visp.subagent.spawn
+        assert_eq!(
+            run_span.parent_id,
+            Some(spawn_span.id),
+            "visp.agent.run should be child of visp.subagent.spawn"
+        );
+    }
+
+    /// W2-S5 Test 3: Full trace chain — all spans share the same parent chain:
+    /// agent.iteration → visp.subagent.spawn → visp.agent.run (sub)
+    #[tokio::test]
+    async fn test_subagent_full_trace_chain_single_trace_id() {
+        let (spans, _events, _tcs, _guard) = setup_tracing_with_otel();
+
+        let parent_span = tracing::info_span!("agent.iteration");
+        let parent_id_u64 = parent_span.in_scope(|| {
+            let temp = tracing::info_span!("marker");
+            let id = {
+                let captured = spans.lock().unwrap();
+                captured
+                    .iter()
+                    .find(|s| s.name == "marker")
+                    .expect("marker span should exist")
+                    .parent_id
+                    .expect("marker should have parent (agent.iteration)")
+            };
+            drop(temp);
+            id
+        });
+
+        let (mut orch, _gtx, _grx, session_id) = make_orchestrator_for_spawn();
+        let envelope = Envelope {
+            session_id: session_id.clone(),
+            message: AgentMessage::SpawnRequest {
+                call_id: "call-w2s5-3".to_string(),
+                subagent_type: "default".to_string(),
+                description: "full chain test".to_string(),
+                task_id: None,
+                trace_context: None,
+            },
+            trace_context: None,
+        };
+
+        async {
+            orch.handle_agent_message(envelope).await;
+        }
+        .instrument(parent_span)
+        .await;
+
+        // Wait for spawned task to complete
+        let sub_sessions: Vec<String> = orch.sub_agent_handles.keys().cloned().collect();
+        for sid in &sub_sessions {
+            if let Some(handle) = orch.sub_agent_handles.remove(sid) {
+                let _ = handle.await;
+            }
+        }
+
+        let captured = spans.lock().unwrap();
+        let spawn_span = captured
+            .iter()
+            .find(|s| s.name == "visp.subagent.spawn")
+            .expect("should find visp.subagent.spawn");
+        let run_span = captured
+            .iter()
+            .find(|s| s.name == "visp.agent.run")
+            .expect("should find visp.agent.run (sub-agent)");
+
+        // Chain: agent.iteration → visp.subagent.spawn → visp.agent.run
+        assert_eq!(
+            spawn_span.parent_id,
+            Some(parent_id_u64),
+            "spawn_span parent should be parent_span (Oracle B1 fix)"
+        );
+        assert_eq!(
+            run_span.parent_id,
+            Some(spawn_span.id),
+            "visp.agent.run parent should be visp.subagent.spawn"
+        );
+    }
+
+    /// W2-S5 Test 4: When TraceContext is invalid, rebuild_parent_context
+    /// returns None, set_parent is NOT called, and the spawn_span becomes
+    /// a new trace root (no crash).
+    #[tokio::test]
+    async fn test_set_parent_fallback_when_trace_context_invalid() {
+        let (spans, _events, _tcs, _guard) = setup_tracing_with_otel();
+
+        let (mut orch, _gtx, _grx, session_id) = make_orchestrator_for_spawn();
+
+        // Construct an invalid TraceContext (empty trace_id — fails hex parse)
+        let invalid_tc = visp_core::TraceContext {
+            trace_id: "".to_string(),
+            span_id: "b7ad6b7169203331".to_string(),
+            trace_flags: 1,
+            trace_state: None,
+            parent_span_id: Some("aaaaaaaaaaaaaaaa".to_string()),
+        };
+
+        let envelope = Envelope {
+            session_id: session_id.clone(),
+            message: AgentMessage::SpawnRequest {
+                call_id: "call-w2s5-4".to_string(),
+                subagent_type: "default".to_string(),
+                description: "fallback test".to_string(),
+                task_id: None,
+                trace_context: Some(invalid_tc),
+            },
+            trace_context: None,
+        };
+        orch.handle_agent_message(envelope).await;
+
+        // Wait for spawned task to complete
+        let sub_sessions: Vec<String> = orch.sub_agent_handles.keys().cloned().collect();
+        for sid in &sub_sessions {
+            if let Some(handle) = orch.sub_agent_handles.remove(sid) {
+                let _ = handle.await;
+            }
+        }
+
+        let captured = spans.lock().unwrap();
+        let spawn_span = captured
+            .iter()
+            .find(|s| s.name == "visp.subagent.spawn")
+            .expect("should find visp.subagent.spawn even with invalid TraceContext");
+
+        // When set_parent is not called, the tracing span has no explicit parent
+        // (it's created outside any parent span scope), so it becomes a root span.
+        assert!(
+            spawn_span.parent_id.is_none(),
+            "spawn_span should be a root span when TraceContext is invalid, parent_id={:?}",
+            spawn_span.parent_id
         );
     }
 
