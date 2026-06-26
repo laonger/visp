@@ -18,7 +18,6 @@ use crate::observability::otlp;
 use crate::observability::parent_link::ParentLinkLayer;
 
 /// Output of [`init_observability`]; held for the lifetime of the program.
-// Not yet wired into main.rs; Step 5-e2e will assemble it.
 #[allow(dead_code)]
 pub struct ObservabilityGuard {
     pub metrics: Option<Arc<MetricsLayer>>,
@@ -26,6 +25,10 @@ pub struct ObservabilityGuard {
     /// OTel tracer provider; shut down on drop if set.
     pub tracer_provider: Option<SdkTracerProvider>,
     _file_guard: Option<tracing_appender::non_blocking::WorkerGuard>,
+    /// Keeps a thread-local `DefaultGuard` alive when the subscriber was
+    /// installed via `set_default` (test helpers).  `None` when the
+    /// subscriber was installed globally via `try_init` (production or
+    /// `init_global_observability_with_writer`).
     _set_default: Option<tracing::subscriber::DefaultGuard>,
 }
 
@@ -35,10 +38,14 @@ pub struct ObservabilityGuard {
 /// Layers are always registered (they are lightweight noops when unused);
 /// only the guard handles are conditional on config.
 ///
-/// Returns a guard that unwinds the subscriber when dropped.
+/// The subscriber is installed globally (`try_init`) so that any
+/// `tokio::spawn` task (even on another worker thread) can emit tracing
+/// events.  The guard controls OTel tracer-provider shutdown only.
 ///
 /// # Panics
-/// If `set_default` fails (e.g., a subscriber was already set globally).
+/// Panics only if a previous call already installed a **different** global
+/// subscriber (same layers, different identity).  Identical subscribers
+/// from the same `tracing_subscriber::registry` do not cause issues.
 #[allow(dead_code)]
 pub fn init_observability(cfg: &ObservabilityConfig) -> ObservabilityGuard {
     if !cfg.enabled {
@@ -92,7 +99,11 @@ pub fn init_observability(cfg: &ObservabilityConfig) -> ObservabilityGuard {
     // Assembly order: EnvFilter → OTelLayer? → ParentLinkLayer → MetricsLayer → fmt.
     // OTel layer must be outer to ParentLinkLayer (registered first = outer),
     // so ParentLinkLayer.on_enter sees the OTel-fixed SpanContext.
-    let _set_default = if cfg.format == "json" {
+    //
+    // Install globally so all threads (including tokio worker threads) see
+    // the subscriber.  Use `ok()` to ignore "already set" — in tests the
+    // first call wins and subsequent tests silently re-use that subscriber.
+    let _ = if cfg.format == "json" {
         tracing_subscriber::registry()
             .with(filter)
             .with(otel_layer)
@@ -103,7 +114,7 @@ pub fn init_observability(cfg: &ObservabilityConfig) -> ObservabilityGuard {
                     .json()
                     .with_writer(fmt_writer),
             )
-            .set_default()
+            .try_init()
     } else {
         tracing_subscriber::registry()
             .with(filter)
@@ -115,7 +126,7 @@ pub fn init_observability(cfg: &ObservabilityConfig) -> ObservabilityGuard {
                     .pretty()
                     .with_writer(fmt_writer),
             )
-            .set_default()
+            .try_init()
     };
 
     ObservabilityGuard {
@@ -123,7 +134,7 @@ pub fn init_observability(cfg: &ObservabilityConfig) -> ObservabilityGuard {
         parent_link: cfg.parent_link.then(|| Arc::new(parent_link)),
         tracer_provider,
         _file_guard,
-        _set_default: Some(_set_default),
+        _set_default: None, // global subscriber, no DefaultGuard needed
     }
 }
 
@@ -136,8 +147,15 @@ pub fn init_observability(cfg: &ObservabilityConfig) -> ObservabilityGuard {
 /// When `cfg.enabled` is `false`, a no-op guard is returned and the writer
 /// is **not** used (mirrors the production behaviour).
 ///
+/// **Note:** This function uses `try_init()` (global subscriber) so that
+/// `tokio::spawn` tasks on any tokio worker thread can emit tracing events.
+/// Because only one global subscriber can exist per process, repeated calls
+/// silently re-use the subscriber from the first call—the returned guard's
+/// other fields (metrics, parent_link, tracer_provider) are still valid.
+///
 /// # Panics
-/// If `set_default` fails (e.g., a subscriber was already set globally).
+/// Never—`try_init()` errors are silently ignored (expected when the global
+/// subscriber was already set by an earlier call).
 #[allow(dead_code)]
 pub fn init_observability_with_writer<W>(cfg: &ObservabilityConfig, writer: W) -> ObservabilityGuard
 where
@@ -172,14 +190,15 @@ where
         None::<OpenTelemetryLayer<_, _>>
     };
 
-    let _set_default = if cfg.format == "json" {
+    // Install globally so spawned tasks on other threads see the subscriber.
+    let _ = if cfg.format == "json" {
         tracing_subscriber::registry()
             .with(filter)
             .with(otel_layer)
             .with(parent_link.clone())
             .with(metrics.clone())
             .with(tracing_subscriber::fmt::layer().json().with_writer(writer))
-            .set_default()
+            .try_init()
     } else {
         tracing_subscriber::registry()
             .with(filter)
@@ -191,7 +210,7 @@ where
                     .pretty()
                     .with_writer(writer),
             )
-            .set_default()
+            .try_init()
     };
 
     ObservabilityGuard {
@@ -199,7 +218,7 @@ where
         parent_link: cfg.parent_link.then(|| Arc::new(parent_link)),
         tracer_provider,
         _file_guard: None,
-        _set_default: Some(_set_default),
+        _set_default: None, // global subscriber, no DefaultGuard needed
     }
 }
 
@@ -218,6 +237,8 @@ impl Drop for ObservabilityGuard {
 /// The exporter is expected to be an `InMemorySpanExporter` in tests.
 ///
 /// Returns a guard whose `tracer_provider` field holds the constructed provider.
+///
+/// **Note:** Uses `set_default()` (thread-local) to preserve test isolation.
 #[cfg(test)]
 #[allow(dead_code)]
 pub(crate) fn init_observability_with_exporter<W, E>(
@@ -258,7 +279,7 @@ where
         None::<OpenTelemetryLayer<_, _>>
     };
 
-    let _set_default = if cfg.format == "json" {
+    let set_default = if cfg.format == "json" {
         tracing_subscriber::registry()
             .with(filter)
             .with(otel_layer)
@@ -285,7 +306,86 @@ where
         parent_link: cfg.parent_link.then(|| Arc::new(parent_link)),
         tracer_provider,
         _file_guard: None,
-        _set_default: Some(_set_default),
+        _set_default: Some(set_default),
+    }
+}
+
+/// Like [`init_observability_with_writer`] but installs the subscriber
+/// **globally** via `try_init()` so that `tokio::spawn` tasks on any
+/// tokio worker thread can emit tracing events.
+///
+/// This is the same approach used by [`init_observability`] (production).
+/// Use this in tests that exercise a multi-thread tokio runtime.
+///
+/// Because `try_init()` can succeed only once per process, this function
+/// ignores an "already set" error — the subscriber from the first call
+/// remains active.
+#[cfg(test)]
+pub(crate) fn init_global_observability_with_writer<W>(
+    cfg: &ObservabilityConfig,
+    writer: W,
+) -> ObservabilityGuard
+where
+    W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
+{
+    if !cfg.enabled {
+        return ObservabilityGuard {
+            metrics: None,
+            parent_link: None,
+            tracer_provider: None,
+            _file_guard: None,
+            _set_default: None,
+        };
+    }
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.level));
+    let parent_link = if cfg.otlp.enabled {
+        ParentLinkLayer::with_otel_mode(true)
+    } else {
+        ParentLinkLayer::new()
+    };
+    let metrics = MetricsLayer::new();
+
+    let tracer_provider: Option<SdkTracerProvider>;
+    let otel_layer = if cfg.otlp.enabled {
+        let provider = otlp::build_tracer_provider(&cfg.otlp);
+        let tracer = provider.tracer("visp-daemon");
+        tracer_provider = Some(provider);
+        Some(OpenTelemetryLayer::new(tracer).with_context_activation(true))
+    } else {
+        tracer_provider = None;
+        None::<OpenTelemetryLayer<_, _>>
+    };
+
+    // Install globally — use ok() to ignore "already set" error.
+    let _ = if cfg.format == "json" {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(otel_layer)
+            .with(parent_link.clone())
+            .with(metrics.clone())
+            .with(tracing_subscriber::fmt::layer().json().with_writer(writer))
+            .try_init()
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(otel_layer)
+            .with(parent_link.clone())
+            .with(metrics.clone())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .pretty()
+                    .with_writer(writer),
+            )
+            .try_init()
+    };
+
+    ObservabilityGuard {
+        metrics: cfg.metrics_summary.then(|| Arc::new(metrics)),
+        parent_link: cfg.parent_link.then(|| Arc::new(parent_link)),
+        tracer_provider,
+        _file_guard: None,
+        _set_default: None, // global subscriber, no DefaultGuard needed
     }
 }
 
@@ -321,6 +421,17 @@ mod tests {
 
         fn into_string(self) -> String {
             String::from_utf8(self.buf.lock().unwrap().clone()).unwrap_or_default()
+        }
+
+        #[allow(dead_code)]
+        fn len(&self) -> usize {
+            self.buf.lock().unwrap().len()
+        }
+
+        #[allow(dead_code)]
+        fn content_since(&self, offset: usize) -> String {
+            let buf = self.buf.lock().unwrap();
+            String::from_utf8(buf[offset..].to_vec()).unwrap_or_default()
         }
     }
 
@@ -373,6 +484,38 @@ mod tests {
                 )
                 .set_default()
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Global subscriber: spawned task events captured
+    // ------------------------------------------------------------------
+
+    /// Verify that `init_global_observability_with_writer` (which uses
+    /// `try_init()`) compiles and the function signature is correct.
+    ///
+    /// The actual spawned-task capture behaviour is verified by the
+    /// integration test `test_spawned_task_events_captured_with_global_subscriber`
+    /// in `tests/observability_global_subscriber.rs`, which runs in its own
+    /// process so `try_init()` succeeds uncontested.
+    ///
+    /// Run in isolation:  `cargo test -p visp-daemon --test observability_global_subscriber`
+    #[test]
+    #[serial]
+    fn test_init_global_observability_with_writer_function_exists() {
+        let w = TestVecWriter::new();
+        let cfg = ObservabilityConfig {
+            enabled: true,
+            format: "json".into(),
+            parent_link: false,
+            metrics_summary: false,
+            log_file: None,
+            ..Default::default()
+        };
+        let guard = init_global_observability_with_writer(&cfg, w.clone());
+        // Guard fields should be populated from config
+        assert!(guard.metrics.is_none());
+        assert!(guard.parent_link.is_none());
+        assert!(guard.tracer_provider.is_none());
     }
 
     // ------------------------------------------------------------------

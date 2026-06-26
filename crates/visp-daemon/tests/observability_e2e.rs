@@ -56,6 +56,56 @@ use visp_daemon::config::ObservabilityConfig;
 use visp_daemon::observability::init::init_observability_with_writer;
 
 // ---------------------------------------------------------------------------
+// Shared global observability for tests in this binary
+// ---------------------------------------------------------------------------
+
+/// Because `init_observability_with_writer` now uses `try_init()` (global),
+/// only the first call succeeds.  We use [`std::sync::OnceLock`] to initialise
+/// once and re-use the same writer across all tests.
+static SHARED_OBSERVABILITY: std::sync::OnceLock<(
+    TestVecWriter,
+    visp_daemon::observability::init::ObservabilityGuard,
+)> = std::sync::OnceLock::new();
+
+/// Returns the shared writer used by the global subscriber.
+///
+/// The first call installs the subscriber; subsequent calls return the
+/// same writer.  Callers can save the current `len()` before running
+/// their scenario and use `content_since()` to check only their events.
+fn shared_writer() -> &'static TestVecWriter {
+    let (ref writer, _) = *SHARED_OBSERVABILITY.get_or_init(|| {
+        let w = TestVecWriter::new();
+        let cfg = ObservabilityConfig {
+            enabled: true,
+            format: "json".into(),
+            parent_link: true,
+            metrics_summary: true,
+            ..Default::default()
+        };
+        let guard = init_observability_with_writer(&cfg, w.clone());
+        (w, guard)
+    });
+    writer
+}
+
+/// Access the shared [`ObservabilityGuard`] (for parent_link / metrics handles).
+fn shared_guard() -> &'static visp_daemon::observability::init::ObservabilityGuard {
+    let (_, ref guard) = *SHARED_OBSERVABILITY.get_or_init(|| {
+        let w = TestVecWriter::new();
+        let cfg = ObservabilityConfig {
+            enabled: true,
+            format: "json".into(),
+            parent_link: true,
+            metrics_summary: true,
+            ..Default::default()
+        };
+        let guard = init_observability_with_writer(&cfg, w.clone());
+        (w, guard)
+    });
+    guard
+}
+
+// ---------------------------------------------------------------------------
 // In-memory writer
 // ---------------------------------------------------------------------------
 
@@ -77,6 +127,15 @@ impl TestVecWriter {
 
     fn into_string(self) -> String {
         String::from_utf8(self.buf.lock().unwrap().clone()).unwrap_or_default()
+    }
+
+    fn len(&self) -> usize {
+        self.buf.lock().unwrap().len()
+    }
+
+    fn content_since(&self, offset: usize) -> String {
+        let buf = self.buf.lock().unwrap();
+        String::from_utf8(buf[offset..].to_vec()).unwrap_or_default()
     }
 }
 
@@ -330,15 +389,9 @@ fn single_agent_phases() -> Vec<Vec<ChatEvent>> {
 #[test]
 #[serial]
 fn test_e2e_single_agent_emits_expected_span_tree() {
-    let writer = TestVecWriter::new();
-    let cfg = ObservabilityConfig {
-        enabled: true,
-        format: "json".into(),
-        parent_link: true,
-        metrics_summary: true,
-        ..Default::default()
-    };
-    let guard = init_observability_with_writer(&cfg, writer.clone());
+    // Use the shared global subscriber so spawned-task events are captured.
+    let writer = shared_writer();
+    let offset = writer.len();
 
     let harness = build_harness(single_agent_phases());
     let (tx, _rx) = mpsc::channel(64);
@@ -361,12 +414,10 @@ fn test_e2e_single_agent_emits_expected_span_tree() {
     ));
 
     // Drop the runtime: this ensures all instrumented futures are dropped
-    // and their on_close callbacks fire.  A multi-thread runtime may keep
-    // futures alive after block_on returns.
+    // and their on_close callbacks fire.
     drop(rt);
-    drop(guard);
 
-    let output = writer.into_string();
+    let output = writer.content_since(offset);
     assert!(!output.is_empty(), "expected non-empty JSON output");
 
     // ── Span presence assertions (by name in JSON) ────────────────────
@@ -465,15 +516,10 @@ fn test_e2e_single_agent_emits_expected_span_tree() {
 #[test]
 #[serial]
 fn test_e2e_multi_agent_parent_link_propagation() {
-    let writer = TestVecWriter::new();
-    let cfg = ObservabilityConfig {
-        enabled: true,
-        format: "json".into(),
-        parent_link: true,
-        metrics_summary: true,
-        ..Default::default()
-    };
-    let guard = init_observability_with_writer(&cfg, writer.clone());
+    // Use the shared global subscriber.
+    let writer = shared_writer();
+    let guard = shared_guard();
+    let offset = writer.len();
 
     // We manually orchestrate a primary agent and a sub-agent to test
     // trace propagation.  The primary agent runs first, creating a
@@ -508,7 +554,7 @@ fn test_e2e_multi_agent_parent_link_propagation() {
 
         // After primary completes, read the trace_id from the JSON output.
         // Fall back to hardcoded value if unavailable.
-        let output_so_far = writer.clone().into_string();
+        let output_so_far = writer.content_since(offset);
         let lines = parse_json_lines(&output_so_far);
         let trace_id = lines
             .iter()
@@ -618,9 +664,7 @@ fn test_e2e_multi_agent_parent_link_propagation() {
         );
     }
 
-    drop(guard);
-
-    let output = writer.into_string();
+    let output = writer.content_since(offset);
     assert!(!output.is_empty(), "expected non-empty JSON output");
 
     // ── Assertions ────────────────────────────────────────────────────
@@ -734,15 +778,8 @@ fn test_e2e_observability_disabled_no_logs() {
 #[test]
 #[serial]
 fn test_e2e_metrics_handle_accessible_post_run() {
-    let writer = TestVecWriter::new();
-    let cfg = ObservabilityConfig {
-        enabled: true,
-        format: "json".into(),
-        parent_link: true,
-        metrics_summary: true,
-        ..Default::default()
-    };
-    let guard = init_observability_with_writer(&cfg, writer.clone());
+    let _writer = shared_writer();
+    let guard = shared_guard();
 
     let harness = build_harness(single_agent_phases());
     let (tx, _rx) = mpsc::channel(64);
@@ -786,5 +823,5 @@ fn test_e2e_metrics_handle_accessible_post_run() {
         all.len()
     );
 
-    drop(guard);
+    let _ = guard;
 }
