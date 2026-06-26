@@ -85,6 +85,49 @@ max_context_tokens = 128000
 # 工具可操作文件大小限制（字节）
 # file_max_size_bytes = 1048576
 
+# ---------------------------------------------------------------------------
+# [observability] — 日志、Trace、Metrics 观测配置
+# ---------------------------------------------------------------------------
+[observability]
+# 是否启用 observability 初始化。关闭后不会安装 tracing subscriber，也不会导出 OTLP。
+# enabled = true
+
+# tracing 过滤级别；也可用 RUST_LOG 环境变量覆盖。
+# level = "info"
+
+# 控制台/文件日志格式：json 或 pretty。
+# format = "json"
+
+# 是否启用跨异步任务的父子 span 关联。
+# parent_link = true
+
+# 是否保留内部 metrics summary 句柄。
+# metrics_summary = true
+
+# 可选：日志目录。设置后按天滚动写入 visp-daemon.log；不设置则输出到 stdout。
+# log_file = "/tmp/visp-logs"
+
+# ----- OpenTelemetry / OTLP -----
+[observability.otlp]
+# 是否通过 OTLP 导出 trace。
+# enabled = false
+
+# OTLP Collector/后端地址。当前实现使用 OTLP/gRPC，通常端口为 4317。
+# endpoint = "http://localhost:4317"
+
+# 协议字段；当前建议使用 grpc。
+# protocol = "grpc"
+
+# OTLP 导出超时时间（秒）。
+# timeout_secs = 10
+
+# Trace 采样率，范围 0.0 ~ 1.0；超出范围会被夹到有效区间。
+# sample_rate = 1.0
+
+# 可选：OTLP headers，常用于鉴权。
+# [observability.otlp.headers]
+# Authorization = "Bearer your-token"
+
 # =============================================================================
 # [tool.*] — 各工具的 per-tool 配置
 # =============================================================================
