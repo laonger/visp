@@ -35,6 +35,156 @@ pub fn load_agents(project_path: &Path) -> AgentRegistry {
     };
     registry.register(code_reader).ok();
 
+    // Register built-in explorer subagent (fast codebase search, read-only)
+    let explorer = AgentDefinition {
+        name: "explorer".to_string(),
+        description:
+            "快速代码库搜索专家。用于查找文件、定位代码模式、回答\"X 在哪里？\"等问题。"
+                .to_string(),
+        mode: AgentMode::Subagent,
+        model: None,
+        temperature: Some(0.1),
+        steps: None,
+        permission: vec![
+            PermissionRule {
+                permission: "read_file".into(),
+                pattern: "*".into(),
+                action: PermissionAction::Allow,
+            },
+            PermissionRule {
+                permission: "grep".into(),
+                pattern: "*".into(),
+                action: PermissionAction::Allow,
+            },
+            PermissionRule {
+                permission: "glob".into(),
+                pattern: "*".into(),
+                action: PermissionAction::Allow,
+            },
+            PermissionRule {
+                permission: "fetch_web".into(),
+                pattern: "*".into(),
+                action: PermissionAction::Allow,
+            },
+            PermissionRule {
+                permission: "codegraph_search".into(),
+                pattern: "*".into(),
+                action: PermissionAction::Allow,
+            },
+            PermissionRule {
+                permission: "codegraph_get_details".into(),
+                pattern: "*".into(),
+                action: PermissionAction::Allow,
+            },
+            PermissionRule {
+                permission: "codegraph_context".into(),
+                pattern: "*".into(),
+                action: PermissionAction::Allow,
+            },
+            PermissionRule {
+                permission: "codegraph_trace".into(),
+                pattern: "*".into(),
+                action: PermissionAction::Allow,
+            },
+            PermissionRule {
+                permission: "codegraph_impact".into(),
+                pattern: "*".into(),
+                action: PermissionAction::Allow,
+            },
+        ],
+        system_prompt: concat!(
+            "你是 Explorer —— 快速代码库导航专家。\n",
+            "\n",
+            "**角色**：代码库侦察兵。回答\"X 在哪里？\"\"找到 Y\"\"哪个文件有 Z\"。\n",
+            "\n",
+            "**工具选择**：\n",
+            "- 文本/正则搜索（字符串、注释、变量名）：grep\n",
+            "- 文件发现（按名称/扩展名查找）：glob\n",
+            "- 结构性查询（符号定义、调用关系、影响分析）：codegraph_search、codegraph_get_details、codegraph_context、codegraph_trace、codegraph_impact\n",
+            "- 读取文件内容：read_file\n",
+            "\n",
+            "**行为准则**：\n",
+            "- 快速且彻底\n",
+            "- 需要时并行发起多个搜索\n",
+            "- 返回文件路径和代码片段（含行号）\n",
+            "\n",
+            "**输出格式**：\n",
+            "<results>\n",
+            "<files>\n",
+            "- 文件路径:行号 — 简要说明\n",
+            "</files>\n",
+            "<answer>\n",
+            "简洁回答\n",
+            "</answer>\n",
+            "</results>\n",
+            "\n",
+            "**约束**：\n",
+            "- 只读——搜索和报告，不修改文件\n",
+            "- 详尽但简洁\n",
+            "- 包含行号\n",
+        )
+        .to_string(),
+    };
+    registry.register(explorer).ok();
+
+    // Register built-in fixer subagent (fast implementation, read-write)
+    let fixer = AgentDefinition {
+        name: "fixer".to_string(),
+        description:
+            "快速实现专家。接收完整上下文和任务规格，高效执行代码变更。".to_string(),
+        mode: AgentMode::Subagent,
+        model: None,
+        temperature: Some(0.2),
+        steps: None,
+        permission: vec![
+            PermissionRule {
+                permission: "task".into(),
+                pattern: "*".into(),
+                action: PermissionAction::Deny,
+            },
+            PermissionRule {
+                permission: "*".into(),
+                pattern: "*".into(),
+                action: PermissionAction::Allow,
+            },
+        ],
+        system_prompt: concat!(
+            "你是 Fixer —— 快速、专注的实现专家。\n",
+            "\n",
+            "**角色**：高效执行代码变更。你从 Orchestrator 收到完整上下文和明确任务规格。你的工作是实现，不是规划或调研。\n",
+            "\n",
+            "**行为准则**：\n",
+            "- 执行 Orchestrator 提供的任务规格\n",
+            "- 使用提供的研究上下文（文件路径、文档、模式）\n",
+            "- 使用 edit_file/write_file 之前先 read_file 读取确切内容\n",
+            "- 快速直接——不做调研，不委托，不多步规划\n",
+            "- 需要时编写或更新测试\n",
+            "- 完成后报告变更摘要\n",
+            "\n",
+            "**约束**：\n",
+            "- 不做外部调研（不使用 fetch_web）\n",
+            "- 不委托或生成子 agent（不使用 task）\n",
+            "- 不做多步研究/规划；最小执行序列即可\n",
+            "- 上下文不足时：直接用 grep/glob/read_file 获取，不委托\n",
+            "- 只在真正无法自行获取时才请求补充输入\n",
+            "\n",
+            "**输出格式**：\n",
+            "<summary>\n",
+            "实现内容简述\n",
+            "</summary>\n",
+            "<changes>\n",
+            "- file1.rs: 将 X 改为 Y\n",
+            "- file2.rs: 新增 Z 函数\n",
+            "</changes>\n",
+            "<verification>\n",
+            "- 测试通过: [是/否/跳过原因]\n",
+            "- 验证: [通过/失败/跳过原因]\n",
+            "</verification>\n",
+        )
+        .to_string(),
+    };
+    registry.register(fixer).ok();
+
     // Scan .visp/agents/*.md
     let agents_dir = project_path.join(".visp/agents/");
     if !agents_dir.exists() {
@@ -326,7 +476,9 @@ You search.
         let registry = load_agents(&dir);
         assert!(registry.get("default").is_some());
         assert!(registry.get("code_reader").is_some());
-        assert_eq!(registry.list().len(), 2);
+        assert!(registry.get("explorer").is_some());
+        assert!(registry.get("fixer").is_some());
+        assert_eq!(registry.list().len(), 4);
     }
 
     #[test]
@@ -336,7 +488,9 @@ You search.
         let registry = load_agents(&dir);
         assert!(registry.get("default").is_some());
         assert!(registry.get("code_reader").is_some());
-        assert_eq!(registry.list().len(), 2);
+        assert!(registry.get("explorer").is_some());
+        assert!(registry.get("fixer").is_some());
+        assert_eq!(registry.list().len(), 4);
     }
 
     #[test]
@@ -361,8 +515,8 @@ mode: all
         assert!(registry.get("default").is_some());
         assert!(registry.get("code_reader").is_some());
         assert!(registry.get("valid").is_some());
-        // Invalid file should not produce an entry (only default + code_reader + valid)
-        assert_eq!(registry.list().len(), 3);
+        // Invalid file should not produce an entry (only built-ins + valid)
+        assert_eq!(registry.list().len(), 5);
     }
 
     #[test]
