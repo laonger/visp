@@ -603,6 +603,16 @@ impl Orchestrator {
             trace_id = tracing::field::Empty,
             parent_span_id = tracing::field::Empty,
             trace_state = tracing::field::Empty,
+            // Langfuse trace-level fields
+            langfuse.session.id = tracing::field::Empty,
+            langfuse.user.id = tracing::field::Empty,
+            langfuse.trace.tags = tracing::field::Empty,
+            langfuse.trace.name = tracing::field::Empty,
+            langfuse.environment = tracing::field::Empty,
+            langfuse.release = tracing::field::Empty,
+            langfuse.version = tracing::field::Empty,
+            langfuse.trace.public = tracing::field::Empty,
+            langfuse.trace.metadata = tracing::field::Empty,
         );
 
         // W2-S5: Rebuild OTel parent Context from TraceContext and set it
@@ -625,6 +635,14 @@ impl Orchestrator {
                 spawn_span.record("trace_state", ts.as_str());
             }
         }
+
+        // 记录 Langfuse trace 级字段（仅 enabled 时写入）
+        // 使用 parent_session_id 确保同 trace 内的 session/name 一致
+        visp_core::agent_loop::record_langfuse_trace_fields(
+            &spawn_span,
+            &self.agent_config,
+            parent_session_id,
+        );
 
         // 记录 task_id（Risk R1：前移到 tokio::spawn 之前）
         if let Some(task_id) = _task_id {
@@ -1464,8 +1482,20 @@ mod tests {
             .set_default()
     }
 
-    /// 创建完整可用的 orchestrator（含父 session、agent 定义、provider）
+    /// 创建完整可用的 orchestrator（含父 session、agent 定义、provider，默认配置）
     fn make_orchestrator_for_spawn() -> (
+        Orchestrator,
+        mpsc::Sender<Envelope>,
+        mpsc::Receiver<AgentEventFrame>,
+        String,
+    ) {
+        make_orchestrator_for_spawn_with_config(AgentConfig::default())
+    }
+
+    /// 创建完整可用的 orchestrator，使用指定的 AgentConfig
+    fn make_orchestrator_for_spawn_with_config(
+        agent_config: AgentConfig,
+    ) -> (
         Orchestrator,
         mpsc::Sender<Envelope>,
         mpsc::Receiver<AgentEventFrame>,
@@ -1502,7 +1532,6 @@ mod tests {
 
         let tool_registry = Arc::new(ToolRegistry::new());
         let rule_engine = Arc::new(RuleEngine::new(&PathBuf::from(".")).unwrap());
-        let agent_config = AgentConfig::default();
         let context_trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(NoopTrimmer);
 
         let provider: Arc<dyn LlmProvider> = Arc::new(visp_llm::mock::MockProvider::new(vec![]));
@@ -2147,5 +2176,257 @@ mod tests {
             }
             _ => panic!("unexpected message variant"),
         }
+    }
+
+    // ── 步骤 5a: Langfuse trace 级字段 ─────────────────────────
+
+    #[tokio::test]
+    async fn test_subagent_spawn_langfuse_disabled_no_langfuse_fields() {
+        let (spans, _events, _tcs) = setup_tracing();
+        let _guard = make_tracing_guard(&spans, &_events, &_tcs);
+        let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+
+        let envelope = Envelope {
+            session_id: parent_id.clone(),
+            message: AgentMessage::SpawnRequest {
+                call_id: "call-lf-off".to_string(),
+                subagent_type: "default".to_string(),
+                description: "disabled test".to_string(),
+                task_id: None,
+                trace_context: None,
+            },
+            trace_context: None,
+        };
+        orch.handle_agent_message(envelope).await;
+
+        let captured = spans.lock().unwrap();
+        let spawn_span = captured
+            .iter()
+            .find(|s| s.name == "visp.subagent.spawn")
+            .expect("expected 'visp.subagent.spawn' span");
+
+        let langfuse_fields: Vec<_> = spawn_span
+            .fields
+            .iter()
+            .filter(|(k, _)| k.starts_with("langfuse."))
+            .collect();
+
+        assert!(
+            langfuse_fields.is_empty(),
+            "expected no langfuse.* fields when disabled, found: {langfuse_fields:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subagent_spawn_langfuse_enabled_all_fields() {
+        let (spans, _events, _tcs) = setup_tracing();
+        let _guard = make_tracing_guard(&spans, &_events, &_tcs);
+
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("key1".to_string(), "val1".to_string());
+        metadata.insert("key2".to_string(), "val2".to_string());
+
+        let agent_config = AgentConfig {
+            langfuse_enabled: true,
+            langfuse_user_id: Some("test-user".to_string()),
+            langfuse_tags: Some(r#"["tag1","tag2"]"#.to_string()),
+            langfuse_environment: Some("staging".to_string()),
+            langfuse_release: Some("v1.0.0".to_string()),
+            langfuse_version: Some("1.0.0".to_string()),
+            langfuse_public: Some(true),
+            langfuse_metadata: Some(metadata),
+            ..AgentConfig::default()
+        };
+
+        let (mut orch, _global_tx, _grpc_rx, parent_id) =
+            make_orchestrator_for_spawn_with_config(agent_config);
+
+        let envelope = Envelope {
+            session_id: parent_id.clone(),
+            message: AgentMessage::SpawnRequest {
+                call_id: "call-lf-all".to_string(),
+                subagent_type: "default".to_string(),
+                description: "all fields".to_string(),
+                task_id: Some("task-42".to_string()),
+                trace_context: None,
+            },
+            trace_context: None,
+        };
+        orch.handle_agent_message(envelope).await;
+
+        let captured = spans.lock().unwrap();
+        let spawn_span = captured
+            .iter()
+            .find(|s| s.name == "visp.subagent.spawn")
+            .expect("expected 'visp.subagent.spawn' span");
+
+        let field_map: std::collections::HashMap<&str, &str> = spawn_span
+            .fields
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        // ── Langfuse fields ──
+        assert_eq!(
+            field_map.get("langfuse.session.id"),
+            Some(&parent_id.as_str()),
+            "langfuse.session.id should be parent_session_id"
+        );
+        assert_eq!(field_map.get("langfuse.user.id"), Some(&"test-user"));
+        assert_eq!(
+            field_map.get("langfuse.trace.tags"),
+            Some(&r#"["tag1","tag2"]"#)
+        );
+        let expected_name = "visp.agent.run";
+        assert_eq!(field_map.get("langfuse.trace.name"), Some(&expected_name));
+        assert_eq!(field_map.get("langfuse.environment"), Some(&"staging"));
+        assert_eq!(field_map.get("langfuse.release"), Some(&"v1.0.0"));
+        assert_eq!(field_map.get("langfuse.version"), Some(&"1.0.0"));
+        assert_eq!(field_map.get("langfuse.trace.public"), Some(&"true"));
+
+        // metadata 以 JSON 字符串形式写入
+        let metadata_str = field_map
+            .get("langfuse.trace.metadata")
+            .expect("metadata should be present");
+        let parsed: std::collections::HashMap<String, String> =
+            serde_json::from_str(metadata_str).expect("metadata should be valid JSON");
+        assert_eq!(parsed.get("key1"), Some(&"val1".to_string()));
+        assert_eq!(parsed.get("key2"), Some(&"val2".to_string()));
+
+        // ── 现有字段保留 ──
+        assert_eq!(field_map.get("visp.subagent.name"), Some(&"default"));
+        assert_eq!(field_map.get("visp.subagent.call_id"), Some(&"call-lf-all"));
+        assert!(
+            field_map.contains_key("visp.subagent.session_id"),
+            "visp.subagent.session_id should be present"
+        );
+        assert_eq!(field_map.get("visp.subagent.task_id"), Some(&"task-42"));
+        assert_eq!(field_map.get("visp.subagent.depth"), Some(&"0"));
+    }
+
+    #[tokio::test]
+    async fn test_subagent_spawn_langfuse_enabled_partial() {
+        let (spans, _events, _tcs) = setup_tracing();
+        let _guard = make_tracing_guard(&spans, &_events, &_tcs);
+
+        // 只配置 enabled + user_id，其他字段 None
+        let agent_config = AgentConfig {
+            langfuse_enabled: true,
+            langfuse_user_id: Some("partial-user".to_string()),
+            langfuse_tags: None,
+            langfuse_environment: None,
+            langfuse_release: None,
+            langfuse_version: None,
+            langfuse_public: None,
+            langfuse_metadata: None,
+            ..AgentConfig::default()
+        };
+
+        let (mut orch, _global_tx, _grpc_rx, parent_id) =
+            make_orchestrator_for_spawn_with_config(agent_config);
+
+        let envelope = Envelope {
+            session_id: parent_id.clone(),
+            message: AgentMessage::SpawnRequest {
+                call_id: "call-lf-partial".to_string(),
+                subagent_type: "default".to_string(),
+                description: "partial fields".to_string(),
+                task_id: None,
+                trace_context: None,
+            },
+            trace_context: None,
+        };
+        orch.handle_agent_message(envelope).await;
+
+        let captured = spans.lock().unwrap();
+        let spawn_span = captured
+            .iter()
+            .find(|s| s.name == "visp.subagent.spawn")
+            .expect("expected 'visp.subagent.spawn' span");
+
+        let field_map: std::collections::HashMap<&str, &str> = spawn_span
+            .fields
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        // 始终写入的字段
+        assert_eq!(
+            field_map.get("langfuse.session.id"),
+            Some(&parent_id.as_str())
+        );
+        assert_eq!(field_map.get("langfuse.user.id"), Some(&"partial-user"));
+        // trace.name 和 environment 总有值
+        let expected_name = "visp.agent.run";
+        assert_eq!(field_map.get("langfuse.trace.name"), Some(&expected_name));
+        assert_eq!(field_map.get("langfuse.environment"), Some(&"default"));
+
+        // 未配置的字段不写入
+        assert!(
+            !field_map.contains_key("langfuse.trace.tags"),
+            "tags should NOT be present when None"
+        );
+        assert!(
+            !field_map.contains_key("langfuse.release"),
+            "release should NOT be present when None"
+        );
+        assert!(
+            !field_map.contains_key("langfuse.version"),
+            "version should NOT be present when None"
+        );
+        assert!(
+            !field_map.contains_key("langfuse.trace.public"),
+            "public should NOT be present when None"
+        );
+        assert!(
+            !field_map.contains_key("langfuse.trace.metadata"),
+            "metadata should NOT be present when None"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subagent_spawn_langfuse_enabled_public_false() {
+        let (spans, _events, _tcs) = setup_tracing();
+        let _guard = make_tracing_guard(&spans, &_events, &_tcs);
+
+        let agent_config = AgentConfig {
+            langfuse_enabled: true,
+            langfuse_public: Some(false),
+            ..AgentConfig::default()
+        };
+
+        let (mut orch, _global_tx, _grpc_rx, parent_id) =
+            make_orchestrator_for_spawn_with_config(agent_config);
+
+        let envelope = Envelope {
+            session_id: parent_id.clone(),
+            message: AgentMessage::SpawnRequest {
+                call_id: "call-lf-pub".to_string(),
+                subagent_type: "default".to_string(),
+                description: "public false".to_string(),
+                task_id: None,
+                trace_context: None,
+            },
+            trace_context: None,
+        };
+        orch.handle_agent_message(envelope).await;
+
+        let captured = spans.lock().unwrap();
+        let spawn_span = captured
+            .iter()
+            .find(|s| s.name == "visp.subagent.spawn")
+            .expect("expected 'visp.subagent.spawn' span");
+
+        let field_map: std::collections::HashMap<&str, &str> = spawn_span
+            .fields
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        assert_eq!(
+            field_map.get("langfuse.trace.public"),
+            Some(&"false"),
+            "public=false should be recorded as 'false'"
+        );
     }
 }

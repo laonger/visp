@@ -216,7 +216,17 @@ message ServerMessage {
         UserQuery user_query = 7;         // Agent 向用户提问
         ThinkingBlock thinking_block = 8; // LLM 推理过程
         UsageInfo usage_info = 9;         // LLM API token 用量统计
+        UserMessage user_message = 10;    // 回放时发送的用户消息
     }
+}
+
+// 用户消息（仅 session 回放时使用）。
+// 当恢复/查看历史 session 时，每个 User 消息通过此类型发送给 CLI，
+// CLI 渲染为 LineType::User 显示在对话区。
+message UserMessage {
+    // 用户消息文本内容。
+    string content = 1;
+    string session_id = 2;
 }
 
 // 流式文本增量。LLM 响应通过多个 TextDelta 流式传输。

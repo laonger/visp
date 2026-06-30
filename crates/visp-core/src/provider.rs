@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::pin::Pin;
 
 use crate::error::LlmError;
@@ -18,7 +19,35 @@ pub struct LlmConfig {
     /// 最大上下文 token 数（默认 128_000）
     pub max_context_tokens: u32,
     /// 扩展参数（provider 特定参数）
-    pub extra: std::collections::HashMap<String, String>,
+    pub extra: HashMap<String, String>,
+    /// Langfuse 总开关（控制 gen_ai.client.operation span 上 trace 级字段记录）
+    pub langfuse_enabled: bool,
+    /// Langfuse session.id（若不设置则不记录）
+    pub langfuse_session_id: Option<String>,
+    /// Langfuse trace.name（若不设置则不记录）
+    pub langfuse_trace_name: Option<String>,
+    /// Langfuse user.id 字段值（None = 不设置）
+    pub langfuse_user_id: Option<String>,
+    /// Langfuse tags 字段值（JSON 字符串，None = 不设置）
+    pub langfuse_tags: Option<String>,
+    /// Langfuse environment 字段
+    pub langfuse_environment: Option<String>,
+    /// Langfuse release 字段
+    pub langfuse_release: Option<String>,
+    /// Langfuse version 字段
+    pub langfuse_version: Option<String>,
+    /// Langfuse public 开关（None = 不设置）
+    pub langfuse_public: Option<bool>,
+    /// Langfuse metadata（值均为字符串，记录到 span 时序列化为紧凑 JSON）
+    pub langfuse_metadata: Option<HashMap<String, String>>,
+    /// 是否在 Langfuse OTEL span 中记录 LLM generation input
+    pub langfuse_capture_input: bool,
+    /// 是否在 Langfuse OTEL span 中记录 LLM generation output
+    pub langfuse_capture_output: bool,
+    /// Langfuse capture 最大字符数（超出截断）
+    pub langfuse_capture_max_chars: usize,
+    /// 是否脱敏敏感字段（api_key/token/secret/password 等）
+    pub langfuse_redact_secrets: bool,
 }
 
 impl Default for LlmConfig {
@@ -28,7 +57,21 @@ impl Default for LlmConfig {
             temperature: 0.7,
             max_tokens: 4096,
             max_context_tokens: 128_000,
-            extra: std::collections::HashMap::new(),
+            extra: HashMap::new(),
+            langfuse_enabled: false,
+            langfuse_session_id: None,
+            langfuse_trace_name: None,
+            langfuse_user_id: None,
+            langfuse_tags: None,
+            langfuse_environment: None,
+            langfuse_release: None,
+            langfuse_version: None,
+            langfuse_public: None,
+            langfuse_metadata: None,
+            langfuse_capture_input: false,
+            langfuse_capture_output: false,
+            langfuse_capture_max_chars: 20_000,
+            langfuse_redact_secrets: true,
         }
     }
 }
@@ -44,6 +87,36 @@ mod tests_llmconfig {
         assert_eq!(config.temperature, 0.7);
         assert_eq!(config.max_tokens, 4096);
         assert!(config.extra.is_empty());
+    }
+
+    #[test]
+    fn test_llmconfig_capture_defaults() {
+        let config = LlmConfig::default();
+        assert!(
+            !config.langfuse_capture_input,
+            "capture_input should default to false"
+        );
+        assert!(
+            !config.langfuse_capture_output,
+            "capture_output should default to false"
+        );
+        assert_eq!(config.langfuse_capture_max_chars, 20000);
+        assert!(config.langfuse_redact_secrets);
+    }
+
+    #[test]
+    fn test_llmconfig_capture_configured() {
+        let config = LlmConfig {
+            langfuse_capture_input: true,
+            langfuse_capture_output: false,
+            langfuse_capture_max_chars: 5000,
+            langfuse_redact_secrets: false,
+            ..Default::default()
+        };
+        assert!(config.langfuse_capture_input);
+        assert!(!config.langfuse_capture_output);
+        assert_eq!(config.langfuse_capture_max_chars, 5000);
+        assert!(!config.langfuse_redact_secrets);
     }
 
     #[test]
@@ -66,6 +139,89 @@ mod tests_llmconfig {
             ..Default::default()
         };
         assert_eq!(config.max_context_tokens, 64_000);
+    }
+
+    // ── Langfuse trace 级字段测试 ──────────────────────────────────────────
+
+    #[test]
+    fn test_llmconfig_langfuse_trace_defaults() {
+        let config = LlmConfig::default();
+        assert!(
+            !config.langfuse_enabled,
+            "langfuse_enabled should default to false"
+        );
+        assert_eq!(config.langfuse_session_id, None);
+        assert_eq!(config.langfuse_trace_name, None);
+        assert_eq!(config.langfuse_user_id, None);
+        assert_eq!(config.langfuse_tags, None);
+        assert_eq!(config.langfuse_environment, None);
+        assert_eq!(config.langfuse_release, None);
+        assert_eq!(config.langfuse_version, None);
+        assert_eq!(config.langfuse_public, None);
+        assert_eq!(config.langfuse_metadata, None);
+    }
+
+    #[test]
+    fn test_llmconfig_langfuse_trace_configured() {
+        let mut meta = HashMap::new();
+        meta.insert("env".into(), "prod".into());
+        let config = LlmConfig {
+            langfuse_enabled: true,
+            langfuse_session_id: Some("sess_abc".into()),
+            langfuse_trace_name: Some("visp.agent.run".into()),
+            langfuse_user_id: Some("user_789".into()),
+            langfuse_tags: Some(r#"["agent"]"#.into()),
+            langfuse_environment: Some("staging".into()),
+            langfuse_release: Some("1.0.0".into()),
+            langfuse_version: Some("abc123".into()),
+            langfuse_public: Some(true),
+            langfuse_metadata: Some(meta.clone()),
+            ..Default::default()
+        };
+        assert!(config.langfuse_enabled);
+        assert_eq!(config.langfuse_session_id.as_deref(), Some("sess_abc"));
+        assert_eq!(
+            config.langfuse_trace_name.as_deref(),
+            Some("visp.agent.run")
+        );
+        assert_eq!(config.langfuse_user_id.as_deref(), Some("user_789"));
+        assert_eq!(config.langfuse_tags.as_deref(), Some(r#"["agent"]"#));
+        assert_eq!(config.langfuse_environment.as_deref(), Some("staging"));
+        assert_eq!(config.langfuse_release.as_deref(), Some("1.0.0"));
+        assert_eq!(config.langfuse_version.as_deref(), Some("abc123"));
+        assert_eq!(config.langfuse_public, Some(true));
+        assert_eq!(config.langfuse_metadata, Some(meta));
+    }
+
+    #[test]
+    fn test_llmconfig_langfuse_partial_trace() {
+        let config = LlmConfig {
+            langfuse_enabled: true,
+            langfuse_user_id: Some("partial".into()),
+            langfuse_environment: Some("default".into()),
+            ..Default::default()
+        };
+        assert!(config.langfuse_enabled);
+        assert_eq!(config.langfuse_user_id.as_deref(), Some("partial"));
+        assert_eq!(config.langfuse_environment.as_deref(), Some("default"));
+        // Other fields should remain None
+        assert_eq!(config.langfuse_session_id, None);
+        assert_eq!(config.langfuse_trace_name, None);
+        assert_eq!(config.langfuse_tags, None);
+        assert_eq!(config.langfuse_release, None);
+        assert_eq!(config.langfuse_version, None);
+        assert_eq!(config.langfuse_public, None);
+        assert_eq!(config.langfuse_metadata, None);
+    }
+
+    #[test]
+    fn test_llmconfig_langfuse_capture_defaults_unchanged() {
+        // Verify existing capture defaults are not affected by new trace fields
+        let config = LlmConfig::default();
+        assert!(!config.langfuse_capture_input);
+        assert!(!config.langfuse_capture_output);
+        assert_eq!(config.langfuse_capture_max_chars, 20000);
+        assert!(config.langfuse_redact_secrets);
     }
 }
 

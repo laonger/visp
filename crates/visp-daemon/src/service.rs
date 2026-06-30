@@ -150,6 +150,20 @@ impl CoderDaemonService {
             max_tokens: default_cfg.max_tokens.unwrap_or(4096),
             max_context_tokens: default_cfg.max_context_tokens.unwrap_or(128_000),
             extra,
+            langfuse_enabled: agent_config.langfuse_enabled,
+            langfuse_session_id: None, // set per-session
+            langfuse_trace_name: None, // set per-session
+            langfuse_user_id: agent_config.langfuse_user_id.clone(),
+            langfuse_tags: agent_config.langfuse_tags.clone(),
+            langfuse_environment: agent_config.langfuse_environment.clone(),
+            langfuse_release: agent_config.langfuse_release.clone(),
+            langfuse_version: agent_config.langfuse_version.clone(),
+            langfuse_public: agent_config.langfuse_public,
+            langfuse_metadata: agent_config.langfuse_metadata.clone(),
+            langfuse_capture_input: agent_config.langfuse_capture_input,
+            langfuse_capture_output: agent_config.langfuse_capture_output,
+            langfuse_capture_max_chars: agent_config.langfuse_capture_max_chars,
+            langfuse_redact_secrets: agent_config.langfuse_redact_secrets,
         };
         let model_config_keys: Vec<String> = model_configs.iter().map(|mc| mc.key()).collect();
         Self {
@@ -233,6 +247,38 @@ impl CoderDaemon for CoderDaemonService {
         if config.model == LlmConfig::default().model {
             config.model = self.default_llm_config.model.clone();
         }
+        // 应用 daemon 默认的 Langfuse 配置（客户端不会传递这些字段）
+        config.langfuse_enabled = self.default_llm_config.langfuse_enabled;
+        config
+            .langfuse_session_id
+            .clone_from(&self.default_llm_config.langfuse_session_id);
+        config
+            .langfuse_trace_name
+            .clone_from(&self.default_llm_config.langfuse_trace_name);
+        config
+            .langfuse_user_id
+            .clone_from(&self.default_llm_config.langfuse_user_id);
+        config
+            .langfuse_tags
+            .clone_from(&self.default_llm_config.langfuse_tags);
+        config
+            .langfuse_environment
+            .clone_from(&self.default_llm_config.langfuse_environment);
+        config
+            .langfuse_release
+            .clone_from(&self.default_llm_config.langfuse_release);
+        config
+            .langfuse_version
+            .clone_from(&self.default_llm_config.langfuse_version);
+        config.langfuse_public = self.default_llm_config.langfuse_public;
+        config
+            .langfuse_metadata
+            .clone_from(&self.default_llm_config.langfuse_metadata);
+        config.langfuse_capture_input = self.default_llm_config.langfuse_capture_input;
+        config.langfuse_capture_output = self.default_llm_config.langfuse_capture_output;
+        config.langfuse_capture_max_chars = self.default_llm_config.langfuse_capture_max_chars;
+        config.langfuse_redact_secrets = self.default_llm_config.langfuse_redact_secrets;
+
         // 解析模型名：支持 key 格式 ("Anthropic.Claude Sonnet") 和直接 API model key
         if let Some(mc) = self
             .model_configs
@@ -532,6 +578,32 @@ impl CoderDaemon for CoderDaemonService {
                                                 }
                                             }
                                         }
+                                        // Send UsageInfo if token data available
+                                        if let Some(input_tokens) = msg.actual_tokens_input {
+                                            let ui_msg = proto::ServerMessage {
+                                                payload: Some(
+                                                    proto::server_message::Payload::UsageInfo(
+                                                        proto::UsageInfo {
+                                                            input_tokens,
+                                                            output_tokens: msg
+                                                                .actual_tokens_output
+                                                                .unwrap_or(0),
+                                                            tool_calls: msg
+                                                                .tool_call_count
+                                                                .unwrap_or(0),
+                                                            cache_creation_input_tokens: msg
+                                                                .actual_cache_write
+                                                                .unwrap_or(0),
+                                                            cache_read_input_tokens: msg
+                                                                .actual_cache_read
+                                                                .unwrap_or(0),
+                                                            session_id: session_id.clone(),
+                                                        },
+                                                    ),
+                                                ),
+                                            };
+                                            let _ = response_tx_inbound.send(Ok(ui_msg)).await;
+                                        }
                                     }
                                     Role::Tool => {
                                         let tr_msg = proto::ServerMessage {
@@ -552,6 +624,21 @@ impl CoderDaemon for CoderDaemonService {
                                             ),
                                         };
                                         if response_tx_inbound.send(Ok(tr_msg)).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Role::User => {
+                                        let um_msg = proto::ServerMessage {
+                                            payload: Some(
+                                                proto::server_message::Payload::UserMessage(
+                                                    proto::UserMessage {
+                                                        content: msg.content.clone(),
+                                                        session_id: session_id.clone(),
+                                                    },
+                                                ),
+                                            ),
+                                        };
+                                        if response_tx_inbound.send(Ok(um_msg)).await.is_err() {
                                             break;
                                         }
                                     }
@@ -986,6 +1073,24 @@ async fn replay_session_history(
                         }
                     }
                 }
+                // Send UsageInfo if token data available
+                if let Some(input_tokens) = msg.actual_tokens_input {
+                    let ui_msg = proto::ServerMessage {
+                        payload: Some(proto::server_message::Payload::UsageInfo(
+                            proto::UsageInfo {
+                                input_tokens,
+                                output_tokens: msg.actual_tokens_output.unwrap_or(0),
+                                tool_calls: msg.tool_call_count.unwrap_or(0),
+                                cache_creation_input_tokens: msg.actual_cache_write.unwrap_or(0),
+                                cache_read_input_tokens: msg.actual_cache_read.unwrap_or(0),
+                                session_id: session_id.clone(),
+                            },
+                        )),
+                    };
+                    if response_tx.send(Ok(ui_msg)).await.is_err() {
+                        return Err(());
+                    }
+                }
             }
             Role::Tool => {
                 let tr_msg = proto::ServerMessage {
@@ -1004,7 +1109,20 @@ async fn replay_session_history(
                     return Err(());
                 }
             }
-            _ => {} // User 消息跳过（已塞入 user_inputs）
+            Role::User => {
+                let um_msg = proto::ServerMessage {
+                    payload: Some(proto::server_message::Payload::UserMessage(
+                        proto::UserMessage {
+                            content: msg.content.clone(),
+                            session_id: session_id.clone(),
+                        },
+                    )),
+                };
+                if response_tx.send(Ok(um_msg)).await.is_err() {
+                    return Err(());
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1991,9 +2109,18 @@ mod tests {
             _ => panic!("expected StatusUpdate"),
         }
 
-        // Second frame: TextDelta for assistant response (NOT for user messages)
+        // Second frame: UserMessage for first user message
         let frame2 = rx.recv().await.unwrap().unwrap();
         match frame2.payload {
+            Some(proto::server_message::Payload::UserMessage(u)) => {
+                assert_eq!(u.content, "first message");
+            }
+            _ => panic!("expected UserMessage"),
+        }
+
+        // Third frame: TextDelta for assistant response
+        let frame3 = rx.recv().await.unwrap().unwrap();
+        match frame3.payload {
             Some(proto::server_message::Payload::TextDelta(t)) => {
                 assert_eq!(
                     t.delta, "response",
@@ -2003,9 +2130,18 @@ mod tests {
             _ => panic!("expected TextDelta"),
         }
 
-        // Third frame: Done
-        let frame3 = rx.recv().await.unwrap().unwrap();
-        match frame3.payload {
+        // Fourth frame: UserMessage for second user message
+        let frame4 = rx.recv().await.unwrap().unwrap();
+        match frame4.payload {
+            Some(proto::server_message::Payload::UserMessage(u)) => {
+                assert_eq!(u.content, "second message");
+            }
+            _ => panic!("expected UserMessage"),
+        }
+
+        // Fifth frame: Done
+        let frame5 = rx.recv().await.unwrap().unwrap();
+        match frame5.payload {
             Some(proto::server_message::Payload::Done(d)) => {
                 assert_eq!(d.session_id, "child-1");
             }
@@ -2190,6 +2326,24 @@ mod tests {
                                 }
                             }
                         }
+                        // Send UsageInfo if token data available
+                        if let Some(input_tokens) = msg.actual_tokens_input {
+                            let ui_msg = proto::ServerMessage {
+                                payload: Some(proto::server_message::Payload::UsageInfo(
+                                    proto::UsageInfo {
+                                        input_tokens,
+                                        output_tokens: msg.actual_tokens_output.unwrap_or(0),
+                                        tool_calls: msg.tool_call_count.unwrap_or(0),
+                                        cache_creation_input_tokens: msg
+                                            .actual_cache_write
+                                            .unwrap_or(0),
+                                        cache_read_input_tokens: msg.actual_cache_read.unwrap_or(0),
+                                        session_id: session_id.to_string(),
+                                    },
+                                )),
+                            };
+                            let _ = response_tx.send(Ok(ui_msg)).await;
+                        }
                     }
                     Role::Tool => {
                         let tr = proto::ServerMessage {
@@ -2205,6 +2359,19 @@ mod tests {
                             )),
                         };
                         if response_tx.send(Ok(tr)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Role::User => {
+                        let um_msg = proto::ServerMessage {
+                            payload: Some(proto::server_message::Payload::UserMessage(
+                                proto::UserMessage {
+                                    content: msg.content.clone(),
+                                    session_id: session_id.to_string(),
+                                },
+                            )),
+                        };
+                        if response_tx.send(Ok(um_msg)).await.is_err() {
                             return;
                         }
                     }
@@ -2259,11 +2426,12 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
         simulate_join_session(&mgr, &tx, &sid).await;
 
-        // Read 3 frames
+        // Read 4 frames (StatusUpdate + UserMessage + TextDelta + Done)
         let f1 = rx.recv().await.unwrap().unwrap();
         let f2 = rx.recv().await.unwrap().unwrap();
         let f3 = rx.recv().await.unwrap().unwrap();
-        let try_f4 = rx.try_recv();
+        let f4 = rx.recv().await.unwrap().unwrap();
+        let try_f5 = rx.try_recv();
 
         // Frame 1: StatusUpdate
         match f1.payload {
@@ -2277,24 +2445,32 @@ mod tests {
             _ => panic!("frame 0 should be StatusUpdate"),
         }
 
-        // Frame 2: TextDelta
+        // Frame 2: UserMessage
         match f2.payload {
+            Some(proto::server_message::Payload::UserMessage(ref u)) => {
+                assert_eq!(u.content, "hello");
+            }
+            _ => panic!("frame 1 should be UserMessage"),
+        }
+
+        // Frame 3: TextDelta
+        match f3.payload {
             Some(proto::server_message::Payload::TextDelta(ref t)) => {
                 assert_eq!(t.delta, "world");
             }
-            _ => panic!("frame 1 should be TextDelta"),
+            _ => panic!("frame 2 should be TextDelta"),
         }
 
-        // Frame 3: Done
-        match f3.payload {
+        // Frame 4: Done
+        match f4.payload {
             Some(proto::server_message::Payload::Done(ref d)) => {
                 assert_eq!(d.session_id, sid);
             }
-            _ => panic!("frame 2 should be Done"),
+            _ => panic!("frame 3 should be Done"),
         }
 
         // No more frames (no children)
-        assert!(try_f4.is_err(), "no descendants → no additional frames");
+        assert!(try_f5.is_err(), "no descendants → no additional frames");
     }
 
     #[tokio::test]
@@ -2472,13 +2648,25 @@ mod tests {
 
         let f2 = rx.recv().await.unwrap().unwrap();
         match f2.payload {
+            Some(proto::server_message::Payload::UserMessage(ref u)) => {
+                assert_eq!(
+                    u.content, "skip me",
+                    "user input should appear as UserMessage"
+                );
+                assert_eq!(u.session_id, sid);
+            }
+            _ => panic!("frame 1 should be UserMessage"),
+        }
+
+        let f3 = rx.recv().await.unwrap().unwrap();
+        match f3.payload {
             Some(proto::server_message::Payload::TextDelta(ref t)) => {
                 assert_eq!(
                     t.delta, "keep this",
-                    "user input should NOT appear as TextDelta"
+                    "assistant content should appear as TextDelta"
                 );
             }
-            _ => panic!("frame 1 should be TextDelta"),
+            _ => panic!("frame 2 should be TextDelta"),
         }
     }
 
@@ -2722,14 +2910,15 @@ mod tests {
             frames.push(msg);
         }
 
-        // 12 frames: 4 (main) + 4 (child) + 4 (grand)
+        // 15 frames: 5 (main) + 5 (child) + 5 (grand)
+        // Each session: StatusUpdate + UserMessage + TextDelta + ToolResult + Done
         assert_eq!(
             frames.len(),
-            12,
-            "expected 12 frames: main(4) + child(4) + grand(4)"
+            15,
+            "expected 15 frames: main(5) + child(5) + grand(5)"
         );
 
-        // ── Main session (frames 0-3) ──
+        // ── Main session (frames 0-4) ──
         match &frames[0].payload {
             Some(proto::server_message::Payload::StatusUpdate(s)) => {
                 assert_eq!(s.session_id, main_id);
@@ -2747,29 +2936,36 @@ mod tests {
             _ => panic!("frame 0 should be main StatusUpdate"),
         }
         match &frames[1].payload {
+            Some(proto::server_message::Payload::UserMessage(u)) => {
+                assert_eq!(u.content, "hello");
+                assert_eq!(u.session_id, main_id);
+            }
+            _ => panic!("frame 1 should be main UserMessage"),
+        }
+        match &frames[2].payload {
             Some(proto::server_message::Payload::TextDelta(t)) => {
                 assert_eq!(t.delta, "main response");
                 assert_eq!(t.session_id, main_id);
             }
-            _ => panic!("frame 1 should be main TextDelta"),
+            _ => panic!("frame 2 should be main TextDelta"),
         }
-        match &frames[2].payload {
+        match &frames[3].payload {
             Some(proto::server_message::Payload::ToolResult(tr)) => {
                 assert_eq!(tr.call_id, "call-0");
                 assert_eq!(tr.content, "main result");
                 assert_eq!(tr.session_id, main_id);
             }
-            _ => panic!("frame 2 should be main ToolResult"),
+            _ => panic!("frame 3 should be main ToolResult"),
         }
-        match &frames[3].payload {
+        match &frames[4].payload {
             Some(proto::server_message::Payload::Done(d)) => {
                 assert_eq!(d.session_id, main_id);
             }
-            _ => panic!("frame 3 should be main Done"),
+            _ => panic!("frame 4 should be main Done"),
         }
 
-        // ── Child session (frames 4-7) ──
-        match &frames[4].payload {
+        // ── Child session (frames 5-9) ──
+        match &frames[5].payload {
             Some(proto::server_message::Payload::StatusUpdate(s)) => {
                 assert_eq!(s.session_id, "child");
                 assert!(s.view_only, "child session must have view_only=true");
@@ -2780,34 +2976,41 @@ mod tests {
                     "child user_inputs should contain task prompt"
                 );
             }
-            _ => panic!("frame 4 should be child StatusUpdate"),
+            _ => panic!("frame 5 should be child StatusUpdate"),
         }
-        match &frames[5].payload {
+        match &frames[6].payload {
+            Some(proto::server_message::Payload::UserMessage(u)) => {
+                assert_eq!(u.content, "task: implement feature X");
+                assert_eq!(u.session_id, "child");
+            }
+            _ => panic!("frame 6 should be child UserMessage"),
+        }
+        match &frames[7].payload {
             Some(proto::server_message::Payload::TextDelta(t)) => {
                 assert_eq!(t.delta, "child response");
                 assert_eq!(t.session_id, "child");
                 assert_eq!(t.agent_name, "sub-agent-child");
             }
-            _ => panic!("frame 5 should be child TextDelta"),
+            _ => panic!("frame 7 should be child TextDelta"),
         }
-        match &frames[6].payload {
+        match &frames[8].payload {
             Some(proto::server_message::Payload::ToolResult(tr)) => {
                 assert_eq!(tr.call_id, "call-1");
                 assert_eq!(tr.content, "child result");
                 assert_eq!(tr.session_id, "child");
                 assert_eq!(tr.agent_name, "sub-agent-child");
             }
-            _ => panic!("frame 6 should be child ToolResult"),
+            _ => panic!("frame 8 should be child ToolResult"),
         }
-        match &frames[7].payload {
+        match &frames[9].payload {
             Some(proto::server_message::Payload::Done(d)) => {
                 assert_eq!(d.session_id, "child");
             }
-            _ => panic!("frame 7 should be child Done"),
+            _ => panic!("frame 9 should be child Done"),
         }
 
-        // ── Grandchild session (frames 8-11) ──
-        match &frames[8].payload {
+        // ── Grandchild session (frames 10-14) ──
+        match &frames[10].payload {
             Some(proto::server_message::Payload::StatusUpdate(s)) => {
                 assert_eq!(s.session_id, "grand");
                 assert!(s.view_only, "grand session must have view_only=true");
@@ -2818,29 +3021,36 @@ mod tests {
                     "grand user_inputs should contain task prompt"
                 );
             }
-            _ => panic!("frame 8 should be grand StatusUpdate"),
+            _ => panic!("frame 10 should be grand StatusUpdate"),
         }
-        match &frames[9].payload {
+        match &frames[11].payload {
+            Some(proto::server_message::Payload::UserMessage(u)) => {
+                assert_eq!(u.content, "task: review the code");
+                assert_eq!(u.session_id, "grand");
+            }
+            _ => panic!("frame 11 should be grand UserMessage"),
+        }
+        match &frames[12].payload {
             Some(proto::server_message::Payload::TextDelta(t)) => {
                 assert_eq!(t.delta, "grand response");
                 assert_eq!(t.session_id, "grand");
                 assert_eq!(t.agent_name, "sub-agent-grand");
             }
-            _ => panic!("frame 9 should be grand TextDelta"),
+            _ => panic!("frame 12 should be grand TextDelta"),
         }
-        match &frames[10].payload {
+        match &frames[13].payload {
             Some(proto::server_message::Payload::ToolResult(tr)) => {
                 assert_eq!(tr.call_id, "call-2");
                 assert_eq!(tr.content, "grand result");
                 assert_eq!(tr.session_id, "grand");
             }
-            _ => panic!("frame 10 should be grand ToolResult"),
+            _ => panic!("frame 13 should be grand ToolResult"),
         }
-        match &frames[11].payload {
+        match &frames[14].payload {
             Some(proto::server_message::Payload::Done(d)) => {
                 assert_eq!(d.session_id, "grand");
             }
-            _ => panic!("frame 11 should be grand Done"),
+            _ => panic!("frame 14 should be grand Done"),
         }
     }
 
@@ -2859,7 +3069,8 @@ mod tests {
         let f1 = rx.recv().await.unwrap().unwrap();
         let f2 = rx.recv().await.unwrap().unwrap();
         let f3 = rx.recv().await.unwrap().unwrap();
-        let no_f4 = rx.try_recv();
+        let f4 = rx.recv().await.unwrap().unwrap();
+        let no_f5 = rx.try_recv();
 
         // Frame 1: StatusUpdate (view_only=false, no descendants)
         match &f1.payload {
@@ -2871,25 +3082,34 @@ mod tests {
             _ => panic!("frame 0 should be StatusUpdate"),
         }
 
-        // Frame 2: TextDelta (no user messages leaked)
+        // Frame 2: UserMessage
         match &f2.payload {
+            Some(proto::server_message::Payload::UserMessage(u)) => {
+                assert_eq!(u.content, "prompt");
+                assert_eq!(u.session_id, sid);
+            }
+            _ => panic!("frame 1 should be UserMessage"),
+        }
+
+        // Frame 3: TextDelta
+        match &f3.payload {
             Some(proto::server_message::Payload::TextDelta(t)) => {
                 assert_eq!(t.delta, "response 1");
                 assert_eq!(t.session_id, sid);
             }
-            _ => panic!("frame 1 should be TextDelta"),
+            _ => panic!("frame 2 should be TextDelta"),
         }
 
-        // Frame 3: Done
-        match &f3.payload {
+        // Frame 4: Done
+        match &f4.payload {
             Some(proto::server_message::Payload::Done(d)) => {
                 assert_eq!(d.session_id, sid);
             }
-            _ => panic!("frame 2 should be Done"),
+            _ => panic!("frame 3 should be Done"),
         }
 
         // No extra frames
-        assert!(no_f4.is_err(), "no descendants → no extra frames");
+        assert!(no_f5.is_err(), "no descendants → no extra frames");
     }
 
     #[tokio::test]

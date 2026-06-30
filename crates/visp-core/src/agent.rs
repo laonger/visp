@@ -1,6 +1,7 @@
 // Allow unused imports — they are consumed by test module via `use super::*`
 #![allow(unused_imports)]
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -219,6 +220,30 @@ pub struct AgentConfig {
     pub file_max_size_bytes: u64,
     /// Agent 嵌套深度上限
     pub max_depth: u32,
+    /// Langfuse 总开关
+    pub langfuse_enabled: bool,
+    /// Langfuse user.id 字段值（None = 不设置）
+    pub langfuse_user_id: Option<String>,
+    /// Langfuse tags 字段值（JSON 字符串，None = 不设置）
+    pub langfuse_tags: Option<String>,
+    /// Langfuse environment 字段
+    pub langfuse_environment: Option<String>,
+    /// Langfuse release 字段
+    pub langfuse_release: Option<String>,
+    /// Langfuse version 字段
+    pub langfuse_version: Option<String>,
+    /// Langfuse public 开关（None = 不设置）
+    pub langfuse_public: Option<bool>,
+    /// Langfuse metadata（值均为字符串：标量保留，数组/table 转紧凑 JSON）
+    pub langfuse_metadata: Option<HashMap<String, String>>,
+    /// 是否在 Langfuse OTEL span 中记录 LLM generation input
+    pub langfuse_capture_input: bool,
+    /// 是否在 Langfuse OTEL span 中记录 LLM generation output
+    pub langfuse_capture_output: bool,
+    /// Langfuse capture 最大字符数（超出截断）
+    pub langfuse_capture_max_chars: usize,
+    /// 是否脱敏敏感字段（api_key/token/secret/password 等）
+    pub langfuse_redact_secrets: bool,
 }
 
 impl Default for AgentConfig {
@@ -232,6 +257,18 @@ impl Default for AgentConfig {
             bash_confirm_mode: true,
             file_max_size_bytes: 1048576,
             max_depth: 5,
+            langfuse_enabled: false,
+            langfuse_user_id: None,
+            langfuse_tags: None,
+            langfuse_environment: None,
+            langfuse_release: None,
+            langfuse_version: None,
+            langfuse_public: None,
+            langfuse_metadata: None,
+            langfuse_capture_input: false,
+            langfuse_capture_output: false,
+            langfuse_capture_max_chars: 20_000,
+            langfuse_redact_secrets: true,
         }
     }
 }
@@ -746,6 +783,111 @@ mod tests {
         assert_eq!(cfg.llm_retry_base_delay_ms, 1000);
         assert!(cfg.bash_confirm_mode);
         assert_eq!(cfg.file_max_size_bytes, 1048576);
+    }
+
+    #[test]
+    fn test_agent_config_langfuse_defaults() {
+        let cfg = AgentConfig::default();
+        assert_eq!(cfg.langfuse_user_id, None);
+        assert_eq!(cfg.langfuse_tags, None);
+    }
+
+    #[test]
+    fn test_agent_config_langfuse_configured() {
+        let cfg = AgentConfig {
+            langfuse_user_id: Some("user_456".into()),
+            langfuse_tags: Some(r#"["agent","weather"]"#.into()),
+            ..Default::default()
+        };
+        assert_eq!(cfg.langfuse_user_id.as_deref(), Some("user_456"));
+        assert_eq!(cfg.langfuse_tags.as_deref(), Some(r#"["agent","weather"]"#));
+    }
+
+    // ── 1b: 传递配置到核心 AgentConfig ──────────────────────────────────
+
+    #[test]
+    fn test_agent_config_langfuse_enabled_default() {
+        let cfg = AgentConfig::default();
+        assert!(
+            !cfg.langfuse_enabled,
+            "langfuse_enabled should default to false"
+        );
+    }
+
+    #[test]
+    fn test_agent_config_langfuse_all_fields() {
+        let mut meta = HashMap::new();
+        meta.insert("env".into(), "prod".into());
+        meta.insert("count".into(), "42".into());
+        let cfg = AgentConfig {
+            langfuse_enabled: true,
+            langfuse_user_id: Some("user".into()),
+            langfuse_tags: Some(r#"["agent"]"#.into()),
+            langfuse_environment: Some("staging".into()),
+            langfuse_release: Some("2.0".into()),
+            langfuse_version: Some("abc123".into()),
+            langfuse_public: Some(true),
+            langfuse_metadata: Some(meta.clone()),
+            ..Default::default()
+        };
+        assert!(cfg.langfuse_enabled);
+        assert_eq!(cfg.langfuse_user_id.as_deref(), Some("user"));
+        assert_eq!(cfg.langfuse_tags.as_deref(), Some(r#"["agent"]"#));
+        assert_eq!(cfg.langfuse_environment.as_deref(), Some("staging"));
+        assert_eq!(cfg.langfuse_release.as_deref(), Some("2.0"));
+        assert_eq!(cfg.langfuse_version.as_deref(), Some("abc123"));
+        assert_eq!(cfg.langfuse_public, Some(true));
+        assert_eq!(cfg.langfuse_metadata, Some(meta));
+    }
+
+    #[test]
+    fn test_agent_config_langfuse_capture_defaults() {
+        let cfg = AgentConfig::default();
+        assert!(!cfg.langfuse_capture_input);
+        assert!(!cfg.langfuse_capture_output);
+        assert_eq!(cfg.langfuse_capture_max_chars, 20000);
+        assert!(cfg.langfuse_redact_secrets);
+    }
+
+    #[test]
+    fn test_agent_config_langfuse_capture_configured() {
+        let cfg = AgentConfig {
+            langfuse_capture_input: true,
+            langfuse_capture_output: true,
+            langfuse_capture_max_chars: 5000,
+            langfuse_redact_secrets: false,
+            ..Default::default()
+        };
+        assert!(cfg.langfuse_capture_input);
+        assert!(cfg.langfuse_capture_output);
+        assert_eq!(cfg.langfuse_capture_max_chars, 5000);
+        assert!(!cfg.langfuse_redact_secrets);
+    }
+
+    #[test]
+    fn test_agent_config_langfuse_empty_tags_none() {
+        // 空 tags 策略：tags 为 None 时不写入
+        let cfg = AgentConfig {
+            langfuse_tags: None,
+            ..Default::default()
+        };
+        assert_eq!(cfg.langfuse_tags, None);
+    }
+
+    #[test]
+    fn test_agent_config_langfuse_metadata_cross_crate() {
+        // metadata 跨 crate 表达：HashMap<String, String> 可以在 core 中使用
+        let mut meta = HashMap::new();
+        meta.insert("env".into(), "prod".into());
+        meta.insert("items".into(), r#"["a","b"]"#.into());
+        let cfg = AgentConfig {
+            langfuse_metadata: Some(meta),
+            ..Default::default()
+        };
+        let m = cfg.langfuse_metadata.as_ref().unwrap();
+        assert_eq!(m.get("env").map(|s| s.as_str()), Some("prod"));
+        assert_eq!(m.get("items").map(|s| s.as_str()), Some(r#"["a","b"]"#));
+        assert_eq!(m.len(), 2);
     }
 
     #[test]

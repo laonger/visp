@@ -154,6 +154,69 @@ pub struct ObservabilityConfig {
     pub log_file: Option<String>,
     #[serde(default)]
     pub otlp: OtlpConfig,
+    #[serde(default)]
+    pub langfuse: LangfuseConfig,
+}
+
+/// Langfuse capture switch configuration
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LangfuseCaptureConfig {
+    #[serde(default)]
+    pub input: bool,
+    #[serde(default)]
+    pub output: bool,
+    /// 最大字符数（超出截断，默认 20000）
+    #[serde(default = "default_capture_max_chars")]
+    pub max_chars: usize,
+    /// 是否脱敏敏感字段（默认 true）
+    #[serde(default = "default_capture_redact_secrets")]
+    pub redact_secrets: bool,
+}
+
+fn default_capture_max_chars() -> usize {
+    20_000
+}
+
+fn default_capture_redact_secrets() -> bool {
+    true
+}
+
+impl Default for LangfuseCaptureConfig {
+    fn default() -> Self {
+        Self {
+            input: false,
+            output: false,
+            max_chars: default_capture_max_chars(),
+            redact_secrets: default_capture_redact_secrets(),
+        }
+    }
+}
+
+/// Langfuse 观测配置
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct LangfuseConfig {
+    /// 总开关（默认关闭，需显式开启）
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub environment: Option<String>,
+    #[serde(default)]
+    pub release: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    /// 三态：未设置/true/false（非布尔值报错）
+    #[serde(default)]
+    pub public: Option<bool>,
+    /// 任意元数据（标量原样，数组/table 转紧凑 JSON）
+    #[serde(default)]
+    pub metadata: Option<toml::value::Table>,
+    /// P1 capture 开关（仅解析，功能待实现）
+    #[serde(default)]
+    pub capture: LangfuseCaptureConfig,
 }
 
 impl Default for ObservabilityConfig {
@@ -166,6 +229,7 @@ impl Default for ObservabilityConfig {
             metrics_summary: default_observability_metrics_summary(),
             log_file: default_observability_log_file(),
             otlp: OtlpConfig::default(),
+            langfuse: LangfuseConfig::default(),
         }
     }
 }
@@ -352,6 +416,7 @@ fn default_config() -> DaemonConfig {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::PathBuf;
 
     #[test]
     fn test_llm_section_with_api_key() {
@@ -893,5 +958,364 @@ sample_rate = 2.5
 "#;
         let config2: DaemonConfig = toml::from_str(toml2).unwrap();
         assert!((config2.observability.otlp.sample_rate - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_observability_langfuse_config() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+
+[tools]
+
+[agent]
+
+[observability]
+enabled = true
+
+[observability.langfuse]
+user_id = "user_456"
+tags = ["agent", "weather"]
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.observability.langfuse.user_id.as_deref(),
+            Some("user_456")
+        );
+        assert_eq!(
+            config.observability.langfuse.tags,
+            vec!["agent".to_string(), "weather".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_observability_langfuse_defaults() {
+        let config = default_config();
+        assert!(!config.observability.langfuse.enabled);
+        assert_eq!(config.observability.langfuse.user_id, None);
+        assert!(config.observability.langfuse.tags.is_empty());
+        assert_eq!(config.observability.langfuse.environment, None);
+        assert_eq!(config.observability.langfuse.release, None);
+        assert_eq!(config.observability.langfuse.version, None);
+        assert_eq!(config.observability.langfuse.public, None);
+        assert_eq!(config.observability.langfuse.metadata, None);
+        assert!(!config.observability.langfuse.capture.input);
+        assert!(!config.observability.langfuse.capture.output);
+        assert_eq!(config.observability.langfuse.capture.max_chars, 20000);
+        assert!(config.observability.langfuse.capture.redact_secrets);
+    }
+
+    #[test]
+    fn test_observability_langfuse_full_capture_config() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+
+[tools]
+
+[agent]
+
+[observability.langfuse.capture]
+input = true
+output = true
+max_chars = 10000
+redact_secrets = false
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        let capture = &config.observability.langfuse.capture;
+        assert!(capture.input);
+        assert!(capture.output);
+        assert_eq!(capture.max_chars, 10000);
+        assert!(!capture.redact_secrets);
+    }
+
+    #[test]
+    fn test_observability_langfuse_omitted_section_is_default() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+
+[tools]
+
+[agent]
+
+[observability]
+enabled = true
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.observability.langfuse, LangfuseConfig::default());
+    }
+
+    // ── 1a: 扩展 Langfuse 配置 ──────────────────────────────────────────
+
+    #[test]
+    fn test_langfuse_config_default() {
+        let cfg = LangfuseConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.user_id, None);
+        assert!(cfg.tags.is_empty());
+        assert_eq!(cfg.environment, None);
+        assert_eq!(cfg.release, None);
+        assert_eq!(cfg.version, None);
+        assert_eq!(cfg.public, None);
+        assert_eq!(cfg.metadata, None);
+        assert!(!cfg.capture.input);
+        assert!(!cfg.capture.output);
+        assert_eq!(cfg.capture.max_chars, 20000);
+        assert!(cfg.capture.redact_secrets);
+    }
+
+    #[test]
+    fn test_langfuse_config_full() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+
+[tools]
+
+[agent]
+
+[observability.langfuse]
+enabled = true
+user_id = "user_456"
+tags = ["agent", "weather"]
+environment = "production"
+release = "1.0.0"
+version = "abc123"
+public = true
+
+[observability.langfuse.metadata]
+env = "prod"
+count = 42
+items = ["a", "b"]
+
+[observability.langfuse.metadata.nested]
+key = "val"
+
+[observability.langfuse.capture]
+input = true
+output = true
+max_chars = 15000
+redact_secrets = false
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        let lf = &config.observability.langfuse;
+        assert!(lf.enabled);
+        assert_eq!(lf.user_id.as_deref(), Some("user_456"));
+        assert_eq!(lf.tags, vec!["agent", "weather"]);
+        assert_eq!(lf.environment.as_deref(), Some("production"));
+        assert_eq!(lf.release.as_deref(), Some("1.0.0"));
+        assert_eq!(lf.version.as_deref(), Some("abc123"));
+        assert_eq!(lf.public, Some(true));
+        let meta = lf.metadata.as_ref().unwrap();
+        assert_eq!(meta.get("env").and_then(|v| v.as_str()), Some("prod"));
+        assert!(meta.contains_key("count"));
+        assert!(meta.contains_key("items"));
+        assert!(meta.contains_key("nested"));
+        assert!(lf.capture.input);
+        assert!(lf.capture.output);
+        assert_eq!(lf.capture.max_chars, 15000);
+        assert!(!lf.capture.redact_secrets);
+    }
+
+    #[test]
+    fn test_langfuse_config_public_tri_state() {
+        // not set → None
+        let config = default_config();
+        assert_eq!(config.observability.langfuse.public, None);
+
+        // false → Some(false)
+        let toml_false = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+
+[tools]
+
+[agent]
+
+[observability.langfuse]
+public = false
+"#;
+        let cfg_false: DaemonConfig = toml::from_str(toml_false).unwrap();
+        assert_eq!(cfg_false.observability.langfuse.public, Some(false));
+
+        // true → Some(true)
+        let toml_true = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+
+[tools]
+
+[agent]
+
+[observability.langfuse]
+public = true
+"#;
+        let cfg_true: DaemonConfig = toml::from_str(toml_true).unwrap();
+        assert_eq!(cfg_true.observability.langfuse.public, Some(true));
+    }
+
+    #[test]
+    fn test_langfuse_config_public_non_bool_error() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+
+[tools]
+
+[agent]
+
+[observability.langfuse]
+public = "notabool"
+"#;
+        let result: Result<DaemonConfig, toml::de::Error> = toml::from_str(toml);
+        assert!(result.is_err(), "non-boolean public should fail to parse");
+    }
+
+    #[test]
+    fn test_langfuse_config_default_disabled() {
+        let config = default_config();
+        assert!(!config.observability.langfuse.enabled);
+    }
+
+    // ── 6a: Collector 示例与示例配置 ─────────────────────────────────────
+
+    /// Helper: 从 crate 目录回溯到 workspace docs 目录
+    fn docs_dir() -> PathBuf {
+        let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        // crate_dir = .../visp/crates/visp-daemon
+        crate_dir
+            .parent()
+            .expect("crates")
+            .parent()
+            .expect("visp")
+            .join("docs")
+    }
+
+    #[test]
+    fn test_example_collector_yaml_exists() {
+        let path = docs_dir().join("otel-collector-langfuse.example.yaml");
+        assert!(
+            path.exists(),
+            "Collector 示例文件不存在: {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn test_example_collector_yaml_content() {
+        let path = docs_dir().join("otel-collector-langfuse.example.yaml");
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("读取 {} 失败: {}", path.display(), e));
+
+        // 必须包含 OTLP gRPC receiver
+        assert!(content.contains("grpc"), "Collector 示例缺少 gRPC receiver");
+        // 必包含 OTLP HTTP exporter
+        assert!(
+            content.contains("http/protobuf"),
+            "Collector 示例缺少 OTLP HTTP exporter（http/protobuf）"
+        );
+        // 必包含 x-langfuse-ingestion-version=4
+        assert!(
+            content.contains("x-langfuse-ingestion-version") && content.contains("4"),
+            "Collector 示例缺少 x-langfuse-ingestion-version=4"
+        );
+    }
+
+    #[test]
+    fn test_example_collector_yaml_no_real_secrets() {
+        let path = docs_dir().join("otel-collector-langfuse.example.yaml");
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("读取 {} 失败: {}", path.display(), e));
+
+        // 检查 secret key 行：如果有 sk-lf- 必须是占位符 ${...} 或明显示例值（含 example/test/your）
+        for line in content.lines() {
+            if line.contains("sk-lf-") {
+                let trimmed = line.trim();
+                assert!(
+                    trimmed.contains('$')
+                        || trimmed.contains("example")
+                        || trimmed.contains("YOUR_")
+                        || trimmed.contains("your-")
+                        || trimmed.contains("your_"),
+                    "Collector 示例包含疑似真实 sk-lf- secret: {}",
+                    trimmed
+                );
+            }
+            if line.contains("pk-lf-") {
+                let trimmed = line.trim();
+                assert!(
+                    trimmed.contains('$')
+                        || trimmed.contains("example")
+                        || trimmed.contains("YOUR_")
+                        || trimmed.contains("your-")
+                        || trimmed.contains("your_"),
+                    "Collector 示例包含疑似真实 pk-lf- public key: {}",
+                    trimmed
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_example_daemon_toml_has_langfuse_config() {
+        let path = docs_dir().join("daemon.example.toml");
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("读取 {} 失败: {}", path.display(), e));
+
+        // 必须包含 observability.langfuse 配置段
+        assert!(
+            content.contains("[observability.langfuse]"),
+            "daemon.example.toml 缺少 [observability.langfuse] 段"
+        );
+
+        // 必须包含关键配置字段
+        let expected_fields = [
+            "enabled",
+            "user_id",
+            "tags",
+            "environment",
+            "release",
+            "version",
+            "public",
+            "metadata",
+            "capture",
+        ];
+        for field in &expected_fields {
+            assert!(
+                content.contains(field),
+                "daemon.example.toml langfuse 配置缺少字段: {}",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn test_example_daemon_toml_collector_disclaimer() {
+        let path = docs_dir().join("daemon.example.toml");
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("读取 {} 失败: {}", path.display(), e));
+
+        // 必须声明 Collector 示例是参考配置
+        let keywords = ["Collector", "参考", "示例", "管理"];
+        let found = keywords.iter().any(|k| content.contains(k));
+        assert!(
+            found,
+            "daemon.example.toml 未声明 Collector 示例为参考配置（缺少 Collector/参考/示例/管理 关键词）"
+        );
     }
 }

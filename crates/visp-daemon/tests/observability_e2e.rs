@@ -787,6 +787,11 @@ fn test_e2e_metrics_handle_accessible_post_run() {
 
     let session_id = harness.session_id.clone();
 
+    // Record baseline before run — other tests may have left session data
+    // in the shared global subscriber.
+    let metrics = guard.metrics.as_ref().unwrap();
+    let before_count = metrics.all_sessions().len();
+
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -808,19 +813,27 @@ fn test_e2e_metrics_handle_accessible_post_run() {
 
     // After run, the bucket should have been removed by MetricsLayer
     // on summary emission (P0-4: destroy after summary).
-    let metrics = guard.metrics.as_ref().unwrap();
     let session_metrics = metrics.session_metrics(&session_id);
     assert!(
         session_metrics.is_none(),
-        "expected bucket to be removed after summary emission"
+        "expected bucket to be removed after summary emission, session_id={session_id}"
     );
 
-    // all_sessions() should also be empty.
-    let all = metrics.all_sessions();
+    // all_sessions() should not have grown relative to baseline.
+    // We do NOT assert absolute emptiness because other tests in the same
+    // binary share the global subscriber and may have residual sessions.
+    let after = metrics.all_sessions();
     assert!(
-        all.is_empty(),
-        "expected all_sessions() to be empty after summaries, got {} sessions",
-        all.len()
+        after.len() <= before_count,
+        "all_sessions() grew {} -> {} after test (expected <=)",
+        before_count,
+        after.len()
+    );
+    // Also verify our session is not present.
+    let session_still_present = after.iter().any(|(id, _)| id == &session_id);
+    assert!(
+        !session_still_present,
+        "our session {session_id} still present in all_sessions() after cleanup"
     );
 
     let _ = guard;

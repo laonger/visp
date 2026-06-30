@@ -17,6 +17,7 @@ use crate::message::{
 };
 use crate::prompt::PromptBuilder;
 use crate::provider::ChatEvent;
+use crate::provider::LlmConfig;
 use crate::provider::LlmProvider;
 use crate::rules::RuleEngine;
 use crate::session::SessionManager;
@@ -111,6 +112,41 @@ async fn send_event(
         return Err(());
     }
     Ok(())
+}
+
+/// Record langfuse trace-level fields onto a span.
+/// The span must have these fields declared in its `info_span!` macro invocation.
+/// Safe to call even when langfuse is disabled (returns immediately).
+pub fn record_langfuse_trace_fields(span: &tracing::Span, cfg: &AgentConfig, session_id: &str) {
+    if !cfg.langfuse_enabled {
+        return;
+    }
+    span.record("langfuse.session.id", session_id);
+    span.record("langfuse.trace.name", "visp.agent.run".to_string());
+
+    if let Some(ref user_id) = cfg.langfuse_user_id {
+        span.record("langfuse.user.id", user_id.as_str());
+    }
+    if let Some(ref tags) = cfg.langfuse_tags {
+        span.record("langfuse.trace.tags", tags.as_str());
+    }
+    let env = cfg.langfuse_environment.as_deref().unwrap_or("default");
+    span.record("langfuse.environment", env);
+    if let Some(ref release) = cfg.langfuse_release {
+        span.record("langfuse.release", release.as_str());
+    }
+    if let Some(ref version) = cfg.langfuse_version {
+        span.record("langfuse.version", version.as_str());
+    }
+    if let Some(public) = cfg.langfuse_public {
+        span.record("langfuse.trace.public", public);
+    }
+    if let Some(ref metadata) = cfg.langfuse_metadata
+        && !metadata.is_empty()
+        && let Ok(json) = serde_json::to_string(metadata)
+    {
+        span.record("langfuse.trace.metadata", json.as_str());
+    }
 }
 
 /// Iteration context produced by setup_iteration
@@ -262,6 +298,22 @@ async fn call_llm_with_retry(
     sid: &str,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError> {
     let mut attempt = 0u32;
+
+    // 注入 Langfuse trace 级字段到 LlmConfig，使 provider 能在 gen_ai.client.operation span 上记录
+    let llm_config = LlmConfig {
+        langfuse_enabled: cfg.langfuse_enabled,
+        langfuse_session_id: Some(ctx.session_id.clone()),
+        langfuse_trace_name: Some("visp.agent.run".to_string()),
+        langfuse_user_id: cfg.langfuse_user_id.clone(),
+        langfuse_tags: cfg.langfuse_tags.clone(),
+        langfuse_environment: cfg.langfuse_environment.clone(),
+        langfuse_release: cfg.langfuse_release.clone(),
+        langfuse_version: cfg.langfuse_version.clone(),
+        langfuse_public: cfg.langfuse_public,
+        langfuse_metadata: cfg.langfuse_metadata.clone(),
+        ..ctx.config.clone()
+    };
+
     loop {
         // 循环顶部检查 cancel：首次进入或 sleep 后立即返回
         if ctx.cancel_token.is_cancelled() {
@@ -269,7 +321,7 @@ async fn call_llm_with_retry(
         }
 
         match provider
-            .chat_stream(messages, tools, &ctx.config, &ctx.cancel_token)
+            .chat_stream(messages, tools, &llm_config, &ctx.cancel_token)
             .await
         {
             Ok(s) => break Ok(Box::pin(s)),
@@ -832,6 +884,7 @@ async fn execute_tool_calls(
     let mut pending_spawns: Vec<PendingSpawn> = Vec::new();
     let tool_ids: Vec<String> = tool_calls.iter().map(|tc| tc.id.clone()).collect();
     let is_multi_agent = ctx.global_tx.is_some() && ctx.inbox_rx.is_some();
+    let langfuse_enabled = cfg.langfuse_enabled;
 
     for (i, tc) in tool_calls.iter().enumerate() {
         // Multi-agent: intercept "task" tool calls
@@ -900,14 +953,40 @@ async fn execute_tool_calls(
         // Pre-clone for tool span
         let tool_span_name = tc.name.clone();
         let tool_span_id = tc.id.clone();
-        let tool_span = tracing::info_span!(
-            "visp.tool.execute",
-            gen_ai.tool.name = %tool_span_name,
-            gen_ai.tool.call.id = %tool_span_id,
-            gen_ai.tool.type = "function",
-            visp.tool.is_error = tracing::field::Empty,
-            visp.tool.duration_ms = tracing::field::Empty,
-        );
+        let tool_span = if langfuse_enabled {
+            tracing::info_span!(
+                "visp.tool.execute",
+                gen_ai.tool.name = %tool_span_name,
+                gen_ai.tool.call.id = %tool_span_id,
+                gen_ai.tool.type = "function",
+                gen_ai.operation.name = "execute_tool",
+                langfuse.observation.type = "span",
+                level = tracing::field::Empty,
+                status_message = tracing::field::Empty,
+                langfuse.session.id = tracing::field::Empty,
+                langfuse.user.id = tracing::field::Empty,
+                langfuse.trace.tags = tracing::field::Empty,
+                langfuse.trace.name = tracing::field::Empty,
+                langfuse.environment = tracing::field::Empty,
+                langfuse.trace.public = tracing::field::Empty,
+                langfuse.release = tracing::field::Empty,
+                langfuse.version = tracing::field::Empty,
+                langfuse.trace.metadata = tracing::field::Empty,
+                visp.tool.is_error = tracing::field::Empty,
+                visp.tool.duration_ms = tracing::field::Empty,
+            )
+        } else {
+            tracing::info_span!(
+                "visp.tool.execute",
+                gen_ai.tool.name = %tool_span_name,
+                gen_ai.tool.call.id = %tool_span_id,
+                gen_ai.tool.type = "function",
+                visp.tool.is_error = tracing::field::Empty,
+                visp.tool.duration_ms = tracing::field::Empty,
+            )
+        };
+        // Propagate langfuse trace-level fields onto tool span
+        record_langfuse_trace_fields(&tool_span, cfg, sid);
 
         exec_tasks.push(tokio::spawn(
             async move {
@@ -1075,6 +1154,23 @@ async fn execute_tool_calls(
                 // Record tool execution fields on the visp.tool.execute span
                 tracing::Span::current().record("visp.tool.duration_ms", elapsed_ms as i64);
                 tracing::Span::current().record("visp.tool.is_error", result.is_error);
+
+                if langfuse_enabled {
+                    let level = if result.is_error { "ERROR" } else { "DEFAULT" };
+                    tracing::Span::current().record("level", level);
+                    if result.is_error {
+                        let summary = result.content.lines().next().unwrap_or("Tool error");
+                        let status_msg = if summary.len() > 100 {
+                            let mut s = summary.to_string();
+                            s.truncate(97);
+                            s.push_str("...");
+                            s
+                        } else {
+                            summary.to_string()
+                        };
+                        tracing::Span::current().record("status_message", status_msg);
+                    }
+                }
 
                 forward_global!(AgentMessage::ToolCallResult {
                     call_id: tc.id.clone(),
@@ -1352,16 +1448,44 @@ pub async fn run_agent_loop(
     // Manual span creation (replaces #[tracing::instrument]) – using
     // tracing::info_span! directly so the span is visible to test subscribers
     // created via set_default() on the same thread.
-    let __run_span = tracing::info_span!(
-        "visp.agent.run",
-        session.id = %ctx.session_id,
-        session.short_id = %(&ctx.session_id[..ctx.session_id.len().min(8)]),
-        visp.agent.kind = %ctx.agent_kind,
-        visp.agent.depth = ctx.depth,
-        visp.span.w3c_id = tracing::field::Empty,
-        trace_id = tracing::field::Empty,
-        parent_span_id = tracing::field::Empty,
-    );
+    let short_id = ctx.session_id[..ctx.session_id.len().min(8)].to_string();
+
+    let __run_span = if agent_config.langfuse_enabled {
+        let trace_name = "visp.agent.run".to_string();
+        tracing::info_span!(
+            "visp.agent.run",
+            session.id = %ctx.session_id,
+            session.short_id = %short_id,
+            langfuse.session.id = %ctx.session_id,
+            langfuse.trace.name = %trace_name,
+            langfuse.user.id = tracing::field::Empty,
+            langfuse.trace.tags = tracing::field::Empty,
+            langfuse.environment = tracing::field::Empty,
+            langfuse.trace.public = tracing::field::Empty,
+            langfuse.release = tracing::field::Empty,
+            langfuse.version = tracing::field::Empty,
+            langfuse.trace.metadata = tracing::field::Empty,
+            visp.agent.kind = %ctx.agent_kind,
+            visp.agent.depth = ctx.depth,
+            langfuse.observation.type = tracing::field::Empty,
+            langfuse.observation.input = tracing::field::Empty,
+            langfuse.observation.output = tracing::field::Empty,
+            visp.span.w3c_id = tracing::field::Empty,
+            trace_id = tracing::field::Empty,
+            parent_span_id = tracing::field::Empty,
+        )
+    } else {
+        tracing::info_span!(
+            "visp.agent.run",
+            session.id = %ctx.session_id,
+            session.short_id = %short_id,
+            visp.agent.kind = %ctx.agent_kind,
+            visp.agent.depth = ctx.depth,
+            visp.span.w3c_id = tracing::field::Empty,
+            trace_id = tracing::field::Empty,
+            parent_span_id = tracing::field::Empty,
+        )
+    };
     let __run_guard = __run_span.enter();
 
     let sid = ctx.session_id.clone();
@@ -1382,6 +1506,57 @@ pub async fn run_agent_loop(
     // via on_record and writes it into the span extension.
     let run_span_w3c_id = generate_w3c_span_id();
     __run_span.record("visp.span.w3c_id", &run_span_w3c_id);
+
+    // Record optional langfuse fields based on config
+    if agent_config.langfuse_enabled {
+        if let Some(ref user_id) = agent_config.langfuse_user_id {
+            __run_span.record("langfuse.user.id", user_id.as_str());
+        }
+        if let Some(ref tags) = agent_config.langfuse_tags {
+            __run_span.record("langfuse.trace.tags", tags.as_str());
+        }
+        if let Some(ref env) = agent_config.langfuse_environment {
+            __run_span.record("langfuse.environment", env.as_str());
+        }
+        if let Some(ref release) = agent_config.langfuse_release {
+            __run_span.record("langfuse.release", release.as_str());
+        }
+        if let Some(ref version) = agent_config.langfuse_version {
+            __run_span.record("langfuse.version", version.as_str());
+        }
+        if let Some(public) = agent_config.langfuse_public {
+            __run_span.record("langfuse.trace.public", public);
+        }
+        if let Some(ref metadata) = agent_config.langfuse_metadata
+            && !metadata.is_empty()
+            && let Ok(json) = serde_json::to_string(metadata)
+        {
+            __run_span.record("langfuse.trace.metadata", json.as_str());
+        }
+
+        // Record langfuse observation input (for trace preview)
+        if agent_config.langfuse_capture_input {
+            __run_span.record("langfuse.observation.type", "span");
+            let input_json = serde_json::json!({"message": user_message.content});
+            let input_str = input_json.to_string();
+            let max_chars = agent_config.langfuse_capture_max_chars;
+            let truncated = if input_str.len() > max_chars {
+                let mut end = max_chars.saturating_sub(14);
+                while end > 0 && !input_str.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let mut s = input_str[..end].to_string();
+                s.push_str("...[truncated]");
+                s
+            } else {
+                input_str
+            };
+            __run_span.record("langfuse.observation.input", &truncated);
+        }
+    }
+
+    // Clone root span handle for use inside async body (for output recording)
+    let root_span = __run_span.clone();
 
     // Enter the span for the sync setup part, then wrap the async body with Instrument.
     drop(__run_guard);
@@ -1440,12 +1615,31 @@ pub async fn run_agent_loop(
         loop {
             // Create iteration span with W3C ID placeholder.
             let iter_span_w3c_id = generate_w3c_span_id();
-            let iteration_span = tracing::info_span!(
-                "visp.agent.iteration",
-                visp.span.w3c_id = tracing::field::Empty,
-                iteration.count = iteration,
-            );
+            let iteration_span = if agent_config.langfuse_enabled {
+                tracing::info_span!(
+                    "visp.agent.iteration",
+                    visp.span.w3c_id = tracing::field::Empty,
+                    iteration.count = iteration,
+                    langfuse.session.id = tracing::field::Empty,
+                    langfuse.user.id = tracing::field::Empty,
+                    langfuse.trace.tags = tracing::field::Empty,
+                    langfuse.trace.name = tracing::field::Empty,
+                    langfuse.environment = tracing::field::Empty,
+                    langfuse.trace.public = tracing::field::Empty,
+                    langfuse.release = tracing::field::Empty,
+                    langfuse.version = tracing::field::Empty,
+                    langfuse.trace.metadata = tracing::field::Empty,
+                )
+            } else {
+                tracing::info_span!(
+                    "visp.agent.iteration",
+                    visp.span.w3c_id = tracing::field::Empty,
+                    iteration.count = iteration,
+                )
+            };
             iteration_span.record("visp.span.w3c_id", &iter_span_w3c_id);
+            // Propagate langfuse trace-level fields onto iteration span
+            record_langfuse_trace_fields(&iteration_span, &cfg, &sid);
 
             // a/b/c: Build prompt + boundary checks
             let ic = match setup_iteration(
@@ -1532,6 +1726,29 @@ pub async fn run_agent_loop(
                 .await
             {
                 Ok(StreamDecision::Done) => {
+                    // Record langfuse observation output (for trace preview)
+                    if cfg.langfuse_enabled
+                        && cfg.langfuse_capture_output
+                        && !output.text_buffer.is_empty()
+                    {
+                        root_span.record("langfuse.observation.type", "span");
+                        let output_json = serde_json::json!({"response": output.text_buffer});
+                        let output_str = output_json.to_string();
+                        let max_chars = cfg.langfuse_capture_max_chars;
+                        let truncated = if output_str.len() > max_chars {
+                            let mut end = max_chars.saturating_sub(14);
+                            while end > 0 && !output_str.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            let mut s = output_str[..end].to_string();
+                            s.push_str("...[truncated]");
+                            s
+                        } else {
+                            output_str
+                        };
+                        root_span.record("langfuse.observation.output", &truncated);
+                    }
+
                     tracing::info!(
                         target: "visp.agent.completed",
                         session_id = %sid,
@@ -2686,6 +2903,611 @@ mod tests {
 
     #[serial]
     #[tokio::test]
+    async fn test_agent_run_carries_langfuse_session_id() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        let provider: StdArc<dyn LlmProvider> =
+            StdArc::new(SimpleProvider::new(vec![vec![ChatEvent::Done]]));
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig {
+            langfuse_enabled: true,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("hello"),
+            tx,
+        )
+        .await;
+
+        let captured = spans.lock().unwrap();
+        let run_span = captured
+            .iter()
+            .find(|s| s.name == "visp.agent.run")
+            .unwrap();
+        assert!(
+            run_span
+                .fields
+                .iter()
+                .any(|(k, _)| k == "langfuse.session.id"),
+            "expected langfuse.session.id field on visp.agent.run span, fields: {:?}",
+            run_span.fields
+        );
+        // Value should equal session.id
+        let langfuse_val = run_span
+            .fields
+            .iter()
+            .find(|(k, _)| k == "langfuse.session.id")
+            .map(|(_, v)| v.as_str())
+            .unwrap();
+        let session_id_val = run_span
+            .fields
+            .iter()
+            .find(|(k, _)| k == "session.id")
+            .map(|(_, v)| v.as_str())
+            .unwrap();
+        assert_eq!(
+            langfuse_val, session_id_val,
+            "langfuse.session.id should equal session.id"
+        );
+        // Verify langfuse.trace.name is present with correct format
+        let trace_name = run_span
+            .fields
+            .iter()
+            .find(|(k, _)| k == "langfuse.trace.name")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        assert_eq!(
+            trace_name, "visp.agent.run",
+            "langfuse.trace.name should be visp.agent.run, got: {trace_name}"
+        );
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn test_agent_run_carries_langfuse_all_fields() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        let provider: StdArc<dyn LlmProvider> =
+            StdArc::new(SimpleProvider::new(vec![vec![ChatEvent::Done]]));
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig {
+            langfuse_enabled: true,
+            langfuse_user_id: Some("user_456".to_string()),
+            langfuse_tags: Some(r#"["agent","weather"]"#.to_string()),
+            langfuse_environment: Some("prod".to_string()),
+            langfuse_public: Some(true),
+            langfuse_release: Some("1.0.0".to_string()),
+            langfuse_version: Some("abc123".to_string()),
+            langfuse_metadata: Some({
+                let mut m = std::collections::HashMap::new();
+                m.insert("source".to_string(), "test".to_string());
+                m
+            }),
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("hello"),
+            tx,
+        )
+        .await;
+
+        let captured = spans.lock().unwrap();
+        let run_span = captured
+            .iter()
+            .find(|s| s.name == "visp.agent.run")
+            .unwrap();
+
+        // Verify langfuse.user.id
+        assert!(
+            run_span.fields.iter().any(|(k, _)| k == "langfuse.user.id"),
+            "expected langfuse.user.id field on visp.agent.run span, fields: {:?}",
+            run_span.fields
+        );
+        let user_id_val = run_span
+            .fields
+            .iter()
+            .find(|(k, _)| k == "langfuse.user.id")
+            .map(|(_, v)| v.as_str())
+            .unwrap();
+        assert_eq!(
+            user_id_val, "user_456",
+            "langfuse.user.id should equal configured user_id"
+        );
+
+        // Verify langfuse.trace.tags (replaces old langfuse.tags)
+        assert!(
+            run_span
+                .fields
+                .iter()
+                .any(|(k, _)| k == "langfuse.trace.tags"),
+            "expected langfuse.trace.tags field on visp.agent.run span, fields: {:?}",
+            run_span.fields
+        );
+        let tags_val = run_span
+            .fields
+            .iter()
+            .find(|(k, _)| k == "langfuse.trace.tags")
+            .map(|(_, v)| v.as_str())
+            .unwrap();
+        assert_eq!(
+            tags_val, r#"["agent","weather"]"#,
+            "langfuse.trace.tags should equal configured tags JSON"
+        );
+
+        // Verify no old langfuse.tags field
+        assert!(
+            !run_span.fields.iter().any(|(k, _)| k == "langfuse.tags"),
+            "expected NO langfuse.tags field (old name), fields: {:?}",
+            run_span.fields
+        );
+
+        // Verify langfuse.trace.name
+        let trace_name = run_span
+            .fields
+            .iter()
+            .find(|(k, _)| k == "langfuse.trace.name")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        assert_eq!(
+            trace_name, "visp.agent.run",
+            "langfuse.trace.name should be visp.agent.run, got: {trace_name}"
+        );
+
+        // Verify langfuse.environment
+        assert!(
+            run_span
+                .fields
+                .iter()
+                .any(|(k, v)| k == "langfuse.environment" && v == "prod"),
+            "expected langfuse.environment=prod, fields: {:?}",
+            run_span.fields
+        );
+
+        // Verify langfuse.trace.public
+        assert!(
+            run_span
+                .fields
+                .iter()
+                .any(|(k, v)| k == "langfuse.trace.public" && v == "true"),
+            "expected langfuse.trace.public=true, fields: {:?}",
+            run_span.fields
+        );
+
+        // Verify langfuse.release
+        assert!(
+            run_span
+                .fields
+                .iter()
+                .any(|(k, v)| k == "langfuse.release" && v == "1.0.0"),
+            "expected langfuse.release=1.0.0, fields: {:?}",
+            run_span.fields
+        );
+
+        // Verify langfuse.version
+        assert!(
+            run_span
+                .fields
+                .iter()
+                .any(|(k, v)| k == "langfuse.version" && v == "abc123"),
+            "expected langfuse.version=abc123, fields: {:?}",
+            run_span.fields
+        );
+
+        // Verify langfuse.trace.metadata includes the metadata JSON
+        assert!(
+            run_span
+                .fields
+                .iter()
+                .any(|(k, v)| k == "langfuse.trace.metadata"
+                    && v.contains("source")
+                    && v.contains("test")),
+            "expected langfuse.trace.metadata to contain metadata JSON, fields: {:?}",
+            run_span.fields
+        );
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn test_agent_run_langfuse_disabled_no_langfuse_fields() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        let provider: StdArc<dyn LlmProvider> =
+            StdArc::new(SimpleProvider::new(vec![vec![ChatEvent::Done]]));
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig::default(); // langfuse_enabled=false
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("hello"),
+            tx,
+        )
+        .await;
+
+        let captured = spans.lock().unwrap();
+        let run_span = captured
+            .iter()
+            .find(|s| s.name == "visp.agent.run")
+            .unwrap();
+        let langfuse_fields: Vec<_> = run_span
+            .fields
+            .iter()
+            .filter(|(k, _)| k.starts_with("langfuse."))
+            .collect();
+        assert!(
+            langfuse_fields.is_empty(),
+            "expected NO langfuse.* fields when disabled, got: {:?}",
+            langfuse_fields
+        );
+    }
+
+    // ── Langfuse observation input/output recording ──────────────────────
+
+    #[serial]
+    #[tokio::test]
+    async fn test_agent_run_records_observation_type_and_input_when_capture_enabled() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        let provider: StdArc<dyn LlmProvider> =
+            StdArc::new(SimpleProvider::new(vec![vec![ChatEvent::Done]]));
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig {
+            langfuse_enabled: true,
+            langfuse_capture_input: true,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("test query"),
+            tx,
+        )
+        .await;
+
+        let captured = spans.lock().unwrap();
+        let run_span = captured
+            .iter()
+            .find(|s| s.name == "visp.agent.run")
+            .unwrap();
+
+        // Verify observation type = span
+        assert!(
+            run_span
+                .fields
+                .iter()
+                .any(|(k, v)| k == "langfuse.observation.type" && v == "span"),
+            "expected langfuse.observation.type=span, fields: {:?}",
+            run_span.fields
+        );
+
+        // Verify observation input is valid JSON containing the user message
+        let input_field = run_span
+            .fields
+            .iter()
+            .find(|(k, _)| k == "langfuse.observation.input")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+        assert!(
+            !input_field.is_empty(),
+            "expected langfuse.observation.input to be non-empty"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(input_field).expect("observation.input should be valid JSON");
+        assert_eq!(
+            parsed["message"], "test query",
+            "observation.input should contain the user message"
+        );
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn test_agent_run_records_output_when_capture_enabled() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        // Provider that returns text + Done
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![vec![
+            ChatEvent::TextDelta("Hello world response".into()),
+            ChatEvent::Done,
+        ]]));
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig {
+            langfuse_enabled: true,
+            langfuse_capture_output: true,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("hello"),
+            tx,
+        )
+        .await;
+
+        let captured = spans.lock().unwrap();
+        let run_span = captured
+            .iter()
+            .find(|s| s.name == "visp.agent.run")
+            .unwrap();
+
+        // Verify observation type = span (set during output recording)
+        assert!(
+            run_span
+                .fields
+                .iter()
+                .any(|(k, v)| k == "langfuse.observation.type" && v == "span"),
+            "expected langfuse.observation.type=span, fields: {:?}",
+            run_span.fields
+        );
+
+        // Verify observation output is valid JSON containing the response text
+        let output_field = run_span
+            .fields
+            .iter()
+            .find(|(k, _)| k == "langfuse.observation.output")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+        assert!(
+            !output_field.is_empty(),
+            "expected langfuse.observation.output to be non-empty"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(output_field).expect("observation.output should be valid JSON");
+        assert_eq!(
+            parsed["response"], "Hello world response",
+            "observation.output should contain the assistant response"
+        );
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn test_agent_run_does_not_record_input_when_capture_disabled() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        let provider: StdArc<dyn LlmProvider> =
+            StdArc::new(SimpleProvider::new(vec![vec![ChatEvent::Done]]));
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig {
+            langfuse_enabled: true,
+            langfuse_capture_input: false, // disabled
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("secret"),
+            tx,
+        )
+        .await;
+
+        let captured = spans.lock().unwrap();
+        let run_span = captured
+            .iter()
+            .find(|s| s.name == "visp.agent.run")
+            .unwrap();
+
+        assert!(
+            !run_span
+                .fields
+                .iter()
+                .any(|(k, _)| k == "langfuse.observation.input"),
+            "expected NO langfuse.observation.input when capture is disabled, fields: {:?}",
+            run_span.fields
+        );
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn test_agent_run_does_not_record_output_when_capture_disabled() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        // Provider returns text but capture is disabled
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![vec![
+            ChatEvent::TextDelta("secret response".into()),
+            ChatEvent::Done,
+        ]]));
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig {
+            langfuse_enabled: true,
+            langfuse_capture_output: false, // disabled
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("hello"),
+            tx,
+        )
+        .await;
+
+        let captured = spans.lock().unwrap();
+        let run_span = captured
+            .iter()
+            .find(|s| s.name == "visp.agent.run")
+            .unwrap();
+
+        assert!(
+            !run_span
+                .fields
+                .iter()
+                .any(|(k, _)| k == "langfuse.observation.output"),
+            "expected NO langfuse.observation.output when capture is disabled, fields: {:?}",
+            run_span.fields
+        );
+    }
+
+    #[serial]
+    #[tokio::test]
     async fn test_agent_run_emits_completed_event() {
         let (spans, events) = setup_tracing();
         let _guard = make_guard(&spans, &events);
@@ -2989,6 +3811,205 @@ mod tests {
         }
     }
 
+    // ── W1-S3b: iteration langfuse propagation ────────────────────────────
+
+    #[serial]
+    #[tokio::test]
+    async fn test_iteration_span_propagates_langfuse_fields_when_enabled() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        // Use a provider that does one tool call then done, giving us 2 iterations
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(OneToolCallProvider {
+            call_count: AtomicUsize::new(0),
+        });
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        registry
+            .register(StdArc::new(MockTestTool { name: "sleepy" }))
+            .unwrap();
+        let config = AgentConfig {
+            langfuse_enabled: true,
+            langfuse_user_id: Some("iter_user".to_string()),
+            langfuse_tags: Some(r#"["iter"]"#.to_string()),
+            langfuse_environment: Some("staging".to_string()),
+            hard_limit: 10,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("test iteration"),
+            tx,
+        )
+        .await;
+
+        let captured = spans.lock().unwrap();
+        // Get root run span trace name for comparison
+        let run_span = captured
+            .iter()
+            .find(|s| s.name == "visp.agent.run")
+            .expect("expected visp.agent.run span");
+        let root_trace_name = run_span
+            .fields
+            .iter()
+            .find(|(k, _)| k == "langfuse.trace.name")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+
+        // Get iteration spans
+        let iter_spans: Vec<&CapturedSpan> = captured
+            .iter()
+            .filter(|s| s.name == "visp.agent.iteration")
+            .collect();
+        assert!(
+            !iter_spans.is_empty(),
+            "expected at least one iteration span"
+        );
+
+        // Each iteration span should carry trace-level langfuse fields
+        for (i, span) in iter_spans.iter().enumerate() {
+            assert!(
+                span.fields.iter().any(|(k, _)| k == "langfuse.session.id"),
+                "iteration span {} should have langfuse.session.id, fields: {:?}",
+                i,
+                span.fields
+            );
+            assert!(
+                span.fields.iter().any(|(k, _)| k == "langfuse.trace.name"),
+                "iteration span {} should have langfuse.trace.name, fields: {:?}",
+                i,
+                span.fields
+            );
+            assert!(
+                span.fields.iter().any(|(k, _)| k == "langfuse.user.id"),
+                "iteration span {} should have langfuse.user.id, fields: {:?}",
+                i,
+                span.fields
+            );
+            assert!(
+                span.fields.iter().any(|(k, _)| k == "langfuse.trace.tags"),
+                "iteration span {} should have langfuse.trace.tags, fields: {:?}",
+                i,
+                span.fields
+            );
+            assert!(
+                span.fields.iter().any(|(k, _)| k == "langfuse.environment"),
+                "iteration span {} should have langfuse.environment, fields: {:?}",
+                i,
+                span.fields
+            );
+
+            // Verify trace name matches root
+            let iter_trace_name = span
+                .fields
+                .iter()
+                .find(|(k, _)| k == "langfuse.trace.name")
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default();
+            assert_eq!(
+                iter_trace_name, root_trace_name,
+                "iteration span {} trace name should match root",
+                i
+            );
+        }
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn test_iteration_span_no_langfuse_fields_when_disabled() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(OneToolCallProvider {
+            call_count: AtomicUsize::new(0),
+        });
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        registry
+            .register(StdArc::new(MockTestTool { name: "sleepy" }))
+            .unwrap();
+        let config = AgentConfig {
+            hard_limit: 10,
+            ..Default::default() // langfuse_enabled=false
+        };
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("test no-langfuse iteration"),
+            tx,
+        )
+        .await;
+
+        let captured = spans.lock().unwrap();
+        let iter_spans: Vec<&CapturedSpan> = captured
+            .iter()
+            .filter(|s| s.name == "visp.agent.iteration")
+            .collect();
+        assert!(
+            !iter_spans.is_empty(),
+            "expected at least one iteration span"
+        );
+
+        for (i, span) in iter_spans.iter().enumerate() {
+            let langfuse_fields: Vec<_> = span
+                .fields
+                .iter()
+                .filter(|(k, _)| k.starts_with("langfuse."))
+                .collect();
+            assert!(
+                langfuse_fields.is_empty(),
+                "iteration span {} should have NO langfuse.* fields when disabled, got: {:?}",
+                i,
+                langfuse_fields
+            );
+        }
+    }
+
     // ── W1-S3a-5/6: visp.tool.execute span ────────────────────────────────
 
     /// Provider that returns three tool calls in one go
@@ -3167,6 +4188,7 @@ mod tests {
         registry.register(StdArc::new(SleepyTool)).unwrap();
         let config = AgentConfig {
             hard_limit: 10,
+            langfuse_enabled: true,
             ..Default::default()
         };
         let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
@@ -3214,6 +4236,245 @@ mod tests {
                 .any(|(k, _)| k == "gen_ai.tool.type"),
             "expected gen_ai.tool.type field, got: {:?}",
             field_names
+        );
+        // Check langfuse observation type
+        assert!(
+            tool_span
+                .fields
+                .iter()
+                .any(|(k, v)| k == "langfuse.observation.type" && v == "span"),
+            "expected langfuse.observation.type=span, got: {:?}",
+            field_names
+        );
+        // Check gen_ai operation name
+        assert!(
+            tool_span
+                .fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.operation.name" && v == "execute_tool"),
+            "expected gen_ai.operation.name=execute_tool, got: {:?}",
+            field_names
+        );
+        // Check trace-level langfuse fields are propagated
+        assert!(
+            tool_span
+                .fields
+                .iter()
+                .any(|(k, _)| k == "langfuse.session.id"),
+            "expected langfuse.session.id on tool span"
+        );
+        assert!(
+            tool_span
+                .fields
+                .iter()
+                .any(|(k, _)| k == "langfuse.trace.name"),
+            "expected langfuse.trace.name on tool span"
+        );
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn test_tool_execute_success_level_default() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(OneToolCallProvider {
+            call_count: AtomicUsize::new(0),
+        });
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        registry.register(StdArc::new(SleepyTool)).unwrap();
+        let config = AgentConfig {
+            hard_limit: 10,
+            langfuse_enabled: true,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("sleep"),
+            tx,
+        )
+        .await;
+
+        let captured = spans.lock().unwrap();
+        let tool_span = captured
+            .iter()
+            .find(|s| s.name == "visp.tool.execute")
+            .expect("expected visp.tool.execute span");
+
+        // Success should have level=DEFAULT
+        assert!(
+            tool_span
+                .fields
+                .iter()
+                .any(|(k, v)| k == "level" && v == "DEFAULT"),
+            "expected level=DEFAULT for successful tool, got fields: {:?}",
+            tool_span.fields
+        );
+        // No status_message for success
+        assert!(
+            !tool_span.fields.iter().any(|(k, _)| k == "status_message"),
+            "expected no status_message for successful tool, got fields: {:?}",
+            tool_span.fields
+        );
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn test_tool_execute_error_level_error_with_status_message() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::session::InMemorySessionStore;
+        use std::path::Path;
+
+        // ErrorTool returns an error
+        struct ErrorTool;
+        #[async_trait::async_trait]
+        impl crate::tool::Tool for ErrorTool {
+            fn name(&self) -> &str {
+                "error_tool"
+            }
+            fn description(&self) -> &str {
+                "always fails"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn execute(
+                &self,
+                _args: serde_json::Value,
+                _ctx: &crate::tool::ToolContext,
+            ) -> crate::tool::ToolResult {
+                crate::tool::ToolResult::error("always fails")
+            }
+        }
+
+        struct ErrorToolProvider {
+            call_count: AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl LlmProvider for ErrorToolProvider {
+            async fn chat_stream(
+                &self,
+                _messages: &[Message],
+                _tools: &[ToolDefinition],
+                _config: &LlmConfig,
+                _cancel: &tokio_util::sync::CancellationToken,
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>
+            {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+                if count == 0 {
+                    let events = vec![
+                        Ok(ChatEvent::ToolCall {
+                            id: "call_err_1".into(),
+                            name: "error_tool".into(),
+                            arguments: "{}".into(),
+                        }),
+                        Ok(ChatEvent::Done),
+                    ];
+                    Ok(Box::pin(stream::iter(events)))
+                } else {
+                    Ok(Box::pin(stream::iter(vec![Ok(ChatEvent::Done)])))
+                }
+            }
+        }
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(ErrorToolProvider {
+            call_count: AtomicUsize::new(0),
+        });
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        registry.register(StdArc::new(ErrorTool)).unwrap();
+        let config = AgentConfig {
+            hard_limit: 10,
+            langfuse_enabled: true,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("fail"),
+            tx,
+        )
+        .await;
+
+        let captured = spans.lock().unwrap();
+        let tool_span = captured
+            .iter()
+            .find(|s| s.name == "visp.tool.execute")
+            .expect("expected visp.tool.execute span");
+
+        // Error should have level=ERROR
+        assert!(
+            tool_span
+                .fields
+                .iter()
+                .any(|(k, v)| k == "level" && v == "ERROR"),
+            "expected level=ERROR for failing tool, got fields: {:?}",
+            tool_span.fields
+        );
+        // status_message should contain a summary (not full args/results)
+        assert!(
+            tool_span.fields.iter().any(|(k, _)| k == "status_message"),
+            "expected status_message for failing tool, got fields: {:?}",
+            tool_span.fields
+        );
+        let status_msg = tool_span
+            .fields
+            .iter()
+            .find(|(k, _)| k == "status_message")
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+        assert!(
+            status_msg.contains("always fails"),
+            "status_message should contain error summary, got: {status_msg}"
+        );
+        // status_message should NOT contain full args or results (just summary)
+        assert!(
+            status_msg.len() < 200,
+            "status_message should be a short summary, got length {}",
+            status_msg.len()
         );
     }
 

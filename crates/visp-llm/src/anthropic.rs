@@ -462,38 +462,92 @@ impl LlmProvider for AnthropicProvider {
         config: &LlmConfig,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError> {
-        // 提取 system 文本用于 span field
-        let system_text: String = messages
-            .iter()
-            .filter(|m| m.role == Role::System)
-            .map(|m| m.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-
         // 创建 gen_ai.client.operation span（OTel Semantic Conventions 标准命名）
         let span = tracing::info_span!(
             "gen_ai.client.operation",
             gen_ai.system = field::Empty,
             gen_ai.request.model = %config.model,
             gen_ai.operation.name = "chat",
+            gen_ai.provider.name = "anthropic",
             gen_ai.request.max_tokens = field::Empty,
             gen_ai.request.temperature = field::Empty,
             visp.llm.attempt = 0u64,
             gen_ai.usage.input_tokens = field::Empty,
             gen_ai.usage.output_tokens = field::Empty,
-            gen_ai.usage.cache_read_input_tokens = field::Empty,
-            gen_ai.usage.cache_creation_input_tokens = field::Empty,
+            gen_ai.usage.cache_read.input_tokens = field::Empty,
+            gen_ai.usage.cache_creation.input_tokens = field::Empty,
             gen_ai.response.finish_reasons = field::Empty,
             gen_ai.response.model = field::Empty,
             visp.llm.cost_usd = field::Empty,
+            visp.llm.token_limit_hit = field::Empty,
+            langfuse.observation.type = field::Empty,
+            langfuse.observation.input = field::Empty,
+            langfuse.observation.output = field::Empty,
+            langfuse.session.id = field::Empty,
+            langfuse.trace.name = field::Empty,
+            langfuse.user.id = field::Empty,
+            langfuse.trace.tags = field::Empty,
+            langfuse.environment = field::Empty,
+            langfuse.release = field::Empty,
+            langfuse.version = field::Empty,
+            langfuse.trace.public = field::Empty,
+            langfuse.trace.metadata = field::Empty,
         );
-        span.record("gen_ai.system", &system_text);
+        span.record("gen_ai.system", "anthropic");
         span.record("gen_ai.request.max_tokens", config.max_tokens);
         span.record("gen_ai.request.temperature", config.temperature);
+
+        // Langfuse trace-level fields: record when enabled
+        if config.langfuse_enabled {
+            if let Some(ref val) = config.langfuse_session_id {
+                span.record("langfuse.session.id", val.as_str());
+            }
+            if let Some(ref val) = config.langfuse_trace_name {
+                span.record("langfuse.trace.name", val.as_str());
+            }
+            if let Some(ref val) = config.langfuse_user_id {
+                span.record("langfuse.user.id", val.as_str());
+            }
+            if let Some(ref val) = config.langfuse_tags {
+                span.record("langfuse.trace.tags", val.as_str());
+            }
+            if let Some(ref val) = config.langfuse_environment {
+                span.record("langfuse.environment", val.as_str());
+            }
+            if let Some(ref val) = config.langfuse_release {
+                span.record("langfuse.release", val.as_str());
+            }
+            if let Some(ref val) = config.langfuse_version {
+                span.record("langfuse.version", val.as_str());
+            }
+            if let Some(public) = config.langfuse_public {
+                span.record("langfuse.trace.public", public);
+            }
+            if let Some(ref metadata) = config.langfuse_metadata
+                && !metadata.is_empty()
+                && let Ok(json) = serde_json::to_string(metadata)
+            {
+                span.record("langfuse.trace.metadata", json.as_str());
+            }
+        }
 
         let url = format!("{}/v1/messages", self.api_url.trim_end_matches('/'));
         let body = build_anthropic_request(messages, tools, config);
         let headers = build_anthropic_headers(&self.api_key);
+
+        // Langfuse generation capture: record input if enabled
+        let capture_enabled = config.langfuse_capture_input || config.langfuse_capture_output;
+        if capture_enabled {
+            span.record("langfuse.observation.type", "generation");
+        }
+        if config.langfuse_capture_input {
+            let sanitized = crate::sanitize::format_langfuse_input(
+                &body,
+                config.langfuse_capture_max_chars,
+                config.langfuse_redact_secrets,
+            );
+            span.record("langfuse.observation.input", &sanitized);
+        }
 
         tracing::debug!(url = %url, model = %config.model, "Anthropic request");
         let start_time = std::time::Instant::now();
@@ -507,8 +561,18 @@ impl LlmProvider for AnthropicProvider {
         let status = response.status();
         if status.is_success() {
             let byte_stream = response.bytes_stream();
-            Ok(byte_stream_to_chat_events(byte_stream, start_time, span))
+            Ok(byte_stream_to_chat_events(
+                byte_stream,
+                start_time,
+                span,
+                config.langfuse_capture_output,
+                config.langfuse_capture_max_chars,
+                config.langfuse_redact_secrets,
+            ))
         } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            span.in_scope(|| {
+                tracing::error!(target: "gen_ai.client.error", error_type = "rate_limit", "rate limit exceeded");
+            });
             let retry_after = parse_retry_after(response.headers()).unwrap_or(60);
             Err(LlmError::RateLimit {
                 retry_after_secs: retry_after,
@@ -519,6 +583,9 @@ impl LlmProvider for AnthropicProvider {
             let body_text = response.text().await.unwrap_or_default();
             Err(LlmError::Auth(body_text))
         } else {
+            span.in_scope(|| {
+                tracing::error!(target: "gen_ai.client.error", error_type = "api_error", status = status.as_u16(), "API error");
+            });
             let body_text = response.text().await.unwrap_or_default();
             Err(LlmError::Api {
                 status: status.as_u16(),
@@ -528,14 +595,29 @@ impl LlmProvider for AnthropicProvider {
     }
 }
 
+/// 归一化 Anthropic stop_reason 为 OTel 标准 finish_reason
+///
+/// - `max_tokens` → `length`
+/// - 其余值原样保留
+fn normalize_anthropic_reason(reason: &str) -> &str {
+    match reason {
+        "max_tokens" => "length",
+        other => other,
+    }
+}
+
 /// 将 `reqwest` 的字节流转换为 `ChatEvent` 流
 ///
 /// 累积字节直到遇到 `\n\n` 分隔符，然后用 `parse_sse_events` 解析
 /// 每个完整的 SSE 事件，最后用 `parse_anthropic_event` 映射为 ChatEvent。
+#[allow(clippy::too_many_arguments)]
 fn byte_stream_to_chat_events(
     byte_stream: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
     start_time: std::time::Instant,
     span: tracing::Span,
+    langfuse_capture_output: bool,
+    langfuse_capture_max_chars: usize,
+    langfuse_redact_secrets: bool,
 ) -> Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>> {
     use std::collections::HashMap;
 
@@ -575,6 +657,12 @@ fn byte_stream_to_chat_events(
         span: tracing::Span,
         /// 是否已发射首 token 事件
         first_content_emitted: bool,
+        /// Langfuse 输出捕获配置
+        langfuse_capture_output: bool,
+        langfuse_capture_max_chars: usize,
+        langfuse_redact_secrets: bool,
+        /// 累积的输出文本（用于 langfuse.observation.output）
+        accumulated_output: String,
     }
 
     let state = StreamState {
@@ -594,6 +682,10 @@ fn byte_stream_to_chat_events(
         metadata_emitted: false,
         span,
         first_content_emitted: false,
+        langfuse_capture_output,
+        langfuse_capture_max_chars,
+        langfuse_redact_secrets,
+        accumulated_output: String::new(),
     };
 
     /// 标记首 token 已到达（幂等，仅首次有效）
@@ -625,10 +717,11 @@ fn byte_stream_to_chat_events(
             if state.usage_emitted && !state.metadata_emitted {
                 state.metadata_emitted = true;
                 let latency = state.start_time.elapsed().as_millis() as u64;
+                let normalized_stop_reason = normalize_anthropic_reason(&state.stop_reason);
                 let finish_reasons = if state.stop_reason.is_empty() {
                     vec![]
                 } else {
-                    vec![state.stop_reason.clone()]
+                    vec![normalized_stop_reason.to_string()]
                 };
 
                 // 在 span 上 record usage / model / finish_reasons / cost
@@ -640,17 +733,20 @@ fn byte_stream_to_chat_events(
                     .record("gen_ai.usage.output_tokens", state.output_tokens);
                 if state.cache_read_input_tokens > 0 {
                     state.span.record(
-                        "gen_ai.usage.cache_read_input_tokens",
+                        "gen_ai.usage.cache_read.input_tokens",
                         state.cache_read_input_tokens,
                     );
                 }
                 if state.cache_creation_input_tokens > 0 {
                     state.span.record(
-                        "gen_ai.usage.cache_creation_input_tokens",
+                        "gen_ai.usage.cache_creation.input_tokens",
                         state.cache_creation_input_tokens,
                     );
                 }
-                let finish_reasons_str = finish_reasons.join(",");
+                if state.stop_reason == "max_tokens" {
+                    state.span.record("visp.llm.token_limit_hit", true);
+                }
+                let finish_reasons_str = serde_json::to_string(&finish_reasons).unwrap_or_default();
                 state
                     .span
                     .record("gen_ai.response.finish_reasons", &finish_reasons_str);
@@ -661,6 +757,17 @@ fn byte_stream_to_chat_events(
                     state.output_tokens,
                 );
                 state.span.record("visp.llm.cost_usd", cost);
+
+                // Langfuse generation capture: record output if enabled
+                let raw_output_len = state.accumulated_output.len();
+                if state.langfuse_capture_output && raw_output_len > 0 {
+                    let sanitized = crate::sanitize::format_langfuse_output(
+                        &state.accumulated_output,
+                        state.langfuse_capture_max_chars,
+                        state.langfuse_redact_secrets,
+                    );
+                    state.span.record("langfuse.observation.output", &sanitized);
+                }
 
                 return Some((
                     Ok(ChatEvent::OutputMetadata(visp_core::ProviderMetadata {
@@ -759,6 +866,12 @@ fn byte_stream_to_chat_events(
                                     state.done_pending = true;
                                     state.usage_emitted = true;
                                     return Some((Ok(build_done_usage_info(&state)), state));
+                                }
+                                // Accumulate output text for Langfuse capture
+                                if state.langfuse_capture_output
+                                    && let ChatEvent::TextDelta(ref text) = chat_event
+                                {
+                                    state.accumulated_output.push_str(text);
                                 }
                                 emit_first_token(&mut state);
                                 return Some((Ok(chat_event), state));
@@ -885,6 +998,12 @@ fn byte_stream_to_chat_events(
                                                 Ok(build_done_usage_info(&state)),
                                                 state,
                                             ));
+                                        }
+                                        // Accumulate output text for Langfuse capture
+                                        if state.langfuse_capture_output
+                                            && let ChatEvent::TextDelta(ref text) = chat_event
+                                        {
+                                            state.accumulated_output.push_str(text);
                                         }
                                         emit_first_token(&mut state);
                                         return Some((Ok(chat_event), state));
@@ -1128,6 +1247,7 @@ mod tests {
             max_tokens: 4096,
             max_context_tokens: 128_000,
             extra: Default::default(),
+            ..Default::default()
         };
         let req = build_anthropic_request(&msgs, &[], &config);
         assert_eq!(req["model"], "claude-sonnet-4-20250514");
@@ -1217,7 +1337,7 @@ mod tests {
             futures::stream::iter(chunks.into_iter().map(|s| Ok(bytes::Bytes::from(s))));
         let start = std::time::Instant::now();
         let span = tracing::Span::current();
-        let event_stream = byte_stream_to_chat_events(byte_stream, start, span);
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
         event_stream
             .filter_map(|e| futures::future::ready(e.ok()))
             .collect()
@@ -1350,7 +1470,7 @@ mod tests {
         let byte_stream =
             futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
         let span = tracing::Span::current();
-        let event_stream = byte_stream_to_chat_events(byte_stream, start, span);
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
         let events: Vec<ChatEvent> = event_stream
             .filter_map(|e| futures::future::ready(e.ok()))
             .collect()
@@ -1493,16 +1613,18 @@ mod tests {
             gen_ai.system = tracing::field::Empty,
             gen_ai.request.model = "claude-sonnet-4",
             gen_ai.operation.name = "chat",
+            gen_ai.provider.name = "anthropic",
             gen_ai.request.max_tokens = tracing::field::Empty,
             gen_ai.request.temperature = tracing::field::Empty,
             visp.llm.attempt = 0u64,
             gen_ai.usage.input_tokens = tracing::field::Empty,
             gen_ai.usage.output_tokens = tracing::field::Empty,
-            gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
-            gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_read.input_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_creation.input_tokens = tracing::field::Empty,
             gen_ai.response.finish_reasons = tracing::field::Empty,
             gen_ai.response.model = tracing::field::Empty,
             visp.llm.cost_usd = tracing::field::Empty,
+            visp.llm.token_limit_hit = tracing::field::Empty,
         );
         span.record("gen_ai.request.max_tokens", 4096u64);
         span.record("gen_ai.request.temperature", 0.7f64);
@@ -1523,20 +1645,22 @@ mod tests {
             gen_ai.system = tracing::field::Empty,
             gen_ai.request.model = "claude-sonnet-4",
             gen_ai.operation.name = "chat",
+            gen_ai.provider.name = "anthropic",
             gen_ai.request.max_tokens = tracing::field::Empty,
             gen_ai.request.temperature = tracing::field::Empty,
             visp.llm.attempt = 0u64,
             gen_ai.usage.input_tokens = tracing::field::Empty,
             gen_ai.usage.output_tokens = tracing::field::Empty,
-            gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
-            gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_read.input_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_creation.input_tokens = tracing::field::Empty,
             gen_ai.response.finish_reasons = tracing::field::Empty,
             gen_ai.response.model = tracing::field::Empty,
             visp.llm.cost_usd = tracing::field::Empty,
+            visp.llm.token_limit_hit = tracing::field::Empty,
         );
 
         // 模拟 chat_stream 中在 span 创建后的 record
-        span.record("gen_ai.system", "You are a helpful AI.");
+        span.record("gen_ai.system", "anthropic");
         span.record("gen_ai.request.max_tokens", 4096u64);
         span.record("gen_ai.request.temperature", 0.7f64);
 
@@ -1562,7 +1686,12 @@ mod tests {
         assert!(
             fields
                 .iter()
-                .any(|(k, v)| k == "gen_ai.system" && v == "You are a helpful AI.")
+                .any(|(k, v)| k == "gen_ai.system" && v == "anthropic")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.provider.name" && v == "anthropic")
         );
         assert!(
             fields
@@ -1638,16 +1767,18 @@ mod tests {
             gen_ai.system = tracing::field::Empty,
             gen_ai.request.model = "claude-sonnet-4-6",
             gen_ai.operation.name = "chat",
+            gen_ai.provider.name = "anthropic",
             gen_ai.request.max_tokens = tracing::field::Empty,
             gen_ai.request.temperature = tracing::field::Empty,
             visp.llm.attempt = 0u64,
             gen_ai.usage.input_tokens = tracing::field::Empty,
             gen_ai.usage.output_tokens = tracing::field::Empty,
-            gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
-            gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_read.input_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_creation.input_tokens = tracing::field::Empty,
             gen_ai.response.finish_reasons = tracing::field::Empty,
             gen_ai.response.model = tracing::field::Empty,
             visp.llm.cost_usd = tracing::field::Empty,
+            visp.llm.token_limit_hit = tracing::field::Empty,
         );
         span.record("gen_ai.request.max_tokens", 4096u64);
         span.record("gen_ai.request.temperature", 0.7f64);
@@ -1656,7 +1787,7 @@ mod tests {
         let byte_stream =
             futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
         let start = std::time::Instant::now();
-        let event_stream = byte_stream_to_chat_events(byte_stream, start, span);
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
         let _events: Vec<ChatEvent> = event_stream
             .filter_map(|e| futures::future::ready(e.ok()))
             .collect()
@@ -1683,17 +1814,17 @@ mod tests {
         assert!(
             fields
                 .iter()
-                .any(|(k, v)| k == "gen_ai.usage.cache_read_input_tokens" && v == "200")
+                .any(|(k, v)| k == "gen_ai.usage.cache_read.input_tokens" && v == "200")
         );
         assert!(
             fields
                 .iter()
-                .any(|(k, v)| k == "gen_ai.usage.cache_creation_input_tokens" && v == "52")
+                .any(|(k, v)| k == "gen_ai.usage.cache_creation.input_tokens" && v == "52")
         );
         assert!(
             fields
                 .iter()
-                .any(|(k, v)| k == "gen_ai.response.finish_reasons" && v == "end_turn")
+                .any(|(k, v)| k == "gen_ai.response.finish_reasons" && v == "[\"end_turn\"]")
         );
         assert!(
             fields
@@ -1710,17 +1841,17 @@ mod tests {
     }
 
     #[test]
-    fn test_finish_reasons_serialized_as_comma_separated_string() {
-        // 验证逗号分隔逻辑（独立于 span 层）
-        let reasons = ["end_turn".to_string(), "stop".to_string()];
-        let serialized = reasons.join(",");
-        assert_eq!(serialized, "end_turn,stop");
+    fn test_finish_reasons_serialized_as_json_array() {
+        // 验证 JSON 数组序列化
+        let reasons = vec!["end_turn".to_string(), "stop".to_string()];
+        let serialized = serde_json::to_string(&reasons).unwrap();
+        assert_eq!(serialized, "[\"end_turn\",\"stop\"]");
 
-        let single = ["end_turn".to_string()];
-        assert_eq!(single.join(","), "end_turn");
+        let single = vec!["end_turn".to_string()];
+        assert_eq!(serde_json::to_string(&single).unwrap(), "[\"end_turn\"]");
 
         let empty: Vec<String> = vec![];
-        assert_eq!(empty.join(","), "");
+        assert_eq!(serde_json::to_string(&empty).unwrap(), "[]");
     }
 
     #[tokio::test]
@@ -1740,7 +1871,7 @@ mod tests {
         let byte_stream =
             futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
         let start = std::time::Instant::now();
-        let event_stream = byte_stream_to_chat_events(byte_stream, start, span);
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
         let _: Vec<ChatEvent> = event_stream
             .filter_map(|e| futures::future::ready(e.ok()))
             .collect()
@@ -1802,7 +1933,7 @@ mod tests {
         let byte_stream =
             futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
         let start = std::time::Instant::now();
-        let event_stream = byte_stream_to_chat_events(byte_stream, start, span);
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
         let _: Vec<ChatEvent> = event_stream
             .filter_map(|e| futures::future::ready(e.ok()))
             .collect()
@@ -1814,6 +1945,219 @@ mod tests {
         assert!(
             evts.iter().any(|(t, _)| t == "gen_ai.client.first_token"),
             "should find first_token event"
+        );
+    }
+
+    #[test]
+    fn test_gen_ai_provider_name_is_anthropic() {
+        let (spans, _events) = setup_tracing();
+        let _guard = make_guard(&spans, &_events);
+
+        let _span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.provider.name = "anthropic",
+            gen_ai.operation.name = "chat",
+        );
+
+        drop(_guard);
+        let spans = spans.lock().unwrap();
+        assert!(
+            spans[0]
+                .fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.provider.name" && v == "anthropic")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_finish_reason_max_tokens_normalized_to_length() {
+        let (spans, _events) = setup_tracing();
+        let _guard = make_guard(&spans, &_events);
+
+        let span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.response.finish_reasons = tracing::field::Empty,
+            visp.llm.token_limit_hit = tracing::field::Empty,
+        );
+
+        // 模拟 max_tokens stop_reason
+        let sse = make_complete_sse("claude-sonnet-4-6", "max_tokens");
+        let byte_stream =
+            futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
+        let start = std::time::Instant::now();
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
+        let _: Vec<ChatEvent> = event_stream
+            .filter_map(|e| futures::future::ready(e.ok()))
+            .collect()
+            .await;
+
+        drop(_guard);
+        let spans = spans.lock().unwrap();
+        let fields = &spans[0].fields;
+
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.response.finish_reasons" && v == "[\"length\"]"),
+            "max_tokens should be normalized to length, got: {:?}",
+            fields
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "visp.llm.token_limit_hit" && v == "true"),
+            "token_limit_hit should be true for max_tokens"
+        );
+    }
+
+    #[test]
+    fn test_anthropic_finish_reason_end_turn_stays_unmodified() {
+        let reason = crate::anthropic::normalize_anthropic_reason("end_turn");
+        assert_eq!(reason, "end_turn");
+    }
+
+    #[test]
+    fn test_anthropic_finish_reason_tool_use_stays_unmodified() {
+        let reason = crate::anthropic::normalize_anthropic_reason("tool_use");
+        assert_eq!(reason, "tool_use");
+    }
+
+    #[test]
+    fn test_anthropic_finish_reason_unknown_stays_unmodified() {
+        let reason = crate::anthropic::normalize_anthropic_reason("unknown_reason");
+        assert_eq!(reason, "unknown_reason");
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_token_limit_hit_when_max_tokens() {
+        let (spans, _events) = setup_tracing();
+        let _guard = make_guard(&spans, &_events);
+
+        let span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.response.finish_reasons = tracing::field::Empty,
+            visp.llm.token_limit_hit = tracing::field::Empty,
+        );
+
+        let sse = make_complete_sse("claude-sonnet-4-6", "max_tokens");
+        let byte_stream =
+            futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
+        let start = std::time::Instant::now();
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
+        let _: Vec<ChatEvent> = event_stream
+            .filter_map(|e| futures::future::ready(e.ok()))
+            .collect()
+            .await;
+
+        drop(_guard);
+        let spans = spans.lock().unwrap();
+        assert!(
+            spans[0]
+                .fields
+                .iter()
+                .any(|(k, v)| k == "visp.llm.token_limit_hit" && v == "true"),
+            "token_limit_hit should be true for max_tokens"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_token_limit_not_set_for_normal_stop() {
+        let (spans, _events) = setup_tracing();
+        let _guard = make_guard(&spans, &_events);
+
+        let span = tracing::info_span!(
+            "gen_ai.client.operation",
+            visp.llm.token_limit_hit = tracing::field::Empty,
+        );
+
+        let sse = make_complete_sse("claude-sonnet-4-6", "end_turn");
+        let byte_stream =
+            futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
+        let start = std::time::Instant::now();
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
+        let _: Vec<ChatEvent> = event_stream
+            .filter_map(|e| futures::future::ready(e.ok()))
+            .collect()
+            .await;
+
+        drop(_guard);
+        let spans = spans.lock().unwrap();
+        let token_limit_entry = spans[0]
+            .fields
+            .iter()
+            .find(|(k, _)| k == "visp.llm.token_limit_hit");
+        assert!(
+            token_limit_entry.is_none() || token_limit_entry.unwrap().1 == "false",
+            "token_limit_hit should not be true for normal stop"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_cache_uses_new_dot_notation() {
+        let (spans, _events) = setup_tracing();
+        let _guard = make_guard(&spans, &_events);
+
+        let span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.usage.cache_read.input_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_creation.input_tokens = tracing::field::Empty,
+        );
+
+        let message_start = r#"{"type":"message_start","message":{"id":"msg_02","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-5","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":200,"output_tokens":0,"cache_creation_input_tokens":80,"cache_read_input_tokens":300}}}"#;
+        let block_start =
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        let text_delta =
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}"#;
+        let block_stop = r#"{"type":"content_block_stop","index":0}"#;
+        let message_delta = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":50}}"#;
+        let message_stop = r#"{"type":"message_stop"}"#;
+
+        fn sse_line(event: &str, data: &str) -> String {
+            format!("event: {}\ndata: {}\n\n", event, data)
+        }
+
+        let sse = format!(
+            "{}{}{}{}{}{}",
+            sse_line("message_start", message_start),
+            sse_line("content_block_start", block_start),
+            sse_line("content_block_delta", text_delta),
+            sse_line("content_block_stop", block_stop),
+            sse_line("message_delta", message_delta),
+            sse_line("message_stop", message_stop),
+        );
+        let byte_stream =
+            futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
+        let start = std::time::Instant::now();
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
+        let _: Vec<ChatEvent> = event_stream
+            .filter_map(|e| futures::future::ready(e.ok()))
+            .collect()
+            .await;
+
+        drop(_guard);
+        let spans = spans.lock().unwrap();
+        let fields = &spans[0].fields;
+
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.usage.cache_read.input_tokens" && v == "300")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.usage.cache_creation.input_tokens" && v == "80")
+        );
+        // 确认旧的下划线字段名不存在
+        assert!(
+            !fields
+                .iter()
+                .any(|(k, _)| k == "gen_ai.usage.cache_read_input_tokens")
+        );
+        assert!(
+            !fields
+                .iter()
+                .any(|(k, _)| k == "gen_ai.usage.cache_creation_input_tokens")
         );
     }
 
@@ -1834,7 +2178,7 @@ mod tests {
         let byte_stream =
             futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
         let start = std::time::Instant::now();
-        let event_stream = byte_stream_to_chat_events(byte_stream, start, span);
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
         let _: Vec<ChatEvent> = event_stream
             .filter_map(|e| futures::future::ready(e.ok()))
             .collect()

@@ -43,6 +43,12 @@
 
 ## 🔴 待实现（按优先级排序）
 
+### 继承RTK
+
+https://github.com/rtk-ai/rtk
+
+CLI proxy that reduces LLM token consumption by 60-90% on common dev commands. Single Rust binary, zero dependencies
+
 ### P1：gRPC TLS 支持（daemon / cli）
 
 **问题**：daemon 监听 `[::1]:50051` 纯文本 gRPC，CLI 连接无加密。本地回环虽相对安全，但 TLS 为零信任/合规场景的必要特性。
@@ -181,3 +187,5 @@ Agent 循环在等待 UserQuery 确认时 panic，mpsc sender 被 drop，daemon 
 `SymbolDetails.source` 基于 `line` 字段读文件取源码片段，MVP 截取前 500 字符。
 
 **后续方案**：使用 tree-sitter 的 node range 精确定位完整函数源码。
+
+

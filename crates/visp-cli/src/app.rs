@@ -362,6 +362,41 @@ impl TabEntry {
         }
     }
 
+    /// 消费 pending_usage，将 token 统计追加到最后一条 Assistant 消息或 streaming_text。
+    /// 用于回放时在 UserMessage 和 Done 帧处理中追加 token footer。
+    pub fn consume_pending_usage(&mut self) {
+        if let Some((it, ot, tc, ccit, crit)) = self.pending_usage.take() {
+            let time = chrono::Local::now().format("%H:%M:%S");
+            let suffix = if ccit > 0 || crit > 0 {
+                format!(
+                    "\n\n[{} | Tokens: {} in / {} out | Cache: {} create / {} read | Tools: {}]",
+                    time, it, ot, ccit, crit, tc
+                )
+            } else {
+                format!(
+                    "\n\n[{} | Tokens: {} in / {} out | Tools: {}]",
+                    time, it, ot, tc
+                )
+            };
+            if !self.streaming_text.is_empty() {
+                // 有流式文本：追加到 streaming_text，flush 时一并成为本条 Assistant
+                self.streaming_text.push_str(&suffix);
+            } else if let Some(last) = self
+                .messages
+                .iter_mut()
+                .rev()
+                .find(|m| matches!(m.line_type, LineType::Assistant))
+            {
+                // 已 flush（如 ToolCall 后）：追加到最后一条 Assistant 消息
+                last.content.push_str(&suffix);
+                last.version += 1;
+            } else {
+                // 没有任何 Assistant 消息：用 streaming_text 新建一条
+                self.streaming_text.push_str(&suffix);
+            }
+        }
+    }
+
     pub fn update_thinking(&mut self, content: String) {
         if let Some(last) = self.messages.last_mut()
             && matches!(last.line_type, LineType::Thinking)
@@ -459,6 +494,12 @@ impl TabEntry {
                     // NOTE: user_inputs handling deferred to later step
                     self.push_chat_line(LineType::Status, su.message, None);
                 }
+                Some(server_message::Payload::UserMessage(um)) => {
+                    // 回放时重放用户消息：先消费 pending_usage 为上一条 assistant 追加 token 统计
+                    self.consume_pending_usage();
+                    self.flush_streaming();
+                    self.push_chat_line(LineType::User, um.content, None);
+                }
                 Some(server_message::Payload::Error(err)) => {
                     self.flush_streaming();
                     self.push_chat_line(
@@ -470,6 +511,8 @@ impl TabEntry {
                     self.status = AgentStatus::Error;
                 }
                 Some(server_message::Payload::Done(_)) => {
+                    // 将 token 统计 + 时间戳追加到对话区
+                    self.consume_pending_usage();
                     self.flush_streaming();
                     self.generating = false;
                     if self.status == AgentStatus::Running {
@@ -1001,6 +1044,7 @@ fn extract_session_and_agent(msg: &ServerMessage) -> (String, String) {
         Some(server_message::Payload::UserQuery(d)) => (d.session_id.clone(), String::new()),
         Some(server_message::Payload::ThinkingBlock(d)) => (d.session_id.clone(), String::new()),
         Some(server_message::Payload::UsageInfo(d)) => (d.session_id.clone(), String::new()),
+        Some(server_message::Payload::UserMessage(d)) => (d.session_id.clone(), String::new()),
         None => (String::new(), String::new()),
     }
 }
@@ -1415,12 +1459,17 @@ impl AppState {
         self.current_request_usage.1 += output;
         self.current_request_usage.2 += cache_create;
         self.current_request_usage.3 += cache_read;
+        // L3: 立即累加到 total tokens，状态栏即时显示
+        self.total_input_tokens += input;
+        self.total_output_tokens += output;
+        self.total_cache_creation_input_tokens += cache_create;
+        self.total_cache_read_input_tokens += cache_read;
     }
 
     /// Token 三层路由 — Done 结算
     ///
-    /// - default tab（idx == 0）：显示 L2 → 累加 L3 → 清零 L2
-    /// - sub tab（idx != 0）：显示 L1（take pending_usage）→ 不动 L2/L3
+    /// - default tab（idx == 0）：清零 L2（L3 已在 apply_usage_info 中即时累加）
+    /// - sub tab（idx != 0）：pending_usage 由 render_pending 消费，此处不做处理
     /// - 状态守卫：仅 Running 状态的 tab 执行结算；Error/Done 跳過
     pub fn apply_done_token_settlement(&mut self, session_id: &str) {
         let idx = if session_id.is_empty() || session_id == self.main_session_id {
@@ -1436,51 +1485,13 @@ impl AppState {
             return;
         }
 
-        let time = chrono::Local::now().format("%H:%M:%S");
-
         if idx == 0 {
-            // ── default tab Done ──
-            let (input, output, cache_create, cache_read) = self.current_request_usage;
-            if input == 0 && output == 0 {
-                return; // No usage to report
-            }
-            let usage = if cache_create > 0 || cache_read > 0 {
-                format!(
-                    "[{} | Tokens: {} in / {} out | Cache: {} create / {} read]",
-                    time, input, output, cache_create, cache_read
-                )
-            } else {
-                format!("[{} | Tokens: {} in / {} out]", time, input, output)
-            };
-            self.add_message(LineType::Usage, usage);
-
-            // L3: 累加 total tokens
-            self.total_input_tokens += input;
-            self.total_output_tokens += output;
-            self.total_cache_creation_input_tokens += cache_create;
-            self.total_cache_read_input_tokens += cache_read;
-
-            // 清零 L2
+            // 清零 L2（L3 已在 apply_usage_info 中即时累加）
             self.current_request_usage = (0, 0, 0, 0);
-        } else {
-            // ── sub tab Done ──
-            if let Some((it, ot, tc, ccit, crit)) = self.tab_bar.tabs[idx].pending_usage.take() {
-                let usage = if ccit > 0 || crit > 0 {
-                    format!(
-                        "[{} | Tokens: {} in / {} out | Cache: {} create / {} read | Tools: {}]",
-                        time, it, ot, ccit, crit, tc
-                    )
-                } else {
-                    format!(
-                        "[{} | Tokens: {} in / {} out | Tools: {}]",
-                        time, it, ot, tc
-                    )
-                };
-                let sid = self.tab_bar.tabs[idx].session_id.clone();
-                self.add_message_to_session(&sid, LineType::Usage, usage);
-            }
-            // L2/L3 不变
         }
+        // ── sub tab Done ──
+        // pending_usage 由 TabEntry::render_pending 在 Done 帧处理时消费，
+        // 此处不做任何处理
     }
 
     /// 重置为新 session 的状态（保留 mouse 设置和 textarea 内容）
@@ -2953,14 +2964,14 @@ mod tests {
     }
 
     #[test]
-    fn test_usage_does_not_directly_modify_total_tokens() {
+    fn test_usage_now_directly_updates_total_tokens() {
         let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
         app.apply_usage_info("main-sid", 50, 10, 0, 5, 2);
-        // L3 remains 0 after UsageInfo
-        assert_eq!(app.total_input_tokens, 0);
-        assert_eq!(app.total_output_tokens, 0);
-        assert_eq!(app.total_cache_creation_input_tokens, 0);
-        assert_eq!(app.total_cache_read_input_tokens, 0);
+        // L3 updated directly from apply_usage_info for status bar
+        assert_eq!(app.total_input_tokens, 50);
+        assert_eq!(app.total_output_tokens, 10);
+        assert_eq!(app.total_cache_creation_input_tokens, 5);
+        assert_eq!(app.total_cache_read_input_tokens, 2);
     }
 
     #[test]
@@ -2970,22 +2981,23 @@ mod tests {
         app.apply_done_token_settlement("main-sid");
         // L2 is cleared
         assert_eq!(app.current_request_usage, (0, 0, 0, 0));
-        // Default tab should have a Usage message
-        assert_eq!(app.tab_bar.tabs[0].messages.len(), 1);
-        assert_eq!(app.tab_bar.tabs[0].messages[0].line_type, LineType::Usage);
-        assert!(
-            app.tab_bar.tabs[0].messages[0]
-                .content
-                .contains("Tokens: 100 in / 50 out")
-        );
+        // No Usage message added (token footer is appended in render_pending)
+        assert!(app.tab_bar.tabs[0].messages.is_empty());
     }
 
     #[test]
-    fn test_done_default_accumulates_to_total_tokens() {
+    fn test_done_default_clears_l2_only() {
         let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        // L2 was accumulated from UsageInfo (which also updated L3)
         app.current_request_usage = (100, 50, 20, 10);
+        // L3 was already set by apply_usage_info
+        app.total_input_tokens = 100;
+        app.total_output_tokens = 50;
+        app.total_cache_creation_input_tokens = 20;
+        app.total_cache_read_input_tokens = 10;
+        // Done clears L2, does NOT touch L3 (already done by apply_usage_info)
         app.apply_done_token_settlement("main-sid");
-        // L3 equals previous L2 values
+        assert_eq!(app.current_request_usage, (0, 0, 0, 0));
         assert_eq!(app.total_input_tokens, 100);
         assert_eq!(app.total_output_tokens, 50);
         assert_eq!(app.total_cache_creation_input_tokens, 20);
@@ -2993,23 +3005,16 @@ mod tests {
     }
 
     #[test]
-    fn test_done_sub_displays_l1_only() {
+    fn test_done_sub_does_not_consume_pending_usage() {
         let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
         app.tab_bar.tabs[1].pending_usage = Some((200, 30, 5, 15, 8));
         app.current_request_usage = (999, 999, 999, 999); // arbitrary L2
         app.apply_done_token_settlement("sub-1");
-        // Sub tab has Usage message
-        assert_eq!(app.tab_bar.tabs[1].messages.len(), 1);
-        assert_eq!(app.tab_bar.tabs[1].messages[0].line_type, LineType::Usage);
-        assert!(
-            app.tab_bar.tabs[1].messages[0]
-                .content
-                .contains("Tokens: 200 in / 30 out")
-        );
-        assert!(app.tab_bar.tabs[1].messages[0].content.contains("Tools: 5"));
-        // L1 taken
-        assert!(app.tab_bar.tabs[1].pending_usage.is_none());
+        // Sub tab: pending_usage is NOT consumed here (render_pending handles it)
+        assert_eq!(app.tab_bar.tabs[1].pending_usage, Some((200, 30, 5, 15, 8)));
+        // No Usage message added
+        assert!(app.tab_bar.tabs[1].messages.is_empty());
         // L2 unchanged
         assert_eq!(app.current_request_usage, (999, 999, 999, 999));
         // L3 unchanged
@@ -3354,7 +3359,7 @@ mod tests {
     }
 
     #[test]
-    fn test_e2e_token_l1_displayed_per_sub_done() {
+    fn test_e2e_token_l1_preserved_for_render_pending() {
         let mut app = AppState::new("main".into(), "m".into(), "".into());
         app.tab_bar.insert_sub_agent("sub1", "agentA", false);
         // Route UsageInfo for sub (L1)
@@ -3363,18 +3368,22 @@ mod tests {
             app.tab_bar.tabs[1].pending_usage,
             Some((100, 200, 5, 10, 20))
         );
-        // Route Done for sub → L1 taken, token line added
+        // Route Done for sub → pending_usage preserved (render_pending handles it)
         app.apply_done_token_settlement("sub1");
-        // L1 taken
-        assert!(app.tab_bar.tabs[1].pending_usage.is_none());
-        // Token line contains input count
-        assert!(!app.tab_bar.tabs[1].messages.is_empty());
-        assert!(app.tab_bar.tabs[1].messages[0].content.contains("100"));
+        // L1 preserved for render_pending
+        assert_eq!(
+            app.tab_bar.tabs[1].pending_usage,
+            Some((100, 200, 5, 10, 20))
+        );
+        // No Usage message added (render_pending appends to assistant text)
+        assert!(app.tab_bar.tabs[1].messages.is_empty());
         // L2 still accumulated (sub Done does NOT clear L2)
         assert_eq!(app.current_request_usage, (100, 200, 10, 20));
-        // L3 unchanged (sub Done does NOT modify L3)
-        assert_eq!(app.total_input_tokens, 0);
-        assert_eq!(app.total_output_tokens, 0);
+        // L3 already updated by apply_usage_info (status bar shows immediately)
+        assert_eq!(app.total_input_tokens, 100);
+        assert_eq!(app.total_output_tokens, 200);
+        assert_eq!(app.total_cache_creation_input_tokens, 10);
+        assert_eq!(app.total_cache_read_input_tokens, 20);
     }
 
     #[test]
@@ -3394,13 +3403,8 @@ mod tests {
         assert_eq!(app.total_output_tokens, 120);
         assert_eq!(app.total_cache_creation_input_tokens, 8);
         assert_eq!(app.total_cache_read_input_tokens, 15);
-        // Token line in default tab
-        assert!(!app.tab_bar.tabs[0].messages.is_empty());
-        assert!(
-            app.tab_bar.tabs[0].messages[0]
-                .content
-                .contains("Tokens: 80 in / 120 out")
-        );
+        // No Usage message added (token footer is appended in render_pending)
+        assert!(app.tab_bar.tabs[0].messages.is_empty());
     }
 
     #[test]

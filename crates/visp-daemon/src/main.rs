@@ -280,6 +280,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 8. Agent config
+    let langfuse = &config.observability.langfuse;
+    let langfuse_tags = if langfuse.tags.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&langfuse.tags).unwrap_or_default())
+    };
+    let langfuse_metadata = langfuse.metadata.as_ref().map(|meta| {
+        meta.iter()
+            .map(|(k, v)| {
+                let val = match v {
+                    toml::Value::String(s) => s.clone(),
+                    toml::Value::Integer(i) => i.to_string(),
+                    toml::Value::Float(f) => f.to_string(),
+                    toml::Value::Boolean(b) => b.to_string(),
+                    _ => serde_json::to_string(v).unwrap_or_default(),
+                };
+                (k.clone(), val)
+            })
+            .collect()
+    });
     let agent_config = AgentConfig {
         soft_limit: config.agent.soft_limit,
         hard_limit: 200,
@@ -289,6 +309,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bash_confirm_mode: config.agent.bash_confirm_mode,
         file_max_size_bytes: config.agent.file_max_size_bytes,
         max_depth: config.agent.max_depth,
+        langfuse_enabled: langfuse.enabled,
+        langfuse_user_id: langfuse.user_id.clone(),
+        langfuse_tags,
+        langfuse_environment: langfuse.environment.clone(),
+        langfuse_release: langfuse.release.clone(),
+        langfuse_version: langfuse.version.clone(),
+        langfuse_public: langfuse.public,
+        langfuse_metadata,
+        langfuse_capture_input: langfuse.capture.input,
+        langfuse_capture_output: langfuse.capture.output,
+        langfuse_capture_max_chars: langfuse.capture.max_chars,
+        langfuse_redact_secrets: langfuse.capture.redact_secrets,
     };
 
     // 8.5. Create provider HashMap

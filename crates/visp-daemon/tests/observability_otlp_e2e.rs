@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use serial_test::serial;
 
-use visp_daemon::config::{ObservabilityConfig, OtlpConfig};
+use visp_daemon::config::{LangfuseConfig, ObservabilityConfig, OtlpConfig};
 use visp_daemon::observability::init::init_observability;
 
 // ---------------------------------------------------------------------------
@@ -43,6 +43,7 @@ fn test_otlp_e2e_export_failure_graceful() {
             timeout_secs: 1, // fast failure for unreachable endpoint
             ..Default::default()
         },
+        langfuse: LangfuseConfig::default(),
     };
 
     // ── Act: init observability (real exporter path, not test exporter) ──

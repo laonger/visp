@@ -128,6 +128,33 @@ max_context_tokens = 128000
 # [observability.otlp.headers]
 # Authorization = "Bearer your-token"
 
+# ----- Langfuse -----
+# 在 span 上设置 Langfuse 语义字段，用于 Langfuse 关联 trace/session/用户/tag。
+# 这些字段是 Langfuse 标准属性，非 OTel 原生属性，由 tracing 字段注入。
+# langfuse.session.id 由 daemon 根据当前 session 自动填充。
+#
+# 此配置仅控制 visp 写入的 Langfuse 语义字段，不包含 Langfuse 连接配置。
+# Langfuse 连接（endpoint/public key/secret key）属于 OpenTelemetry Collector
+# 配置，而非 visp 配置。参考 Collector 配置见 docs/otel-collector-langfuse.example.yaml。
+# visp 不管理 Collector 进程；Collector 示例仅为参考，不代表 visp 管理 Collector。
+#
+# [observability.langfuse]
+# enabled = true
+# user_id = "user_456"
+# tags = ["agent", "weather"]
+# environment = "production"
+# release = "1.0.0"
+# version = "abc123"
+# public = true
+#
+# [observability.langfuse.metadata]
+# env = "prod"
+# count = 42
+#
+# [observability.langfuse.capture]
+# input = false
+# output = false
+
 # =============================================================================
 # [tool.*] — 各工具的 per-tool 配置
 # =============================================================================

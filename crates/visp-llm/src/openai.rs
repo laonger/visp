@@ -400,10 +400,14 @@ fn truncate_for_log(s: &str, max_chars: usize) -> &str {
 /// - 每条消息以 `data: ` 开头，空行分隔
 /// - 流结束标记为 `data: [DONE]`
 /// - 每个 data 行可能包含 usage、choices 中的 text delta 或 tool calls delta
+#[allow(clippy::too_many_arguments)]
 fn byte_stream_to_chat_events(
     byte_stream: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
     start_time: std::time::Instant,
     span: tracing::Span,
+    langfuse_capture_output: bool,
+    langfuse_capture_max_chars: usize,
+    langfuse_redact_secrets: bool,
 ) -> Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>> {
     struct StreamState {
         stream: Pin<Box<dyn Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send>>,
@@ -438,6 +442,12 @@ fn byte_stream_to_chat_events(
         span: tracing::Span,
         /// 是否已发射首 token 事件
         first_content_emitted: bool,
+        /// Langfuse 输出捕获配置
+        langfuse_capture_output: bool,
+        langfuse_capture_max_chars: usize,
+        langfuse_redact_secrets: bool,
+        /// 累积的输出文本（用于 langfuse.observation.output）
+        accumulated_output: String,
     }
 
     /// 将累积的工具调用（tool_acc）转移到 pending_tool_calls
@@ -481,6 +491,10 @@ fn byte_stream_to_chat_events(
         done_emitted: false,
         span,
         first_content_emitted: false,
+        langfuse_capture_output,
+        langfuse_capture_max_chars,
+        langfuse_redact_secrets,
+        accumulated_output: String::new(),
     };
 
     let event_stream = stream::unfold(state, |mut state| {
@@ -503,6 +517,9 @@ fn byte_stream_to_chat_events(
                         }
                         match parse_openai_sse_data(data) {
                             Ok(OpenAiStreamEvent::TextDelta(text)) => {
+                                if state.langfuse_capture_output {
+                                    state.accumulated_output.push_str(&text);
+                                }
                                 emit_first_token(&mut state);
                                 return Some((Ok(ChatEvent::TextDelta(text)), state));
                             }
@@ -639,17 +656,27 @@ fn byte_stream_to_chat_events(
                     // 在 span 上 record usage / model / finish_reasons / cost
                     state.span.record("gen_ai.usage.input_tokens", state.input_tokens);
                     state.span.record("gen_ai.usage.output_tokens", state.output_tokens);
-                    if state.cache_read_input_tokens > 0 {
-                        state.span.record("gen_ai.usage.cache_read_input_tokens", state.cache_read_input_tokens);
+                    // OpenAI 不写 cache 字段
+                    if state.finish_reason == "length" {
+                        state.span.record("visp.llm.token_limit_hit", true);
                     }
-                    if state.cache_creation_input_tokens > 0 {
-                        state.span.record("gen_ai.usage.cache_creation_input_tokens", state.cache_creation_input_tokens);
-                    }
-                    let finish_reasons_str = finish_reasons.join(",");
+                    let finish_reasons_str =
+                        serde_json::to_string(&finish_reasons).unwrap_or_default();
                     state.span.record("gen_ai.response.finish_reasons", &finish_reasons_str);
                     state.span.record("gen_ai.response.model", &state.model);
                     let cost = crate::cost::openai_cost_usd(&state.model, state.input_tokens, state.output_tokens);
                     state.span.record("visp.llm.cost_usd", cost);
+
+                    // Langfuse generation capture: record output if enabled
+                    let raw_output_len = state.accumulated_output.len();
+                    if state.langfuse_capture_output && raw_output_len > 0 {
+                        let sanitized = crate::sanitize::format_langfuse_output(
+                            &state.accumulated_output,
+                            state.langfuse_capture_max_chars,
+                            state.langfuse_redact_secrets,
+                        );
+                        state.span.record("langfuse.observation.output", &sanitized);
+                    }
 
                     return Some((
                         Ok(ChatEvent::OutputMetadata(visp_core::ProviderMetadata {
@@ -742,38 +769,90 @@ impl LlmProvider for OpenAiProvider {
         config: &LlmConfig,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError> {
-        // 提取 system 文本用于 span field
-        let system_text: String = messages
-            .iter()
-            .filter(|m| m.role == Role::System)
-            .map(|m| m.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-
         // 创建 gen_ai.client.operation span
         let span = tracing::info_span!(
             "gen_ai.client.operation",
             gen_ai.system = field::Empty,
             gen_ai.request.model = %config.model,
             gen_ai.operation.name = "chat",
+            gen_ai.provider.name = "openai",
             gen_ai.request.max_tokens = field::Empty,
             gen_ai.request.temperature = field::Empty,
             visp.llm.attempt = 0u64,
             gen_ai.usage.input_tokens = field::Empty,
             gen_ai.usage.output_tokens = field::Empty,
-            gen_ai.usage.cache_read_input_tokens = field::Empty,
-            gen_ai.usage.cache_creation_input_tokens = field::Empty,
             gen_ai.response.finish_reasons = field::Empty,
             gen_ai.response.model = field::Empty,
             visp.llm.cost_usd = field::Empty,
+            visp.llm.token_limit_hit = field::Empty,
+            langfuse.observation.type = field::Empty,
+            langfuse.observation.input = field::Empty,
+            langfuse.observation.output = field::Empty,
+            langfuse.session.id = field::Empty,
+            langfuse.trace.name = field::Empty,
+            langfuse.user.id = field::Empty,
+            langfuse.trace.tags = field::Empty,
+            langfuse.environment = field::Empty,
+            langfuse.release = field::Empty,
+            langfuse.version = field::Empty,
+            langfuse.trace.public = field::Empty,
+            langfuse.trace.metadata = field::Empty,
         );
-        span.record("gen_ai.system", &system_text);
+        span.record("gen_ai.system", "openai");
         span.record("gen_ai.request.max_tokens", config.max_tokens);
         span.record("gen_ai.request.temperature", config.temperature);
+
+        // Langfuse trace-level fields: record when enabled
+        if config.langfuse_enabled {
+            if let Some(ref val) = config.langfuse_session_id {
+                span.record("langfuse.session.id", val.as_str());
+            }
+            if let Some(ref val) = config.langfuse_trace_name {
+                span.record("langfuse.trace.name", val.as_str());
+            }
+            if let Some(ref val) = config.langfuse_user_id {
+                span.record("langfuse.user.id", val.as_str());
+            }
+            if let Some(ref val) = config.langfuse_tags {
+                span.record("langfuse.trace.tags", val.as_str());
+            }
+            if let Some(ref val) = config.langfuse_environment {
+                span.record("langfuse.environment", val.as_str());
+            }
+            if let Some(ref val) = config.langfuse_release {
+                span.record("langfuse.release", val.as_str());
+            }
+            if let Some(ref val) = config.langfuse_version {
+                span.record("langfuse.version", val.as_str());
+            }
+            if let Some(public) = config.langfuse_public {
+                span.record("langfuse.trace.public", public);
+            }
+            if let Some(ref metadata) = config.langfuse_metadata
+                && !metadata.is_empty()
+                && let Ok(json) = serde_json::to_string(metadata)
+            {
+                span.record("langfuse.trace.metadata", json.as_str());
+            }
+        }
 
         let url = format!("{}/v1/chat/completions", self.api_url.trim_end_matches('/'));
         let body = build_openai_request(messages, tools, config);
         let headers = build_openai_headers(&self.api_key);
+
+        // Langfuse generation capture: record input if enabled
+        let capture_enabled = config.langfuse_capture_input || config.langfuse_capture_output;
+        if capture_enabled {
+            span.record("langfuse.observation.type", "generation");
+        }
+        if config.langfuse_capture_input {
+            let sanitized = crate::sanitize::format_langfuse_input(
+                &body,
+                config.langfuse_capture_max_chars,
+                config.langfuse_redact_secrets,
+            );
+            span.record("langfuse.observation.input", &sanitized);
+        }
 
         tracing::debug!(url = %url, model = %config.model, "OpenAI request");
         let start_time = std::time::Instant::now();
@@ -787,8 +866,18 @@ impl LlmProvider for OpenAiProvider {
         let status = response.status();
         if status.is_success() {
             let byte_stream = response.bytes_stream();
-            Ok(byte_stream_to_chat_events(byte_stream, start_time, span))
+            Ok(byte_stream_to_chat_events(
+                byte_stream,
+                start_time,
+                span,
+                config.langfuse_capture_output,
+                config.langfuse_capture_max_chars,
+                config.langfuse_redact_secrets,
+            ))
         } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            span.in_scope(|| {
+                tracing::error!(target: "gen_ai.client.error", error_type = "rate_limit", "rate limit exceeded");
+            });
             let retry_after = parse_retry_after(response.headers()).unwrap_or(60);
             Err(LlmError::RateLimit {
                 retry_after_secs: retry_after,
@@ -799,6 +888,9 @@ impl LlmProvider for OpenAiProvider {
             let body_text = response.text().await.unwrap_or_default();
             Err(LlmError::Auth(body_text))
         } else {
+            span.in_scope(|| {
+                tracing::error!(target: "gen_ai.client.error", error_type = "api_error", status = status.as_u16(), "API error");
+            });
             let body_text = response.text().await.unwrap_or_default();
             Err(LlmError::Api {
                 status: status.as_u16(),
@@ -1240,7 +1332,14 @@ mod tests {
         let byte_stream =
             futures::stream::iter(chunks.into_iter().map(|s| Ok(bytes::Bytes::from(s))));
         let span = tracing::Span::current();
-        let event_stream = byte_stream_to_chat_events(byte_stream, std::time::Instant::now(), span);
+        let event_stream = byte_stream_to_chat_events(
+            byte_stream,
+            std::time::Instant::now(),
+            span,
+            false,
+            20000,
+            true,
+        );
         event_stream
             .filter_map(|e| futures::future::ready(e.ok()))
             .collect()
@@ -1715,16 +1814,16 @@ mod tests {
             gen_ai.system = tracing::field::Empty,
             gen_ai.request.model = "gpt-4o",
             gen_ai.operation.name = "chat",
+            gen_ai.provider.name = "openai",
             gen_ai.request.max_tokens = tracing::field::Empty,
             gen_ai.request.temperature = tracing::field::Empty,
             visp.llm.attempt = 0u64,
             gen_ai.usage.input_tokens = tracing::field::Empty,
             gen_ai.usage.output_tokens = tracing::field::Empty,
-            gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
-            gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
             gen_ai.response.finish_reasons = tracing::field::Empty,
             gen_ai.response.model = tracing::field::Empty,
             visp.llm.cost_usd = tracing::field::Empty,
+            visp.llm.token_limit_hit = tracing::field::Empty,
         );
         span.record("gen_ai.request.max_tokens", 4096u64);
         span.record("gen_ai.request.temperature", 0.7f64);
@@ -1745,19 +1844,19 @@ mod tests {
             gen_ai.system = tracing::field::Empty,
             gen_ai.request.model = "gpt-4o",
             gen_ai.operation.name = "chat",
+            gen_ai.provider.name = "openai",
             gen_ai.request.max_tokens = tracing::field::Empty,
             gen_ai.request.temperature = tracing::field::Empty,
             visp.llm.attempt = 0u64,
             gen_ai.usage.input_tokens = tracing::field::Empty,
             gen_ai.usage.output_tokens = tracing::field::Empty,
-            gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
-            gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
             gen_ai.response.finish_reasons = tracing::field::Empty,
             gen_ai.response.model = tracing::field::Empty,
             visp.llm.cost_usd = tracing::field::Empty,
+            visp.llm.token_limit_hit = tracing::field::Empty,
         );
 
-        span.record("gen_ai.system", "You are a helpful AI.");
+        span.record("gen_ai.system", "openai");
         span.record("gen_ai.request.max_tokens", 4096u64);
         span.record("gen_ai.request.temperature", 0.7f64);
 
@@ -1783,7 +1882,12 @@ mod tests {
         assert!(
             fields
                 .iter()
-                .any(|(k, v)| k == "gen_ai.system" && v == "You are a helpful AI.")
+                .any(|(k, v)| k == "gen_ai.system" && v == "openai")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.provider.name" && v == "openai")
         );
         assert!(
             fields
@@ -1807,16 +1911,16 @@ mod tests {
             gen_ai.system = tracing::field::Empty,
             gen_ai.request.model = "gpt-4o",
             gen_ai.operation.name = "chat",
+            gen_ai.provider.name = "openai",
             gen_ai.request.max_tokens = tracing::field::Empty,
             gen_ai.request.temperature = tracing::field::Empty,
             visp.llm.attempt = 0u64,
             gen_ai.usage.input_tokens = tracing::field::Empty,
             gen_ai.usage.output_tokens = tracing::field::Empty,
-            gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
-            gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
             gen_ai.response.finish_reasons = tracing::field::Empty,
             gen_ai.response.model = tracing::field::Empty,
             visp.llm.cost_usd = tracing::field::Empty,
+            visp.llm.token_limit_hit = tracing::field::Empty,
         );
         span.record("gen_ai.request.max_tokens", 4096u64);
         span.record("gen_ai.request.temperature", 0.7f64);
@@ -1825,7 +1929,7 @@ mod tests {
         let byte_stream =
             futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
         let start = std::time::Instant::now();
-        let event_stream = byte_stream_to_chat_events(byte_stream, start, span);
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
         let _: Vec<ChatEvent> = event_stream
             .filter_map(|e| futures::future::ready(e.ok()))
             .collect()
@@ -1849,12 +1953,34 @@ mod tests {
         assert!(
             fields
                 .iter()
-                .any(|(k, v)| k == "gen_ai.response.finish_reasons" && v == "stop")
+                .any(|(k, v)| k == "gen_ai.response.finish_reasons" && v == "[\"stop\"]")
         );
         assert!(
             fields
                 .iter()
                 .any(|(k, v)| k == "gen_ai.response.model" && v == "gpt-4o")
+        );
+
+        // OpenAI span 不应包含 cache 字段
+        assert!(
+            !fields
+                .iter()
+                .any(|(k, _)| k == "gen_ai.usage.cache_read_input_tokens")
+        );
+        assert!(
+            !fields
+                .iter()
+                .any(|(k, _)| k == "gen_ai.usage.cache_creation_input_tokens")
+        );
+        assert!(
+            !fields
+                .iter()
+                .any(|(k, _)| k == "gen_ai.usage.cache_read.input_tokens")
+        );
+        assert!(
+            !fields
+                .iter()
+                .any(|(k, _)| k == "gen_ai.usage.cache_creation.input_tokens")
         );
 
         // cost_usd 应为正数
@@ -1882,7 +2008,7 @@ mod tests {
         let byte_stream =
             futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
         let start = std::time::Instant::now();
-        let event_stream = byte_stream_to_chat_events(byte_stream, start, span);
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
         let _: Vec<ChatEvent> = event_stream
             .filter_map(|e| futures::future::ready(e.ok()))
             .collect()
@@ -1913,7 +2039,7 @@ mod tests {
         let byte_stream =
             futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
         let start = std::time::Instant::now();
-        let event_stream = byte_stream_to_chat_events(byte_stream, start, span);
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
         let _: Vec<ChatEvent> = event_stream
             .filter_map(|e| futures::future::ready(e.ok()))
             .collect()
@@ -1944,6 +2070,135 @@ mod tests {
         assert!(
             evts.iter().any(|(t, _)| t == "gen_ai.client.retry"),
             "should find retry event"
+        );
+    }
+
+    #[test]
+    fn test_gen_ai_provider_name_is_openai() {
+        let (spans, _events) = setup_tracing();
+        let _guard = make_guard(&spans, &_events);
+
+        let _span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.provider.name = "openai",
+            gen_ai.operation.name = "chat",
+        );
+
+        drop(_guard);
+        let spans = spans.lock().unwrap();
+        assert!(
+            spans[0]
+                .fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.provider.name" && v == "openai")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openai_finish_reason_length_stays_length() {
+        let (spans, _events) = setup_tracing();
+        let _guard = make_guard(&spans, &_events);
+
+        let span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.response.finish_reasons = tracing::field::Empty,
+            visp.llm.token_limit_hit = tracing::field::Empty,
+        );
+
+        let sse = make_openai_complete_sse("gpt-4o", "length");
+        let byte_stream =
+            futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
+        let start = std::time::Instant::now();
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
+        let _: Vec<ChatEvent> = event_stream
+            .filter_map(|e| futures::future::ready(e.ok()))
+            .collect()
+            .await;
+
+        drop(_guard);
+        let spans = spans.lock().unwrap();
+        let fields = &spans[0].fields;
+
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.response.finish_reasons" && v == "[\"length\"]"),
+            "OpenAI length should stay as length"
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "visp.llm.token_limit_hit" && v == "true"),
+            "token_limit_hit should be true for length"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openai_finish_reason_stop_stays_stop() {
+        let (spans, _events) = setup_tracing();
+        let _guard = make_guard(&spans, &_events);
+
+        let span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.response.finish_reasons = tracing::field::Empty,
+            visp.llm.token_limit_hit = tracing::field::Empty,
+        );
+
+        let sse = make_openai_complete_sse("gpt-4o", "stop");
+        let byte_stream =
+            futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
+        let start = std::time::Instant::now();
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
+        let _: Vec<ChatEvent> = event_stream
+            .filter_map(|e| futures::future::ready(e.ok()))
+            .collect()
+            .await;
+
+        drop(_guard);
+        let spans = spans.lock().unwrap();
+        let fields = &spans[0].fields;
+
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.response.finish_reasons" && v == "[\"stop\"]")
+        );
+        // stop 不应设置 token_limit_hit
+        let token_limit_entry = fields.iter().find(|(k, _)| k == "visp.llm.token_limit_hit");
+        assert!(token_limit_entry.is_none() || token_limit_entry.unwrap().1 == "false");
+    }
+
+    #[tokio::test]
+    async fn test_openai_no_cache_fields() {
+        let (spans, _events) = setup_tracing();
+        let _guard = make_guard(&spans, &_events);
+
+        let span = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.usage.input_tokens = tracing::field::Empty,
+            gen_ai.usage.output_tokens = tracing::field::Empty,
+        );
+
+        let sse = make_openai_complete_sse("gpt-4o", "stop");
+        let byte_stream =
+            futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
+        let start = std::time::Instant::now();
+        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
+        let _: Vec<ChatEvent> = event_stream
+            .filter_map(|e| futures::future::ready(e.ok()))
+            .collect()
+            .await;
+
+        drop(_guard);
+        let spans = spans.lock().unwrap();
+        let fields = &spans[0].fields;
+
+        assert!(
+            !fields
+                .iter()
+                .any(|(k, _)| k.starts_with("gen_ai.usage.cache")),
+            "OpenAI span should not have any cache fields, got: {:?}",
+            fields
         );
     }
 

@@ -1,0 +1,48 @@
+# =============================================================================
+# OpenTelemetry Collector 配置示例 — Langfuse 转发
+# =============================================================================
+# 此配置作为参考示例，不代表 visp 管理或部署 OpenTelemetry Collector。
+# visp 不管理 Collector 进程、不维护 Collector 配置、不保证此示例适用于所有环境。
+# 用户需要自行部署和配置 Collector，并根据实际环境调整。
+#
+# 使用方式：
+#   1. 安装 OpenTelemetry Collector Contrib：
+#      https://opentelemetry.io/docs/collector/installation/
+#   2. 设置环境变量：
+#      export LANGFUSE_PUBLIC_KEY="pk-lf-your-public-key"
+#      export LANGFUSE_SECRET_KEY="sk-lf-your-secret-key"
+#      export LANGFUSE_HOST="us.cloud.langfuse.com"
+#   3. 启动 Collector：
+#      otelcol-contrib --config otel-collector-langfuse.example.yaml
+#
+# 链路：visp-daemon (OTLP/gRPC) → Collector → Langfuse (OTLP/HTTP)
+# =============================================================================
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+exporters:
+  otlp/langfuse:
+    endpoint: https://${env:LANGFUSE_HOST}/api/public/otel
+    protocol: http/protobuf
+    encoding: json
+    headers:
+      Authorization: Basic ${env:LANGFUSE_BASIC_AUTH}
+      x-langfuse-ingestion-version: "4"
+    tls:
+      insecure: false
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 512
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/langfuse]
