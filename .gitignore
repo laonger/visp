@@ -5,4 +5,5 @@ last-prompt.json
 .visp/**
 !.visp/agents/
 !.visp/rules/
+crates/*/.visp/
 doc/

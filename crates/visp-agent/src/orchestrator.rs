@@ -32,6 +32,26 @@ use visp_core::tool_registry::ToolRegistry;
 
 use crate::active_agent::{ActiveAgent, ActiveAgentRegistry};
 
+/// 从 AgentRegistry 动态构建子 agent 列表（用于注入 system prompt）
+fn build_subagent_prompt(registry: &AgentRegistry) -> String {
+    let subs: Vec<&AgentDefinition> = registry
+        .list_subagents()
+        .into_iter()
+        .filter(|a| a.name != "default")
+        .collect();
+
+    if subs.is_empty() {
+        return String::new();
+    }
+
+    let mut prompt = String::from("\n## Delegation Guidelines\n\n");
+    prompt.push_str("Available sub-agents (use via the `task` tool):\n");
+    for def in subs {
+        prompt.push_str(&format!("  - `{}` — {}\n", def.name, def.description));
+    }
+    prompt
+}
+
 /// 取消信号
 pub struct CancelSignal;
 
@@ -318,6 +338,20 @@ impl Orchestrator {
                 session_id,
                 error = %e,
                 "failed to append agent system prompt"
+            );
+        }
+
+        // Append dynamic sub-agent delegation guidelines
+        let subagent_prompt = build_subagent_prompt(&self.agent_registry);
+        if !subagent_prompt.is_empty()
+            && let Err(e) = self
+                .session_mgr
+                .append_system_prompt_template(session_id, &subagent_prompt)
+        {
+            tracing::warn!(
+                session_id,
+                error = %e,
+                "failed to append subagent list to system prompt"
             );
         }
 

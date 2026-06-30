@@ -26,7 +26,7 @@ impl Tool for TaskTool {
             "properties": {
                 "subagent_type": {
                     "type": "string",
-                    "description": "Name of the sub-agent to invoke (e.g. \"code_reader\", \"code_reviewer\")"
+                    "description": "Name of the sub-agent to invoke. Available sub-agents are listed in the system prompt."
                 },
                 "description": {
                     "type": "string",

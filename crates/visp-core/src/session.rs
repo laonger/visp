@@ -226,11 +226,13 @@ const DEFAULT_SYSTEM_PROMPT: &str = concat!(
     "- When you need the user to make a choice, use the [USER_QUERY] marker (see detailed instructions at end of prompt)\n",
     "\n",
     "## Task Delegation\n",
-    "- Use the `task` tool to delegate specialized work to sub-agents:\n",
-    "  - `code_reader` — for reading, understanding, and analyzing source code\n",
-    "- When the user asks you to \"read\", \"review\", \"analyze\", or \"understand\" code,\n",
-    "  always delegate to `code_reader` via `task` instead of doing it yourself.\n",
-    "- Sub-agents have access to all necessary tools and return their results to you.\n",
+    "- Use the `task` tool to delegate specialized work to sub-agents.\n",
+    "- Available sub-agents are listed in the Delegation Guidelines section\n",
+    "  (appended at session start) — match the task to the right agent.\n",
+    "- Provide clear, bounded task specifications; sub-agents work best with\n",
+    "  well-defined tasks.\n",
+    "- Sub-agents have access to the tools they need and return their results\n",
+    "  to you.\n",
 );
 
 /// 按优先级加载系统 prompt 模板：

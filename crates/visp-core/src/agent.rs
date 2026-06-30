@@ -519,9 +519,10 @@ pub(crate) fn render_tool_guide(registry: &ToolRegistry) -> String {
          `grep`/`glob` to search files. \
          Use `codegraph_context`/`codegraph_trace`/`codegraph_impact` for quick symbol \
          lookups and call-chain tracing. \
-         When the user asks you to read, understand, or analyze source code, \
-         use the `task` tool to delegate to `code_reader` sub-agent instead of \
-         doing it yourself. \
+         When you need to discover code (find files, locate patterns, search \
+         the codebase) or execute bounded implementation tasks, \
+         delegate to the appropriate sub-agent via the `task` tool. \
+         See the sub-agent list in the Task Delegation section for details. \
          Only use `bash` when no other tool fits \
          (e.g. running build commands, git operations, or multi-step shell scripts)."
             .to_string(),
