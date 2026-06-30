@@ -974,6 +974,7 @@ async fn execute_tool_calls(
                 langfuse.trace.metadata = tracing::field::Empty,
                 visp.tool.is_error = tracing::field::Empty,
                 visp.tool.duration_ms = tracing::field::Empty,
+                visp.tool.arguments = tracing::field::Empty,
             )
         } else {
             tracing::info_span!(
@@ -983,6 +984,7 @@ async fn execute_tool_calls(
                 gen_ai.tool.type = "function",
                 visp.tool.is_error = tracing::field::Empty,
                 visp.tool.duration_ms = tracing::field::Empty,
+                visp.tool.arguments = tracing::field::Empty,
             )
         };
         // Propagate langfuse trace-level fields onto tool span
@@ -1154,6 +1156,12 @@ async fn execute_tool_calls(
                 // Record tool execution fields on the visp.tool.execute span
                 tracing::Span::current().record("visp.tool.duration_ms", elapsed_ms as i64);
                 tracing::Span::current().record("visp.tool.is_error", result.is_error);
+
+                // Record tool arguments (skip edit/write to avoid logging file content)
+                let tool_name = tc.name.as_str();
+                if tool_name != "edit_file" && tool_name != "write_file" {
+                    tracing::Span::current().record("visp.tool.arguments", &tc.arguments);
+                }
 
                 if langfuse_enabled {
                     let level = if result.is_error { "ERROR" } else { "DEFAULT" };
