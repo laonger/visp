@@ -350,7 +350,7 @@ fn default_observability_metrics_summary() -> bool {
     true
 }
 fn default_observability_log_file() -> Option<String> {
-    None
+    Some("~/.visp/logs".into())
 }
 
 pub fn load_config(config_path: Option<&Path>) -> Result<DaemonConfig, String> {
@@ -734,7 +734,7 @@ path = "/tmp/custom/visp.db"
         assert_eq!(config.observability.format, "json");
         assert!(config.observability.parent_link);
         assert!(config.observability.metrics_summary);
-        assert_eq!(config.observability.log_file, None);
+        assert_eq!(config.observability.log_file, Some("~/.visp/logs".into()));
     }
 
     #[test]
@@ -758,7 +758,7 @@ enabled = false
         assert_eq!(config.observability.format, "json");
         assert!(config.observability.parent_link);
         assert!(config.observability.metrics_summary);
-        assert_eq!(config.observability.log_file, None);
+        assert_eq!(config.observability.log_file, Some("~/.visp/logs".into()));
     }
 
     #[test]

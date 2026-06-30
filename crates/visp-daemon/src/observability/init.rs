@@ -73,7 +73,17 @@ pub fn init_observability(cfg: &ObservabilityConfig) -> ObservabilityGuard {
     let _file_guard: Option<tracing_appender::non_blocking::WorkerGuard>;
     let fmt_writer: Box<dyn Fn() -> Box<dyn std::io::Write + Send> + Send + Sync>;
     if let Some(ref path) = cfg.log_file {
-        let appender = tracing_appender::rolling::daily(path, "visp-daemon.log");
+        // Expand ~/ to $HOME for the log directory path
+        let expanded = if let Some(rest) = path.strip_prefix("~/") {
+            visp_core::session::home_dir()
+                .map(|home| home.join(rest))
+                .unwrap_or_else(|| std::path::PathBuf::from(path))
+        } else {
+            std::path::PathBuf::from(path)
+        };
+        // Ensure the directory exists
+        let _ = std::fs::create_dir_all(&expanded);
+        let appender = tracing_appender::rolling::daily(&expanded, "visp-daemon.log");
         let (nb, guard) = tracing_appender::non_blocking(appender);
         _file_guard = Some(guard);
         fmt_writer = Box::new(move || -> Box<dyn std::io::Write + Send> { Box::new(nb.clone()) });

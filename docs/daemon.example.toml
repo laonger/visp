@@ -105,7 +105,8 @@ max_context_tokens = 128000
 # metrics_summary = true
 
 # 可选：日志目录。设置后按天滚动写入 visp-daemon.log；不设置则输出到 stdout。
-# log_file = "/tmp/visp-logs"
+# 默认：~/.visp/logs
+# log_file = "~/.visp/logs"
 
 # ----- OpenTelemetry / OTLP -----
 [observability.otlp]
