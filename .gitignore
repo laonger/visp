@@ -2,5 +2,7 @@
 .codegraph
 target
 last-prompt.json
-.visp/
+.visp/*
+!.visp/agents/
+!.visp/rules/
 doc/

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use visp_core::agent_definition::{AgentDefinition, AgentMode, PermissionRule};
+use visp_core::agent_definition::{AgentDefinition, AgentMode, PermissionAction, PermissionRule};
 use visp_core::agent_registry::AgentRegistry;
 
 /// Load agent definitions from `.visp/agents/*.md` files.
@@ -107,7 +107,7 @@ fn parse_agent_file(path: &Path) -> Result<AgentDefinition, String> {
     let mut model: Option<String> = None;
     let mut temperature: Option<f32> = None;
     let mut steps: Option<u32> = None;
-    let permission: Vec<PermissionRule> = Vec::new();
+    let mut permission: Vec<PermissionRule> = Vec::new();
 
     for line in yaml_text.lines() {
         let line = line.trim();
@@ -131,6 +131,28 @@ fn parse_agent_file(path: &Path) -> Result<AgentDefinition, String> {
                 }
                 "steps" => {
                     steps = value.parse::<u32>().ok();
+                }
+                "permission" => {
+                    // Format: <action> <tool> [pattern]
+                    // Example: "deny edit_file *", "allow read_file *", "deny bash"
+                    let parts: Vec<&str> = value.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        let action = match parts[0] {
+                            "allow" => PermissionAction::Allow,
+                            "deny" => PermissionAction::Deny,
+                            _ => continue,
+                        };
+                        let tool = parts[1].to_string();
+                        let pattern = parts
+                            .get(2)
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| "*".to_string());
+                        permission.push(PermissionRule {
+                            permission: tool,
+                            pattern,
+                            action,
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -341,5 +363,74 @@ mode: all
         assert!(registry.get("valid").is_some());
         // Invalid file should not produce an entry (only default + code_reader + valid)
         assert_eq!(registry.list().len(), 3);
+    }
+
+    #[test]
+    fn test_parse_agent_with_permission_rules() {
+        let dir = std::env::temp_dir().join(format!("agent_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let content = r#"---
+name: explorer
+mode: subagent
+permission: deny edit_file *
+permission: allow read_file *
+---
+
+You are an explorer.
+"#;
+        let path = write_agent_file(&dir, "explorer.md", content);
+        let def = parse_agent_file(&path).unwrap();
+
+        assert_eq!(def.name, "explorer");
+        assert_eq!(def.mode, AgentMode::Subagent);
+        assert_eq!(def.permission.len(), 2);
+        assert_eq!(def.permission[0].permission, "edit_file");
+        assert_eq!(def.permission[0].pattern, "*");
+        assert_eq!(def.permission[0].action, PermissionAction::Deny);
+        assert_eq!(def.permission[1].permission, "read_file");
+        assert_eq!(def.permission[1].pattern, "*");
+        assert_eq!(def.permission[1].action, PermissionAction::Allow);
+    }
+
+    #[test]
+    fn test_parse_agent_permission_defaults_pattern_to_star() {
+        let dir = std::env::temp_dir().join(format!("agent_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let content = r#"---
+name: test
+mode: subagent
+permission: deny bash
+---
+"#;
+        let path = write_agent_file(&dir, "test.md", content);
+        let def = parse_agent_file(&path).unwrap();
+
+        assert_eq!(def.permission.len(), 1);
+        assert_eq!(def.permission[0].permission, "bash");
+        assert_eq!(def.permission[0].pattern, "*");
+        assert_eq!(def.permission[0].action, PermissionAction::Deny);
+    }
+
+    #[test]
+    fn test_parse_agent_invalid_permission_action_skipped() {
+        let dir = std::env::temp_dir().join(format!("agent_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let content = r#"---
+name: test
+mode: subagent
+permission: unknown_action tool *
+permission: allow grep *
+---
+"#;
+        let path = write_agent_file(&dir, "test.md", content);
+        let def = parse_agent_file(&path).unwrap();
+
+        // First line skipped (unknown action), second line added
+        assert_eq!(def.permission.len(), 1);
+        assert_eq!(def.permission[0].permission, "grep");
+        assert_eq!(def.permission[0].action, PermissionAction::Allow);
     }
 }

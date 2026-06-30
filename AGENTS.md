@@ -36,7 +36,7 @@ cargo run --bin visp -- -p /path/to/project --list
 
 ## 工作区结构
 
-11 个 crate，均在 `crates/` 下：
+12 个 crate，均在 `crates/` 下：
 
 ```
 crates/
@@ -49,11 +49,12 @@ crates/
 ├── visp-context/      ← DefaultContextTrimmer：HEAD+MIDDLE+TAIL 三段式裁剪
 ├── visp-db/           ← SQLite 持久化（SessionRepo、MessageRepo、schema 迁移）
 ├── visp-mcp/          ← MCP 客户端/服务端集成
+├── visp-agent/        ← 多 Agent 编排（Orchestrator、子 Agent 派发、权限合并）
 ├── visp-daemon/       ← gRPC 服务端，组装所有模块
 └── visp-cli/          ← ratatui TUI 客户端
 ```
 
-**依赖方向**：`core ← (llm, tools, context, proto, db) ← daemon/cli`。core 不依赖任何其他 crate。
+**依赖方向**：`core ← (llm, tools, context, proto, db) ← visp-agent ← daemon/cli`。core 不依赖任何其他 crate。
 
 ## proto 代码生成
 
@@ -92,6 +93,31 @@ cargo test && cargo clippy -- -D warnings && cargo fmt -- --check
 1. 在 `visp-tools/src/` 中实现 `Tool` trait
 2. 在 `visp-daemon/src/main.rs` 中 `tool_registry.register(...)`
 3. **禁止**修改 `visp-core` 的 `ToolContext`、`AgentLoopContext` 等核心结构来适配新工具
+
+### 添加新 Subagent
+
+visp 通过 `visp-agent` crate 的 `Orchestrator` 支持子 Agent 调用（通过 `task` 工具拦截 → `spawn_sub_agent()` → `run_agent_loop()`）。
+
+子 Agent 通过 `.visp/agents/*.md` 文件定义，格式为 YAML frontmatter + Markdown 正文（system prompt）：
+
+```markdown
+---
+name: my-agent
+description: 用途说明
+mode: subagent        # all | primary | subagent
+model: gpt-4o         # 可选，不写则继承父 session 模型
+temperature: 0.1      # 可选
+permission: allow read_file *
+permission: deny edit_file *
+---
+
+System prompt 正文
+```
+
+- `mode: subagent` 表示仅通过 `task` 工具调用，不在用户选择列表中
+- `permission` 格式：`<allow|deny> <工具名> [路径pattern，默认*]`
+- 内置默认 agent：`default`（All）、`code_reader`（Subagent）、`explorer`（Subagent，只读）、`fixer`（Subagent，读写）
+- 空 permission 会被 `merge_permissions` 兜底 `*: deny`——子 agent 必须显式声明 permission 规则才能调用工具
 
 ### visp-db schema 迁移
 
