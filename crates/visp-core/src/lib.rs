@@ -10,6 +10,7 @@ pub mod provider;
 pub mod provider_metadata;
 pub mod rules;
 pub mod session;
+pub mod skill;
 pub mod tool;
 pub mod tool_registry;
 pub mod trace_context;

@@ -280,6 +280,18 @@ fn load_skills_inner(project_path: &Path, home: Option<PathBuf>) -> String {
     let mut seen_names = HashSet::new();
     let mut sections = Vec::new();
 
+    // 0. Built-in skills (lowest priority, can be overridden by file system)
+    for skill in crate::skill::builtin_skills() {
+        if !seen_names.insert(skill.name.to_string()) {
+            continue;
+        }
+        let mut section = format!("### {}", skill.name);
+        if !skill.description.is_empty() {
+            section.push_str(&format!("\n{}", skill.description));
+        }
+        sections.push(section);
+    }
+
     // 1. Project skills (higher priority)
     let project_dir = project_path.join(".visp").join("skills");
     load_skills_from_dir(&project_dir, &mut seen_names, &mut sections);
@@ -370,9 +382,8 @@ fn extract_frontmatter_field(content: &str, field: &str) -> Option<String> {
     None
 }
 
-/// 去除 YAML frontmatter，返回正文（仅测试用）
-#[cfg(test)]
-fn strip_frontmatter(content: &str) -> &str {
+/// 去除 YAML frontmatter，返回正文
+pub fn strip_frontmatter(content: &str) -> &str {
     let content = content.trim();
     if !content.starts_with("---") {
         return content;
@@ -868,7 +879,17 @@ mod tests {
             .unwrap();
         assert_eq!(session.status, SessionStatus::Idle);
         assert_eq!(session.project_path, Path::new("/tmp"));
-        assert_eq!(session.system_prompt_template, DEFAULT_SYSTEM_PROMPT);
+        assert!(
+            session
+                .system_prompt_template
+                .starts_with(DEFAULT_SYSTEM_PROMPT)
+        );
+        assert!(session.system_prompt_template.contains("Available Skills"));
+        assert!(
+            session
+                .system_prompt_template
+                .contains("delegation-workflow")
+        );
     }
 
     #[test]
@@ -1077,12 +1098,13 @@ mod tests {
     }
 
     #[test]
-    fn test_load_skills_empty_dir() {
+    fn test_load_skills_empty_dir_still_has_builtins() {
         let tmp = tempfile::TempDir::new().unwrap();
         let home = tempfile::TempDir::new().unwrap();
-        // No skills dir → empty
+        // No skills dir → only built-in skills
         let result = load_skills_inner(tmp.path(), Some(home.path().to_path_buf()));
-        assert!(result.is_empty());
+        assert!(result.contains("delegation-workflow"));
+        assert!(result.contains("Available Skills"));
     }
 
     #[test]

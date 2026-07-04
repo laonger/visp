@@ -173,6 +173,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .register(Arc::new(TaskTool))
         .map_err(|e| format!("register task: {e}"))?;
 
+    // ── 技能工具 ──
+    tool_registry
+        .register(Arc::new(visp_tools::skill::SkillTool))
+        .map_err(|e| format!("register skill: {e}"))?;
+
     let tool_registry = Arc::new(tool_registry);
 
     // ── 锁定核心工具（MCP 工具不能覆盖这些名称）──
