@@ -98,6 +98,19 @@ impl VispClient {
 }
 
 impl ChatHandle {
+    /// 创建用于测试的 mock ChatHandle（无实际 gRPC 连接）。
+    /// send_ack / send_cancel 等方法可正常调用，消息发送到内部 channel。
+    #[cfg(test)]
+    pub fn new_mock(session_id: &str) -> Self {
+        let (tx, _rx) = mpsc::channel::<ClientMessage>(16);
+        ChatHandle {
+            request_tx: tx,
+            response_stream: Box::pin(futures::stream::empty()),
+            session_id: session_id.to_string(),
+            next_request_id: 1,
+        }
+    }
+
     pub fn send_input(&mut self, text: &str) -> String {
         let rid = self.next_request_id.to_string();
         self.next_request_id += 1;
