@@ -172,7 +172,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tool_registry
         .register(Arc::new(TaskTool))
         .map_err(|e| format!("register task: {e}"))?;
-
     // ── 技能工具 ──
     tool_registry
         .register(Arc::new(visp_tools::skill::SkillTool))

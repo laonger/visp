@@ -99,7 +99,6 @@ fn format_skill_output(name: &str, content: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::path::Path;
 
     #[test]
     fn test_name() {
