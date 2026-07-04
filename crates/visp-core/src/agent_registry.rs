@@ -35,6 +35,11 @@ impl AgentRegistry {
         self.agents.get(name)
     }
 
+    /// 按名称查找 agent（可变引用）
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut AgentDefinition> {
+        self.agents.get_mut(name)
+    }
+
     /// 获取默认 agent
     /// 优先取 mode != Subagent 且名称含 "default" 的 agent；
     /// 无则取第一个 mode != Subagent 的 agent；

@@ -3,9 +3,24 @@ use std::path::Path;
 use visp_core::agent_definition::{AgentDefinition, AgentMode, PermissionAction, PermissionRule};
 use visp_core::agent_registry::AgentRegistry;
 
+/// 配置文件中对内置 agent 的覆盖项。
+///
+/// 允许在不修改源码的情况下，通过 daemon.toml 的 `[[agent.builtin]]`
+/// 覆盖内置 agent 的 model / temperature / steps 等字段。
+#[derive(Debug, Clone, Default)]
+pub struct BuiltinAgentOverride {
+    pub name: String,
+    pub model: Option<String>,
+    pub temperature: Option<f32>,
+    pub steps: Option<u32>,
+}
+
 /// Load agent definitions from `.visp/agents/*.md` files.
-/// Falls back to a built-in "default" agent if no files exist.
-pub fn load_agents(project_path: &Path) -> AgentRegistry {
+/// Falls back to built-in agents if no files exist.
+///
+/// `overrides` 来自 daemon.toml 的 `[[agent.builtin]]` 配置，
+/// 在内置 agent 注册之后、文件 agent 加载之前应用。
+pub fn load_agents(project_path: &Path, overrides: &[BuiltinAgentOverride]) -> AgentRegistry {
     let mut registry = AgentRegistry::new();
 
     // Register built-in default agent (lowest priority — file-loaded can overwrite)
@@ -185,7 +200,31 @@ pub fn load_agents(project_path: &Path) -> AgentRegistry {
     };
     registry.register(fixer).ok();
 
-    // Scan .visp/agents/*.md
+    // Apply config overrides (from daemon.toml [[agent.builtin]])
+    for ov in overrides {
+        if let Some(agent) = registry.get_mut(&ov.name) {
+            if let Some(model) = &ov.model {
+                agent.model = Some(model.clone());
+            }
+            if let Some(temp) = ov.temperature {
+                agent.temperature = Some(temp);
+            }
+            if let Some(steps) = ov.steps {
+                agent.steps = Some(steps);
+            }
+            tracing::debug!(
+                agent = %ov.name,
+                "applied config override for built-in agent"
+            );
+        } else {
+            tracing::warn!(
+                agent = %ov.name,
+                "config override references unknown built-in agent, ignored"
+            );
+        }
+    }
+
+    // Scan .visp/agents/*.md (highest priority — overwrites built-in + config)
     let agents_dir = project_path.join(".visp/agents/");
     if !agents_dir.exists() {
         return registry;
@@ -454,7 +493,7 @@ You search.
 "#,
         );
 
-        let registry = load_agents(&dir);
+        let registry = load_agents(&dir, &[]);
 
         // Default agent should exist
         assert!(registry.get("default").is_some());
@@ -473,7 +512,7 @@ You search.
         let dir = std::env::temp_dir().join(format!("agent_test_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join(".visp/agents/")).unwrap();
 
-        let registry = load_agents(&dir);
+        let registry = load_agents(&dir, &[]);
         assert!(registry.get("default").is_some());
         assert!(registry.get("code_reader").is_some());
         assert!(registry.get("explorer").is_some());
@@ -485,7 +524,7 @@ You search.
     fn test_load_agents_no_directory() {
         let dir = std::env::temp_dir().join(format!("agent_test_{}", uuid::Uuid::new_v4()));
 
-        let registry = load_agents(&dir);
+        let registry = load_agents(&dir, &[]);
         assert!(registry.get("default").is_some());
         assert!(registry.get("code_reader").is_some());
         assert!(registry.get("explorer").is_some());
@@ -511,7 +550,7 @@ mode: all
         // Invalid file (no frontmatter)
         write_agent_file(&agents_dir, "invalid.md", "Just plain text content.");
 
-        let registry = load_agents(&dir);
+        let registry = load_agents(&dir, &[]);
         assert!(registry.get("default").is_some());
         assert!(registry.get("code_reader").is_some());
         assert!(registry.get("valid").is_some());
@@ -586,5 +625,64 @@ permission: allow grep *
         assert_eq!(def.permission.len(), 1);
         assert_eq!(def.permission[0].permission, "grep");
         assert_eq!(def.permission[0].action, PermissionAction::Allow);
+    }
+
+    #[test]
+    fn test_load_agents_with_config_overrides() {
+        let dir = std::env::temp_dir().join(format!("agent_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let overrides = vec![
+            BuiltinAgentOverride {
+                name: "explorer".to_string(),
+                model: Some("Opencode/deepseek-v4-flash".to_string()),
+                temperature: Some(0.05),
+                steps: None,
+            },
+            BuiltinAgentOverride {
+                name: "fixer".to_string(),
+                model: Some("Anthropic/claude-sonnet-4-20250514".to_string()),
+                temperature: None,
+                steps: Some(30),
+            },
+        ];
+
+        let registry = load_agents(&dir, &overrides);
+
+        // explorer override applied
+        let explorer = registry.get("explorer").unwrap();
+        assert_eq!(
+            explorer.model.as_deref(),
+            Some("Opencode/deepseek-v4-flash")
+        );
+        assert!((explorer.temperature.unwrap() - 0.05).abs() < f32::EPSILON);
+
+        // fixer override applied
+        let fixer = registry.get("fixer").unwrap();
+        assert_eq!(
+            fixer.model.as_deref(),
+            Some("Anthropic/claude-sonnet-4-20250514")
+        );
+        assert_eq!(fixer.steps, Some(30));
+    }
+
+    #[test]
+    fn test_load_agents_override_unknown_agent_ignored() {
+        let dir = std::env::temp_dir().join(format!("agent_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let overrides = vec![BuiltinAgentOverride {
+            name: "nonexistent".to_string(),
+            model: Some("gpt-4o".to_string()),
+            temperature: None,
+            steps: None,
+        }];
+
+        let registry = load_agents(&dir, &overrides);
+        // Unknown agent should not be registered
+        assert!(registry.get("nonexistent").is_none());
+        // Built-ins still present
+        assert!(registry.get("default").is_some());
+        assert_eq!(registry.list().len(), 4);
     }
 }
