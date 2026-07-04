@@ -96,7 +96,7 @@ pub async fn run(
     io::stdout().flush()?;
     let _guard = TerminalGuard;
     let mut terminal = ratatui::init();
-    let mut app = AppState::new(session_id.clone(), model.clone(), model_key);
+    let mut app = AppState::new(session_id.clone(), model.clone(), model_key, project_path.to_string());
     app.available_models = available_models;
     app.model_keys = model_keys;
 
@@ -953,6 +953,88 @@ fn tc_display(tc: &visp_proto::visp::ToolCall) -> String {
     }
 }
 
+/// Generate a well-documented agent template Markdown file with YAML frontmatter.
+fn init_agent_template(name: &str) -> String {
+    format!(
+        r#"---
+name: {name}
+description: A brief description of what this agent does
+mode: subagent        # all | primary | subagent
+model:                # optional, e.g. "Anthropic/claude-sonnet-4-20250514"
+temperature: 0.1      # optional
+permission: allow read_file *
+permission: allow grep *
+permission: allow glob *
+permission: deny edit_file *
+---
+
+# Agent: {name}
+
+Describe the agent's purpose and capabilities here.
+
+## When to Use This Agent
+
+<!-- Describe scenarios where this agent should be invoked. -->
+<!-- Example: "Use this agent when refactoring a module." -->
+
+- Use case 1
+- Use case 2
+
+## Guidelines
+
+- Guideline 1
+- Guideline 2
+
+## Constraints
+
+- Constraint 1
+- Constraint 2
+"#,
+    )
+}
+
+/// Generate a well-documented skill template Markdown file with YAML frontmatter.
+fn init_skill_template(name: &str) -> String {
+    format!(
+        r#"---
+name: {name}
+description: A brief description of what this skill does and when to use it
+---
+
+# Skill: {name}
+
+## When to Use This Skill
+
+<!-- Describe the scenarios where this skill should be activated. -->
+<!-- Example: "Use this skill when the user asks to refactor a module." -->
+
+- Trigger condition 1
+- Trigger condition 2
+
+## When NOT to Use
+
+- Scenario where this skill is unnecessary
+- Scenario where a different approach is better
+
+## Workflow
+
+1. **Step 1**: Describe the first action
+2. **Step 2**: Describe the next action
+3. **Step 3**: Finalize and report
+
+## Guidelines
+
+- Guideline 1
+- Guideline 2
+
+## Constraints
+
+- Constraint 1
+- Constraint 2
+"#,
+    )
+}
+
 fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) {
     let parts: Vec<&str> = text.splitn(2, ' ').collect();
     match parts[0] {
@@ -1167,7 +1249,7 @@ mod tests {
     /// 修复前 set_generating(false) 作用于 active tab，切换 tab 后会误清其他 tab。
     #[test]
     fn test_sub_done_does_not_clear_main_generating() {
-        let mut app = AppState::new("main".into(), "m".into(), "".into());
+        let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
         let mut chat = ChatHandle::new_mock("main");
 
         // 主 agent 正在运行
@@ -1205,7 +1287,7 @@ mod tests {
     /// Bug: 主 agent Done 时不应影响子 agent 的 generating 状态。
     #[tokio::test]
     async fn test_main_done_does_not_clear_sub_generating() {
-        let mut app = AppState::new("main".into(), "m".into(), "".into());
+        let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
         let mut chat = ChatHandle::new_mock("main");
 
         // 主 agent 正在运行
@@ -1242,7 +1324,7 @@ mod tests {
     /// 子 agent Error 不应清除主 agent 的 current_request_id。
     #[test]
     fn test_sub_error_does_not_clear_main_request_id() {
-        let mut app = AppState::new("main".into(), "m".into(), "".into());
+        let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
         let mut chat = ChatHandle::new_mock("main");
 
         app.tab_bar.tabs[0].generating = true;
@@ -1275,7 +1357,7 @@ mod tests {
     /// 不应被子 session 的 Done/Error 消耗。
     #[test]
     fn test_stale_done_not_consumed_by_sub_done() {
-        let mut app = AppState::new("main".into(), "m".into(), "".into());
+        let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
         let mut chat = ChatHandle::new_mock("main");
 
         // 模拟 Ctrl+C 后的 stale 状态
