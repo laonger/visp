@@ -3,7 +3,7 @@ use serde_json::json;
 
 use visp_core::tool::{Tool, ToolContext, ToolResult};
 
-/// Task tool: delegate a complex task to a sub-agent.
+/// Task tool: delegate a task to a specialized sub-agent.
 /// Actual execution is intercepted by the agent loop (via tool name == "task" check),
 /// so this `execute()` is never called in normal flow.
 pub struct TaskTool;
@@ -15,9 +15,9 @@ impl Tool for TaskTool {
     }
 
     fn description(&self) -> &str {
-        "Delegate a complex or specialized task to a dedicated sub-agent. \
-         Use this when the task requires focused expertise (e.g. reading code, \
-         reviewing changes, testing) and can benefit from a separate agent."
+        "Delegate a task to a specialized sub-agent for better precision and cost efficiency. \
+         Use this for code exploration, search, implementation, or testing tasks. \
+         See the Delegation Guidelines in the system prompt for when to use each sub-agent."
     }
 
     fn parameters(&self) -> serde_json::Value {
