@@ -812,10 +812,10 @@ fn render_input_area(app: &mut AppState, f: &mut Frame, area: Rect) {
 }
 
 /// 将 model 字符串拆为 (provider, model_label)
-/// 期望格式为 "{provider}.{name}"，如 "Ollama.deepseek-v4-flash"
-/// 无分隔点时 provider 为空字符串
+/// 期望格式为 "{provider}/{name}"，如 "Ollama/deepseek-v4-flash"
+/// 无分隔斜杠时 provider 为空字符串
 fn split_model_name(model: &str) -> (&str, &str) {
-    model.split_once('.').unwrap_or(("", model))
+    model.split_once('/').unwrap_or(("", model))
 }
 
 /// 格式化状态栏左侧字符串
@@ -1110,13 +1110,13 @@ mod tests {
     #[test]
     fn test_split_model_name_normal() {
         assert_eq!(
-            split_model_name("Ollama.deepseek-v4-flash"),
+            split_model_name("Ollama/deepseek-v4-flash"),
             ("Ollama", "deepseek-v4-flash")
         );
     }
 
     #[test]
-    fn test_split_model_name_no_dot() {
+    fn test_split_model_name_no_slash() {
         assert_eq!(
             split_model_name("deepseek-v4-flash"),
             ("", "deepseek-v4-flash")
@@ -1124,7 +1124,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_model_name_with_parens_no_dot() {
+    fn test_split_model_name_with_parens_no_slash() {
         assert_eq!(
             split_model_name("DeepSeek v4 Flash(Ollama)"),
             ("", "DeepSeek v4 Flash(Ollama)")
@@ -1134,14 +1134,14 @@ mod tests {
     #[test]
     fn test_split_model_name_multi_word() {
         assert_eq!(
-            split_model_name("Anthropic.Claude Sonnet"),
+            split_model_name("Anthropic/Claude Sonnet"),
             ("Anthropic", "Claude Sonnet")
         );
     }
 
     #[test]
     fn test_format_status_left_generating() {
-        let s = format_status_left("abc12345", "Ollama.DeepSeek", true, false);
+        let s = format_status_left("abc12345", "Ollama/DeepSeek", true, false);
         assert_eq!(
             s,
             "abc12345 | DeepSeek(Ollama) | Generating | [Select] | /help = help"
@@ -1150,7 +1150,7 @@ mod tests {
 
     #[test]
     fn test_format_status_left_idle_mouse() {
-        let s = format_status_left("sess_xyz", "Anthropic.Claude Sonnet", false, true);
+        let s = format_status_left("sess_xyz", "Anthropic/Claude Sonnet", false, true);
         assert_eq!(
             s,
             "sess_xyz | Claude Sonnet(Anthropic) | Idle | [Mouse] | /help = help"
@@ -1159,7 +1159,7 @@ mod tests {
 
     #[test]
     fn test_format_status_left_empty_provider() {
-        let s = format_status_left("abcdefgh", "ollama.deepseek-v4-flash", false, false);
+        let s = format_status_left("abcdefgh", "ollama/deepseek-v4-flash", false, false);
         assert_eq!(
             s,
             "abcdefgh | deepseek-v4-flash(ollama) | Idle | [Select] | /help = help"

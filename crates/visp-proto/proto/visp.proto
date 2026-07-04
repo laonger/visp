@@ -23,17 +23,15 @@ message Session {
     // 会话创建时间。
     google.protobuf.Timestamp created_at = 4;
 
-    // 当前会话的模型 key，格式 "{provider}.{name}"。
-    // 用于 CLI 状态栏显示，CLI 端按 "." 拆出 provider 和 name 后
+    // 当前会话的模型 key，格式 "{provider}/{name}"。
+    // 用于 CLI 状态栏显示，CLI 端按 "/" 拆出 provider 和 name 后
     // 显示为 "name(provider)"。
-    // 例如 "Ollama.DeepSeek" → 状态栏显示 "DeepSeek(Ollama)"。
+    // 例如 "Ollama/DeepSeek" → 状态栏显示 "DeepSeek(Ollama)"。
     string model_key = 9;
 
-    // 当前会话使用的模型标识（API model key）。
-    // 在 ConfigUpdate 时通过 LlmConfig.model 传回 daemon，
+    // 当前会话的模型显示标识（与 model_key 相同，格式 "{provider}/{name}"）。
+    // 在 ConfigUpdate 时通过 LlmConfig.model_key 传回 daemon，
     // daemon 端用 mc.key() 查找匹配的 LlmModelConfig 后取 mc.model 发送到 LLM API。
-    // 如果客户端传入的是 key 格式（"{provider}.{name}"），
-    // daemon 会在 create_session 时解析为 API model key。
     string model = 5;
 
     // 最后一条用户消息的文本预览，用于 session 列表中的快速识别。
@@ -45,7 +43,7 @@ message Session {
     // CLI 在 /model 无参时弹出选择器供用户选择。
     repeated string available_models = 7;
 
-    // 所有可用模型的 lookup key 列表，格式 "{provider}.{name}"。
+    // 所有可用模型的 lookup key 列表，格式 "{provider}/{name}"。
     // 与 available_models 一一对应。用户选择模型后，CLI 取对应项
     // 通过 ConfigUpdate 发送给 daemon，daemon 用 mc.key() 匹配。
     repeated string model_keys = 8;
@@ -66,7 +64,7 @@ message LlmConfig {
     // 此字段与 model_key 二选一。同时设置时 model_key 优先。
     optional string model = 1;
 
-    // 模型 lookup key，格式 "{provider}.{name}"，如 "Ollama.DeepSeek"。
+    // 模型 lookup key，格式 "{provider}/{name}"，如 "Ollama/DeepSeek"。
     // daemon 端用此值匹配 daemon.toml 中 [[llm.models]] 的配置，
     // 匹配成功后自动取对应的 mc.model（API model key）发送到 LLM API。
     // 此字段与 model 二选一。同时设置时优先于 model。

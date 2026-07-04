@@ -943,12 +943,19 @@ impl Orchestrator {
             return Some(provider.clone());
         }
 
-        // Try session's model
-        if let Ok(session) = self.session_mgr.get(session_id) {
-            let model_key = &session.config.model;
-            if let Some(provider) = self.providers.get(model_key) {
-                return Some(provider.clone());
-            }
+        // Try session's model_key (format "{provider}.{name}")
+        if let Ok(session) = self.session_mgr.get(session_id)
+            && let Some(ref model_key) = session.config.model_key
+            && let Some(provider) = self.providers.get(model_key)
+        {
+            return Some(provider.clone());
+        }
+
+        // Try session's model name as direct key (backward compat for legacy configs)
+        if let Ok(session) = self.session_mgr.get(session_id)
+            && let Some(provider) = self.providers.get(&session.config.model)
+        {
+            return Some(provider.clone());
         }
 
         // Fall back to default provider key

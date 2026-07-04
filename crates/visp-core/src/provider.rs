@@ -12,6 +12,10 @@ use crate::message::{Message, ToolDefinition};
 pub struct LlmConfig {
     /// API model key（发送到 LLM API 的 model 字段，如 "deepseek-v4-flash"）
     pub model: String,
+    /// Provider lookup key（格式 "{provider}.{name}"，如 "Opencode.DeepSeek v4 Flash"）。
+    /// 用于从 providers HashMap 中查找正确的 provider 实例。
+    /// None 时回退到 default_provider_key。
+    pub model_key: Option<String>,
     /// 温度（0.0-2.0）
     pub temperature: f64,
     /// 最大 token 数
@@ -54,6 +58,7 @@ impl Default for LlmConfig {
     fn default() -> Self {
         Self {
             model: "claude-3-7-sonnet-20250219".to_string(),
+            model_key: None,
             temperature: 0.7,
             max_tokens: 4096,
             max_context_tokens: 128_000,

@@ -96,7 +96,7 @@ pub struct CoderDaemonService {
     available_models: Vec<String>,
     /// 完整模型配置列表
     model_configs: Vec<LlmModelConfig>,
-    /// 模型 key 列表（格式 "{provider}.{name}"，用于 proto Session.model_keys）
+    /// 模型 key 列表（格式 "{provider}/{name}"，用于 proto Session.model_keys）
     model_config_keys: Vec<String>,
     // ── 多 Agent Orchestrator 通道 ──
     /// 向 Orchestrator 发送取消信号
@@ -146,6 +146,7 @@ impl CoderDaemonService {
 
         let default_llm_config = LlmConfig {
             model: default_cfg.model.clone(),
+            model_key: Some(default_cfg.key()),
             temperature: default_cfg.temperature.unwrap_or(0.7),
             max_tokens: default_cfg.max_tokens.unwrap_or(4096),
             max_context_tokens: default_cfg.max_context_tokens.unwrap_or(128_000),
@@ -243,9 +244,18 @@ impl CoderDaemon for CoderDaemonService {
         if config.extra.is_empty() {
             config.extra = self.default_llm_config.extra.clone();
         }
+        // 如果客户端传了 model_key，用其查找对应的 model 配置
+        if let Some(ref model_key) = config.model_key
+            && let Some(mc) = self.model_configs.iter().find(|mc| mc.key() == *model_key)
+        {
+            config.model = mc.model.clone();
+        }
         // 客户端未传的字段用 daemon 默认值
         if config.model == LlmConfig::default().model {
             config.model = self.default_llm_config.model.clone();
+            if config.model_key.is_none() {
+                config.model_key = self.default_llm_config.model_key.clone();
+            }
         }
         // 应用 daemon 默认的 Langfuse 配置（客户端不会传递这些字段）
         config.langfuse_enabled = self.default_llm_config.langfuse_enabled;
@@ -279,7 +289,7 @@ impl CoderDaemon for CoderDaemonService {
         config.langfuse_capture_max_chars = self.default_llm_config.langfuse_capture_max_chars;
         config.langfuse_redact_secrets = self.default_llm_config.langfuse_redact_secrets;
 
-        // 解析模型名：支持 key 格式 ("Anthropic.Claude Sonnet") 和直接 API model key
+        // 解析模型名：支持 key 格式 ("Anthropic/Claude Sonnet") 和直接 API model key
         if let Some(mc) = self
             .model_configs
             .iter()
@@ -401,6 +411,7 @@ impl CoderDaemon for CoderDaemonService {
         let client_tx = self.client_tx.clone();
         let response_tx = tx.clone();
         let session_mgr = self.session_mgr.clone();
+        let model_configs = self.model_configs.clone();
 
         // Shared pending user queries: maps query_id → respond sender
         // Used to route UserResponse from CLI back to the agent loop that's waiting
@@ -498,6 +509,55 @@ impl CoderDaemon for CoderDaemonService {
                         };
                         if client_tx.send(cli_msg).await.is_err() {
                             break;
+                        }
+                    }
+                    Some(proto::client_message::Payload::ConfigUpdate(update)) => {
+                        let session_id = &update.session_id;
+                        let config = update
+                            .config
+                            .as_ref()
+                            .map(map_llm_config)
+                            .unwrap_or_default();
+
+                        // 如果传了 model_key，查找对应的 model 配置并更新 model 名
+                        let final_config = if let Some(ref model_key) = config.model_key {
+                            if let Some(mc) = model_configs.iter().find(|mc| mc.key() == *model_key)
+                            {
+                                LlmConfig {
+                                    model: mc.model.clone(),
+                                    model_key: Some(mc.key()),
+                                    ..config
+                                }
+                            } else {
+                                config
+                            }
+                        } else {
+                            config
+                        };
+
+                        match session_mgr.update_config(session_id, final_config) {
+                            Ok(()) => {
+                                let msg = proto::ServerMessage {
+                                    payload: Some(proto::server_message::Payload::StatusUpdate(
+                                        proto::StatusUpdate {
+                                            session_id: session_id.clone(),
+                                            message: "Configuration updated".into(),
+                                            user_inputs: vec![],
+                                            agent_name: String::new(),
+                                            view_only: false,
+                                        },
+                                    )),
+                                };
+                                let _ = response_tx_inbound.send(Ok(msg)).await;
+                            }
+                            Err(e) => {
+                                let err_msg = session_error_msg(
+                                    "ConfigUpdateFailed",
+                                    &format!("Failed to update config: {e}"),
+                                    session_id,
+                                );
+                                let _ = response_tx_inbound.send(Ok(err_msg)).await;
+                            }
                         }
                     }
                     Some(proto::client_message::Payload::JoinSession(join)) => {
@@ -893,20 +953,22 @@ fn session_to_proto(
         .unwrap_or_default();
     let created_secs = now.as_secs() as i64 - elapsed.as_secs() as i64;
 
-    // proto model_key 字段用于 CLI 状态栏显示，用 key 格式 "{provider}.{name}"
-    let display_model_key = model_configs
-        .iter()
-        .find(|mc| mc.model == session.config.model)
-        .map(|mc| mc.key())
+    // proto model_key 字段用于 CLI 状态栏显示，用 key 格式 "{provider}/{name}"
+    let display_model_key = session
+        .config
+        .model_key
+        .clone()
+        .or_else(|| {
+            model_configs
+                .iter()
+                .find(|mc| mc.model == session.config.model)
+                .map(|mc| mc.key())
+        })
         .unwrap_or_else(|| session.config.model.clone());
 
-    // proto model 字段用于 CLI 状态栏显示，使用 key 格式 "{provider}.{model_name}"
+    // proto model 字段用于 CLI 状态栏显示，使用 key 格式 "{provider}/{name}"
     // 以便 CLI 端 split_model_name 能正确拆出 provider 和模型名
-    let display_model = model_configs
-        .iter()
-        .find(|mc| mc.model == session.config.model)
-        .map(|mc| mc.key())
-        .unwrap_or_else(|| session.config.model.clone());
+    let display_model = display_model_key.clone();
 
     proto::Session {
         session_id: session.id.clone(),
@@ -928,6 +990,9 @@ fn map_llm_config(proto: &proto::LlmConfig) -> LlmConfig {
     let mut config = LlmConfig::default();
     if let Some(model) = &proto.model {
         config.model = model.clone();
+    }
+    if let Some(model_key) = &proto.model_key {
+        config.model_key = Some(model_key.clone());
     }
     if let Some(temperature) = proto.temperature {
         config.temperature = temperature;

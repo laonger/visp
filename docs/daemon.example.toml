@@ -24,8 +24,8 @@
 # ---------------------------------------------------------------------------
 
 [llm]
-# 预设模型（格式 {provider}.{name}），缺省时使用 models 第一个
-# default = "Anthropic.Claude Sonnet"
+# 预设模型（格式 {provider}/{name}），缺省时使用 models 第一个
+# default = "Anthropic/Claude Sonnet"
 
 [[llm.models]]
 name = "Claude Sonnet"
@@ -67,6 +67,7 @@ max_context_tokens = 128000
 [agent]
 # 软上限：达到此轮次后在 LLM 调用前注入"请收尾"提示，由模型自主决定何时结束
 # 设为 0 表示关闭软上限，依赖硬上限兜底
+# 兼容旧字段名 max_iterations（二者等价）
 # soft_limit = 50
 
 # 连续相同工具调用的 doom_loop 检测窗口（0 = 关闭）
@@ -84,6 +85,30 @@ max_context_tokens = 128000
 
 # 工具可操作文件大小限制（字节）
 # file_max_size_bytes = 1048576
+
+# ---------------------------------------------------------------------------
+# 内置 Agent 覆盖配置
+# ---------------------------------------------------------------------------
+# visp 内置了 default、code_reader、explorer、fixer 四个 agent。
+# 通过 [[agent.builtin]] 可以在不修改源码的情况下覆盖内置 agent 的
+# model / temperature / steps。
+#
+# 优先级：内置定义 < [[agent.builtin]] 配置 < .visp/agents/*.md 文件
+#
+# model 格式：{provider}/{model} 或 {provider}.{name}
+#   如 "Opencode/deepseek-v4-flash" 或 "Anthropic.Claude Sonnet"
+# 未指定 model 的内置 agent 会继承 session 默认模型。
+#
+# [[agent.builtin]]
+# name = "explorer"
+# model = "Opencode/deepseek-v4-flash"
+# temperature = 0.1
+#
+# [[agent.builtin]]
+# name = "fixer"
+# model = "Opencode/deepseek-v4-flash"
+# temperature = 0.2
+# steps = 30
 
 # ---------------------------------------------------------------------------
 # [observability] — 日志、Trace、Metrics 观测配置

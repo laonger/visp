@@ -332,7 +332,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for mc in &model_configs {
         match create_llm_provider(mc) {
             Ok(provider) => {
-                providers.insert(mc.key(), provider);
+                let key = mc.key();
+                providers.insert(key, provider.clone());
+                // 额外注册 {provider}/{model} 别名，使 agent 配置文件中的 model 字段
+                // 可以使用更直观的格式，例如 "Opencode/deepseek-v4-flash"
+                let provider_name = mc.provider.as_deref().unwrap_or(&mc.protocol);
+                let model_alias = format!("{provider_name}/{}", mc.model);
+                if model_alias != mc.key() {
+                    providers.insert(model_alias, provider);
+                }
             }
             Err(e) => {
                 tracing::warn!(model_key = %mc.key(), error = %e, "failed to create provider");
@@ -341,7 +349,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 8.6. Load agent definitions
-    let agent_registry = Arc::new(visp_agent::agent_loader::load_agents(&cwd));
+    let builtin_overrides: Vec<visp_agent::agent_loader::BuiltinAgentOverride> = config
+        .agent
+        .builtin
+        .iter()
+        .map(|c| visp_agent::agent_loader::BuiltinAgentOverride {
+            name: c.name.clone(),
+            model: c.model.clone(),
+            temperature: c.temperature,
+            steps: c.steps,
+        })
+        .collect();
+    let agent_registry = Arc::new(visp_agent::agent_loader::load_agents(
+        &cwd,
+        &builtin_overrides,
+    ));
 
     // 8.7. Create orchestration channels
     let (global_tx, global_rx) = mpsc::channel(256);

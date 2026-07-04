@@ -74,10 +74,10 @@ pub struct LlmModelConfig {
 }
 
 impl LlmModelConfig {
-    /// 全局唯一标识 `{provider}.{name}`，作为模型切换的 lookup key
+    /// 全局唯一标识 `{provider}/{name}`，作为模型切换的 lookup key
     pub fn key(&self) -> String {
         let p = self.provider.as_deref().unwrap_or(&self.protocol);
-        format!("{p}.{}", self.name)
+        format!("{p}/{}", self.name)
     }
 }
 
@@ -128,6 +128,33 @@ pub struct AgentSection {
     pub file_max_size_bytes: u64,
     #[serde(default = "default_max_depth")]
     pub max_depth: u32,
+    /// 内置 agent 覆盖配置（model / temperature / steps）
+    #[serde(default)]
+    pub builtin: Vec<BuiltinAgentConfig>,
+}
+
+/// 内置 agent 配置覆盖项，用于在 daemon.toml 中为内置 agent
+/// （如 explorer、fixer）指定 LLM 模型等参数。
+///
+/// ```toml
+/// [[agent.builtin]]
+/// name = "explorer"
+/// model = "Opencode/deepseek-v4-flash"
+/// temperature = 0.1
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct BuiltinAgentConfig {
+    /// 内置 agent 名称，如 "explorer"、"fixer"、"code_reader"
+    pub name: String,
+    /// 模型 key（格式 {provider}/{model} 或 {provider}.{name}）
+    #[serde(default)]
+    pub model: Option<String>,
+    /// 温度
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    /// 最大迭代次数
+    #[serde(default)]
+    pub steps: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -401,6 +428,7 @@ fn default_config() -> DaemonConfig {
             bash_confirm_mode: default_bash_confirm(),
             file_max_size_bytes: default_file_max_size(),
             max_depth: default_max_depth(),
+            builtin: Vec::new(),
         },
         tool: HashMap::new(),
         mcp: McpConfig::default(),
@@ -1317,5 +1345,75 @@ public = "notabool"
             found,
             "daemon.example.toml 未声明 Collector 示例为参考配置（缺少 Collector/参考/示例/管理 关键词）"
         );
+    }
+
+    #[test]
+    fn test_builtin_agent_config_parsing() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+[[llm.models]]
+name = "test"
+protocol = "openai"
+model = "gpt-4"
+
+[tools]
+
+[agent]
+soft_limit = 50
+
+[[agent.builtin]]
+name = "explorer"
+model = "Opencode/deepseek-v4-flash"
+temperature = 0.1
+
+[[agent.builtin]]
+name = "fixer"
+model = "Anthropic/claude-sonnet-4-20250514"
+temperature = 0.2
+steps = 30
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.agent.builtin.len(), 2);
+
+        let explorer = &config.agent.builtin[0];
+        assert_eq!(explorer.name, "explorer");
+        assert_eq!(
+            explorer.model.as_deref(),
+            Some("Opencode/deepseek-v4-flash")
+        );
+        assert!((explorer.temperature.unwrap() - 0.1).abs() < f32::EPSILON);
+        assert!(explorer.steps.is_none());
+
+        let fixer = &config.agent.builtin[1];
+        assert_eq!(fixer.name, "fixer");
+        assert_eq!(
+            fixer.model.as_deref(),
+            Some("Anthropic/claude-sonnet-4-20250514")
+        );
+        assert_eq!(fixer.steps, Some(30));
+    }
+
+    #[test]
+    fn test_builtin_agent_config_defaults_empty() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+[[llm.models]]
+name = "test"
+protocol = "openai"
+model = "gpt-4"
+
+[tools]
+
+[agent]
+soft_limit = 50
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert!(config.agent.builtin.is_empty());
     }
 }
