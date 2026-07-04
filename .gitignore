@@ -1,9 +1,8 @@
+AGENTS.md
+.visp/
 .vibewisp
 .codegraph
 target
 last-prompt.json
-.visp/**
-!.visp/agents/
-!.visp/rules/
 crates/*/.visp/
 doc/
