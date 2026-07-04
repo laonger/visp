@@ -98,7 +98,10 @@ cargo test && cargo clippy -- -D warnings && cargo fmt -- --check
 
 visp 通过 `visp-agent` crate 的 `Orchestrator` 支持子 Agent 调用（通过 `task` 工具拦截 → `spawn_sub_agent()` → `run_agent_loop()`）。
 
-子 Agent 通过 `.visp/agents/*.md` 文件定义，格式为 YAML frontmatter + Markdown 正文（system prompt）：
+子 Agent 通过 `*.md` 文件定义（YAML frontmatter + Markdown 正文），可放在以下目录：
+
+- **全局**：`~/.config/visp/agents/`（所有项目共享，优先级低）
+- **项目**：`.visp/agents/`（当前项目专用，优先级高，覆盖同名全局 agent）
 
 ```markdown
 ---
@@ -106,6 +109,8 @@ name: my-agent
 description: 用途说明
 mode: subagent        # all | primary | subagent
 model: gpt-4o         # 可选，不写则继承父 session 模型
+                      # 格式：{provider}/{model}，如 "Anthropic/claude-sonnet-4-20250514"
+                      # 也兼容旧格式 {provider}.{name}，如 "Anthropic.Claude Sonnet"
 temperature: 0.1      # 可选
 permission: allow read_file *
 permission: deny edit_file *

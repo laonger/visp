@@ -5,6 +5,7 @@ mod server;
 mod service;
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -360,8 +361,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             steps: c.steps,
         })
         .collect();
+
+    // Agent directories: global config dir (lower priority) → project dir (higher priority)
+    let mut agent_dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        let global_agents_dir = std::path::Path::new(&home)
+            .join(".config")
+            .join("visp")
+            .join("agents");
+        if global_agents_dir.exists() {
+            agent_dirs.push(global_agents_dir);
+        }
+    }
+    let project_agents_dir = cwd.join(".visp/agents");
+    if project_agents_dir.exists() {
+        agent_dirs.push(project_agents_dir);
+    }
+    let agent_dir_refs: Vec<&Path> = agent_dirs.iter().map(|p| p.as_path()).collect();
     let agent_registry = Arc::new(visp_agent::agent_loader::load_agents(
-        &cwd,
+        &agent_dir_refs,
         &builtin_overrides,
     ));
 

@@ -15,12 +15,15 @@ pub struct BuiltinAgentOverride {
     pub steps: Option<u32>,
 }
 
-/// Load agent definitions from `.visp/agents/*.md` files.
+/// Load agent definitions from agent directories.
 /// Falls back to built-in agents if no files exist.
+///
+/// `agent_dirs` 按优先级从低到高排列，后面的目录会覆盖前面的同名 agent。
+/// 典型顺序：全局配置目录（`~/.config/visp/agents/`）→ 项目目录（`.visp/agents/`）。
 ///
 /// `overrides` 来自 daemon.toml 的 `[[agent.builtin]]` 配置，
 /// 在内置 agent 注册之后、文件 agent 加载之前应用。
-pub fn load_agents(project_path: &Path, overrides: &[BuiltinAgentOverride]) -> AgentRegistry {
+pub fn load_agents(agent_dirs: &[&Path], overrides: &[BuiltinAgentOverride]) -> AgentRegistry {
     let mut registry = AgentRegistry::new();
 
     // Register built-in default agent (lowest priority — file-loaded can overwrite)
@@ -224,27 +227,27 @@ pub fn load_agents(project_path: &Path, overrides: &[BuiltinAgentOverride]) -> A
         }
     }
 
-    // Scan .visp/agents/*.md (highest priority — overwrites built-in + config)
-    let agents_dir = project_path.join(".visp/agents/");
-    if !agents_dir.exists() {
-        return registry;
-    }
-
-    if let Ok(dir) = std::fs::read_dir(&agents_dir) {
-        for entry in dir.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("md") && path.is_file() {
-                match parse_agent_file(&path) {
-                    Ok(def) => {
-                        // Use register_or_replace so file agents overwrite built-in defaults
-                        registry.register_or_replace(def);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            error = %e,
-                            "skip invalid agent file"
-                        );
+    // Scan agent directories (each later dir overrides earlier ones)
+    for agents_dir in agent_dirs {
+        if !agents_dir.exists() {
+            continue;
+        }
+        if let Ok(dir) = std::fs::read_dir(agents_dir) {
+            for entry in dir.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("md") && path.is_file() {
+                    match parse_agent_file(&path) {
+                        Ok(def) => {
+                            // Use register_or_replace so file agents overwrite built-in defaults
+                            registry.register_or_replace(def);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %path.display(),
+                                error = %e,
+                                "skip invalid agent file"
+                            );
+                        }
                     }
                 }
             }
@@ -493,7 +496,7 @@ You search.
 "#,
         );
 
-        let registry = load_agents(&dir, &[]);
+        let registry = load_agents(&[dir.join(".visp/agents/").as_path()], &[]);
 
         // Default agent should exist
         assert!(registry.get("default").is_some());
@@ -512,7 +515,7 @@ You search.
         let dir = std::env::temp_dir().join(format!("agent_test_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join(".visp/agents/")).unwrap();
 
-        let registry = load_agents(&dir, &[]);
+        let registry = load_agents(&[dir.join(".visp/agents/").as_path()], &[]);
         assert!(registry.get("default").is_some());
         assert!(registry.get("code_reader").is_some());
         assert!(registry.get("explorer").is_some());
@@ -524,7 +527,7 @@ You search.
     fn test_load_agents_no_directory() {
         let dir = std::env::temp_dir().join(format!("agent_test_{}", uuid::Uuid::new_v4()));
 
-        let registry = load_agents(&dir, &[]);
+        let registry = load_agents(&[], &[]);
         assert!(registry.get("default").is_some());
         assert!(registry.get("code_reader").is_some());
         assert!(registry.get("explorer").is_some());
@@ -550,7 +553,7 @@ mode: all
         // Invalid file (no frontmatter)
         write_agent_file(&agents_dir, "invalid.md", "Just plain text content.");
 
-        let registry = load_agents(&dir, &[]);
+        let registry = load_agents(&[dir.join(".visp/agents/").as_path()], &[]);
         assert!(registry.get("default").is_some());
         assert!(registry.get("code_reader").is_some());
         assert!(registry.get("valid").is_some());
@@ -647,7 +650,7 @@ permission: allow grep *
             },
         ];
 
-        let registry = load_agents(&dir, &overrides);
+        let registry = load_agents(&[], &overrides);
 
         // explorer override applied
         let explorer = registry.get("explorer").unwrap();
@@ -678,11 +681,77 @@ permission: allow grep *
             steps: None,
         }];
 
-        let registry = load_agents(&dir, &overrides);
+        let registry = load_agents(&[], &overrides);
         // Unknown agent should not be registered
         assert!(registry.get("nonexistent").is_none());
         // Built-ins still present
         assert!(registry.get("default").is_some());
         assert_eq!(registry.list().len(), 4);
+    }
+
+    #[test]
+    fn test_load_agents_multi_dir_priority() {
+        // Global dir (lower priority)
+        let global_dir =
+            std::env::temp_dir().join(format!("agent_global_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&global_dir).unwrap();
+
+        write_agent_file(
+            &global_dir,
+            "shared.md",
+            r#"---
+name: shared
+mode: all
+---
+Global prompt.
+"#,
+        );
+        write_agent_file(
+            &global_dir,
+            "global_only.md",
+            r#"---
+name: global_only
+mode: all
+---
+Only in global.
+"#,
+        );
+
+        // Project dir (higher priority)
+        let project_dir =
+            std::env::temp_dir().join(format!("agent_project_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        write_agent_file(
+            &project_dir,
+            "shared.md",
+            r#"---
+name: shared
+mode: all
+---
+Project prompt (overrides global).
+"#,
+        );
+        write_agent_file(
+            &project_dir,
+            "project_only.md",
+            r#"---
+name: project_only
+mode: all
+---
+Only in project.
+"#,
+        );
+
+        let registry = load_agents(&[global_dir.as_path(), project_dir.as_path()], &[]);
+
+        // Both global-only and project-only agents should be present
+        assert!(registry.get("global_only").is_some());
+        assert!(registry.get("project_only").is_some());
+
+        // "shared" should be overridden by project dir (higher priority)
+        let shared = registry.get("shared").unwrap();
+        assert!(shared.system_prompt.contains("Project prompt"));
+        assert!(!shared.system_prompt.contains("Global prompt"));
     }
 }
