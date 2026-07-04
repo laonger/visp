@@ -24,6 +24,7 @@ pub fn build_openai_request(
         "max_tokens": config.max_tokens,
         "temperature": config.temperature,
         "stream": true,
+        "stream_options": {"include_usage": true},
     });
 
     // 添加工具定义
@@ -276,8 +277,8 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<OpenAiStreamEvent, Llm
     let v: serde_json::Value = serde_json::from_str(data)
         .map_err(|e| LlmError::Stream(format!("parse openai data: {e}")))?;
 
-    // 检查 usage
-    if let Some(usage) = v.get("usage") {
+    // 检查 usage（跳过 "usage": null，部分 provider 在非最终 chunk 中发送 null）
+    if let Some(usage) = v.get("usage").filter(|u| !u.is_null()) {
         let input_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
         let output_tokens = usage["completion_tokens"].as_u64().unwrap_or(0) as u32;
         // Try Anthropic-style cache fields first (some OpenAI-compatible providers use them)
@@ -1089,6 +1090,7 @@ mod tests {
         assert_eq!(req["temperature"], 0.5);
         assert_eq!(req["max_tokens"], 100);
         assert!(req["stream"].as_bool().unwrap());
+        assert_eq!(req["stream_options"]["include_usage"].as_bool(), Some(true));
         assert_eq!(req["messages"][0]["content"], "Hi");
     }
 
@@ -1243,6 +1245,18 @@ mod tests {
                 assert_eq!(cache_read_input_tokens, 0);
             }
             _ => panic!("expected Usage, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_parse_null_usage_skipped() {
+        // Some providers (e.g. Ark/volcengine) send "usage": null in every chunk
+        // until the final usage-only chunk. null usage should NOT produce a Usage event.
+        let data = r#"{"id":"1","choices":[{"delta":{"content":"hi"},"index":0}],"usage":null}"#;
+        let result = parse_openai_sse_data(data).unwrap();
+        match result {
+            OpenAiStreamEvent::TextDelta(text) => assert_eq!(text, "hi"),
+            _ => panic!("expected TextDelta, got {:?}", result),
         }
     }
 
