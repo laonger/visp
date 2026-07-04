@@ -799,7 +799,7 @@ impl MessageCache {
                         Style::default().fg(theme::TOOL_RESULT_FG)
                     };
                     let display = if i == 0 {
-                        format!("{} {}", icon, content)
+                        format!("{} {} {}", icon, name, content)
                     } else {
                         content
                     };
@@ -821,7 +821,7 @@ impl MessageCache {
                 if max_lines == Some(0) {
                     // 不显示内容，只显示摘要
                     let summary = result_summary(name, &msg.content);
-                    let status_line = format!("  ✓ {} {}", icon, summary);
+                    let status_line = format!("  ✓ {} {} {}", icon, name, summary);
                     lines.push(Line::styled(
                         pad_to_width(&status_line, width as usize),
                         Style::default().fg(theme::TOOL_RESULT_FG),
@@ -835,7 +835,7 @@ impl MessageCache {
                         &msg.content
                     } else if let Some((first, rest)) = msg.content.split_once('\n') {
                         // 其他工具：第一行作为灰色状态头
-                        let status = format!("  ✓ {} {}", icon, first);
+                        let status = format!("  ✓ {} {} {}", icon, name, first);
                         lines.push(Line::styled(
                             pad_to_width(&status, width as usize),
                             Style::default().fg(theme::TOOL_RESULT_FG),
@@ -892,7 +892,7 @@ impl MessageCache {
             LineType::ToolError { ref name } => {
                 let icon = tool_icon(name);
                 let mut lines = Vec::new();
-                let error_line = format!("❌ {} {}", icon, msg.content);
+                let error_line = format!("❌ {} {} {}", icon, name, msg.content);
                 lines.push(Line::styled(
                     pad_to_width(&error_line, width as usize),
                     Style::default().fg(theme::ERROR_FG),
@@ -1102,10 +1102,25 @@ pub struct AppState {
     pub pending_model_select: bool,
     /// 模型选择器弹出面板（/model 无参触发）
     pub model_select: Option<ModelSelectState>,
+    /// 项目路径，用于文件操作
+    pub project_path: String,
+    /// Tab 补全状态：记录原始前缀和匹配列表，用于循环切换
+    pub tab_completion: Option<TabCompletionState>,
+}
+
+/// Tab 补全循环状态
+#[derive(Debug, Clone)]
+pub struct TabCompletionState {
+    /// 用户输入的原始前缀（如 "/i"）
+    pub prefix: String,
+    /// 所有匹配的命令列表
+    pub matches: Vec<String>,
+    /// 当前选中的索引
+    pub index: usize,
 }
 
 impl AppState {
-    pub fn new(session_id: String, model: String, model_key: String) -> Self {
+    pub fn new(session_id: String, model: String, model_key: String, project_path: String) -> Self {
         let mut textarea = Self::new_textarea();
         textarea.set_placeholder_text("Type your message...");
         let main_session_id = session_id.clone();
@@ -1145,6 +1160,8 @@ impl AppState {
             model_keys: Vec::new(),
             pending_model_select: false,
             model_select: None,
+            project_path,
+            tab_completion: None,
         }
     }
 
@@ -1537,7 +1554,7 @@ mod tests {
 
     #[test]
     fn test_spinner_glyph_cycles_points_frames() {
-        let mut app = AppState::new("sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
         // Points 四帧循环：∙∙∙ / ●∙∙ / ∙●∙ / ∙∙●
         let expected = [
             "\u{2219}\u{2219}\u{2219}",
@@ -1639,13 +1656,13 @@ mod tests {
 
     #[test]
     fn test_stale_done_expected_default() {
-        let app = AppState::new("s".into(), "m".into(), "".into());
+        let app = AppState::new("s".into(), "m".into(), "".into(), String::new());
         assert!(!app.stale_done_expected);
     }
 
     #[test]
     fn test_app_state_new() {
-        let app = AppState::new("test-session".into(), "deepseek-v4-flash".into(), "".into());
+        let app = AppState::new("test-session".into(), "deepseek-v4-flash".into(), "".into(), String::new());
         assert_eq!(app.session_id, "test-session");
         assert_eq!(app.model, "deepseek-v4-flash");
         assert!(app.messages().is_empty());
@@ -1660,7 +1677,7 @@ mod tests {
 
     #[test]
     fn test_add_message() {
-        let mut app = AppState::new("s".into(), "m".into(), "".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into(), String::new());
         app.add_message(LineType::User, "hello".into());
         assert_eq!(app.messages().len(), 1);
         assert_eq!(app.messages()[0].content, "hello");
@@ -1669,7 +1686,7 @@ mod tests {
 
     #[test]
     fn test_add_message_id_increments() {
-        let mut app = AppState::new("s".into(), "m".into(), "".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into(), String::new());
         app.add_message(LineType::User, "a".into());
         app.add_message(LineType::Assistant, "b".into());
         assert_eq!(app.messages()[0].id, 0);
@@ -1678,14 +1695,14 @@ mod tests {
 
     #[test]
     fn test_add_message_version_initial() {
-        let mut app = AppState::new("s".into(), "m".into(), "".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into(), String::new());
         app.add_message(LineType::User, "hello".into());
         assert_eq!(app.messages()[0].version, 0);
     }
 
     #[test]
     fn test_streaming_text() {
-        let mut app = AppState::new("s".into(), "m".into(), "".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into(), String::new());
         app.append_streaming("Hello ");
         app.append_streaming("world");
         assert_eq!(app.streaming_text(), "Hello world");
@@ -1698,7 +1715,7 @@ mod tests {
 
     #[test]
     fn test_update_message_increments_version() {
-        let mut app = AppState::new("s".into(), "m".into(), "".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into(), String::new());
         app.add_message(LineType::Assistant, "original".into());
         let id = app.messages()[0].id;
         app.update_message(id, "updated".into());
@@ -1708,7 +1725,7 @@ mod tests {
 
     #[test]
     fn test_update_message_id_not_found_does_nothing() {
-        let mut app = AppState::new("s".into(), "m".into(), "".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into(), String::new());
         app.add_message(LineType::Assistant, "original".into());
         let original_version = app.messages()[0].version;
         app.update_message(999, "nope".into());
@@ -1718,7 +1735,7 @@ mod tests {
 
     #[test]
     fn test_clear_messages() {
-        let mut app = AppState::new("s".into(), "m".into(), "".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into(), String::new());
         app.add_message(LineType::User, "hello".into());
         app.add_message(LineType::Assistant, "world".into());
         assert_eq!(app.messages().len(), 2);
@@ -1803,7 +1820,7 @@ mod tests {
 
     #[test]
     fn test_clear_messages_also_clears_caches() {
-        let mut app = AppState::new("s".into(), "m".into(), "".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into(), String::new());
         app.add_message(LineType::User, "hello".into());
         // 手动添加一个 cache 模拟渲染后的状态
         app.message_caches
@@ -1816,7 +1833,7 @@ mod tests {
 
     #[test]
     fn test_add_tool_line_stores_call_id() {
-        let mut app = AppState::new("s".into(), "m".into(), "".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into(), String::new());
         app.add_tool_line(
             LineType::ToolCall {
                 name: "test".into(),
@@ -1829,7 +1846,7 @@ mod tests {
 
     #[test]
     fn test_insert_tool_result_appends_to_matching_call() {
-        let mut app = AppState::new("s".into(), "m".into(), "".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into(), String::new());
         app.add_tool_line(
             LineType::ToolCall {
                 name: "test".into(),
@@ -1856,7 +1873,7 @@ mod tests {
 
     #[test]
     fn test_insert_tool_result_without_matching_call_appends() {
-        let mut app = AppState::new("s".into(), "m".into(), "".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into(), String::new());
         app.add_tool_line(
             LineType::ToolCall {
                 name: "test".into(),
@@ -1872,7 +1889,7 @@ mod tests {
 
     #[test]
     fn test_multiple_tool_calls_grouped() {
-        let mut app = AppState::new("s".into(), "m".into(), "".into());
+        let mut app = AppState::new("s".into(), "m".into(), "".into(), String::new());
         app.add_tool_line(
             LineType::ToolCall {
                 name: "test".into(),
@@ -2342,7 +2359,7 @@ mod tests {
 
     #[test]
     fn test_add_message_writes_to_default_tab() {
-        let mut app = AppState::new("sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
         app.add_message(LineType::User, "hi".into());
         assert_eq!(app.tab_bar.tabs[0].messages.len(), 1);
@@ -2352,7 +2369,7 @@ mod tests {
 
     #[test]
     fn test_add_message_writes_to_default_when_active_is_sub() {
-        let mut app = AppState::new("sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
         // Switch active to sub tab
         app.tab_bar.active = 1;
@@ -2366,7 +2383,7 @@ mod tests {
 
     #[test]
     fn test_add_message_to_session_routes_to_correct_tab() {
-        let mut app = AppState::new("sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
         app.tab_bar.insert_sub_agent("sub-2", "agentB", false);
         app.add_message_to_session("sub-1", LineType::Assistant, "from agent".into());
@@ -2379,7 +2396,7 @@ mod tests {
 
     #[test]
     fn test_add_message_to_session_unknown_falls_back_to_default() {
-        let mut app = AppState::new("sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
         app.add_message_to_session("unknown-sid", LineType::Status, "fallback".into());
         // Default tab gets the fallback
@@ -2391,7 +2408,7 @@ mod tests {
 
     #[test]
     fn test_add_tool_line_to_session_routes_by_session_id() {
-        let mut app = AppState::new("sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
         app.add_tool_line_to_session(
             "sub-1",
@@ -2411,7 +2428,7 @@ mod tests {
 
     #[test]
     fn test_update_thinking_to_session_routes_by_session_id() {
-        let mut app = AppState::new("sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
         app.update_thinking_to_session("sub-1", "thinking...".into());
         assert_eq!(app.tab_bar.tabs[0].messages.len(), 0);
@@ -2429,7 +2446,7 @@ mod tests {
 
     #[test]
     fn test_append_streaming_to_session_routes_by_session_id() {
-        let mut app = AppState::new("sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
         app.append_streaming_to_session("sub-1", "Hello ");
         app.append_streaming_to_session("sub-1", "world");
@@ -2439,7 +2456,7 @@ mod tests {
 
     #[test]
     fn test_flush_streaming_to_session_routes_by_session_id() {
-        let mut app = AppState::new("sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
         app.append_streaming_to_session("sub-1", "Hello world");
         app.flush_streaming_to_session("sub-1");
@@ -2536,7 +2553,7 @@ mod tests {
 
     #[test]
     fn test_route_frame_text_delta_main_session() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         let frame = make_text_delta_frame("main-sid", "", "hello");
         app.route_frame(frame);
         assert_eq!(app.tab_bar.tabs[0].frames.len(), 1);
@@ -2545,7 +2562,7 @@ mod tests {
 
     #[test]
     fn test_route_frame_text_delta_sub_session_creates_tab() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         let frame = make_text_delta_frame("sub-1", "code_reader", "hello");
         app.route_frame(frame);
         assert_eq!(app.tab_bar.tabs.len(), 2);
@@ -2557,7 +2574,7 @@ mod tests {
 
     #[test]
     fn test_route_frame_tool_call_routes() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
         let frame = make_tool_call_frame("sub-1", "agentA", "c1", "bash", "{}");
         app.route_frame(frame);
@@ -2567,7 +2584,7 @@ mod tests {
 
     #[test]
     fn test_route_frame_done_to_correct_tab() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
         let frame = make_done_frame("sub-1");
         app.route_frame(frame);
@@ -2577,7 +2594,7 @@ mod tests {
 
     #[test]
     fn test_route_frame_unknown_session_uses_agent_name_as_title() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         let frame = make_text_delta_frame("new-sid", "X", "hi");
         app.route_frame(frame);
         assert_eq!(app.tab_bar.tabs.len(), 2);
@@ -2594,7 +2611,7 @@ mod tests {
     #[test]
     fn test_route_frame_upgrades_fallback_agent_name() {
         // 首帧 agent_name 为空 → tab 创建为 fallback "agent"
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         let f1 = make_text_delta_frame("sub-sid", "", "first");
         app.route_frame(f1);
         assert_eq!(app.tab_bar.tabs[1].agent_name, "agent");
@@ -2608,7 +2625,7 @@ mod tests {
 
     #[test]
     fn test_route_frame_active_tab_renders_immediately() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
         app.tab_bar.active = 1;
         let frame = make_tool_call_frame("sub-1", "agentA", "c1", "bash", "{}");
@@ -2624,7 +2641,7 @@ mod tests {
 
     #[test]
     fn test_route_frame_inactive_tab_accumulates_only() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
         app.tab_bar.active = 1;
         let frame = make_text_delta_frame("main-sid", "", "hello");
@@ -2636,7 +2653,7 @@ mod tests {
     #[test]
     fn test_route_frame_done_updates_inactive_sub_tab_status_immediately() {
         // 子 tab 收到 Done，即使它不是 active，status 也应立刻变 Done（图标实时刷新）
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
         // active 仍是 0 (default)
         assert_eq!(app.tab_bar.tabs[1].status, AgentStatus::Running);
@@ -2646,7 +2663,7 @@ mod tests {
 
     #[test]
     fn test_route_frame_error_updates_inactive_sub_tab_status_immediately() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
         assert_eq!(app.tab_bar.tabs[1].status, AgentStatus::Running);
         app.route_frame(make_error_frame("sub-1", "agentA", "X", "boom"));
@@ -2655,7 +2672,7 @@ mod tests {
 
     #[test]
     fn test_route_frame_status_update_routes_by_session_id() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
         let frame = make_status_update_frame("sub-1", "agentA", "working...");
         app.route_frame(frame);
@@ -2665,7 +2682,7 @@ mod tests {
 
     #[test]
     fn test_route_frame_empty_session_id_falls_back_to_default() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         let frame = make_text_delta_frame("", "", "hello");
         app.route_frame(frame);
         assert_eq!(app.tab_bar.tabs[0].frames.len(), 1);
@@ -2678,7 +2695,7 @@ mod tests {
 
     #[test]
     fn route_frame_status_update_view_only_creates_view_only_tab() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         let frame = make_status_update_frame_with_view_only("sub-1", "agentA", "hi", true);
         app.route_frame(frame);
         assert_eq!(app.tab_bar.tabs.len(), 2);
@@ -2689,7 +2706,7 @@ mod tests {
 
     #[test]
     fn route_frame_status_update_view_false_creates_running_tab() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         let frame = make_status_update_frame_with_view_only("sub-1", "agentA", "hi", false);
         app.route_frame(frame);
         assert_eq!(app.tab_bar.tabs.len(), 2);
@@ -2698,7 +2715,7 @@ mod tests {
 
     #[test]
     fn route_frame_existing_view_only_tab_not_recreated() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         // Create sub-1 tab first
         app.tab_bar.insert_sub_agent("sub-1", "agentA", true);
         let len_before = app.tab_bar.tabs.len();
@@ -2713,7 +2730,7 @@ mod tests {
 
     #[test]
     fn route_frame_user_inputs_populated_for_view_only_tab() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         // Simulate Phase 1: input_history already populated (as handle_grpc_message would)
         app.input_history.push("my original task prompt".into());
         app.input_history.push("follow-up question".into());
@@ -2734,7 +2751,7 @@ mod tests {
 
     #[test]
     fn route_frame_error_session_not_active_renders_hint() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         let frame = make_error_frame("sub-1", "agentA", "SessionNotActive", "session expired");
         app.route_frame(frame);
         // Tab was created automatically by route_frame for unknown session
@@ -2748,7 +2765,7 @@ mod tests {
 
     #[test]
     fn route_frame_error_other_codes_unchanged() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
         let frame = make_error_frame("sub-1", "agentA", "SomeOtherError", "details");
         app.route_frame(frame);
@@ -2762,7 +2779,7 @@ mod tests {
 
     #[test]
     fn route_frame_error_routes_by_session_id() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
         app.tab_bar.insert_sub_agent("sub-2", "agentB", false);
         // Error for sub-1 (index 2, newest inserts at 1)
@@ -2781,7 +2798,7 @@ mod tests {
 
     #[test]
     fn view_only_tab_input_submission_disabled() {
-        let mut app = AppState::new("sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", true);
         app.tab_bar.active = 1;
         // Active tab is a ViewOnly sub-tab
@@ -2793,7 +2810,7 @@ mod tests {
 
     #[test]
     fn view_only_tab_shows_task_prompt_marker() {
-        let mut app = AppState::new("sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
         app.input_history.push("task prompt text".into());
         let frame = make_status_update_frame_with_view_only("sub-1", "agentA", "hi", true);
         app.route_frame(frame);
@@ -2813,7 +2830,7 @@ mod tests {
 
     #[test]
     fn view_only_tab_arrow_keys_browse_input_history() {
-        let mut app = AppState::new("sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
         app.input_history.push("first".into());
         app.input_history.push("second".into());
         app.input_history.push("third".into());
@@ -2945,7 +2962,7 @@ mod tests {
 
     #[test]
     fn test_usage_routed_to_tab_pending_usage() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
         app.apply_usage_info("sub-1", 100, 20, 3, 10, 5);
         // L1: sub tab pending_usage is set
@@ -2956,7 +2973,7 @@ mod tests {
 
     #[test]
     fn test_usage_accumulates_to_current_request_usage() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         app.apply_usage_info("main-sid", 50, 10, 0, 5, 2);
         app.apply_usage_info("main-sid", 30, 8, 0, 3, 1);
         // L2 = cumulative sum
@@ -2965,7 +2982,7 @@ mod tests {
 
     #[test]
     fn test_usage_now_directly_updates_total_tokens() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         app.apply_usage_info("main-sid", 50, 10, 0, 5, 2);
         // L3 updated directly from apply_usage_info for status bar
         assert_eq!(app.total_input_tokens, 50);
@@ -2976,7 +2993,7 @@ mod tests {
 
     #[test]
     fn test_done_default_displays_l2_and_clears() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         app.current_request_usage = (100, 50, 20, 10);
         app.apply_done_token_settlement("main-sid");
         // L2 is cleared
@@ -2987,7 +3004,7 @@ mod tests {
 
     #[test]
     fn test_done_default_clears_l2_only() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         // L2 was accumulated from UsageInfo (which also updated L3)
         app.current_request_usage = (100, 50, 20, 10);
         // L3 was already set by apply_usage_info
@@ -3006,7 +3023,7 @@ mod tests {
 
     #[test]
     fn test_done_sub_does_not_consume_pending_usage() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
         app.tab_bar.tabs[1].pending_usage = Some((200, 30, 5, 15, 8));
         app.current_request_usage = (999, 999, 999, 999); // arbitrary L2
@@ -3023,7 +3040,7 @@ mod tests {
 
     #[test]
     fn test_done_sub_does_not_clear_l2() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
         app.tab_bar.tabs[1].pending_usage = Some((10, 5, 1, 2, 3));
         app.current_request_usage = (50, 25, 10, 5);
@@ -3034,7 +3051,7 @@ mod tests {
 
     #[test]
     fn test_user_input_clears_current_request_usage() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         app.apply_usage_info("main-sid", 100, 50, 0, 20, 10);
         assert_eq!(app.current_request_usage, (100, 50, 20, 10));
         // Simulate user input clearing L2
@@ -3044,7 +3061,7 @@ mod tests {
 
     #[test]
     fn test_done_status_guard_blocks_token_settlement() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         app.tab_bar.tabs[0].status = AgentStatus::Error;
         app.current_request_usage = (100, 50, 20, 10);
         app.apply_done_token_settlement("main-sid");
@@ -3252,7 +3269,7 @@ mod tests {
 
     #[test]
     fn test_ctrl_w_closed_session_can_reopen_on_new_event() {
-        let mut app = AppState::new("main-sid".into(), "m".into(), "".into());
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         // Route a frame to create a sub tab
         let frame = make_text_delta_frame("sub-1", "agentA", "hello");
         app.route_frame(frame);
@@ -3288,7 +3305,7 @@ mod tests {
 
     #[test]
     fn test_e2e_spawn_subagent_creates_tab() {
-        let mut app = AppState::new("main".into(), "m".into(), "".into());
+        let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
         let frame = make_text_delta_frame("sub1", "explorer", "hello");
         app.route_frame(frame);
         assert_eq!(app.tab_bar.tabs.len(), 2);
@@ -3299,7 +3316,7 @@ mod tests {
 
     #[test]
     fn test_e2e_subagent_done_changes_status_color() {
-        let mut app = AppState::new("main".into(), "m".into(), "".into());
+        let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub1", "agentA", false);
         assert_eq!(app.tab_bar.tabs[1].status, AgentStatus::Running);
         // Tab must be active for route_frame to auto-render the Done frame
@@ -3311,7 +3328,7 @@ mod tests {
 
     #[test]
     fn test_e2e_subagent_error_status_guards_done() {
-        let mut app = AppState::new("main".into(), "m".into(), "".into());
+        let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub1", "agentA", false);
         app.tab_bar.active = 1;
         // Error frame changes status to Error
@@ -3326,7 +3343,7 @@ mod tests {
 
     #[test]
     fn test_e2e_subagent_inactive_does_not_pollute_default() {
-        let mut app = AppState::new("main".into(), "m".into(), "".into());
+        let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
         // active defaults to 0; sub frames should go to sub tab, not default
         let f1 = make_text_delta_frame("sub1", "agentA", "hello");
         let f2 = make_tool_call_frame("sub1", "agentA", "c1", "bash", "{}");
@@ -3340,7 +3357,7 @@ mod tests {
 
     #[test]
     fn test_e2e_switch_to_sub_renders_accumulated() {
-        let mut app = AppState::new("main".into(), "m".into(), "".into());
+        let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
         // Accumulate 4 TextDelta + 1 ToolCall (ToolCall creates a message)
         for i in 0..4 {
             let frame = make_text_delta_frame("sub1", "agentA", &format!("delta{}", i));
@@ -3360,7 +3377,7 @@ mod tests {
 
     #[test]
     fn test_e2e_token_l1_preserved_for_render_pending() {
-        let mut app = AppState::new("main".into(), "m".into(), "".into());
+        let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
         app.tab_bar.insert_sub_agent("sub1", "agentA", false);
         // Route UsageInfo for sub (L1)
         app.apply_usage_info("sub1", 100, 200, 5, 10, 20);
@@ -3388,7 +3405,7 @@ mod tests {
 
     #[test]
     fn test_e2e_token_l2_l3_only_on_default_done() {
-        let mut app = AppState::new("main".into(), "m".into(), "".into());
+        let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
         // Two UsageInfo frames for main session
         app.apply_usage_info("main", 50, 80, 2, 5, 10);
         app.apply_usage_info("main", 30, 40, 1, 3, 5);
@@ -3409,7 +3426,7 @@ mod tests {
 
     #[test]
     fn test_e2e_no_sub_prefix_in_messages() {
-        let mut app = AppState::new("main".into(), "m".into(), "".into());
+        let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
         let frame = make_text_delta_frame("sub1", "agentA", "hello world");
         app.route_frame(frame);
         // Switch to sub tab to render
