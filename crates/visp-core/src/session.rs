@@ -307,7 +307,8 @@ fn load_skills_inner(project_path: &Path, home: Option<PathBuf>) -> String {
     }
 
     format!(
-        "\n\n## Available Skills\n\n{}",
+        "\n\n## Available Skills\n\n\
+         Use the `skill` tool to load a skill's detailed instructions.\n\n{}",
         sections.join("\n\n---\n\n")
     )
 }
