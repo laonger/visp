@@ -92,8 +92,8 @@ pub const TAB_PAGE_FG: Color = Color::DarkGray;
 // Help Popup
 // ════════════════════════════════════════════════════════════════
 
-/// 帮助弹窗背景
-pub const HELP_BG: Color = Color::from_u32(0x00222233);
+/// 帮助弹窗背景（0xCC 半透明，可隐约看到底层内容）
+pub const HELP_BG: Color = Color::from_u32(0xCC111122);
 /// 帮助弹窗边框
 pub const HELP_BORDER_FG: Color = Color::Cyan;
 /// 帮助弹窗标题
