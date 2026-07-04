@@ -775,13 +775,15 @@ fn render_input_area(app: &mut AppState, f: &mut Frame, area: Rect) {
             let all_cmds = [
                 "/clear",
                 "/help",
-                "/list",
-                "/sessions",
-                "/new",
-                "/temp",
-                "/model",
                 "/init",
+                "/init-agent",
+                "/init-skill",
+                "/list",
+                "/model",
                 "/mouse",
+                "/new",
+                "/sessions",
+                "/temp",
             ];
             let hint: Vec<&str> = if current.len() > 1 {
                 all_cmds
@@ -910,6 +912,8 @@ fn render_help_popup(f: &mut Frame, area: Rect) {
         ("/model <m>", "Switch model"),
         ("/init", "Initialize session with system prompt"),
         ("/mouse", "Toggle mouse capture mode"),
+        ("/init-agent <name>", "Create a template agent file in .visp/agents/"),
+        ("/init-skill <name>", "Create a template skill file in .visp/skills/"),
     ];
     let key_items = [
         ("F1 / /help", "Toggle this help popup"),

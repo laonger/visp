@@ -20,7 +20,7 @@ macro_rules! debug_log {
     }};
 }
 
-use crate::app::{AppState, ConfirmState, LineType};
+use crate::app::{AppState, ConfirmState, LineType, TabCompletionState};
 use crate::client::{ChatHandle, VispClient};
 use crate::ui::render;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
@@ -637,6 +637,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 }
                 let text: String = app.textarea.lines().join("\n");
                 app.textarea = AppState::new_textarea();
+                app.tab_completion = None;
                 if text.trim().is_empty() {
                     return false;
                 }
@@ -667,28 +668,56 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                         let cmds = [
                             "/clear",
                             "/help",
+                            "/init",
+                            "/init-agent ",
+                            "/init-skill ",
                             "/list",
+                            "/model ",
+                            "/mouse",
                             "/sessions ",
                             "/temp ",
-                            "/model ",
-                            "/init",
-                            "/mouse",
                         ];
-                        let completion = if current.len() > 1 {
-                            cmds.iter()
-                                .find(|c| c.starts_with(&current))
-                                .map(|c| c.to_string())
-                        } else {
-                            None
-                        };
-                        if let Some(cmd) = completion {
+
+                        // 如果已有补全状态且当前文本是上次补全结果之一，循环到下一个
+                        if let Some(tc) = &mut app.tab_completion
+                            && tc.matches.contains(&current)
+                            && current.starts_with(&tc.prefix)
+                        {
+                            tc.index = (tc.index + 1) % tc.matches.len();
+                            let next = tc.matches[tc.index].clone();
                             app.textarea = AppState::new_textarea();
-                            app.textarea.insert_str(&cmd);
+                            app.textarea.insert_str(&next);
+                            return false;
+                        }
+
+                        // 新一轮补全：以当前文本为前缀，查找所有匹配
+                        let prefix = current.trim_end().to_string();
+                        let matches: Vec<String> = if prefix.len() > 1 {
+                            cmds.iter()
+                                .filter(|c| c.starts_with(prefix.as_str()))
+                                .map(|c| c.to_string())
+                                .collect()
+                        } else {
+                            // 仅 "/"：列出全部命令
+                            cmds.iter().map(|c| c.to_string()).collect()
+                        };
+
+                        if matches.is_empty() {
+                            app.tab_completion = None;
+                        } else {
+                            app.tab_completion = Some(TabCompletionState {
+                                prefix,
+                                matches: matches.clone(),
+                                index: 0,
+                            });
+                            app.textarea = AppState::new_textarea();
+                            app.textarea.insert_str(&matches[0]);
                         }
                     }
                     return false;
                 }
                 KeyCode::Up => {
+                    app.tab_completion = None;
                     if !app.input_history.is_empty() {
                         let idx = app
                             .history_index
@@ -701,6 +730,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                     }
                 }
                 KeyCode::Down => {
+                    app.tab_completion = None;
                     if let Some(idx) = app.history_index {
                         let ni = idx + 1;
                         if ni >= app.input_history.len() {
@@ -727,6 +757,8 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                         input.key,
                         app.textarea.lines().len()
                     );
+                    // 普通按键输入时重置 Tab 补全状态
+                    app.tab_completion = None;
                     app.textarea.input(input);
                 }
             }
@@ -939,6 +971,75 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
         }
         "/mouse" => {
             toggle_mouse_mode(app);
+        }
+        "/init-agent" => {
+            let name = if parts.len() >= 2 && !parts[1].is_empty() {
+                parts[1].trim().to_string()
+            } else {
+                "my-agent".to_string()
+            };
+            // Validate name
+            if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+                app.add_message(LineType::Status, "Error: Agent name can only contain alphanumeric characters, hyphens, and underscores".to_string());
+                return;
+            }
+            let agents_dir = std::path::Path::new(&app.project_path).join(".visp").join("agents");
+            let file_path = agents_dir.join(format!("{name}.md"));
+            if file_path.exists() {
+                app.add_message(LineType::Status, format!("Agent file already exists at .visp/agents/{name}.md. Delete it first if you want to regenerate."));
+                return;
+            }
+            // Create directory
+            if let Err(e) = std::fs::create_dir_all(&agents_dir) {
+                app.add_message(LineType::Status, format!("Error creating directory: {e}"));
+                return;
+            }
+            // Write template
+            let template = init_agent_template(&name);
+            match std::fs::write(&file_path, &template) {
+                Ok(_) => {
+                    app.add_message(LineType::Status, format!("Created agent template at .visp/agents/{name}.md"));
+                }
+                Err(e) => {
+                    app.add_message(LineType::Status, format!("Error writing file: {e}"));
+                }
+            }
+        }
+        "/init-skill" => {
+            let name = if parts.len() >= 2 && !parts[1].is_empty() {
+                parts[1].trim().to_string()
+            } else {
+                "my-skill".to_string()
+            };
+            // Validate name
+            if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+                app.add_message(LineType::Status, "Error: Skill name can only contain alphanumeric characters, hyphens, and underscores".to_string());
+                return;
+            }
+            let skill_dir = std::path::Path::new(&app.project_path)
+                .join(".visp")
+                .join("skills")
+                .join(&name);
+            let file_path = skill_dir.join("SKILL.md");
+            if file_path.exists() {
+                app.add_message(LineType::Status, format!("Skill file already exists at .visp/skills/{name}/SKILL.md. Delete it first if you want to regenerate."));
+                return;
+            }
+            // Create directory
+            if let Err(e) = std::fs::create_dir_all(&skill_dir) {
+                app.add_message(LineType::Status, format!("Error creating directory: {e}"));
+                return;
+            }
+            // Write template
+            let template = init_skill_template(&name);
+            match std::fs::write(&file_path, &template) {
+                Ok(_) => {
+                    app.add_message(LineType::Status, format!("Created skill template at .visp/skills/{name}/SKILL.md"));
+                }
+                Err(e) => {
+                    app.add_message(LineType::Status, format!("Error writing file: {e}"));
+                }
+            }
         }
         "/list" => {
             app.add_message(LineType::Status, "Fetching sessions...".into());
