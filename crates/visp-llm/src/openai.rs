@@ -735,6 +735,15 @@ fn byte_stream_to_chat_events(
     Box::pin(event_stream)
 }
 
+/// 检查 base_url 是否已经包含版本路径段（如 /v1, /v3 等）。
+/// 如果用户提供了带版本的自定义 base_url（例如火山引擎 Ark 的 /api/plan/v3），
+/// 则不重复追加 /v1 前缀。
+fn is_versioned_base_url(url: &str) -> bool {
+    url.rsplit('/')
+        .next()
+        .is_some_and(|seg| seg.starts_with('v') && seg[1..].chars().all(|c| c.is_ascii_digit()))
+}
+
 /// OpenAI API 提供器
 pub struct OpenAiProvider {
     api_key: String,
@@ -836,7 +845,12 @@ impl LlmProvider for OpenAiProvider {
             }
         }
 
-        let url = format!("{}/v1/chat/completions", self.api_url.trim_end_matches('/'));
+        let base = self.api_url.trim_end_matches('/');
+        let url = if is_versioned_base_url(base) {
+            format!("{base}/chat/completions")
+        } else {
+            format!("{base}/v1/chat/completions")
+        };
         let body = build_openai_request(messages, tools, config);
         let headers = build_openai_headers(&self.api_key);
 

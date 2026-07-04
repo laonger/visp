@@ -428,6 +428,13 @@ pub(crate) fn parse_anthropic_event(event_name: &str, data: &str) -> Result<Pars
     }
 }
 
+/// 检查 base_url 是否已经包含版本路径段（如 /v1, /v3 等）。
+fn is_versioned_base_url(url: &str) -> bool {
+    url.rsplit('/')
+        .next()
+        .is_some_and(|seg| seg.starts_with('v') && seg[1..].chars().all(|c| c.is_ascii_digit()))
+}
+
 /// Anthropic API 提供器
 pub struct AnthropicProvider {
     api_key: String,
@@ -531,7 +538,12 @@ impl LlmProvider for AnthropicProvider {
             }
         }
 
-        let url = format!("{}/v1/messages", self.api_url.trim_end_matches('/'));
+        let base = self.api_url.trim_end_matches('/');
+        let url = if is_versioned_base_url(base) {
+            format!("{base}/messages")
+        } else {
+            format!("{base}/v1/messages")
+        };
         let body = build_anthropic_request(messages, tools, config);
         let headers = build_anthropic_headers(&self.api_key);
 
