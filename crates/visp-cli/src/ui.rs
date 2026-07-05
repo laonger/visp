@@ -912,8 +912,14 @@ fn render_help_popup(f: &mut Frame, area: Rect) {
         ("/model <m>", "Switch model"),
         ("/init", "Initialize session with system prompt"),
         ("/mouse", "Toggle mouse capture mode"),
-        ("/init-agent <name>", "Create a template agent file in .visp/agents/"),
-        ("/init-skill <name>", "Create a template skill file in .visp/skills/"),
+        (
+            "/init-agent <name>",
+            "Create a template agent file in .visp/agents/",
+        ),
+        (
+            "/init-skill <name>",
+            "Create a template skill file in .visp/skills/",
+        ),
     ];
     let key_items = [
         ("F1 / /help", "Toggle this help popup"),

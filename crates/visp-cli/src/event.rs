@@ -96,7 +96,12 @@ pub async fn run(
     io::stdout().flush()?;
     let _guard = TerminalGuard;
     let mut terminal = ratatui::init();
-    let mut app = AppState::new(session_id.clone(), model.clone(), model_key, project_path.to_string());
+    let mut app = AppState::new(
+        session_id.clone(),
+        model.clone(),
+        model_key,
+        project_path.to_string(),
+    );
     app.available_models = available_models;
     app.model_keys = model_keys;
 
@@ -512,8 +517,8 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                                     // 保留 assistant 已输出的消息，移除末尾的 [USER_QUERY] 标记
                                     if let Some(close_pos) =
                                         app.streaming_text().rfind("[/USER_QUERY]")
-                                        && let Some(open_pos) = app.streaming_text()[..close_pos]
-                                            .rfind("[USER_QUERY")
+                                        && let Some(open_pos) =
+                                            app.streaming_text()[..close_pos].rfind("[USER_QUERY")
                                     {
                                         app.truncate_streaming(open_pos);
                                     }
@@ -1069,11 +1074,16 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
                 "my-agent".to_string()
             };
             // Validate name
-            if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+            if !name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            {
                 app.add_message(LineType::Status, "Error: Agent name can only contain alphanumeric characters, hyphens, and underscores".to_string());
                 return;
             }
-            let agents_dir = std::path::Path::new(&app.project_path).join(".visp").join("agents");
+            let agents_dir = std::path::Path::new(&app.project_path)
+                .join(".visp")
+                .join("agents");
             let file_path = agents_dir.join(format!("{name}.md"));
             if file_path.exists() {
                 app.add_message(LineType::Status, format!("Agent file already exists at .visp/agents/{name}.md. Delete it first if you want to regenerate."));
@@ -1088,7 +1098,10 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
             let template = init_agent_template(&name);
             match std::fs::write(&file_path, &template) {
                 Ok(_) => {
-                    app.add_message(LineType::Status, format!("Created agent template at .visp/agents/{name}.md"));
+                    app.add_message(
+                        LineType::Status,
+                        format!("Created agent template at .visp/agents/{name}.md"),
+                    );
                 }
                 Err(e) => {
                     app.add_message(LineType::Status, format!("Error writing file: {e}"));
@@ -1102,7 +1115,10 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
                 "my-skill".to_string()
             };
             // Validate name
-            if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+            if !name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            {
                 app.add_message(LineType::Status, "Error: Skill name can only contain alphanumeric characters, hyphens, and underscores".to_string());
                 return;
             }
@@ -1124,7 +1140,10 @@ fn handle_command(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) 
             let template = init_skill_template(&name);
             match std::fs::write(&file_path, &template) {
                 Ok(_) => {
-                    app.add_message(LineType::Status, format!("Created skill template at .visp/skills/{name}/SKILL.md"));
+                    app.add_message(
+                        LineType::Status,
+                        format!("Created skill template at .visp/skills/{name}/SKILL.md"),
+                    );
                 }
                 Err(e) => {
                     app.add_message(LineType::Status, format!("Error writing file: {e}"));

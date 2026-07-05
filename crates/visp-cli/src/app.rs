@@ -1662,7 +1662,12 @@ mod tests {
 
     #[test]
     fn test_app_state_new() {
-        let app = AppState::new("test-session".into(), "deepseek-v4-flash".into(), "".into(), String::new());
+        let app = AppState::new(
+            "test-session".into(),
+            "deepseek-v4-flash".into(),
+            "".into(),
+            String::new(),
+        );
         assert_eq!(app.session_id, "test-session");
         assert_eq!(app.model, "deepseek-v4-flash");
         assert!(app.messages().is_empty());
