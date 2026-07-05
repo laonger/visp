@@ -5,7 +5,44 @@ use std::path::PathBuf;
 use visp_core::tool::{Tool, ToolContext, ToolResult};
 
 /// Skill tool: load a skill's detailed instructions.
-pub struct SkillTool;
+///
+/// Construct with [`SkillTool::new`] to embed the available-skills listing
+/// (built-in + project + global) directly into the tool description, so the
+/// LLM can discover skills without a system-prompt block.
+pub struct SkillTool {
+    /// Full description including the available-skills listing.
+    description: String,
+}
+
+impl SkillTool {
+    /// Build a SkillTool whose `description()` includes the list of
+    /// available skills for `project_path`.
+    pub fn new(project_path: &std::path::Path) -> Self {
+        let skills_listing = visp_core::session::load_skills(project_path);
+        let description = if skills_listing.is_empty() {
+            "Load a specialized skill's detailed instructions into the current conversation. \
+             No skills are currently available."
+                .to_string()
+        } else {
+            format!(
+                "Load a specialized skill's detailed instructions into the current conversation. \
+                 Use this tool to inject the skill's instructions and workflow guidance.\n\
+                 \n{skills_listing}"
+            )
+        };
+        Self { description }
+    }
+
+    /// Construct a SkillTool with no skills listing (for tests).
+    #[cfg(test)]
+    pub fn empty() -> Self {
+        Self {
+            description: "Load a specialized skill's detailed instructions into the current \
+                          conversation. No skills are currently available."
+                .to_string(),
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for SkillTool {
@@ -14,10 +51,7 @@ impl Tool for SkillTool {
     }
 
     fn description(&self) -> &str {
-        "Load a specialized skill when the task at hand matches one of the available skills \
-         in the system context. Use this tool to inject the skill's instructions and workflow \
-         guidance into the current conversation. \
-         The skill name must match one of the available skills listed in the Available Skills section."
+        &self.description
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -102,13 +136,13 @@ mod tests {
 
     #[test]
     fn test_name() {
-        let tool = SkillTool;
+        let tool = SkillTool::empty();
         assert_eq!(tool.name(), "skill");
     }
 
     #[test]
     fn test_parameters_has_name() {
-        let tool = SkillTool;
+        let tool = SkillTool::empty();
         let params = tool.parameters();
         let props = params["properties"].as_object().unwrap();
         assert!(props.contains_key("name"));
@@ -117,7 +151,7 @@ mod tests {
 
     #[test]
     fn test_parameters_required_contains_name() {
-        let tool = SkillTool;
+        let tool = SkillTool::empty();
         let params = tool.parameters();
         let required = params["required"].as_array().unwrap();
         let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
@@ -135,13 +169,13 @@ mod tests {
 
     #[test]
     fn test_category() {
-        let tool = SkillTool;
+        let tool = SkillTool::empty();
         assert_eq!(tool.category(), "agent");
     }
 
     #[tokio::test]
     async fn test_execute_empty_name() {
-        let tool = SkillTool;
+        let tool = SkillTool::empty();
         let ctx = ToolContext {
             working_dir: PathBuf::from("/tmp"),
             session_id: None,
@@ -154,7 +188,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_not_found() {
-        let tool = SkillTool;
+        let tool = SkillTool::empty();
         let ctx = ToolContext {
             working_dir: PathBuf::from("/nonexistent"),
             session_id: None,

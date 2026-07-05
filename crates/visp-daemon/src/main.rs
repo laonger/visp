@@ -1,4 +1,3 @@
-mod command;
 mod config;
 mod observability;
 mod server;
@@ -172,9 +171,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tool_registry
         .register(Arc::new(TaskTool))
         .map_err(|e| format!("register task: {e}"))?;
-    // ── 技能工具 ──
+    // ── 技能工具（description 内嵌可用技能列表）──
+    let cwd = std::env::current_dir()?;
     tool_registry
-        .register(Arc::new(visp_tools::skill::SkillTool))
+        .register(Arc::new(visp_tools::skill::SkillTool::new(&cwd)))
         .map_err(|e| format!("register skill: {e}"))?;
 
     let tool_registry = Arc::new(tool_registry);
@@ -228,7 +228,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 6. Create rule engine
-    let cwd = std::env::current_dir()?;
     let rule_engine = Arc::new(RuleEngine::new(&cwd)?);
 
     // 6.5. Create context trimmer
