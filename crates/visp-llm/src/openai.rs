@@ -655,8 +655,11 @@ fn byte_stream_to_chat_events(
                     };
 
                     // 在 span 上 record usage / model / finish_reasons / cost
-                    state.span.record("gen_ai.usage.input_tokens", state.input_tokens);
-                    state.span.record("gen_ai.usage.output_tokens", state.output_tokens);
+                    // Cast u32 → i64: tracing-opentelemetry's Visit impl only handles
+                    // record_i64 (not record_u64), so u32/u64 values would fall through
+                    // to record_debug and be exported as String("100") instead of I64(100).
+                    state.span.record("gen_ai.usage.input_tokens", state.input_tokens as i64);
+                    state.span.record("gen_ai.usage.output_tokens", state.output_tokens as i64);
                     // OpenAI 不写 cache 字段
                     if state.finish_reason == "length" {
                         state.span.record("visp.llm.token_limit_hit", true);
@@ -809,7 +812,7 @@ impl LlmProvider for OpenAiProvider {
             langfuse.trace.metadata = field::Empty,
         );
         span.record("gen_ai.system", "openai");
-        span.record("gen_ai.request.max_tokens", config.max_tokens);
+        span.record("gen_ai.request.max_tokens", config.max_tokens as i64);
         span.record("gen_ai.request.temperature", config.temperature);
 
         // Langfuse trace-level fields: record when enabled
@@ -1853,7 +1856,7 @@ mod tests {
             visp.llm.cost_usd = tracing::field::Empty,
             visp.llm.token_limit_hit = tracing::field::Empty,
         );
-        span.record("gen_ai.request.max_tokens", 4096u64);
+        span.record("gen_ai.request.max_tokens", 4096i64);
         span.record("gen_ai.request.temperature", 0.7f64);
 
         drop(_guard);
@@ -1885,7 +1888,7 @@ mod tests {
         );
 
         span.record("gen_ai.system", "openai");
-        span.record("gen_ai.request.max_tokens", 4096u64);
+        span.record("gen_ai.request.max_tokens", 4096i64);
         span.record("gen_ai.request.temperature", 0.7f64);
 
         drop(_guard);
@@ -1950,7 +1953,7 @@ mod tests {
             visp.llm.cost_usd = tracing::field::Empty,
             visp.llm.token_limit_hit = tracing::field::Empty,
         );
-        span.record("gen_ai.request.max_tokens", 4096u64);
+        span.record("gen_ai.request.max_tokens", 4096i64);
         span.record("gen_ai.request.temperature", 0.7f64);
 
         let sse = make_openai_complete_sse("gpt-4o", "stop");
