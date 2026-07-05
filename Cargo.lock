@@ -4292,6 +4292,7 @@ dependencies = [
  "tokio-stream",
  "tonic 0.13.1",
  "unicode-width 0.2.0",
+ "visp-command",
  "visp-proto",
 ]
 
@@ -4312,6 +4313,13 @@ dependencies = [
  "tree-sitter-typescript",
  "visp-core",
  "walkdir",
+]
+
+[[package]]
+name = "visp-command"
+version = "0.4.0"
+dependencies = [
+ "visp-core",
 ]
 
 [[package]]
@@ -4370,6 +4378,7 @@ dependencies = [
  "uuid",
  "visp-agent",
  "visp-codegraph",
+ "visp-command",
  "visp-context",
  "visp-core",
  "visp-db",

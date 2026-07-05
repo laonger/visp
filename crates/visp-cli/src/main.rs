@@ -1,5 +1,6 @@
 mod app;
 mod client;
+mod command;
 mod event;
 mod theme;
 mod ui;

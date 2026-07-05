@@ -4,6 +4,7 @@ members = [
     "crates/visp", "crates/visp-agent",
     "crates/visp-cli",
     "crates/visp-codegraph",
+    "crates/visp-command",
     "crates/visp-context",
     "crates/visp-core",
     "crates/visp-daemon",
