@@ -406,6 +406,7 @@ fn byte_stream_to_chat_events(
     byte_stream: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
     start_time: std::time::Instant,
     span: tracing::Span,
+    request_model: String,
     langfuse_capture_output: bool,
     langfuse_capture_max_chars: usize,
     langfuse_redact_secrets: bool,
@@ -427,6 +428,8 @@ fn byte_stream_to_chat_events(
         cache_read_input_tokens: u32,
         /// 响应模型名称（从 chunk 顶层 model 字段提取）
         model: String,
+        /// 请求时的模型名称（用于 response model 为空时的 fallback）
+        request_model: String,
         /// 结束原因（从 Finish 事件提取）
         finish_reason: String,
         /// 请求开始时刻（用于计算端到端 latency）
@@ -484,6 +487,7 @@ fn byte_stream_to_chat_events(
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 0,
         model: String::new(),
+        request_model,
         finish_reason: String::new(),
         state_start_time: start_time,
         stream_ended: false,
@@ -667,8 +671,15 @@ fn byte_stream_to_chat_events(
                     let finish_reasons_str =
                         serde_json::to_string(&finish_reasons).unwrap_or_default();
                     state.span.record("gen_ai.response.finish_reasons", &finish_reasons_str);
-                    state.span.record("gen_ai.response.model", &state.model);
-                    let cost = crate::cost::openai_cost_usd(&state.model, state.input_tokens, state.output_tokens);
+                    // Fallback to request model if response didn't include one
+                    // (some OpenAI-compatible providers don't include "model" in SSE chunks)
+                    let effective_model = if state.model.is_empty() {
+                        &state.request_model
+                    } else {
+                        &state.model
+                    };
+                    state.span.record("gen_ai.response.model", effective_model);
+                    let cost = crate::cost::openai_cost_usd(effective_model, state.input_tokens, state.output_tokens);
                     state.span.record("visp.llm.cost_usd", cost);
 
                     // Langfuse generation capture: record output if enabled
@@ -684,7 +695,7 @@ fn byte_stream_to_chat_events(
 
                     return Some((
                         Ok(ChatEvent::OutputMetadata(visp_core::ProviderMetadata {
-                            model: state.model.clone(),
+                            model: effective_model.clone(),
                             finish_reasons,
                             input_tokens: state.input_tokens,
                             output_tokens: state.output_tokens,
@@ -888,6 +899,7 @@ impl LlmProvider for OpenAiProvider {
                 byte_stream,
                 start_time,
                 span,
+                config.model.clone(),
                 config.langfuse_capture_output,
                 config.langfuse_capture_max_chars,
                 config.langfuse_redact_secrets,
@@ -1367,6 +1379,7 @@ mod tests {
             byte_stream,
             std::time::Instant::now(),
             span,
+            "test-model".to_string(),
             false,
             20000,
             true,
@@ -1960,7 +1973,15 @@ mod tests {
         let byte_stream =
             futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
         let start = std::time::Instant::now();
-        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
+        let event_stream = byte_stream_to_chat_events(
+            byte_stream,
+            start,
+            span,
+            "test-model".to_string(),
+            false,
+            20000,
+            true,
+        );
         let _: Vec<ChatEvent> = event_stream
             .filter_map(|e| futures::future::ready(e.ok()))
             .collect()
@@ -2039,7 +2060,15 @@ mod tests {
         let byte_stream =
             futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
         let start = std::time::Instant::now();
-        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
+        let event_stream = byte_stream_to_chat_events(
+            byte_stream,
+            start,
+            span,
+            "test-model".to_string(),
+            false,
+            20000,
+            true,
+        );
         let _: Vec<ChatEvent> = event_stream
             .filter_map(|e| futures::future::ready(e.ok()))
             .collect()
@@ -2070,7 +2099,15 @@ mod tests {
         let byte_stream =
             futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
         let start = std::time::Instant::now();
-        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
+        let event_stream = byte_stream_to_chat_events(
+            byte_stream,
+            start,
+            span,
+            "test-model".to_string(),
+            false,
+            20000,
+            true,
+        );
         let _: Vec<ChatEvent> = event_stream
             .filter_map(|e| futures::future::ready(e.ok()))
             .collect()
@@ -2140,7 +2177,15 @@ mod tests {
         let byte_stream =
             futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
         let start = std::time::Instant::now();
-        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
+        let event_stream = byte_stream_to_chat_events(
+            byte_stream,
+            start,
+            span,
+            "test-model".to_string(),
+            false,
+            20000,
+            true,
+        );
         let _: Vec<ChatEvent> = event_stream
             .filter_map(|e| futures::future::ready(e.ok()))
             .collect()
@@ -2179,7 +2224,15 @@ mod tests {
         let byte_stream =
             futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
         let start = std::time::Instant::now();
-        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
+        let event_stream = byte_stream_to_chat_events(
+            byte_stream,
+            start,
+            span,
+            "test-model".to_string(),
+            false,
+            20000,
+            true,
+        );
         let _: Vec<ChatEvent> = event_stream
             .filter_map(|e| futures::future::ready(e.ok()))
             .collect()
@@ -2214,7 +2267,15 @@ mod tests {
         let byte_stream =
             futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
         let start = std::time::Instant::now();
-        let event_stream = byte_stream_to_chat_events(byte_stream, start, span, false, 20000, true);
+        let event_stream = byte_stream_to_chat_events(
+            byte_stream,
+            start,
+            span,
+            "test-model".to_string(),
+            false,
+            20000,
+            true,
+        );
         let _: Vec<ChatEvent> = event_stream
             .filter_map(|e| futures::future::ready(e.ok()))
             .collect()
