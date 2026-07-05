@@ -36,7 +36,6 @@ How should we fix this bug?\n\
 - Options should be REAL choices, not invitations to talk\n\
 - Do NOT create \"listening\" options like \"你来说说看\" or \"I'll listen\" — use allow_other=true instead\n\
 - Only use [USER_QUERY] when you genuinely need user input\n\
-- The selection UI lets the user navigate with arrow keys and confirm with Enter\n\
 - `allow_other=true` adds an \"Other\" button that opens a text input field";
 
 #[allow(clippy::too_many_arguments)]
