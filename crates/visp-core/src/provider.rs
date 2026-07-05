@@ -16,6 +16,9 @@ pub struct LlmConfig {
     /// 用于从 providers HashMap 中查找正确的 provider 实例。
     /// None 时回退到 default_provider_key。
     pub model_key: Option<String>,
+    /// Provider 名称（来自 daemon.toml [[llm.models]] provider 字段，缺省时为 protocol）。
+    /// 用于 trace span 和 metrics summary 中记录 gen_ai.provider.name。
+    pub provider: Option<String>,
     /// 温度（0.0-2.0）
     pub temperature: f64,
     /// 最大 token 数
@@ -59,6 +62,7 @@ impl Default for LlmConfig {
         Self {
             model: "claude-3-7-sonnet-20250219".to_string(),
             model_key: None,
+            provider: None,
             temperature: 0.7,
             max_tokens: 4096,
             max_context_tokens: 128_000,

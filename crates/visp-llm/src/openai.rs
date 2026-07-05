@@ -793,13 +793,15 @@ impl LlmProvider for OpenAiProvider {
         config: &LlmConfig,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError> {
+        // Provider name from config (falls back to "openai" for backward compat)
+        let provider_name = config.provider.as_deref().unwrap_or("openai");
         // 创建 gen_ai.client.operation span
         let span = tracing::info_span!(
             "gen_ai.client.operation",
             gen_ai.system = field::Empty,
             gen_ai.request.model = %config.model,
             gen_ai.operation.name = "chat",
-            gen_ai.provider.name = "openai",
+            gen_ai.provider.name = %provider_name,
             gen_ai.request.max_tokens = field::Empty,
             gen_ai.request.temperature = field::Empty,
             visp.llm.attempt = 0u64,
@@ -811,6 +813,7 @@ impl LlmProvider for OpenAiProvider {
             visp.llm.token_limit_hit = field::Empty,
             langfuse.observation.type = field::Empty,
             langfuse.observation.input = field::Empty,
+            visp.tools.definitions = field::Empty,
             langfuse.observation.output = field::Empty,
             langfuse.session.id = field::Empty,
             langfuse.trace.name = field::Empty,
@@ -875,12 +878,25 @@ impl LlmProvider for OpenAiProvider {
             span.record("langfuse.observation.type", "generation");
         }
         if config.langfuse_capture_input {
+            // Record only the messages array, not the full request body
+            let input = body.get("messages").unwrap_or(&body);
             let sanitized = crate::sanitize::format_langfuse_input(
-                &body,
+                input,
                 config.langfuse_capture_max_chars,
                 config.langfuse_redact_secrets,
             );
             span.record("langfuse.observation.input", &sanitized);
+
+            // Record tools as a separate attribute
+            if let Some(tools_val) = body.get("tools") {
+                let tools_str = serde_json::to_string(tools_val).unwrap_or_default();
+                let tools_sanitized = crate::sanitize::sanitize_and_truncate(
+                    &tools_str,
+                    config.langfuse_capture_max_chars,
+                    config.langfuse_redact_secrets,
+                );
+                span.record("visp.tools.definitions", &tools_sanitized);
+            }
         }
 
         tracing::debug!(url = %url, model = %config.model, "OpenAI request");

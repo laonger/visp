@@ -147,6 +147,12 @@ impl CoderDaemonService {
         let default_llm_config = LlmConfig {
             model: default_cfg.model.clone(),
             model_key: Some(default_cfg.key()),
+            provider: Some(
+                default_cfg
+                    .provider
+                    .clone()
+                    .unwrap_or_else(|| default_cfg.protocol.clone()),
+            ),
             temperature: default_cfg.temperature.unwrap_or(0.7),
             max_tokens: default_cfg.max_tokens.unwrap_or(4096),
             max_context_tokens: default_cfg.max_context_tokens.unwrap_or(128_000),
@@ -249,12 +255,16 @@ impl CoderDaemon for CoderDaemonService {
             && let Some(mc) = self.model_configs.iter().find(|mc| mc.key() == *model_key)
         {
             config.model = mc.model.clone();
+            config.provider = Some(mc.provider.clone().unwrap_or_else(|| mc.protocol.clone()));
         }
         // 客户端未传的字段用 daemon 默认值
         if config.model == LlmConfig::default().model {
             config.model = self.default_llm_config.model.clone();
             if config.model_key.is_none() {
                 config.model_key = self.default_llm_config.model_key.clone();
+            }
+            if config.provider.is_none() {
+                config.provider = self.default_llm_config.provider.clone();
             }
         }
         // 应用 daemon 默认的 Langfuse 配置（客户端不会传递这些字段）
@@ -452,12 +462,91 @@ impl CoderDaemon for CoderDaemonService {
                             Err(_) => false,
                         };
                         if can_accept {
-                            let cli_msg = visp_agent::orchestrator::ClientMessage::UserInput {
-                                session_id,
-                                text: input.text,
-                            };
-                            if client_tx.send(cli_msg).await.is_err() {
-                                break;
+                            // Intercept daemon-side slash commands and either
+                            // replace the prompt (for /init) or execute file
+                            // operations (for /init-agent, /init-skill).
+                            let cmd = visp_command::parse(&input.text);
+                            match visp_command::resolve(
+                                &cmd,
+                                &session_mgr
+                                    .get(&session_id)
+                                    .ok()
+                                    .map(|s| s.project_path.clone())
+                                    .unwrap_or_default(),
+                            ) {
+                                Ok(action) => {
+                                    match action {
+                                        visp_command::CommandAction::Prompt(prompt) => {
+                                            // Forward the prompt to the LLM.
+                                            // Side-effect: ensure .visp dirs exist.
+                                            if let Ok(session) = session_mgr.get(&session_id) {
+                                                let visp_dir = session.project_path.join(".visp");
+                                                for sub in ["rules", "skills"] {
+                                                    let _ =
+                                                        std::fs::create_dir_all(visp_dir.join(sub));
+                                                }
+                                            }
+                                            let cli_msg = visp_agent::orchestrator::ClientMessage::UserInput {
+                                                session_id,
+                                                text: prompt,
+                                            };
+                                            if client_tx.send(cli_msg).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                        visp_command::CommandAction::WriteFile {
+                                            path,
+                                            content,
+                                        } => {
+                                            // Write file and send status back.
+                                            let parent = path.parent().unwrap();
+                                            if let Err(e) = std::fs::create_dir_all(parent) {
+                                                let err_msg = session_error_msg(
+                                                    "FileWriteError",
+                                                    &format!("Failed to create directory: {e}"),
+                                                    &session_id,
+                                                );
+                                                let _ = response_tx_inbound.send(Ok(err_msg)).await;
+                                            } else if let Err(e) = std::fs::write(&path, &content) {
+                                                let err_msg = session_error_msg(
+                                                    "FileWriteError",
+                                                    &format!("Failed to write file: {e}"),
+                                                    &session_id,
+                                                );
+                                                let _ = response_tx_inbound.send(Ok(err_msg)).await;
+                                            } else {
+                                                let msg = proto::ServerMessage {
+                                                    payload: Some(proto::server_message::Payload::StatusUpdate(
+                                                        proto::StatusUpdate {
+                                                            session_id: session_id.clone(),
+                                                            message: format!("Created {}", path.display()),
+                                                            agent_name: String::new(),
+                                                            user_inputs: vec![],
+                                                            view_only: false,
+                                                        },
+                                                    )),
+                                                };
+                                                let _ = response_tx_inbound.send(Ok(msg)).await;
+                                            }
+                                        }
+                                        visp_command::CommandAction::None => {
+                                            // Not a daemon command — forward as-is.
+                                            let cli_msg = visp_agent::orchestrator::ClientMessage::UserInput {
+                                                session_id,
+                                                text: input.text,
+                                            };
+                                            if client_tx.send(cli_msg).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(err_msg) => {
+                                    // resolve returned an error (e.g. invalid name, file exists)
+                                    let err_msg =
+                                        session_error_msg("CommandError", &err_msg, &session_id);
+                                    let _ = response_tx_inbound.send(Ok(err_msg)).await;
+                                }
                             }
                         } else {
                             // 已知限制：DB 持久化场景下 status 可能不可靠（见设计文档）
@@ -526,6 +615,9 @@ impl CoderDaemon for CoderDaemonService {
                                 LlmConfig {
                                     model: mc.model.clone(),
                                     model_key: Some(mc.key()),
+                                    provider: Some(
+                                        mc.provider.clone().unwrap_or_else(|| mc.protocol.clone()),
+                                    ),
                                     ..config
                                 }
                             } else {

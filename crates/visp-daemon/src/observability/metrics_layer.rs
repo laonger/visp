@@ -54,6 +54,9 @@ pub struct SessionMetrics {
     pub tool_calls: u32,
     /// Number of LLM calls (`gen_ai.client.operation` spans closed).
     pub llm_calls: u32,
+    /// LLM provider name (e.g. "anthropic", "openai"), captured from
+    /// `gen_ai.provider.name` on the first `gen_ai.client.operation` span.
+    pub provider_name: Option<String>,
     /// Wall-clock instant when this session was first seen.
     #[allow(dead_code)]
     pub started_at: Instant,
@@ -72,6 +75,7 @@ impl Default for SessionMetrics {
             tool_duration_ms: 0,
             tool_calls: 0,
             llm_calls: 0,
+            provider_name: None,
             started_at: Instant::now(),
             ended_at: None,
         }
@@ -322,6 +326,7 @@ where
                     .get("visp.llm.cost_usd")
                     .and_then(|v| v.parse::<f64>().ok())
                     .unwrap_or(0.0);
+                let provider_name = fields.get("gen_ai.provider.name").map(|s| s.to_string());
 
                 let mut entry = self.sessions.entry(session_id).or_default();
                 entry.total_tokens_input += input_tokens;
@@ -330,6 +335,9 @@ where
                 entry.cache_creation_input += cache_creation;
                 entry.total_cost_usd += cost_usd;
                 entry.llm_calls += 1;
+                if entry.provider_name.is_none() {
+                    entry.provider_name = provider_name;
+                }
             }
 
             "visp.agent.run" => {
@@ -360,6 +368,7 @@ where
                     target: "visp.metrics",
                     name = "metrics.session.summary",
                     session.id = %session_id,
+                    provider = ?metrics.provider_name,
                     total_tokens_input = metrics.total_tokens_input,
                     total_tokens_output = metrics.total_tokens_output,
                     cache_read_tokens = metrics.cache_read_input,
@@ -1004,6 +1013,52 @@ mod tests {
         assert!(
             layer.session_metrics("sess_rerun").is_none(),
             "second bucket should also be removed"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_metrics_layer_captures_provider_name_in_summary() {
+        let layer = MetricsLayer::new();
+        let collector = TestMetricsEventCollector::new();
+
+        let _guard = tracing_subscriber::registry()
+            .with(layer.clone())
+            .with(collector.clone())
+            .set_default();
+
+        let parent = tracing::info_span!(
+            "visp.agent.run",
+            session.id = "sess_provider",
+            session.short_id = "sess_pr",
+            visp.agent.kind = "primary",
+            visp.agent.depth = 0u64,
+        );
+        let _enter = parent.enter();
+
+        let llm = tracing::info_span!(
+            "gen_ai.client.operation",
+            gen_ai.provider.name = "anthropic",
+            gen_ai.usage.input_tokens = tracing::field::Empty,
+            gen_ai.usage.output_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
+            visp.llm.cost_usd = tracing::field::Empty,
+        );
+        llm.record("gen_ai.usage.input_tokens", 100u64);
+        llm.record("gen_ai.usage.output_tokens", 50u64);
+        drop(llm);
+
+        drop(_enter);
+        drop(parent);
+        drop(_guard);
+
+        assert_eq!(collector.count_summary_events(), 1);
+        let provider = collector.summary_event_field("provider");
+        assert_eq!(
+            provider.as_deref(),
+            Some("Some(\"anthropic\")"),
+            "summary should include provider name"
         );
     }
 }

@@ -1458,12 +1458,21 @@ pub async fn run_agent_loop(
     // created via set_default() on the same thread.
     let short_id = ctx.session_id[..ctx.session_id.len().min(8)].to_string();
 
+    // Provider name from daemon.toml [[llm.models]] provider field (falls back to protocol)
+    let provider_name = ctx
+        .config
+        .provider
+        .as_deref()
+        .unwrap_or("unknown")
+        .to_string();
+
     let __run_span = if agent_config.langfuse_enabled {
         let trace_name = "visp.agent.run".to_string();
         tracing::info_span!(
             "visp.agent.run",
             session.id = %ctx.session_id,
             session.short_id = %short_id,
+            gen_ai.provider.name = %provider_name,
             langfuse.session.id = %ctx.session_id,
             langfuse.trace.name = %trace_name,
             langfuse.user.id = tracing::field::Empty,
@@ -1487,6 +1496,7 @@ pub async fn run_agent_loop(
             "visp.agent.run",
             session.id = %ctx.session_id,
             session.short_id = %short_id,
+            gen_ai.provider.name = %provider_name,
             visp.agent.kind = %ctx.agent_kind,
             visp.agent.depth = ctx.depth,
             visp.span.w3c_id = tracing::field::Empty,
@@ -2906,6 +2916,63 @@ mod tests {
                 .iter()
                 .any(|(k, v)| k == "visp.agent.depth" && v == "0"),
             "expected visp.agent.depth=0"
+        );
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn test_agent_run_records_provider_name_from_model_key() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let mut llm_config = LlmConfig::default();
+        llm_config.provider = Some("Anthropic".to_string());
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr.create(Path::new("/tmp"), llm_config).unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None, None)
+            .unwrap();
+
+        let provider: StdArc<dyn LlmProvider> =
+            StdArc::new(SimpleProvider::new(vec![vec![ChatEvent::Done]]));
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig::default();
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("hello"),
+            tx,
+        )
+        .await;
+
+        let captured = spans.lock().unwrap();
+        let run_span = captured
+            .iter()
+            .find(|s| s.name == "visp.agent.run")
+            .expect("expected visp.agent.run span");
+        assert!(
+            run_span
+                .fields
+                .iter()
+                .any(|(k, v)| k == "gen_ai.provider.name" && v == "Anthropic"),
+            "expected gen_ai.provider.name=Anthropic, got: {:?}",
+            run_span.fields
         );
     }
 
