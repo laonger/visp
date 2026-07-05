@@ -100,10 +100,16 @@ async fn run_command(
     program: &str,
     args: &[String],
     timeout_secs: u64,
+    working_dir: Option<&std::path::Path>,
 ) -> Result<(String, String), ToolResult> {
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    if let Some(dir) = working_dir {
+        cmd.current_dir(dir);
+    }
     let cmd_output = match timeout(
         Duration::from_secs(timeout_secs),
-        Command::new(program).args(args).output(),
+        cmd.output(),
     )
     .await
     {
@@ -238,9 +244,13 @@ impl Tool for Grep {
             None => context.working_dir.clone(),
         };
 
-        let path_str = match search_path.to_str() {
-            Some(s) => s,
-            None => return ToolResult::error("Path is not valid UTF-8"),
+        // 使用相对路径（从 project root 算起），避免 rg 输出绝对路径浪费 token
+        let relative = search_path
+            .strip_prefix(&context.working_dir)
+            .unwrap_or(&search_path);
+        let path_str = match relative.to_str() {
+            Some(s) if !s.is_empty() => s,
+            _ => ".",  // 当搜索路径就是 working_dir 本身时，用 "." 表示当前目录
         };
 
         let include = arguments
@@ -272,7 +282,11 @@ impl Tool for Grep {
             max_matches,
         );
 
-        let (stdout, stderr) = match run_command(program, &args, self.timeout_secs).await {
+        let (stdout, stderr) = match run_command(
+            program, &args, self.timeout_secs, Some(&context.working_dir),
+        )
+        .await
+        {
             Ok(v) => v,
             Err(e) => return e,
         };
@@ -388,15 +402,23 @@ impl Tool for Glob {
             None => context.working_dir.clone(),
         };
 
-        let path_str = match search_path.to_str() {
-            Some(s) => s,
-            None => return ToolResult::error("Path is not valid UTF-8"),
+        // 使用相对路径（从 project root 算起），避免 rg/find 输出绝对路径浪费 token
+        let relative = search_path
+            .strip_prefix(&context.working_dir)
+            .unwrap_or(&search_path);
+        let path_str = match relative.to_str() {
+            Some(s) if !s.is_empty() => s,
+            _ => ".",
         };
 
         let use_rg = has_rg();
         let (program, args) = build_glob_args(pattern, path_str, use_rg);
 
-        let (stdout, stderr) = match run_command(program, &args, self.timeout_secs).await {
+        let (stdout, stderr) = match run_command(
+            program, &args, self.timeout_secs, Some(&context.working_dir),
+        )
+        .await
+        {
             Ok(v) => v,
             Err(e) => return e,
         };
