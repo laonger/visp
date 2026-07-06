@@ -181,6 +181,23 @@ api_key = "sk-ant-..."          # 或设置 ANTHROPIC_API_KEY 环境变量
 
 不创建也能运行，仅配 `api_key` 和 `model` 即可。完整的注解模板见 [`docs/daemon.example.toml`](docs/daemon.example.toml)，完整结构见 [`config.rs`](crates/visp-daemon/src/config.rs)。
 
+### 核心提示词（system prompt）
+
+visp 内置了一套默认核心提示词（`DEFAULT_SYSTEM_PROMPT`），定义了 AI 助手的行为模式。你可以通过以下方式覆盖它：
+
+**优先级：项目级 > 全局级 > 内置默认**
+
+1. **项目级** — `.visp/system-prompt.md`，仅对该项目生效
+2. **全局级** — `~/.config/visp/system-prompt.md`，对所有项目生效
+3. **内置默认** — 如果以上文件都不存在，使用代码中的 `DEFAULT_SYSTEM_PROMPT`
+
+```bash
+# 示例：自定义项目级提示词
+echo "You are a Rust expert assistant." > .visp/system-prompt.md
+```
+
+> 注意：自定义提示词会**完全替换**内置默认提示词，而非追加。`USER_QUERY_INSTRUCTION`（[USER_QUERY] 标记的使用说明）仍会由系统自动追加到末尾。
+
 ### 规则文件（rules）
 
 项目级规则放在 `.visp/rules/`，全局规则放在 `~/.config/visp/rules/`，Markdown 格式：
