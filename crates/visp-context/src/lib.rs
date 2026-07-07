@@ -102,8 +102,10 @@ impl ContextTrimmer for DefaultContextTrimmer {
 
 /// max_context_tokens 是 effective limit（含预留）
 /// 只减去 max(output_tokens, 4000) 作为输出保留空间
+/// output_tokens 上限为 max_context_tokens 的 75%，确保至少 25% 用于输入
 pub(crate) fn calculate_available(max_context_tokens: u32, output_tokens: u32) -> u32 {
-    max_context_tokens.saturating_sub(output_tokens.max(4_000))
+    let capped_output = output_tokens.min(max_context_tokens * 3 / 4);
+    max_context_tokens.saturating_sub(capped_output.max(4_000))
 }
 
 /// 估算消息列表中每条消息在 prompt 中的实际 token 数
@@ -421,6 +423,15 @@ mod tests {
     #[test]
     fn test_calculate_available_high_output() {
         assert_eq!(calculate_available(128_000, 8_000), 120_000);
+    }
+
+    #[test]
+    fn test_calculate_available_output_exceeds_context() {
+        // Bug: max_tokens (output) >= max_context_tokens caused available=0,
+        // trimmer stripped all history → LLM infinite loop
+        let available = calculate_available(128_000, 128_000);
+        assert!(available > 0, "available must be > 0 when context > 0");
+        assert_eq!(available, 32_000); // 25% reserved for input
     }
 
     #[test]
