@@ -107,12 +107,7 @@ async fn run_command(
     if let Some(dir) = working_dir {
         cmd.current_dir(dir);
     }
-    let cmd_output = match timeout(
-        Duration::from_secs(timeout_secs),
-        cmd.output(),
-    )
-    .await
-    {
+    let cmd_output = match timeout(Duration::from_secs(timeout_secs), cmd.output()).await {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => {
             return Err(ToolResult::error(format!(
@@ -250,7 +245,7 @@ impl Tool for Grep {
             .unwrap_or(&search_path);
         let path_str = match relative.to_str() {
             Some(s) if !s.is_empty() => s,
-            _ => ".",  // 当搜索路径就是 working_dir 本身时，用 "." 表示当前目录
+            _ => ".", // 当搜索路径就是 working_dir 本身时，用 "." 表示当前目录
         };
 
         let include = arguments
@@ -283,7 +278,10 @@ impl Tool for Grep {
         );
 
         let (stdout, stderr) = match run_command(
-            program, &args, self.timeout_secs, Some(&context.working_dir),
+            program,
+            &args,
+            self.timeout_secs,
+            Some(&context.working_dir),
         )
         .await
         {
@@ -415,7 +413,10 @@ impl Tool for Glob {
         let (program, args) = build_glob_args(pattern, path_str, use_rg);
 
         let (stdout, stderr) = match run_command(
-            program, &args, self.timeout_secs, Some(&context.working_dir),
+            program,
+            &args,
+            self.timeout_secs,
+            Some(&context.working_dir),
         )
         .await
         {

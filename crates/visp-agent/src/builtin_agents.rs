@@ -44,9 +44,8 @@ fn register_code_reader(registry: &mut AgentRegistry) {
 fn register_explorer(registry: &mut AgentRegistry) {
     let explorer = AgentDefinition {
         name: "explorer".to_string(),
-        description:
-            "快速代码库搜索专家。用于查找文件、定位代码模式、回答\"X 在哪里？\"等问题。"
-                .to_string(),
+        description: "快速代码库搜索专家。用于查找文件、定位代码模式、回答\"X 在哪里？\"等问题。"
+            .to_string(),
         mode: AgentMode::Subagent,
         model: None,
         temperature: Some(0.1),

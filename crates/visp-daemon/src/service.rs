@@ -140,6 +140,10 @@ impl CoderDaemonService {
             .and_then(|key| model_configs.iter().position(|mc| mc.key() == *key))
             .unwrap_or(0);
         let default_cfg = &model_configs[default_idx];
+        // per-model thinking_budget_tokens 覆盖全局 fallback
+        if let Some(budget) = default_cfg.thinking_budget_tokens {
+            extra.insert("thinking_budget_tokens".into(), budget.to_string());
+        }
 
         let initial_provider =
             create_llm_provider(default_cfg).expect("failed to create initial LLM provider");
@@ -256,6 +260,28 @@ impl CoderDaemon for CoderDaemonService {
         {
             config.model = mc.model.clone();
             config.provider = Some(mc.provider.clone().unwrap_or_else(|| mc.protocol.clone()));
+            // 用该模型配置填充客户端未显式设置的字段
+            if config.max_tokens == LlmConfig::default().max_tokens
+                && let Some(mt) = mc.max_tokens
+            {
+                config.max_tokens = mt;
+            }
+            if config.max_context_tokens == LlmConfig::default().max_context_tokens
+                && let Some(mct) = mc.max_context_tokens
+            {
+                config.max_context_tokens = mct;
+            }
+            if (config.temperature - LlmConfig::default().temperature).abs() < f64::EPSILON
+                && let Some(t) = mc.temperature
+            {
+                config.temperature = t;
+            }
+            // per-model thinking_budget_tokens
+            if let Some(budget) = mc.thinking_budget_tokens {
+                config
+                    .extra
+                    .insert("thinking_budget_tokens".into(), budget.to_string());
+            }
         }
         // 客户端未传的字段用 daemon 默认值
         if config.model == LlmConfig::default().model {
@@ -422,6 +448,7 @@ impl CoderDaemon for CoderDaemonService {
         let response_tx = tx.clone();
         let session_mgr = self.session_mgr.clone();
         let model_configs = self.model_configs.clone();
+        let default_llm_config_extra = self.default_llm_config.extra.clone();
 
         // Shared pending user queries: maps query_id → respond sender
         // Used to route UserResponse from CLI back to the agent loop that's waiting
@@ -612,14 +639,43 @@ impl CoderDaemon for CoderDaemonService {
                         let final_config = if let Some(ref model_key) = config.model_key {
                             if let Some(mc) = model_configs.iter().find(|mc| mc.key() == *model_key)
                             {
-                                LlmConfig {
+                                let mut cfg = LlmConfig {
                                     model: mc.model.clone(),
                                     model_key: Some(mc.key()),
                                     provider: Some(
                                         mc.provider.clone().unwrap_or_else(|| mc.protocol.clone()),
                                     ),
                                     ..config
+                                };
+                                // 用该模型配置填充客户端未显式设置的字段
+                                if cfg.max_tokens == LlmConfig::default().max_tokens
+                                    && let Some(mt) = mc.max_tokens
+                                {
+                                    cfg.max_tokens = mt;
                                 }
+                                if cfg.max_context_tokens == LlmConfig::default().max_context_tokens
+                                    && let Some(mct) = mc.max_context_tokens
+                                {
+                                    cfg.max_context_tokens = mct;
+                                }
+                                if (cfg.temperature - LlmConfig::default().temperature).abs()
+                                    < f64::EPSILON
+                                    && let Some(t) = mc.temperature
+                                {
+                                    cfg.temperature = t;
+                                }
+                                // per-model thinking_budget_tokens
+                                if let Some(budget) = mc.thinking_budget_tokens {
+                                    cfg.extra.insert(
+                                        "thinking_budget_tokens".into(),
+                                        budget.to_string(),
+                                    );
+                                }
+                                // 合并 daemon 默认 extra（保留其他 extra key）
+                                for (k, v) in &default_llm_config_extra {
+                                    cfg.extra.entry(k.clone()).or_insert_with(|| v.clone());
+                                }
+                                cfg
                             } else {
                                 config
                             }
@@ -1796,6 +1852,144 @@ mod tests {
         let session = response.into_inner();
         let stored = mgr.get(&session.session_id).unwrap();
         assert_eq!(stored.config.max_context_tokens, 32_000);
+    }
+
+    #[tokio::test]
+    async fn test_create_session_model_config_fields_override() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let mc = LlmModelConfig {
+            name: "TestModel".into(),
+            protocol: "TestProvider".into(),
+            provider: None,
+            model: "test-model".into(),
+            api_key: None,
+            base_url: None,
+            temperature: Some(0.3),
+            max_tokens: Some(16384),
+            max_context_tokens: Some(200000),
+            thinking_budget_tokens: Some(2048),
+            extra: HashMap::new(),
+        };
+        let default_llm_config = LlmConfig {
+            extra: {
+                let mut m = HashMap::new();
+                m.insert("thinking_budget_tokens".into(), "2048".into());
+                m
+            },
+            ..LlmConfig::default()
+        };
+        let (cancel_tx, _cancel_rx) = mpsc::channel(16);
+        let (_grpc_tx, orchestrator_grpc_rx) = mpsc::channel(256);
+        let (client_tx, _client_rx) = mpsc::channel(64);
+        let service = CoderDaemonService {
+            provider: Arc::new(StdRwLock::new(
+                Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>
+            )),
+            tool_registry: Arc::new(ToolRegistry::new()),
+            rule_engine: Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap()),
+            session_mgr: mgr.clone(),
+            agent_config: AgentConfig::default(),
+            start_time: Instant::now(),
+            codegraphs: Arc::new(RwLock::new(HashMap::new())),
+            default_llm_config,
+            context_trimmer: Arc::new(visp_core::context::NoopTrimmer),
+            mcp_manager: Arc::new(McpManager::new(vec![])),
+            available_models: vec![],
+            model_configs: vec![mc],
+            model_config_keys: vec!["TestProvider/TestModel".into()],
+            cancel_tx,
+            orchestrator_grpc_rx: std::sync::Mutex::new(Some(orchestrator_grpc_rx)),
+            client_tx,
+        };
+
+        let request = tonic::Request::new(proto::CreateSessionRequest {
+            project_path: "/tmp".into(),
+            config: Some(proto::LlmConfig {
+                model: None,
+                model_key: Some("TestProvider/TestModel".into()),
+                temperature: None,
+                max_tokens: None,
+                max_context_tokens: None,
+                extra: HashMap::new(),
+            }),
+        });
+
+        let response = service.create_session(request).await.unwrap();
+        let session = response.into_inner();
+        let stored = mgr.get(&session.session_id).unwrap();
+        assert_eq!(stored.config.max_tokens, 16384);
+        assert_eq!(stored.config.max_context_tokens, 200000);
+        assert!((stored.config.temperature - 0.3).abs() < f64::EPSILON);
+        assert_eq!(
+            stored.config.extra.get("thinking_budget_tokens"),
+            Some(&"2048".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_session_model_config_partial_override() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let mc = LlmModelConfig {
+            name: "TestModel".into(),
+            protocol: "TestProvider".into(),
+            provider: None,
+            model: "test-model".into(),
+            api_key: None,
+            base_url: None,
+            temperature: None,
+            max_tokens: Some(16384),
+            max_context_tokens: None,
+            thinking_budget_tokens: None,
+            extra: HashMap::new(),
+        };
+        let (cancel_tx, _cancel_rx) = mpsc::channel(16);
+        let (_grpc_tx, orchestrator_grpc_rx) = mpsc::channel(256);
+        let (client_tx, _client_rx) = mpsc::channel(64);
+        let service = CoderDaemonService {
+            provider: Arc::new(StdRwLock::new(
+                Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>
+            )),
+            tool_registry: Arc::new(ToolRegistry::new()),
+            rule_engine: Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap()),
+            session_mgr: mgr.clone(),
+            agent_config: AgentConfig::default(),
+            start_time: Instant::now(),
+            codegraphs: Arc::new(RwLock::new(HashMap::new())),
+            default_llm_config: LlmConfig::default(),
+            context_trimmer: Arc::new(visp_core::context::NoopTrimmer),
+            mcp_manager: Arc::new(McpManager::new(vec![])),
+            available_models: vec![],
+            model_configs: vec![mc],
+            model_config_keys: vec!["TestProvider/TestModel".into()],
+            cancel_tx,
+            orchestrator_grpc_rx: std::sync::Mutex::new(Some(orchestrator_grpc_rx)),
+            client_tx,
+        };
+
+        let request = tonic::Request::new(proto::CreateSessionRequest {
+            project_path: "/tmp".into(),
+            config: Some(proto::LlmConfig {
+                model: None,
+                model_key: Some("TestProvider/TestModel".into()),
+                temperature: None,
+                max_tokens: None,
+                max_context_tokens: None,
+                extra: HashMap::new(),
+            }),
+        });
+
+        let response = service.create_session(request).await.unwrap();
+        let session = response.into_inner();
+        let stored = mgr.get(&session.session_id).unwrap();
+        assert_eq!(stored.config.max_tokens, 16384);
+        assert_eq!(
+            stored.config.max_context_tokens,
+            LlmConfig::default().max_context_tokens
+        );
+        assert!(
+            (stored.config.temperature - LlmConfig::default().temperature).abs() < f64::EPSILON
+        );
+        assert!(stored.config.extra.get("thinking_budget_tokens").is_none());
     }
 
     #[test]

@@ -69,6 +69,8 @@ pub struct LlmModelConfig {
     #[serde(default)]
     pub max_context_tokens: Option<u32>,
     #[serde(default)]
+    pub thinking_budget_tokens: Option<u32>,
+    #[serde(default)]
     #[allow(dead_code)]
     pub extra: std::collections::HashMap<String, String>,
 }
@@ -555,6 +557,47 @@ max_context_tokens = 64000
 "#;
         let config: DaemonConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.llm.models[0].max_context_tokens, Some(64_000));
+    }
+
+    #[test]
+    fn test_llmmodelconfig_with_thinking_budget_tokens() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+[[llm.models]]
+name = "test"
+protocol = "anthropic"
+model = "claude-3-7-sonnet-20250219"
+thinking_budget_tokens = 2048
+
+[tools]
+
+[agent]
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.llm.models[0].thinking_budget_tokens, Some(2048));
+    }
+
+    #[test]
+    fn test_llmmodelconfig_without_thinking_budget_defaults_to_none() {
+        let toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+[[llm.models]]
+name = "test"
+protocol = "anthropic"
+model = "claude-3-7-sonnet-20250219"
+
+[tools]
+
+[agent]
+"#;
+        let config: DaemonConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.llm.models[0].thinking_budget_tokens, None);
     }
 
     #[test]

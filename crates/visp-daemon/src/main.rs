@@ -86,10 +86,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config::load_config(config_path.as_deref()).map_err(|e| format!("config: {e}"))?;
 
     // Allow the launcher to override the listen address via env var.
-    if let Ok(addr) = std::env::var("VISP_LISTEN_ADDR") {
-        if !addr.is_empty() {
-            config.daemon.listen_addr = addr;
-        }
+    if let Ok(addr) = std::env::var("VISP_LISTEN_ADDR")
+        && !addr.is_empty()
+    {
+        config.daemon.listen_addr = addr;
     }
 
     // 2. Init observability (tracing subscriber stack)
