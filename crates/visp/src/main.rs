@@ -58,9 +58,17 @@ async fn main() {
     let log_file_stdout = log_file.try_clone().await.unwrap();
     let log_file_stderr = log_file.try_clone().await.unwrap();
 
-    // 3. Start daemon (no args — uses default addr [::1]:50051 or ~/.config/visp/daemon.toml)
+    // 3. Find an available port for the daemon.
+    let addr = find_available_addr(&cli.addr).unwrap_or_else(|e| {
+        eprintln!("[visp] {e}");
+        std::process::exit(1);
+    });
+    eprintln!("[visp] Daemon will listen on {addr}");
+
+    // 4. Start daemon, passing the selected address via env var.
     eprintln!("[visp] Starting daemon (log: {})...", log_path.display());
     let mut daemon = match Command::new(&daemon_bin)
+        .env("VISP_LISTEN_ADDR", &addr)
         .stdout(log_file_stdout.into_std().await)
         .stderr(log_file_stderr.into_std().await)
         .spawn()
@@ -73,9 +81,8 @@ async fn main() {
         }
     };
 
-    // 4. Health check with timeout
+    // 5. Health check with timeout
     eprintln!("[visp] Waiting for daemon to be ready...");
-    let addr = cli.addr.clone();
     let health_ok =
         tokio::time::timeout(std::time::Duration::from_secs(15), wait_for_health(&addr)).await;
 
@@ -93,11 +100,11 @@ async fn main() {
         }
     }
 
-    // 5. Build CLI args
+    // 6. Build CLI args
     let mut cli_args = vec![
         "visp-cli".to_string(),
         "--addr".to_string(),
-        cli.addr.clone(),
+        addr.clone(),
         "-p".to_string(),
         cli.project,
     ];
@@ -118,7 +125,7 @@ async fn main() {
         cli_args.push(session.clone());
     }
 
-    // 6. Start CLI
+    // 7. Start CLI
     let mut cli_child = match Command::new(&cli_bin)
         .args(&cli_args[1..]) // skip the program name
         .spawn()
@@ -132,20 +139,20 @@ async fn main() {
         }
     };
 
-    // 7. Wait for CLI to exit
+    // 8. Wait for CLI to exit
     let cli_status = cli_child.wait().await.unwrap_or_else(|e| {
         eprintln!("[visp] Failed to wait for CLI: {e}");
         std::process::exit(1);
     });
     let exit_code = cli_status.code().unwrap_or(1);
 
-    // 8. Send shutdown to daemon via gRPC
+    // 9. Send shutdown to daemon via gRPC
     eprintln!("[visp] Shutting down daemon...");
-    if let Err(e) = send_shutdown(&cli.addr).await {
+    if let Err(e) = send_shutdown(&addr).await {
         eprintln!("[visp] gRPC shutdown failed: {e}");
     }
 
-    // 9. Wait for daemon to exit (5s timeout)
+    // 10. Wait for daemon to exit (5s timeout)
     let daemon_exit = tokio::time::timeout(std::time::Duration::from_secs(5), daemon.wait()).await;
     match daemon_exit {
         Ok(Ok(_)) => eprintln!("[visp] Daemon stopped."),
@@ -177,6 +184,64 @@ fn resolve_bin(name: &str) -> PathBuf {
     }
     // 回退到 PATH
     PathBuf::from(name)
+}
+
+/// Parse an address like "[::1]:50051" or "127.0.0.1:9090" into (host, port).
+fn parse_addr(addr: &str) -> Result<(String, u16), String> {
+    // Handle bracketed IPv6: [::1]:50051
+    if let Some(rest) = addr.strip_prefix('[') {
+        if let Some(bracket_end) = rest.find(']') {
+            let host = &rest[..bracket_end];
+            let after = &rest[bracket_end + 1..];
+            if let Some(port_str) = after.strip_prefix(':') {
+                let port: u16 = port_str
+                    .parse()
+                    .map_err(|_| format!("invalid port in address: {addr}"))?;
+                return Ok((host.to_string(), port));
+            }
+        }
+        return Err(format!("invalid address: {addr}"));
+    }
+    // Handle plain host:port
+    let (host, port_str) = addr
+        .rsplit_once(':')
+        .ok_or_else(|| format!("invalid address (no port): {addr}"))?;
+    let port: u16 = port_str
+        .parse()
+        .map_err(|_| format!("invalid port in address: {addr}"))?;
+    Ok((host.to_string(), port))
+}
+
+/// Reassemble host+port into an address string, bracketing IPv6 hosts.
+fn format_addr(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+/// Find an available address starting from `base_addr`. Tries the given port
+/// first; if it is already in use, increments the port up to 1000 attempts.
+fn find_available_addr(base_addr: &str) -> Result<String, String> {
+    let (host, base_port) = parse_addr(base_addr)?;
+    for offset in 0..1000u16 {
+        let port = base_port.saturating_add(offset);
+        let addr = format_addr(&host, port);
+        let sock_addr: std::net::SocketAddr = addr
+            .parse()
+            .map_err(|e| format!("invalid address {addr}: {e}"))?;
+        if std::net::TcpListener::bind(sock_addr).is_ok() {
+            return Ok(addr);
+        }
+        // Port is in use; try the next one.
+        if offset == 0 {
+            eprintln!("[visp] Port {port} is in use, trying next available port...");
+        }
+    }
+    Err(format!(
+        "could not find an available port starting from {base_port}"
+    ))
 }
 
 async fn wait_for_health(addr: &str) -> bool {

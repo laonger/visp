@@ -82,8 +82,15 @@ fn create_llm_provider(config: &LlmModelConfig) -> Result<Arc<dyn LlmProvider>, 
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Load config
     let config_path = std::env::args().nth(1).map(std::path::PathBuf::from);
-    let config: DaemonConfig =
+    let mut config: DaemonConfig =
         config::load_config(config_path.as_deref()).map_err(|e| format!("config: {e}"))?;
+
+    // Allow the launcher to override the listen address via env var.
+    if let Ok(addr) = std::env::var("VISP_LISTEN_ADDR") {
+        if !addr.is_empty() {
+            config.daemon.listen_addr = addr;
+        }
+    }
 
     // 2. Init observability (tracing subscriber stack)
     //    Guard lives for the lifetime of main; on drop it unwinds the subscriber.
