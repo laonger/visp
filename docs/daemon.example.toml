@@ -95,8 +95,8 @@ max_context_tokens = 128000
 #
 # 优先级：内置定义 < [[agent.builtin]] 配置 < ~/.config/visp/agents/*.md < .visp/agents/*.md
 #
-# model 格式：{provider}/{model} 或 {provider}.{name}
-#   如 "Opencode/deepseek-v4-flash" 或 "Anthropic.Claude Sonnet"
+# model 格式：{provider}/{name} 或 {provider}/{model}
+#   如 "Opencode/deepseek-v4-flash" 或 "Anthropic/Claude Sonnet"
 # 未指定 model 的内置 agent 会继承 session 默认模型。
 #
 # [[agent.builtin]]

@@ -12,7 +12,7 @@ use crate::message::{Message, ToolDefinition};
 pub struct LlmConfig {
     /// API model key（发送到 LLM API 的 model 字段，如 "deepseek-v4-flash"）
     pub model: String,
-    /// Provider lookup key（格式 "{provider}.{name}"，如 "Opencode.DeepSeek v4 Flash"）。
+    /// Provider lookup key（格式 "{provider}/{name}"，如 "Opencode/DeepSeek v4 Flash"）。
     /// 用于从 providers HashMap 中查找正确的 provider 实例。
     /// None 时回退到 default_provider_key。
     pub model_key: Option<String>,

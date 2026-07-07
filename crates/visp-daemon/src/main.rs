@@ -336,10 +336,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 8.5. Create provider HashMap
     let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
-    let default_model_key = model_configs
-        .first()
-        .map(|mc| mc.key())
-        .unwrap_or_else(|| "default".to_string());
+    let default_model_key = config.llm.resolve_default_key(&model_configs);
     for mc in &model_configs {
         match create_llm_provider(mc) {
             Ok(provider) => {

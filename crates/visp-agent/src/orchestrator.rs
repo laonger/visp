@@ -943,7 +943,7 @@ impl Orchestrator {
             return Some(provider.clone());
         }
 
-        // Try session's model_key (format "{provider}.{name}")
+        // Try session's model_key (format "{provider}/{name}")
         if let Ok(session) = self.session_mgr.get(session_id)
             && let Some(ref model_key) = session.config.model_key
             && let Some(provider) = self.providers.get(model_key)

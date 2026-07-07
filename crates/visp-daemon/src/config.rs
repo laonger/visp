@@ -102,6 +102,17 @@ impl LlmSection {
             })
             .collect()
     }
+
+    /// 解析默认模型 key（格式 {provider}/{name}）。
+    /// 优先使用 `default` 字段指定的模型，找不到时回退到 model_configs 第一个。
+    pub fn resolve_default_key(&self, model_configs: &[LlmModelConfig]) -> String {
+        self.default
+            .as_ref()
+            .and_then(|key| model_configs.iter().find(|mc| mc.key() == *key))
+            .map(|mc| mc.key())
+            .or_else(|| model_configs.first().map(|mc| mc.key()))
+            .unwrap_or_else(|| "default".to_string())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1458,5 +1469,87 @@ soft_limit = 50
 "#;
         let config: DaemonConfig = toml::from_str(toml).unwrap();
         assert!(config.agent.builtin.is_empty());
+    }
+
+    // ── resolve_default_key ────────────────────────────────────
+
+    fn make_model_configs() -> Vec<LlmModelConfig> {
+        vec![
+            LlmModelConfig {
+                name: "ModelA".into(),
+                protocol: "anthropic".into(),
+                provider: Some("ProviderA".into()),
+                model: "model-a-api".into(),
+                api_key: None,
+                base_url: None,
+                temperature: None,
+                max_tokens: None,
+                max_context_tokens: None,
+                thinking_budget_tokens: None,
+                extra: Default::default(),
+            },
+            LlmModelConfig {
+                name: "ModelB".into(),
+                protocol: "openai".into(),
+                provider: Some("ProviderB".into()),
+                model: "model-b-api".into(),
+                api_key: None,
+                base_url: None,
+                temperature: None,
+                max_tokens: None,
+                max_context_tokens: None,
+                thinking_budget_tokens: None,
+                extra: Default::default(),
+            },
+        ]
+    }
+
+    fn empty_llm_section() -> LlmSection {
+        LlmSection {
+            thinking_budget_tokens: None,
+            extra: std::collections::HashMap::new(),
+            models: vec![],
+            default: None,
+        }
+    }
+
+    #[test]
+    fn test_resolve_default_key_matches_default() {
+        let models = make_model_configs();
+        let section = LlmSection {
+            default: Some("ProviderB/ModelB".into()),
+            ..empty_llm_section()
+        };
+        assert_eq!(section.resolve_default_key(&models), "ProviderB/ModelB");
+    }
+
+    #[test]
+    fn test_resolve_default_key_not_found_falls_back_to_first() {
+        let models = make_model_configs();
+        let section = LlmSection {
+            default: Some("Unknown/Model".into()),
+            ..empty_llm_section()
+        };
+        // default 不匹配任何模型，回退到第一个
+        assert_eq!(section.resolve_default_key(&models), "ProviderA/ModelA");
+    }
+
+    #[test]
+    fn test_resolve_default_key_none_falls_back_to_first() {
+        let models = make_model_configs();
+        let section = LlmSection {
+            default: None,
+            ..empty_llm_section()
+        };
+        assert_eq!(section.resolve_default_key(&models), "ProviderA/ModelA");
+    }
+
+    #[test]
+    fn test_resolve_default_key_empty_models() {
+        let section = LlmSection {
+            default: None,
+            ..empty_llm_section()
+        };
+        assert_eq!(section.resolve_default_key(&[]), "default");
     }
 }
