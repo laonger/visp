@@ -134,11 +134,28 @@ impl CoderDaemonService {
             extra.insert(k.clone(), v.clone());
         }
         // 查找默认模型
-        let default_idx = llm_section
-            .default
-            .as_ref()
-            .and_then(|key| model_configs.iter().position(|mc| mc.key() == *key))
-            .unwrap_or(0);
+        let default_idx = if let Some(ref default_key) = llm_section.default {
+            match model_configs.iter().position(|mc| mc.key() == *default_key) {
+                Some(idx) => {
+                    tracing::info!(
+                        default = %default_key,
+                        "using llm.default model for new sessions"
+                    );
+                    idx
+                }
+                None => {
+                    tracing::warn!(
+                        default = %default_key,
+                        available = %model_configs.iter().map(|m| m.key()).collect::<Vec<_>>().join(", "),
+                        "llm.default points to unknown model, falling back to first model"
+                    );
+                    0
+                }
+            }
+        } else {
+            tracing::info!("llm.default not set, using first model as default");
+            0
+        };
         let default_cfg = &model_configs[default_idx];
         // per-model thinking_budget_tokens 覆盖全局 fallback
         if let Some(budget) = default_cfg.thinking_budget_tokens {
