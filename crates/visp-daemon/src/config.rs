@@ -81,6 +81,17 @@ impl LlmModelConfig {
         let p = self.provider.as_deref().unwrap_or(&self.protocol);
         format!("{p}/{}", self.name)
     }
+
+    /// 模型别名 `{provider}/{model}`，作为备选 lookup key
+    pub fn model_alias(&self) -> String {
+        let p = self.provider.as_deref().unwrap_or(&self.protocol);
+        format!("{p}/{}", self.model)
+    }
+
+    /// 检查给定的 key 是否匹配此模型（匹配 key 或 model_alias）
+    pub fn matches_key(&self, candidate: &str) -> bool {
+        self.key() == candidate || self.model_alias() == candidate
+    }
 }
 
 impl LlmSection {
@@ -103,14 +114,22 @@ impl LlmSection {
             .collect()
     }
 
-    /// 解析默认模型 key（格式 {provider}/{name}）。
+    /// 解析默认模型 key（格式 {provider}/{name} 或 {provider}/{model}）。
     /// 优先使用 `default` 字段指定的模型，找不到时回退到 model_configs 第一个。
     pub fn resolve_default_key(&self, model_configs: &[LlmModelConfig]) -> String {
-        self.default
-            .as_ref()
-            .and_then(|key| model_configs.iter().find(|mc| mc.key() == *key))
+        if let Some(ref default_name) = self.default {
+            if let Some(mc) = model_configs.iter().find(|mc| mc.matches_key(default_name)) {
+                return mc.key();
+            }
+            tracing::warn!(
+                default = %default_name,
+                available = %model_configs.iter().map(|m| m.key()).collect::<Vec<_>>().join(", "),
+                "llm.default points to unknown model, falling back to first model"
+            );
+        }
+        model_configs
+            .first()
             .map(|mc| mc.key())
-            .or_else(|| model_configs.first().map(|mc| mc.key()))
             .unwrap_or_else(|| "default".to_string())
     }
 }
@@ -1551,5 +1570,62 @@ soft_limit = 50
             ..empty_llm_section()
         };
         assert_eq!(section.resolve_default_key(&[]), "default");
+    }
+
+    // ── model_alias / matches_key ───────────────────────────────
+
+    #[test]
+    fn test_model_alias_format() {
+        let mc = LlmModelConfig {
+            name: "Display Name".into(),
+            protocol: "anthropic".into(),
+            provider: Some("ProviderX".into()),
+            model: "api-model-v1".into(),
+            ..make_model_configs()[0].clone()
+        };
+        assert_eq!(mc.model_alias(), "ProviderX/api-model-v1");
+    }
+
+    #[test]
+    fn test_model_alias_falls_back_to_protocol() {
+        let mc = LlmModelConfig {
+            name: "Display Name".into(),
+            protocol: "anthropic".into(),
+            provider: None,
+            model: "api-model-v1".into(),
+            ..make_model_configs()[0].clone()
+        };
+        assert_eq!(mc.model_alias(), "anthropic/api-model-v1");
+    }
+
+    #[test]
+    fn test_matches_key_by_key() {
+        let models = make_model_configs();
+        assert!(models[0].matches_key("ProviderA/ModelA"));
+    }
+
+    #[test]
+    fn test_matches_key_by_model_alias() {
+        let models = make_model_configs();
+        assert!(models[0].matches_key("ProviderA/model-a-api"));
+    }
+
+    #[test]
+    fn test_matches_key_no_match() {
+        let models = make_model_configs();
+        assert!(!models[0].matches_key("Unknown/Model"));
+    }
+
+    // ── resolve_default_key with model_alias ────────────────────
+
+    #[test]
+    fn test_resolve_default_key_matches_model_alias() {
+        let models = make_model_configs();
+        let section = LlmSection {
+            default: Some("ProviderB/model-b-api".into()),
+            ..empty_llm_section()
+        };
+        // 使用 {provider}/{model} 格式也能匹配
+        assert_eq!(section.resolve_default_key(&models), "ProviderB/ModelB");
     }
 }

@@ -133,9 +133,12 @@ impl CoderDaemonService {
         for (k, v) in llm_section.extra.iter() {
             extra.insert(k.clone(), v.clone());
         }
-        // 查找默认模型
+        // 查找默认模型（匹配 {provider}/{name} 或 {provider}/{model} 格式）
         let default_idx = if let Some(ref default_key) = llm_section.default {
-            match model_configs.iter().position(|mc| mc.key() == *default_key) {
+            match model_configs
+                .iter()
+                .position(|mc| mc.matches_key(default_key))
+            {
                 Some(idx) => {
                     tracing::info!(
                         default = %default_key,
