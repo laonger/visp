@@ -877,11 +877,7 @@ fn split_model_name(model: &str) -> (&str, &str) {
 }
 
 /// 格式化状态栏左侧字符串
-fn format_status_left(
-    session_id: &str,
-    model_key: &str,
-    generating: bool,
-) -> String {
+fn format_status_left(session_id: &str, model_key: &str, generating: bool) -> String {
     let sid: String = session_id.chars().take(8).collect();
     let status = if generating { "Generating" } else { "Idle" };
     let (provider, model_label) = split_model_name(model_key);
@@ -899,11 +895,7 @@ fn render_status_bar(app: &AppState, f: &mut Frame, area: Rect) {
     let left_text = if app.last_copy_msg.is_some() {
         app.last_copy_msg.clone().unwrap_or_default()
     } else {
-        format_status_left(
-            &app.session_id,
-            &app.model_key,
-            app.generating(),
-        )
+        format_status_left(&app.session_id, &app.model_key, app.generating())
     };
 
     // 有 token 时左右分割显示，否则整行给左侧
@@ -1210,10 +1202,7 @@ mod tests {
     #[test]
     fn test_format_status_left_generating() {
         let s = format_status_left("abc12345", "Ollama/DeepSeek", true);
-        assert_eq!(
-            s,
-            "abc12345 | DeepSeek(Ollama) | Generating | /help = help"
-        );
+        assert_eq!(s, "abc12345 | DeepSeek(Ollama) | Generating | /help = help");
     }
 
     #[test]

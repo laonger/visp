@@ -147,8 +147,7 @@ pub fn osc52_copy(text: &str) {
 
 /// 简易 Base64 编码器
 fn base64_encode(data: &[u8]) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
     let mut i = 0;
     while i + 2 < data.len() {
@@ -300,7 +299,7 @@ mod tests {
             start: Some((5, 3)),
             end: Some((5, 3)),
         };
-        assert!(sel.is_active());        // 有选择范围
+        assert!(sel.is_active()); // 有选择范围
         assert!(!sel.is_highlighting()); // 但不高亮
     }
 
