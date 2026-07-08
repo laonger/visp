@@ -232,7 +232,7 @@ message TextDelta {
     // 增量文本片段，CLI 逐个追加到当前流式文本缓冲区。
     string delta = 1;
     string session_id = 2;
-    // 来源 agent 名称（如 "code_reader"），空字符串表示主 agent。
+    // 来源 agent 名称（如 "explorer"），空字符串表示主 agent。
     string agent_name = 3;
 }
 
@@ -246,7 +246,7 @@ message ToolCall {
     // 工具参数 JSON 字符串。
     string arguments = 3;
     string session_id = 4;
-    // 来源 agent 名称（如 "code_reader"），空字符串表示主 agent。
+    // 来源 agent 名称（如 "explorer"），空字符串表示主 agent。
     string agent_name = 5;
 }
 
@@ -261,7 +261,7 @@ message ToolResult {
     string session_id = 4;
     // 工具名称。
     string tool_name = 5;
-    // 来源 agent 名称（如 "code_reader"），空字符串表示主 agent。
+    // 来源 agent 名称（如 "explorer"），空字符串表示主 agent。
     string agent_name = 6;
 }
 
@@ -274,7 +274,7 @@ message StatusUpdate {
     // 从 session 历史中收集所有用户消息，用于恢复 CLI 的 ↑↓ 翻找历史功能。
     // 其他场景此字段为空。
     repeated string user_inputs = 3;
-    // 来源 agent 名称（如 "code_reader"），空字符串表示主 agent。
+    // 来源 agent 名称（如 "explorer"），空字符串表示主 agent。
     string agent_name = 4;
     // 是否为"仅查看"模式。为 true 时 CLI 端只显示状态更新，
     // 不改变输入框状态或触发其他交互行为。
@@ -289,7 +289,7 @@ message Error {
     // 错误描述文本，显示给用户。
     string message = 2;
     string session_id = 3;
-    // 来源 agent 名称（如 "code_reader"），空字符串表示主 agent。
+    // 来源 agent 名称（如 "explorer"），空字符串表示主 agent。
     string agent_name = 4;
 }
 

@@ -89,7 +89,7 @@ max_context_tokens = 128000
 # ---------------------------------------------------------------------------
 # 内置 Agent 覆盖配置
 # ---------------------------------------------------------------------------
-# visp 内置了 default、code_reader、explorer、fixer 四个 agent。
+# visp 内置了 default、explorer、fixer 三个 agent。
 # 通过 [[agent.builtin]] 可以在不修改源码的情况下覆盖内置 agent 的
 # model / temperature / steps。
 #

@@ -18,7 +18,6 @@ pub fn builtin_skills() -> &'static [BuiltinSkill] {
             "**Prefer delegation over doing it yourself.** Delegate when the task involves:\n",
             "\n",
             "- Searching or exploring the codebase → `explorer`\n",
-            "- Reading and understanding unfamiliar code → `code_reader`\n",
             "- Making code changes (edit, write, refactor, fix) → `fixer`\n",
             "\n",
             "## When NOT to Delegate\n",

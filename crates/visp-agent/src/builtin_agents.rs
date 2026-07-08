@@ -7,7 +7,6 @@ use visp_core::agent_registry::AgentRegistry;
 /// via `load_agents` will overwrite them.
 pub(crate) fn register_builtin_agents(registry: &mut AgentRegistry) {
     register_default(registry);
-    register_code_reader(registry);
     register_explorer(registry);
     register_fixer(registry);
 }
@@ -24,21 +23,6 @@ fn register_default(registry: &mut AgentRegistry) {
         system_prompt: String::new(),
     };
     registry.register(default_agent).ok();
-}
-
-fn register_code_reader(registry: &mut AgentRegistry) {
-    let code_reader = AgentDefinition {
-        name: "code_reader".to_string(),
-        description: "代码阅读分析子 Agent，擅长阅读、理解和解释源代码，可被 task 工具调用"
-            .to_string(),
-        mode: AgentMode::Subagent,
-        model: None,
-        temperature: None,
-        steps: None,
-        permission: Vec::new(),
-        system_prompt: String::new(),
-    };
-    registry.register(code_reader).ok();
 }
 
 fn register_explorer(registry: &mut AgentRegistry) {

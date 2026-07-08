@@ -2584,11 +2584,11 @@ mod tests {
     #[test]
     fn test_route_frame_text_delta_sub_session_creates_tab() {
         let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
-        let frame = make_text_delta_frame("sub-1", "code_reader", "hello");
+        let frame = make_text_delta_frame("sub-1", "explorer", "hello");
         app.route_frame(frame);
         assert_eq!(app.tab_bar.tabs.len(), 2);
         assert_eq!(app.tab_bar.tabs[1].session_id, "sub-1");
-        assert_eq!(app.tab_bar.tabs[1].agent_name, "code_reader");
+        assert_eq!(app.tab_bar.tabs[1].agent_name, "explorer");
         assert_eq!(app.tab_bar.tabs[1].frames.len(), 1);
         assert!(app.tab_bar.tabs[1].messages.is_empty());
     }
@@ -2638,9 +2638,9 @@ mod tests {
         assert_eq!(app.tab_bar.tabs[1].agent_name, "agent");
 
         // 后续帧带真实 agent_name → 升级 fallback "agent" 为真名
-        let f2 = make_text_delta_frame("sub-sid", "code_reader", "second");
+        let f2 = make_text_delta_frame("sub-sid", "explorer", "second");
         app.route_frame(f2);
-        assert_eq!(app.tab_bar.tabs[1].agent_name, "code_reader");
+        assert_eq!(app.tab_bar.tabs[1].agent_name, "explorer");
         assert_eq!(app.tab_bar.tabs[1].frames.len(), 2);
     }
 

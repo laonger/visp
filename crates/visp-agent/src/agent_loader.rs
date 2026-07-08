@@ -345,10 +345,9 @@ You search.
 
         let registry = load_agents(&[dir.join(".visp/agents/").as_path()], &[]);
         assert!(registry.get("default").is_some());
-        assert!(registry.get("code_reader").is_some());
         assert!(registry.get("explorer").is_some());
         assert!(registry.get("fixer").is_some());
-        assert_eq!(registry.list().len(), 4);
+        assert_eq!(registry.list().len(), 3);
     }
 
     #[test]
@@ -357,10 +356,9 @@ You search.
 
         let registry = load_agents(&[], &[]);
         assert!(registry.get("default").is_some());
-        assert!(registry.get("code_reader").is_some());
         assert!(registry.get("explorer").is_some());
         assert!(registry.get("fixer").is_some());
-        assert_eq!(registry.list().len(), 4);
+        assert_eq!(registry.list().len(), 3);
     }
 
     #[test]
@@ -383,10 +381,9 @@ mode: all
 
         let registry = load_agents(&[dir.join(".visp/agents/").as_path()], &[]);
         assert!(registry.get("default").is_some());
-        assert!(registry.get("code_reader").is_some());
         assert!(registry.get("valid").is_some());
         // Invalid file should not produce an entry (only built-ins + valid)
-        assert_eq!(registry.list().len(), 5);
+        assert_eq!(registry.list().len(), 4);
     }
 
     #[test]
@@ -514,7 +511,7 @@ permission: allow grep *
         assert!(registry.get("nonexistent").is_none());
         // Built-ins still present
         assert!(registry.get("default").is_some());
-        assert_eq!(registry.list().len(), 4);
+        assert_eq!(registry.list().len(), 3);
     }
 
     #[test]

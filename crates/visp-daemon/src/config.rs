@@ -176,7 +176,7 @@ pub struct AgentSection {
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 pub struct BuiltinAgentConfig {
-    /// 内置 agent 名称，如 "explorer"、"fixer"、"code_reader"
+    /// 内置 agent 名称，如 "explorer"、"fixer"
     pub name: String,
     /// 模型 key（格式 {provider}/{model} 或 {provider}.{name}）
     #[serde(default)]

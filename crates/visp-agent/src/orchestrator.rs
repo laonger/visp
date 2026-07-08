@@ -2183,7 +2183,7 @@ mod tests {
         orch.active_agents.register(ActiveAgent {
             session_id: "child-c".to_string(),
             parent_session_id: Some("parent-c".to_string()),
-            agent_name: "code_reader".to_string(),
+            agent_name: "explorer".to_string(),
             cancel_token: cancel.clone(),
             inbox: mpsc::channel(16).0,
             pending_call_id: Some("call-cancel-1".to_string()),
