@@ -448,6 +448,11 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                     app.current_request_id = None;
                     app.set_generating(false);
                     chat_handle.send_cancel();
+                } else {
+                    // Idle 状态：清空输入框
+                    app.textarea = AppState::new_textarea();
+                    app.tab_completion = None;
+                    app.needs_render = true;
                 }
                 return false;
             }
