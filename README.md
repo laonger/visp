@@ -29,8 +29,8 @@
 ├───────┴─────────────────────────────────────────────────────┤
 │  后端 Daemon                                                │
 │  ┌───────────────────────────────────────────────────────┐  │
-│  │  Agent 编排器 → LLM Provider → 工具执行 → CodeGraph   │  │
-│  │  规则引擎 · Skills · 上下文裁剪 · 会话管理            │  │
+│  │  Orchestrator -> Sub-Agents -> LLM -> 工具执行           │  │
+│  │  CodeGraph · Skills · 上下文裁剪 · 会话管理 · 可观测性  │  │
 │  └───────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -47,7 +47,7 @@ visp 采用 **前后端分离的 daemon 架构**，核心决策是让后端（Da
 
 **Launcher（`visp`）** — 一键式入口。不参与运行时架构，只做启动编排：start daemon → health check → start CLI → CLI 退出后 shutdown daemon。本身启动完即退出。
 
-**Daemon（`visp-daemon`）** — 核心服务进程，常驻后台。负责 Agent 编排、LLM 调用、工具执行、CodeGraph、会话管理、上下文裁剪、规则引擎、Skills 等全部 AI 能力。这是唯一直接使用 AI 模型和系统资源的进程。
+**Daemon（`visp-daemon`）** - 核心服务进程，常驻后台。负责 Multi-Agent 编排（Orchestrator）、LLM 调用、工具执行、CodeGraph、会话管理、上下文裁剪、规则引擎、Skills、可观测性等全部 AI 能力。这是唯一直接使用 AI 模型和系统资源的进程。
 
 **CLI（`visp-cli`）** — TUI 前端（ratatui），通过 gRPC 连接 Daemon，提供聊天界面、审批弹窗、命令系统（`/model`、`/init` 等）。CLI 是默认前端，gRPC 接口同样可被 VSCode 插件、Web 界面等其他前端复用。
 
@@ -59,6 +59,8 @@ visp 采用 **前后端分离的 daemon 架构**，核心决策是让后端（Da
 |-------|------|------|
 | [visp](crates/visp/) | Launcher — 一键启动 daemon + CLI | [README](crates/visp/README.md) |
 | [visp-core](crates/visp-core/) | 核心抽象层 — Agent/Session/Tool/Prompt/Rules | [README](crates/visp-core/README.md) |
+| [visp-agent](crates/visp-agent/) | Multi-Agent 编排 - Orchestrator + Sub-Agent 生命周期 | - |
+| [visp-command](crates/visp-command/) | CLI 命令系统 - 命令注册/解析/Tab 补全 | - |
 | [visp-proto](crates/visp-proto/) | gRPC 协议定义 + 代码生成 | [README](crates/visp-proto/README.md) |
 | [visp-llm](crates/visp-llm/) | LLM 提供器 — Anthropic/OpenAI API 集成 | [README](crates/visp-llm/README.md) |
 | [visp-tools](crates/visp-tools/) | 内置工具 — 文件/Bash/搜索/WebFetch/CodeGraph | [README](crates/visp-tools/README.md) |
@@ -69,6 +71,11 @@ visp 采用 **前后端分离的 daemon 架构**，核心决策是让后端（Da
 | [visp-mcp](crates/visp-mcp/) | MCP 客户端 — 连接外部 MCP 服务器获取动态工具 | [README](crates/visp-mcp/README.md) |
 
 ## 核心特性
+
+### Multi-Agent 编排
+主 Agent 可通过 TaskTool 将子任务委托给专门的 Sub-Agent（如 `explorer` 代码搜索、`fixer` 代码实现），实现并行工作与职责分离。Sub-Agent 拥有独立会话和权限作用域，Orchestrator 管理完整生命周期（spawn → run → complete/error）。
+
+Agent 定义从 `.visp/agents/*.md` 加载（YAML frontmatter + Markdown），支持项目级和全局配置目录，frontmatter 可声明 `permissions` 等元数据。
 
 ### Agent 编排循环
 用户输入 → LLM → 工具调用 → LLM → ... 的完整循环，支持流式输出、多工具并行、自动重试、Thinking 模式、迭代保护。详见 [visp-core](crates/visp-core/README.md)。
@@ -96,7 +103,7 @@ visp 采用 **前后端分离的 daemon 架构**，核心决策是让后端（Da
 长对话自动管理 context window，通过三段式剪枝（HEAD/MIDDLE/TAIL）和工具输出压缩控制 token 用量。详见 [visp-context](crates/visp-context/README.md)。
 
 ### Skills 技能系统
-从 `.visp/skills/` 加载技能定义（YAML frontmatter + Markdown），自动合并到 system prompt 中，用于注入领域知识或工作流指令。详见 [visp-core](crates/visp-core/README.md)。
+从 `.visp/skills/` 加载技能定义（YAML frontmatter + Markdown），通过 SkillTool 按需加载，自动注入 system prompt。内置 `delegation-workflow` 技能指导 Multi-Agent 委托策略。详见 [visp-core](crates/visp-core/README.md)。
 
 ### 规则引擎
 从 `.visp/rules/`（项目级）和 `~/.config/visp/rules/`（全局）加载 Markdown 规则，通过 `alwaysApply: true/false` 控制注入时机。同时支持 AGENTS.md 从项目目录向上查找。
@@ -143,6 +150,12 @@ tool_timeout_secs = 120  # 覆盖默认 60s 超时
 | `tool_timeout_secs` | 单次工具调用超时 | `60` |
 
 MCP 工具与内置工具同属一个 Registry，Agent 循环自动识别与调用。工具名冲突时 MCP 工具会被跳过（内置工具优先级更高）。
+
+### 可观测性
+内置 OpenTelemetry 集成，支持 OTLP 导出 trace 到 [Langfuse](https://langfuse.com/) 或任意 OTel 兼容后端。覆盖完整的 Agent 调用链：`agent.run` → `iteration` → `gen_ai.client.operation` → `tool.execute`，Sub-Agent 通过 `visp.subagent.spawn` span 建立父子关系。内置 PII 脱敏、`sample_rate` 采样控制、零采样快速路径。
+
+### CLI 多 Tab 界面
+Sub-Agent 委托时自动创建独立 Tab，实时展示每个 Agent 的运行状态（Running / Done / Error）。支持 `Alt+←/→` 循环切换、鼠标点击切换、`Ctrl+W` 关闭已完成的 Tab。三层 Token 追踪（Tab 级 / 请求级 / 会话级）实时显示用量。
 
 ## 快速开始
 
@@ -229,6 +242,30 @@ alwaysApply: true
 
 内容格式：`---` 分隔的 YAML frontmatter（`name`、`description`）后接 Markdown 正文，自动合并到 system prompt。详见 [visp-core](crates/visp-core/README.md)。
 
+### Agent 定义文件（agents）
+
+Sub-Agent 定义放在 `.visp/agents/`（项目级）或 `~/.config/visp/agents/`（全局），每个 Agent 一个 `.md` 文件：
+
+```
+.visp/agents/
+├── explorer.md      # 代码搜索专家
+├── fixer.md         # 代码实现专家
+└── reviewer.md      # 代码审查专家
+```
+
+```markdown
+---
+name: explorer
+description: 代码搜索专家，快速定位文件和代码模式
+permissions:
+  tools: [read_file, grep, glob, codegraph_search]
+---
+
+你是一个代码搜索专家...
+```
+
+frontmatter 支持 `name`、`description`、`permissions`（限制可用工具）等字段。主 Agent 通过 TaskTool 自动发现并委托任务给匹配的 Sub-Agent。
+
 ### 运行
 
 ```bash
@@ -269,6 +306,8 @@ cargo build --release
 | `↑` / `↓` | 上/下一条历史输入 |
 | `PgUp` / `PgDn` | 向上/下滚动 10 行 |
 | `Tab` | 命令自动补全 |
+| `Alt+←` / `Alt+->` | 切换 Sub-Agent Tab（循环） |
+| `Ctrl+W` | 关闭已完成的 Sub-Agent Tab |
 | `Ctrl+C` | 中断正在生成的请求 |
 | `Ctrl+D` | 无条件退出程序 |
 | `←` / `→` | 审批弹窗中切换选项 |
@@ -287,6 +326,8 @@ cargo build --release
 | `/sessions <id>` | 切换到指定 session（支持 short-id） |
 | `/new` | 创建新 session |
 | `/init` | 初始化项目配置并生成 AGENTS.md |
+| `/init-agent` | 创建 Sub-Agent 定义模板（`.visp/agents/`） |
+| `/init-skill` | 创建 Skill 定义模板（`.visp/skills/`） |
 | `/mouse` | 切换鼠标捕获模式 |
 | `/clear` | 清屏 |
 | `/help` | 显示帮助 |
@@ -299,7 +340,7 @@ cargo test && cargo clippy -- -D warnings && cargo fmt -- --check
 
 ## 技术栈
 
-Rust (edition 2024) · tokio · tonic + prost · serde · ratatui + crossterm · tree-sitter · SQLite (rusqlite) · notify · tracing · reqwest · clap · rmcp (MCP 协议)
+Rust (edition 2024) · tokio · tonic + prost · serde · ratatui + crossterm · tree-sitter · SQLite (rusqlite) · notify · tracing · OpenTelemetry (OTLP) · reqwest · clap · rmcp (MCP 协议)
 
 ## 已知限制
 

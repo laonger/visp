@@ -43,6 +43,8 @@
 
 ## 🔴 待实现（按优先级排序）
 
+### 固化skills、agent
+
 ### 继承RTK
 
 https://github.com/rtk-ai/rtk
