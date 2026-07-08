@@ -4,7 +4,7 @@
 //! all built-in slash commands.  Three execution paths exist:
 //!
 //! 1. **Local commands** — handled entirely in the CLI without contacting
-//!    the daemon: [`/clear`], [`/help`], [`/mouse`].
+//!    the daemon: [`/clear`], [`/help`].
 //!
 //! 2. **Daemon passthrough commands** — sent as `UserInput` text to the
 //!    daemon, which intercepts and processes them: [`/init`],
@@ -34,10 +34,6 @@ pub fn handle(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) {
         }
         "/help" => {
             app.show_help = !app.show_help;
-            return;
-        }
-        "/mouse" => {
-            crate::event::toggle_mouse_mode(app);
             return;
         }
         _ => {}

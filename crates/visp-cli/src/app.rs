@@ -1083,7 +1083,18 @@ pub struct AppState {
     pub total_output_tokens: u32,
     pub total_cache_creation_input_tokens: u32,
     pub total_cache_read_input_tokens: u32,
-    pub mouse_captured: bool,
+    /// 鼠标文本选择状态（内容坐标）
+    pub text_selection: crate::selection::TextSelection,
+    /// 上一次复制是否成功（用于状态提示）
+    pub last_copy_msg: Option<String>,
+    /// 标记：下一帧渲染时从 buffer 提取选中文字
+    pub pending_copy: bool,
+    /// 渲染时提取的待复制文本（draw 完成后由主循环执行 OSC 52）
+    pub pending_copy_text: Option<String>,
+    /// last_copy_msg 的设置时间，用于自动清除提示
+    pub last_copy_time: Option<std::time::Instant>,
+    /// 上一次渲染的 chat area 矩形（屏幕坐标，用于鼠标命中测试）
+    pub chat_area_rect: (u16, u16, u16, u16),
     /// 用户输入了 /new 命令，主循环需要创建新 session
     pub pending_new_session: bool,
     /// 用户输入了 /list 命令，主循环需要列出 session
@@ -1150,7 +1161,12 @@ impl AppState {
             total_output_tokens: 0,
             total_cache_creation_input_tokens: 0,
             total_cache_read_input_tokens: 0,
-            mouse_captured: true,
+            text_selection: crate::selection::TextSelection::default(),
+            last_copy_msg: None,
+            pending_copy: false,
+            pending_copy_text: None,
+            last_copy_time: None,
+            chat_area_rect: (0, 0, 0, 0),
             pending_new_session: false,
             pending_list_sessions: false,
             pending_switch_session: None,
@@ -1511,7 +1527,7 @@ impl AppState {
         // 此处不做任何处理
     }
 
-    /// 重置为新 session 的状态（保留 mouse 设置和 textarea 内容）
+    /// 重置为新 session 的状态（保留 textarea 内容）
     pub fn reset_for_new_session(&mut self, session_id: String, model: String, model_key: String) {
         // 重置 active tab 的内容状态（msg/streaming/generating/usage）
         let tab = self.active_tab_mut();

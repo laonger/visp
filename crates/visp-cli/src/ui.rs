@@ -306,11 +306,65 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
     if app.model_select.is_some() {
         render_model_select(f, f.area(), app);
     }
+
+    // 文本选择：拖拽松开后从 buffer 提取选中文字
+    // 必须在 apply_selection_highlight 之前执行（此时 buffer 是纯文本，无高亮背景）
+    // OSC 52 写入由主循环在 draw() 完成后执行，避免被 ratatui 输出干扰
+    if app.pending_copy && app.text_selection.is_active() {
+        let text = crate::selection::extract_selected_text(
+            f.buffer_mut(),
+            &app.text_selection,
+            app.scroll_state.y,
+        );
+        if !text.is_empty() {
+            app.pending_copy_text = Some(text);
+        }
+        app.pending_copy = false;
+    }
+
+    // 自动清除复制提示（2 秒后）
+    if let Some(t) = app.last_copy_time
+        && t.elapsed() > std::time::Duration::from_secs(2)
+    {
+        app.last_copy_msg = None;
+        app.last_copy_time = None;
+    }
+
+    // 文本选择高亮：对选中区域应用浅蓝色背景
+    if app.text_selection.is_highlighting() {
+        apply_selection_highlight(f, &app.text_selection, app.scroll_state.y);
+    }
 }
 
 // ════════════════════════════════════════════════════════════════
 // 工具函数
 // ════════════════════════════════════════════════════════════════
+
+// ════════════════════════════════════════════════════════════════
+// 文本选择高亮
+// ════════════════════════════════════════════════════════════════
+
+/// 对选中区域的 buffer cells 应用浅蓝色背景
+fn apply_selection_highlight(
+    f: &mut Frame,
+    selection: &crate::selection::TextSelection,
+    scroll_y: u16,
+) {
+    if !selection.is_active() {
+        return;
+    }
+    let buf = f.buffer_mut();
+    let area = buf.area();
+    let (x, right, y, bottom) = (area.x, area.right(), area.y, area.bottom());
+    for row in y..bottom {
+        for col in x..right {
+            if selection.contains(col, row, scroll_y) {
+                let cell = &mut buf[(col, row)];
+                cell.set_bg(theme::SELECTION_BG);
+            }
+        }
+    }
+}
 
 /// 计算 block 在视窗中的可见范围。不可见返回 None。
 ///
@@ -440,6 +494,9 @@ fn ensure_all_caches(app: &mut AppState, width: u16) {
 
 /// 渲染对话消息列表 + 流式文本。使用统一的 BlockStyle 驱动。
 fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
+    // 保存 chat area 矩形供鼠标命中测试使用
+    app.chat_area_rect = (area.x, area.y, area.width, area.height);
+
     let content_w = area.width.saturating_sub(1);
     // render_block 中 content_w_adj = content_w - margin_horizontal*2
     // 所有 style 的 margin_horizontal 均为 1，按渲染实际宽度折行
@@ -780,7 +837,6 @@ fn render_input_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                 "/init-skill",
                 "/list",
                 "/model",
-                "/mouse",
                 "/new",
                 "/sessions",
                 "/temp",
@@ -825,28 +881,30 @@ fn format_status_left(
     session_id: &str,
     model_key: &str,
     generating: bool,
-    mouse_captured: bool,
 ) -> String {
     let sid: String = session_id.chars().take(8).collect();
     let status = if generating { "Generating" } else { "Idle" };
-    let mouse = if mouse_captured { "Mouse" } else { "Select" };
     let (provider, model_label) = split_model_name(model_key);
     format!(
-        "{sid} | {model}({provider}) | {status} | [{mouse}] | /help = help",
+        "{sid} | {model}({provider}) | {status} | /help = help",
         sid = sid,
         model = model_label,
         provider = provider
     )
 }
 
-/// 底部状态栏：左对齐显示会话 ID / 模型 / 状态 / 鼠标模式，token 统计靠右对齐
+/// 底部状态栏：左对齐显示会话 ID / 模型 / 状态，token 统计靠右对齐
 fn render_status_bar(app: &AppState, f: &mut Frame, area: Rect) {
-    let left_text = format_status_left(
-        &app.session_id,
-        &app.model_key,
-        app.generating(),
-        app.mouse_captured,
-    );
+    // 复制提示激活时，状态栏左侧显示复制信息
+    let left_text = if app.last_copy_msg.is_some() {
+        app.last_copy_msg.clone().unwrap_or_default()
+    } else {
+        format_status_left(
+            &app.session_id,
+            &app.model_key,
+            app.generating(),
+        )
+    };
 
     // 有 token 时左右分割显示，否则整行给左侧
     if app.total_input_tokens > 0 || app.total_output_tokens > 0 {
@@ -911,7 +969,6 @@ fn render_help_popup(f: &mut Frame, area: Rect) {
         ("/temp <n>", "Set temperature (0.0–1.0)"),
         ("/model <m>", "Switch model"),
         ("/init", "Initialize session with system prompt"),
-        ("/mouse", "Toggle mouse capture mode"),
         (
             "/init-agent <name>",
             "Create a template agent file in .visp/agents/",
@@ -923,8 +980,9 @@ fn render_help_popup(f: &mut Frame, area: Rect) {
     ];
     let key_items = [
         ("F1 / /help", "Toggle this help popup"),
-        ("Alt+M", "Toggle mouse capture mode"),
-        ("Ctrl+C", "Cancel generation / confirm"),
+        ("Mouse drag", "Select & auto-copy to clipboard"),
+        ("Esc", "Clear text selection"),
+        ("Ctrl+C", "Cancel generation"),
         ("↑ / ↓", "Input history navigation"),
         ("Ctrl+D", "Quit"),
         ("Enter", "Send message / confirm selection"),
@@ -1151,28 +1209,28 @@ mod tests {
 
     #[test]
     fn test_format_status_left_generating() {
-        let s = format_status_left("abc12345", "Ollama/DeepSeek", true, false);
+        let s = format_status_left("abc12345", "Ollama/DeepSeek", true);
         assert_eq!(
             s,
-            "abc12345 | DeepSeek(Ollama) | Generating | [Select] | /help = help"
+            "abc12345 | DeepSeek(Ollama) | Generating | /help = help"
         );
     }
 
     #[test]
-    fn test_format_status_left_idle_mouse() {
-        let s = format_status_left("sess_xyz", "Anthropic/Claude Sonnet", false, true);
+    fn test_format_status_left_idle() {
+        let s = format_status_left("sess_xyz", "Anthropic/Claude Sonnet", false);
         assert_eq!(
             s,
-            "sess_xyz | Claude Sonnet(Anthropic) | Idle | [Mouse] | /help = help"
+            "sess_xyz | Claude Sonnet(Anthropic) | Idle | /help = help"
         );
     }
 
     #[test]
     fn test_format_status_left_empty_provider() {
-        let s = format_status_left("abcdefgh", "ollama/deepseek-v4-flash", false, false);
+        let s = format_status_left("abcdefgh", "ollama/deepseek-v4-flash", false);
         assert_eq!(
             s,
-            "abcdefgh | deepseek-v4-flash(ollama) | Idle | [Select] | /help = help"
+            "abcdefgh | deepseek-v4-flash(ollama) | Idle | /help = help"
         );
     }
 

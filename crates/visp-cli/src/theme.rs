@@ -122,6 +122,9 @@ pub const SELECT_ITEM_FG: Color = Color::White;
 /// Session 选择器高亮行背景
 pub const SELECT_HIGHLIGHT_BG: Color = CONFIRM_SELECTED_BG;
 
+/// 文本选择高亮背景色（浅蓝色）
+pub const SELECTION_BG: Color = Color::from_u32(0x004A90D9);
+
 // ════════════════════════════════════════════════════════════════
 // BlockStyle — 消息块布局参数
 // ════════════════════════════════════════════════════════════════

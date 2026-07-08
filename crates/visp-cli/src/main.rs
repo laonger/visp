@@ -2,6 +2,7 @@ mod app;
 mod client;
 mod command;
 mod event;
+mod selection;
 mod theme;
 mod ui;
 

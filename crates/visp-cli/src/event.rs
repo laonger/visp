@@ -69,8 +69,8 @@ struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = crossterm::terminal::disable_raw_mode();
-        // 关闭 mouse mode 1000 + 1006 和 bracketed paste mode 2004
-        let _ = write!(io::stdout(), "\x1b[?1000l\x1b[?1006l\x1b[?2004l");
+        // 关闭 mouse mode 1000 + 1002 + 1006 和 bracketed paste mode 2004
+        let _ = write!(io::stdout(), "\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l");
         let _ = io::stdout().flush();
     }
 }
@@ -90,9 +90,9 @@ pub async fn run(
         debug_log!("session start: {_w}x{_h}, model={model}");
     }
     crossterm::terminal::enable_raw_mode()?;
-    // 只启用 mouse mode 1000（按钮点击事件），保留拖拽给终端做原生选择复制
-    // 不启用 1002/1003，这样 drag 不会拦截终端选择
-    write!(io::stdout(), "\x1b[?1000h\x1b[?1006h\x1b[?2004h")?;
+    // 启用 mouse mode 1000（按钮事件）+ 1002（按钮+拖拽）+ 1006（SGR 坐标编码）
+    // 1002 使我们在 chat area 内可以收到 Drag 事件，实现文字选择
+    write!(io::stdout(), "\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h")?;
     io::stdout().flush()?;
     let _guard = TerminalGuard;
     let mut terminal = ratatui::init();
@@ -283,6 +283,11 @@ pub async fn run(
             }
         }
 
+        // 当复制提示显示时，保持渲染以自动清除提示
+        if app.last_copy_time.is_some() {
+            app.needs_render = true;
+        }
+
         if app.needs_render {
             // 确认状态始终需要渲染，不受流节流影响
             if app.generating() && app.confirm.is_none() && !app.try_begin_stream_render() {
@@ -292,6 +297,14 @@ pub async fn run(
                 let _ = terminal.draw(|f| render(&mut app, f));
                 app.needs_render = false;
             }
+        }
+
+        // draw() 完成后执行 OSC 52 复制（避免被 ratatui 输出覆盖）
+        if let Some(text) = app.pending_copy_text.take() {
+            crate::selection::osc52_copy(&text);
+            app.last_copy_msg = Some(format!("Copied {} chars", text.chars().count()));
+            app.last_copy_time = Some(std::time::Instant::now());
+            app.needs_render = true; // 触发重绘显示 toast
         }
     }
 
@@ -396,17 +409,6 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
     app.needs_render = true;
     match event {
         Event::Key(key) => {
-            // Alt+M 或 Ctrl+M: 切换鼠标捕获模式，任何时候都生效
-            // Ctrl+M 在许多终端等价于 Enter，同时检查两种可能
-            if (key.code == KeyCode::Char('m')
-                && (key.modifiers.contains(KeyModifiers::ALT)
-                    || key.modifiers.contains(KeyModifiers::CONTROL)))
-                || (key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL))
-            {
-                toggle_mouse_mode(app);
-                return false;
-            }
-
             // F1: 切换帮助弹窗
             if key.code == KeyCode::F(1) {
                 app.show_help = !app.show_help;
@@ -416,6 +418,13 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
             // 帮助弹窗打开时，按任意键关闭（F1 在上面已经处理了切换）
             if app.show_help {
                 app.show_help = false;
+                return false;
+            }
+
+            // 文本选择模式：Esc 清除选择
+            if app.text_selection.is_active() && key.code == KeyCode::Esc {
+                app.text_selection.clear();
+                app.needs_render = true;
                 return false;
             }
 
@@ -575,11 +584,13 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
             // 后续字节判断是否为转义序列，会造成数十毫秒的卡顿
             if key.code == KeyCode::Char('.') && key.modifiers == KeyModifiers::ALT {
                 app.tab_bar.activate_next();
+                app.text_selection.clear();
                 app.scroll_following = true;
                 return false;
             }
             if key.code == KeyCode::Char(',') && key.modifiers == KeyModifiers::ALT {
                 app.tab_bar.activate_prev();
+                app.text_selection.clear();
                 app.scroll_following = true;
                 return false;
             }
@@ -686,7 +697,6 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                             "/init-skill ",
                             "/list",
                             "/model ",
-                            "/mouse",
                             "/sessions ",
                             "/temp ",
                         ];
@@ -784,8 +794,57 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
             app.show_help = false;
             return false;
         }
-        // 状态栏左键点击切换鼠标模式（底部区域，右半侧）；以及 tab bar 左键切换 tab
+        // 鼠标拖拽：更新选择范围
+        Event::Mouse(m)
+            if m.kind == MouseEventKind::Drag(crossterm::event::MouseButton::Left)
+                && app.text_selection.start.is_some()
+                && !app.show_help =>
+        {
+            // 屏幕坐标 -> 内容坐标（加 scroll 偏移）
+            app.text_selection.end = Some((m.column, m.row + app.scroll_state.y));
+            app.needs_render = true;
+            return false;
+        }
+        // 鼠标左键释放：如果有选择范围，通过 OSC 52 自动复制到剪贴板
+        Event::Mouse(m)
+            if m.kind == MouseEventKind::Up(crossterm::event::MouseButton::Left)
+                && app.text_selection.start.is_some() =>
+        {
+            // 纯点击（start==end）：清除选择，不复制
+            if app.text_selection.start == app.text_selection.end {
+                app.text_selection.clear();
+                app.needs_render = true;
+            } else {
+                // 拖拽结束：标记待复制（渲染时从 buffer 提取文本）
+                app.pending_copy = true;
+                app.needs_render = true;
+            }
+            return false;
+        }
+        // 鼠标左键按下：清除旧选择，记录起点（点击不高亮，拖拽才高亮）
         Event::Mouse(m) if m.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+            // 先检查是否在 chat area 内（用于文本选择）
+            let (cx, cy, cw, ch) = app.chat_area_rect;
+            let in_chat = cw > 0
+                && ch > 0
+                && m.column >= cx
+                && m.column < cx + cw
+                && m.row >= cy
+                && m.row < cy + ch;
+
+            if in_chat && !app.show_help {
+                // 记录起点（内容坐标），清除旧选择
+                let content_row = m.row + app.scroll_state.y;
+                app.text_selection.clear();
+                app.text_selection.start = Some((m.column, content_row));
+                app.text_selection.end = Some((m.column, content_row));
+                app.needs_render = true;
+                return false;
+            }
+
+            // 不在 chat area 内：清除选择，走原有逻辑
+            app.text_selection.clear();
+
             // 优先：tab bar 点击切换 tab
             if let Some(idx) = crate::ui::tab_at_screen(&app.tab_bar, m.column, m.row) {
                 if idx != app.tab_bar.active {
@@ -794,16 +853,6 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                     app.needs_render = true;
                 }
                 return false;
-            }
-            if let Ok((term_cols, term_rows)) = crossterm::terminal::size() {
-                // 状态栏在最底部 (0-indexed: term_rows - 1)
-                // 放宽到最后 3 行 + 右侧 1/3，兼容各种布局偏移
-                let bottom_start = term_rows.saturating_sub(3);
-                let right_start = (term_cols * 2 / 3).max(term_cols.saturating_sub(20));
-                if m.row >= bottom_start && m.column >= right_start {
-                    toggle_mouse_mode(app);
-                    return false;
-                }
             }
         }
         Event::Mouse(m) => match m.kind {
@@ -979,24 +1028,6 @@ fn build_input_from_key(key: KeyEvent) -> ratatui_textarea::Input {
         alt: key.modifiers.contains(KeyModifiers::ALT),
         shift: key.modifiers.contains(KeyModifiers::SHIFT),
     }
-}
-
-pub(crate) fn toggle_mouse_mode(app: &mut AppState) {
-    app.mouse_captured = !app.mouse_captured;
-    let _ = if app.mouse_captured {
-        use std::io::Write;
-        write!(io::stdout(), "\x1b[?1000h\x1b[?1006h")
-    } else {
-        use std::io::Write;
-        write!(io::stdout(), "\x1b[?1000l\x1b[?1006l")
-    };
-    let _ = io::stdout().flush();
-    let mode = if app.mouse_captured {
-        "Mouse"
-    } else {
-        "Select"
-    };
-    app.add_message(LineType::Status, format!("Mouse mode: {mode}"));
 }
 
 #[cfg(test)]
