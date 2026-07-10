@@ -1370,13 +1370,6 @@ impl AppState {
     pub fn append_streaming_text(&mut self, s: &str) {
         self.active_tab_mut().streaming_text.push_str(s);
     }
-    pub fn truncate_streaming(&mut self, n: usize) {
-        self.active_tab_mut().streaming_text.truncate(n);
-    }
-    pub fn streaming_rfind(&self, needle: &str) -> Option<usize> {
-        self.active_tab().streaming_text.rfind(needle)
-    }
-
     pub fn set_pending_usage(&mut self, v: Option<(u32, u32, u32, u32, u32)>) {
         self.active_tab_mut().pending_usage = v;
     }

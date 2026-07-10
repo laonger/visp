@@ -434,13 +434,6 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                     // 如果确认框存在，先将其关闭（向 agent 回复一个拒绝响应）
                     if let Some(q) = app.confirm.take() {
                         chat_handle.send_response(&q.query_id, 1, "");
-                        // 保留 assistant 已输出的消息，移除末尾的 [USER_QUERY] 标记
-                        if let Some(close_pos) = app.streaming_text().rfind("[/USER_QUERY]")
-                            && let Some(open_pos) =
-                                app.streaming_text()[..close_pos].rfind("[USER_QUERY")
-                        {
-                            app.truncate_streaming(open_pos);
-                        }
                     }
                     app.stale_done_expected = true;
                     app.flush_streaming();
@@ -528,14 +521,6 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                                 let q = app.confirm.take().unwrap();
                                 chat_handle.send_response(&q.query_id, 1, "");
                                 if app.generating() {
-                                    // 保留 assistant 已输出的消息，移除末尾的 [USER_QUERY] 标记
-                                    if let Some(close_pos) =
-                                        app.streaming_text().rfind("[/USER_QUERY]")
-                                        && let Some(open_pos) =
-                                            app.streaming_text()[..close_pos].rfind("[USER_QUERY")
-                                    {
-                                        app.truncate_streaming(open_pos);
-                                    }
                                     app.stale_done_expected = true;
                                     app.flush_streaming();
                                     app.clear_pending_usage();
