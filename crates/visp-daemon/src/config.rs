@@ -213,6 +213,35 @@ fn merge_llm_sections(global: &mut LlmSection, project: &LlmSection) {
     }
 }
 
+/// 将 project config 的 [[agent.builtin]] 部分合并到 global config 中。
+/// 优先级：project config > global config。
+/// - 按 name 匹配同名 agent，project 的 model/temperature/steps（仅当 Some）覆盖 global 的值。
+/// - project 中新增的 agent（global 中无同名项）会被追加。
+fn merge_agent_builtins(global: &mut Vec<BuiltinAgentConfig>, project: &[BuiltinAgentConfig]) {
+    for project_item in project {
+        let mut found = false;
+        for global_item in &mut *global {
+            if global_item.name == project_item.name {
+                // 字段级合并：project 的 Some 覆盖 global，None 保留 global 值
+                if let Some(ref model) = project_item.model {
+                    global_item.model = Some(model.clone());
+                }
+                if let Some(temperature) = project_item.temperature {
+                    global_item.temperature = Some(temperature);
+                }
+                if let Some(steps) = project_item.steps {
+                    global_item.steps = Some(steps);
+                }
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            global.push(project_item.clone());
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ToolsSection {
     #[allow(dead_code)]
@@ -513,6 +542,7 @@ pub fn load_config(config_path: Option<&Path>) -> Result<DaemonConfig, String> {
     };
 
     // 3. 加载项目配置 cwd/.visp/daemon.toml，merge 到全局配置（项目优先级更高）
+    //    合并范围：[llm] 全部字段 + [[agent.builtin]]（按 name 字段级合并）
     if let Ok(cwd) = std::env::current_dir() {
         let project_path = cwd.join(".visp").join("daemon.toml");
         if project_path.exists() {
@@ -523,6 +553,7 @@ pub fn load_config(config_path: Option<&Path>) -> Result<DaemonConfig, String> {
             match load_from_file(&project_path) {
                 Ok(project_config) => {
                     merge_llm_sections(&mut config.llm, &project_config.llm);
+                    merge_agent_builtins(&mut config.agent.builtin, &project_config.agent.builtin);
                 }
                 Err(e) => {
                     tracing::warn!(path = %project_path.display(), error = %e, "failed to load project config, ignoring");
@@ -791,6 +822,87 @@ api_key = "project-key"
         // Should merge into one model, not add a second
         assert_eq!(global.llm.models.len(), 1);
         assert_eq!(global.llm.models[0].api_key.as_deref(), Some("project-key"));
+    }
+
+    #[test]
+    fn test_merge_agent_builtins_project_adds_new_agent() {
+        let mut global = vec![BuiltinAgentConfig {
+            name: "explorer".into(),
+            model: Some("opencode/deepseek-v4-flash".into()),
+            temperature: Some(0.1),
+            steps: None,
+        }];
+        let project = vec![BuiltinAgentConfig {
+            name: "oracle".into(),
+            model: Some("opencode/deepseek-v4-pro".into()),
+            temperature: None,
+            steps: Some(50),
+        }];
+
+        merge_agent_builtins(&mut global, &project);
+
+        assert_eq!(global.len(), 2);
+        assert_eq!(global[0].name, "explorer");
+        assert_eq!(global[1].name, "oracle");
+        assert_eq!(global[1].model.as_deref(), Some("opencode/deepseek-v4-pro"));
+        assert_eq!(global[1].steps, Some(50));
+    }
+
+    #[test]
+    fn test_merge_agent_builtins_project_overrides_existing_fields() {
+        let mut global = vec![BuiltinAgentConfig {
+            name: "explorer".into(),
+            model: Some("opencode/deepseek-v4-flash".into()),
+            temperature: Some(0.1),
+            steps: Some(30),
+        }];
+        // project overrides model and temperature, but steps is None (keep global)
+        let project = vec![BuiltinAgentConfig {
+            name: "explorer".into(),
+            model: Some("opencode/deepseek-v4-pro".into()),
+            temperature: Some(0.5),
+            steps: None,
+        }];
+
+        merge_agent_builtins(&mut global, &project);
+
+        assert_eq!(global.len(), 1);
+        assert_eq!(global[0].name, "explorer");
+        // overridden by project
+        assert_eq!(global[0].model.as_deref(), Some("opencode/deepseek-v4-pro"));
+        assert_eq!(global[0].temperature, Some(0.5));
+        // kept from global because project's steps is None
+        assert_eq!(global[0].steps, Some(30));
+    }
+
+    #[test]
+    fn test_merge_agent_builtins_empty_project_keeps_global() {
+        let mut global = vec![
+            BuiltinAgentConfig {
+                name: "explorer".into(),
+                model: Some("opencode/deepseek-v4-flash".into()),
+                temperature: Some(0.1),
+                steps: None,
+            },
+            BuiltinAgentConfig {
+                name: "fixer".into(),
+                model: None,
+                temperature: None,
+                steps: Some(30),
+            },
+        ];
+        let project: Vec<BuiltinAgentConfig> = vec![];
+
+        merge_agent_builtins(&mut global, &project);
+
+        assert_eq!(global.len(), 2);
+        assert_eq!(global[0].name, "explorer");
+        assert_eq!(
+            global[0].model.as_deref(),
+            Some("opencode/deepseek-v4-flash")
+        );
+        assert_eq!(global[1].name, "fixer");
+        assert_eq!(global[1].steps, Some(30));
     }
 
     #[test]

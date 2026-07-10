@@ -6,13 +6,15 @@
 #
 # 配置优先级（从高到低）：
 #   1. CLI 参数指定的配置文件路径
-#   2. 项目级配置 cwd/.visp/daemon.toml （仅 [llm] 部分会 merge 到全局配置）
+#   2. 项目级配置 cwd/.visp/daemon.toml （[llm] 和 [[agent.builtin]] 部分会 merge 到全局配置）
 #   3. 全局配置 ~/.config/visp/daemon.toml
 #   4. 环境变量（OPENAI_API_KEY / ANTHROPIC_API_KEY，仅当 api_key 字段未设置时生效）
 #
-# 项目级配置只需包含 [llm] 部分，用于覆盖全局配置中的模型设置
-# （如 api_key、base_url 等）。匹配规则：同 provider/name 或同 model/protocol
-# 视为同一模型，project 值覆盖 global 值；project 中新增的模型会被追加。
+# 项目级配置通常只包含 [llm] 和/或 [[agent.builtin]] 部分。
+# [llm] 用于覆盖全局配置中的模型设置（如 api_key、base_url 等）。
+# 匹配规则：同 provider/name 或同 model/protocol 视为同一模型，project 值覆盖 global 值；project 中新增的模型会被追加。
+# [[agent.builtin]] 用于覆盖内置 agent 的 model/temperature/steps。
+# 匹配规则：按 name 匹配同名 agent，project 值覆盖 global 值；project 中新增的 agent 会被追加。
 #
 # 所有字段均有默认值，不创建此文件也能正常运行。
 # 此模板列出了所有可配置项及其默认值，按需取消注释修改即可。
