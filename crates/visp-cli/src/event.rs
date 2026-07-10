@@ -899,6 +899,8 @@ fn handle_grpc_message(
             );
         }
         Some(server_message::Payload::UserQuery(uq)) => {
+            // 将已积累的 streaming text 刷入消息列表，使其走 markdown 渲染路径
+            app.flush_streaming();
             app.confirm = Some(ConfirmState {
                 query_id: uq.query_id.clone(),
                 message: uq.message.clone(),
