@@ -2933,8 +2933,10 @@ mod tests {
         use crate::tool_registry::ToolRegistry;
         use std::path::Path;
 
-        let mut llm_config = LlmConfig::default();
-        llm_config.provider = Some("Anthropic".to_string());
+        let llm_config = LlmConfig {
+            provider: Some("Anthropic".to_string()),
+            ..Default::default()
+        };
 
         let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
         let session = session_mgr.create(Path::new("/tmp"), llm_config).unwrap();

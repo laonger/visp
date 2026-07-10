@@ -2009,7 +2009,7 @@ mod tests {
         assert!(
             (stored.config.temperature - LlmConfig::default().temperature).abs() < f64::EPSILON
         );
-        assert!(stored.config.extra.get("thinking_budget_tokens").is_none());
+        assert!(!stored.config.extra.contains_key("thinking_budget_tokens"));
     }
 
     #[test]

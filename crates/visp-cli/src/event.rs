@@ -1052,7 +1052,7 @@ mod tests {
     #[test]
     fn test_sub_done_does_not_clear_main_generating() {
         let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
-        let mut chat = ChatHandle::new_mock("main");
+        let chat = ChatHandle::new_mock("main");
 
         // 主 agent 正在运行
         app.tab_bar.tabs[0].generating = true;
@@ -1066,7 +1066,7 @@ mod tests {
         app.tab_bar.activate(1);
 
         // 子 agent 完成
-        handle_grpc_message(make_done_msg("sub1"), &mut app, &mut chat);
+        handle_grpc_message(make_done_msg("sub1"), &mut app, &chat);
 
         // 子 tab generating 应为 false
         assert!(
@@ -1090,7 +1090,7 @@ mod tests {
     #[tokio::test]
     async fn test_main_done_does_not_clear_sub_generating() {
         let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
-        let mut chat = ChatHandle::new_mock("main");
+        let chat = ChatHandle::new_mock("main");
 
         // 主 agent 正在运行
         app.tab_bar.tabs[0].generating = true;
@@ -1104,7 +1104,7 @@ mod tests {
         app.tab_bar.activate(1);
 
         // 主 agent 完成
-        handle_grpc_message(make_done_msg("main"), &mut app, &mut chat);
+        handle_grpc_message(make_done_msg("main"), &mut app, &chat);
 
         // 主 tab generating 应为 false
         assert!(
@@ -1127,7 +1127,7 @@ mod tests {
     #[test]
     fn test_sub_error_does_not_clear_main_request_id() {
         let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
-        let mut chat = ChatHandle::new_mock("main");
+        let chat = ChatHandle::new_mock("main");
 
         app.tab_bar.tabs[0].generating = true;
         app.current_request_id = Some("req-1".to_string());
@@ -1142,7 +1142,7 @@ mod tests {
         handle_grpc_message(
             make_error_msg("sub1", "ProviderError", "timeout"),
             &mut app,
-            &mut chat,
+            &chat,
         );
 
         // 子 tab generating 应为 false
@@ -1160,7 +1160,7 @@ mod tests {
     #[test]
     fn test_stale_done_not_consumed_by_sub_done() {
         let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
-        let mut chat = ChatHandle::new_mock("main");
+        let chat = ChatHandle::new_mock("main");
 
         // 模拟 Ctrl+C 后的 stale 状态
         app.stale_done_expected = true;
@@ -1170,7 +1170,7 @@ mod tests {
         app.tab_bar.tabs[1].generating = true;
 
         // 子 agent Done 到来
-        handle_grpc_message(make_done_msg("sub1"), &mut app, &mut chat);
+        handle_grpc_message(make_done_msg("sub1"), &mut app, &chat);
 
         // stale_done_expected 仍应为 true（被子 Done 消耗了就错）
         assert!(
@@ -1181,7 +1181,7 @@ mod tests {
         assert!(!app.tab_bar.tabs[1].generating);
 
         // 接着主 agent Done 到来 — 应被 stale 跳过
-        handle_grpc_message(make_done_msg("main"), &mut app, &mut chat);
+        handle_grpc_message(make_done_msg("main"), &mut app, &chat);
         assert!(
             !app.stale_done_expected,
             "stale_done_expected should be consumed by main Done"
