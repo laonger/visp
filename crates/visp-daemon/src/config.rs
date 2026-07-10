@@ -5,10 +5,14 @@ use visp_mcp::config::McpConfig;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DaemonConfig {
+    #[serde(default = "default_daemon_section")]
     pub daemon: DaemonSection,
+    #[serde(default)]
     pub llm: LlmSection,
+    #[serde(default = "default_tools_section")]
     #[allow(dead_code)]
     pub tools: ToolsSection,
+    #[serde(default = "default_agent_section")]
     pub agent: AgentSection,
     #[serde(default)]
     pub tool: HashMap<String, toml::Value>,
@@ -30,7 +34,7 @@ pub struct DaemonSection {
     pub log_level: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct LlmSection {
     /// Claude thinking 模式预算 token 数（如 2048）
     #[serde(default)]
@@ -92,6 +96,48 @@ impl LlmModelConfig {
     pub fn matches_key(&self, candidate: &str) -> bool {
         self.key() == candidate || self.model_alias() == candidate
     }
+
+    /// 判断两个模型配置是否为同一个模型（用于 config merge 时的匹配）
+    fn matches_model(&self, other: &LlmModelConfig) -> bool {
+        self.matches_key(&other.key())
+            || self.matches_key(&other.model_alias())
+            || (self.model == other.model && self.protocol == other.protocol)
+    }
+
+    /// 用 `override_cfg` 的值覆盖当前配置中已设置（Some）的字段。
+    /// 用于 project config 覆盖 global config。
+    fn merge_override(&mut self, override_cfg: &LlmModelConfig) {
+        // 必填字段：override 总是覆盖
+        self.name = override_cfg.name.clone();
+        self.protocol = override_cfg.protocol.clone();
+        self.model = override_cfg.model.clone();
+        // Optional 字段：仅当 override 中为 Some 时覆盖
+        if override_cfg.provider.is_some() {
+            self.provider = override_cfg.provider.clone();
+        }
+        if override_cfg.api_key.is_some() {
+            self.api_key = override_cfg.api_key.clone();
+        }
+        if override_cfg.base_url.is_some() {
+            self.base_url = override_cfg.base_url.clone();
+        }
+        if override_cfg.temperature.is_some() {
+            self.temperature = override_cfg.temperature;
+        }
+        if override_cfg.max_tokens.is_some() {
+            self.max_tokens = override_cfg.max_tokens;
+        }
+        if override_cfg.max_context_tokens.is_some() {
+            self.max_context_tokens = override_cfg.max_context_tokens;
+        }
+        if override_cfg.thinking_budget_tokens.is_some() {
+            self.thinking_budget_tokens = override_cfg.thinking_budget_tokens;
+        }
+        // extra: merge map, override entries 优先
+        for (k, v) in &override_cfg.extra {
+            self.extra.insert(k.clone(), v.clone());
+        }
+    }
 }
 
 impl LlmSection {
@@ -131,6 +177,39 @@ impl LlmSection {
             .first()
             .map(|mc| mc.key())
             .unwrap_or_else(|| "default".to_string())
+    }
+}
+
+/// 将 project config 的 LLM 部分合并到 global config 中。
+/// 优先级：project config > global config。
+/// - project 中新增的模型会被追加到 models 列表。
+/// - project 中已存在的模型（key/model_alias/model+protocol 匹配）会用 project 的值覆盖 global 的值。
+/// - project 的 default 若设置，则覆盖 global 的 default。
+fn merge_llm_sections(global: &mut LlmSection, project: &LlmSection) {
+    if project.thinking_budget_tokens.is_some() {
+        global.thinking_budget_tokens = project.thinking_budget_tokens;
+    }
+    if project.default.is_some() {
+        global.default = project.default.clone();
+    }
+    // extra: merge map, project entries 优先
+    for (k, v) in &project.extra {
+        global.extra.insert(k.clone(), v.clone());
+    }
+    // models: 对 project 中的每个模型，尝试在 global 中找到匹配项并 merge override，
+    // 如果找不到匹配项则追加为新模型
+    for project_model in &project.models {
+        let mut found = false;
+        for global_model in &mut global.models {
+            if global_model.matches_model(project_model) {
+                global_model.merge_override(project_model);
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            global.models.push(project_model.clone());
+        }
     }
 }
 
@@ -413,22 +492,46 @@ fn default_observability_log_file() -> Option<String> {
 }
 
 pub fn load_config(config_path: Option<&Path>) -> Result<DaemonConfig, String> {
+    // 1. 如果通过 CLI 参数指定了配置文件，直接使用该文件（最高优先级，跳过 merge）
     if let Some(path) = config_path {
         return load_from_file(path);
     }
 
-    // 尝试默认路径 ~/.config/visp/daemon.toml
-    if let Ok(home) = std::env::var("HOME") {
-        let default_path = std::path::Path::new(&home)
+    // 2. 加载全局配置 ~/.config/visp/daemon.toml
+    let mut config = if let Ok(home) = std::env::var("HOME") {
+        let global_path = std::path::Path::new(&home)
             .join(".config")
             .join("visp")
             .join("daemon.toml");
-        if default_path.exists() {
-            return load_from_file(&default_path);
+        if global_path.exists() {
+            load_from_file(&global_path)?
+        } else {
+            default_config()
+        }
+    } else {
+        default_config()
+    };
+
+    // 3. 加载项目配置 cwd/.visp/daemon.toml，merge 到全局配置（项目优先级更高）
+    if let Ok(cwd) = std::env::current_dir() {
+        let project_path = cwd.join(".visp").join("daemon.toml");
+        if project_path.exists() {
+            tracing::info!(
+                path = %project_path.display(),
+                "loading project-level config"
+            );
+            match load_from_file(&project_path) {
+                Ok(project_config) => {
+                    merge_llm_sections(&mut config.llm, &project_config.llm);
+                }
+                Err(e) => {
+                    tracing::warn!(path = %project_path.display(), error = %e, "failed to load project config, ignoring");
+                }
+            }
         }
     }
 
-    Ok(default_config())
+    Ok(config)
 }
 
 fn load_from_file(path: &Path) -> Result<DaemonConfig, String> {
@@ -436,32 +539,44 @@ fn load_from_file(path: &Path) -> Result<DaemonConfig, String> {
     toml::from_str(&content).map_err(|e| format!("parse config: {}", e))
 }
 
+fn default_daemon_section() -> DaemonSection {
+    DaemonSection {
+        listen_addr: default_listen_addr(),
+        log_level: default_log_level(),
+    }
+}
+
+fn default_tools_section() -> ToolsSection {
+    ToolsSection {
+        bash_timeout_secs: default_bash_timeout(),
+        file_max_size_bytes: default_file_max_size(),
+    }
+}
+
+fn default_agent_section() -> AgentSection {
+    AgentSection {
+        soft_limit: default_soft_limit(),
+        doom_loop_threshold: default_doom_loop_threshold(),
+        llm_retry_attempts: default_retry_attempts(),
+        llm_retry_base_delay_ms: default_retry_delay(),
+        bash_confirm_mode: default_bash_confirm(),
+        file_max_size_bytes: default_file_max_size(),
+        max_depth: default_max_depth(),
+        builtin: Vec::new(),
+    }
+}
+
 fn default_config() -> DaemonConfig {
     DaemonConfig {
-        daemon: DaemonSection {
-            listen_addr: default_listen_addr(),
-            log_level: default_log_level(),
-        },
+        daemon: default_daemon_section(),
         llm: LlmSection {
             thinking_budget_tokens: None,
             extra: HashMap::new(),
             models: Vec::new(),
             default: None,
         },
-        tools: ToolsSection {
-            bash_timeout_secs: default_bash_timeout(),
-            file_max_size_bytes: default_file_max_size(),
-        },
-        agent: AgentSection {
-            soft_limit: default_soft_limit(),
-            doom_loop_threshold: default_doom_loop_threshold(),
-            llm_retry_attempts: default_retry_attempts(),
-            llm_retry_base_delay_ms: default_retry_delay(),
-            bash_confirm_mode: default_bash_confirm(),
-            file_max_size_bytes: default_file_max_size(),
-            max_depth: default_max_depth(),
-            builtin: Vec::new(),
-        },
+        tools: default_tools_section(),
+        agent: default_agent_section(),
         tool: HashMap::new(),
         mcp: McpConfig::default(),
         storage: StorageSection {
@@ -479,6 +594,207 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn test_merge_llm_sections_project_overrides_global_api_key_and_base_url() {
+        let global_toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+[[llm.models]]
+name = "Sonnet"
+protocol = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key = "global-key"
+base_url = "https://global.example.com"
+
+[tools]
+
+[agent]
+"#;
+        let project_toml = r#"
+[llm]
+[[llm.models]]
+name = "Sonnet"
+protocol = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key = "project-key"
+base_url = "https://project.example.com"
+"#;
+        let mut global: DaemonConfig = toml::from_str(global_toml).unwrap();
+        let project: DaemonConfig = toml::from_str(project_toml).unwrap();
+
+        merge_llm_sections(&mut global.llm, &project.llm);
+
+        assert_eq!(global.llm.models.len(), 1);
+        assert_eq!(global.llm.models[0].api_key.as_deref(), Some("project-key"));
+        assert_eq!(
+            global.llm.models[0].base_url.as_deref(),
+            Some("https://project.example.com")
+        );
+    }
+
+    #[test]
+    fn test_merge_llm_sections_project_adds_new_model() {
+        let global_toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+[[llm.models]]
+name = "Sonnet"
+protocol = "anthropic"
+model = "claude-sonnet-4-20250514"
+
+[tools]
+
+[agent]
+"#;
+        let project_toml = r#"
+[llm]
+[[llm.models]]
+name = "GPT-4o"
+protocol = "openai"
+model = "gpt-4o"
+api_key = "sk-project-key"
+"#;
+        let mut global: DaemonConfig = toml::from_str(global_toml).unwrap();
+        let project: DaemonConfig = toml::from_str(project_toml).unwrap();
+
+        merge_llm_sections(&mut global.llm, &project.llm);
+
+        assert_eq!(global.llm.models.len(), 2);
+        assert_eq!(global.llm.models[0].name, "Sonnet");
+        assert_eq!(global.llm.models[1].name, "GPT-4o");
+        assert_eq!(
+            global.llm.models[1].api_key.as_deref(),
+            Some("sk-project-key")
+        );
+    }
+
+    #[test]
+    fn test_merge_llm_sections_project_partial_override_keeps_global_fields() {
+        let global_toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+[[llm.models]]
+name = "Sonnet"
+protocol = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key = "global-key"
+base_url = "https://global.example.com"
+temperature = 0.5
+max_tokens = 8192
+
+[tools]
+
+[agent]
+"#;
+        // project config only overrides api_key, leaves everything else
+        let project_toml = r#"
+[llm]
+[[llm.models]]
+name = "Sonnet"
+protocol = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key = "project-key"
+"#;
+        let mut global: DaemonConfig = toml::from_str(global_toml).unwrap();
+        let project: DaemonConfig = toml::from_str(project_toml).unwrap();
+
+        merge_llm_sections(&mut global.llm, &project.llm);
+
+        assert_eq!(global.llm.models.len(), 1);
+        assert_eq!(global.llm.models[0].api_key.as_deref(), Some("project-key"));
+        // base_url should be kept from global
+        assert_eq!(
+            global.llm.models[0].base_url.as_deref(),
+            Some("https://global.example.com")
+        );
+        // temperature should be kept from global
+        assert!((global.llm.models[0].temperature.unwrap() - 0.5).abs() < f64::EPSILON);
+        // max_tokens should be kept from global
+        assert_eq!(global.llm.models[0].max_tokens, Some(8192));
+    }
+
+    #[test]
+    fn test_merge_llm_sections_project_overrides_default() {
+        let global_toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+default = "Anthropic/Sonnet"
+[[llm.models]]
+name = "Sonnet"
+provider = "Anthropic"
+protocol = "anthropic"
+model = "claude-sonnet-4-20250514"
+
+[[llm.models]]
+name = "GPT-4o"
+provider = "OpenAI"
+protocol = "openai"
+model = "gpt-4o"
+
+[tools]
+
+[agent]
+"#;
+        let project_toml = r#"
+[llm]
+default = "OpenAI/GPT-4o"
+"#;
+        let mut global: DaemonConfig = toml::from_str(global_toml).unwrap();
+        let project: DaemonConfig = toml::from_str(project_toml).unwrap();
+
+        merge_llm_sections(&mut global.llm, &project.llm);
+
+        assert_eq!(global.llm.default.as_deref(), Some("OpenAI/GPT-4o"));
+    }
+
+    #[test]
+    fn test_merge_llm_sections_match_by_model_alias() {
+        // global config uses provider, project config omits provider
+        // but model + protocol should still match
+        let global_toml = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+[[llm.models]]
+name = "Sonnet"
+provider = "Anthropic"
+protocol = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key = "global-key"
+
+[tools]
+
+[agent]
+"#;
+        // project: no provider, but model + protocol match
+        let project_toml = r#"
+[llm]
+[[llm.models]]
+name = "Sonnet"
+protocol = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key = "project-key"
+"#;
+        let mut global: DaemonConfig = toml::from_str(global_toml).unwrap();
+        let project: DaemonConfig = toml::from_str(project_toml).unwrap();
+
+        merge_llm_sections(&mut global.llm, &project.llm);
+
+        // Should merge into one model, not add a second
+        assert_eq!(global.llm.models.len(), 1);
+        assert_eq!(global.llm.models[0].api_key.as_deref(), Some("project-key"));
+    }
+
+    #[test]
+
     fn test_llm_section_with_api_key() {
         let toml = r#"
 [daemon]
