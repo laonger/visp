@@ -824,10 +824,12 @@ impl LlmProvider for OpenAiProvider {
             langfuse.version = field::Empty,
             langfuse.trace.public = field::Empty,
             langfuse.trace.metadata = field::Empty,
+            gen_ai.client.base_url = field::Empty,
         );
         span.record("gen_ai.system", "openai");
         span.record("gen_ai.request.max_tokens", config.max_tokens as i64);
         span.record("gen_ai.request.temperature", config.temperature);
+        span.record("gen_ai.client.base_url", self.api_url.as_str());
 
         // Langfuse trace-level fields: record when enabled
         if config.langfuse_enabled {
