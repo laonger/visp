@@ -234,6 +234,25 @@ mod tests_llmconfig {
     }
 }
 
+/// 模型元信息，用于 agent 级别的模型覆盖。
+///
+/// 当 agent 定义中指定了 `model` key（如 `"Opencode/deepseek-v4-flash"`）时，
+/// orchestrator 通过此结构解析出实际的 API model 字符串、provider 名称等，
+/// 覆盖从父会话继承的 `LlmConfig`。
+#[derive(Debug, Clone)]
+pub struct ModelInfo {
+    /// 发送到 LLM API 的 model 字段（如 "deepseek-v4-flash"）
+    pub model: String,
+    /// Provider 名称（来自 daemon.toml [[llm.models]] provider 字段）
+    pub provider: Option<String>,
+    /// 默认温度
+    pub temperature: Option<f64>,
+    /// 默认 max_tokens
+    pub max_tokens: Option<u32>,
+    /// 默认 max_context_tokens
+    pub max_context_tokens: Option<u32>,
+}
+
 /// LLM 流式响应中的事件
 #[derive(Debug, Clone)]
 pub enum ChatEvent {

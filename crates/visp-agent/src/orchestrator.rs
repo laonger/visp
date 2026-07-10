@@ -25,7 +25,7 @@ use visp_core::agent_registry::AgentRegistry;
 use visp_core::context::ContextTrimmer;
 use visp_core::error::{AgentErrorCode, SessionError};
 use visp_core::message::Message;
-use visp_core::provider::LlmProvider;
+use visp_core::provider::{LlmProvider, ModelInfo};
 use visp_core::rules::RuleEngine;
 use visp_core::session::{SessionManager, SessionStatus, SubSessionParams};
 use visp_core::tool_registry::ToolRegistry;
@@ -111,6 +111,8 @@ pub struct Orchestrator {
     context_trimmer: Arc<dyn ContextTrimmer + Send + Sync>,
     providers: HashMap<String, Arc<dyn LlmProvider>>,
     default_provider_key: String,
+    /// 模型元信息表（key 同 providers），用于 agent 级别模型覆盖时解析 API model 字符串
+    model_infos: HashMap<String, ModelInfo>,
 }
 
 impl Orchestrator {
@@ -129,6 +131,7 @@ impl Orchestrator {
         context_trimmer: Arc<dyn ContextTrimmer + Send + Sync>,
         providers: HashMap<String, Arc<dyn LlmProvider>>,
         default_provider_key: String,
+        model_infos: HashMap<String, ModelInfo>,
     ) -> Self {
         Self {
             cancel_rx,
@@ -147,6 +150,7 @@ impl Orchestrator {
             context_trimmer,
             providers,
             default_provider_key,
+            model_infos,
         }
     }
 
@@ -369,6 +373,52 @@ impl Orchestrator {
             started_at: std::time::Instant::now(),
         });
 
+        // Apply agent-level model/temperature overrides to the session config.
+        // This ensures that when an agent definition specifies a `model` key,
+        // the actual API model string is used rather than the session's default.
+        {
+            let mut sub_config = match self.session_mgr.get(session_id) {
+                Ok(s) => s.config.clone(),
+                Err(e) => {
+                    tracing::error!(session_id, error = %e, "failed to get session for config override");
+                    return;
+                }
+            };
+
+            if let Some(info) = self.resolve_model_info(Some(&agent_def)) {
+                sub_config.model = info.model.clone();
+                sub_config.model_key = agent_def.model.clone();
+                sub_config.provider = info.provider.clone();
+                if let Some(t) = info.temperature {
+                    sub_config.temperature = t;
+                }
+                if let Some(mt) = info.max_tokens {
+                    sub_config.max_tokens = mt;
+                }
+                if let Some(mct) = info.max_context_tokens {
+                    sub_config.max_context_tokens = mct;
+                }
+                tracing::debug!(
+                    session_id,
+                    agent = %agent_name,
+                    model = %sub_config.model,
+                    "applied agent model override"
+                );
+            }
+
+            if let Some(temp) = agent_def.temperature {
+                sub_config.temperature = temp as f64;
+            }
+
+            if let Err(e) = self.session_mgr.update_config(session_id, sub_config) {
+                tracing::warn!(
+                    session_id,
+                    error = %e,
+                    "failed to apply agent config overrides"
+                );
+            }
+        }
+
         // Resolve provider
         let provider = match self.resolve_provider(Some(&agent_def), session_id) {
             Some(p) => p,
@@ -425,7 +475,15 @@ impl Orchestrator {
         let tool_registry = self.tool_registry.clone();
         let rule_engine = self.rule_engine.clone();
         let session_mgr = self.session_mgr.clone();
-        let config = self.agent_config.clone();
+        let mut config = self.agent_config.clone();
+
+        // Apply agent-level steps override as hard_limit
+        if let Some(steps) = agent_def.steps {
+            config.hard_limit = steps;
+            if config.soft_limit == 0 || config.soft_limit >= steps {
+                config.soft_limit = steps.saturating_mul(4) / 5;
+            }
+        }
 
         tokio::spawn(async move {
             run_agent_loop(
@@ -527,6 +585,54 @@ impl Orchestrator {
         };
         let sub_session_id = sub_session.id.clone();
 
+        // 6.5. Apply agent-level model/temperature overrides
+        //
+        // The sub-session was created with `parent_session.config.clone()`.
+        // If the agent definition specifies a `model` key, we resolve it to
+        // the actual API model string and update the session's LlmConfig.
+        // Similarly, `temperature` from the agent definition overrides the
+        // inherited value.
+        {
+            let mut sub_config = sub_session.config.clone();
+
+            // Resolve model info from agent_def.model key
+            if let Some(info) = self.resolve_model_info(Some(&agent_def)) {
+                sub_config.model = info.model.clone();
+                sub_config.model_key = agent_def.model.clone();
+                sub_config.provider = info.provider.clone();
+                // Apply model-level defaults if the parent config didn't set them explicitly
+                if let Some(t) = info.temperature {
+                    sub_config.temperature = t;
+                }
+                if let Some(mt) = info.max_tokens {
+                    sub_config.max_tokens = mt;
+                }
+                if let Some(mct) = info.max_context_tokens {
+                    sub_config.max_context_tokens = mct;
+                }
+                tracing::debug!(
+                    sub_session_id,
+                    agent = %subagent_type,
+                    model = %sub_config.model,
+                    "applied agent model override"
+                );
+            }
+
+            // Agent-level temperature override takes precedence over model default
+            if let Some(temp) = agent_def.temperature {
+                sub_config.temperature = temp as f64;
+            }
+
+            // Persist the updated config to the session
+            if let Err(e) = self.session_mgr.update_config(&sub_session_id, sub_config) {
+                tracing::warn!(
+                    sub_session_id,
+                    error = %e,
+                    "failed to apply agent config overrides"
+                );
+            }
+        }
+
         // Append agent-specific system prompt (from .visp/agents/*.md)
         if !agent_def.system_prompt.is_empty()
             && let Err(e) = self
@@ -624,7 +730,16 @@ impl Orchestrator {
         let tool_registry = self.tool_registry.clone();
         let rule_engine = self.rule_engine.clone();
         let session_mgr = self.session_mgr.clone();
-        let config = self.agent_config.clone();
+        let mut config = self.agent_config.clone();
+
+        // Apply agent-level steps override as hard_limit for this sub-agent
+        if let Some(steps) = agent_def.steps {
+            config.hard_limit = steps;
+            // Also set soft_limit to 80% of hard_limit if it would exceed hard_limit
+            if config.soft_limit == 0 || config.soft_limit >= steps {
+                config.soft_limit = steps.saturating_mul(4) / 5;
+            }
+        }
 
         // ── W1-S3c: 创建 visp.subagent.spawn span ─────────────────────────
         let spawn_span = tracing::info_span!(
@@ -634,6 +749,7 @@ impl Orchestrator {
             visp.subagent.call_id = %call_id,
             visp.subagent.task_id = tracing::field::Empty,
             visp.subagent.depth = depth,
+            visp.agent.parent_session_id = %ctx.parent_session_id,
             trace_id = tracing::field::Empty,
             parent_span_id = tracing::field::Empty,
             trace_state = tracing::field::Empty,
@@ -930,6 +1046,12 @@ impl Orchestrator {
     }
 
     /// 解析 provider：agent.model → session.model → default
+    fn resolve_model_info(&self, agent: Option<&AgentDefinition>) -> Option<&ModelInfo> {
+        let agent = agent?;
+        let model_key = agent.model.as_ref()?;
+        self.model_infos.get(model_key)
+    }
+
     pub fn resolve_provider(
         &self,
         agent: Option<&AgentDefinition>,
@@ -1009,6 +1131,7 @@ mod tests {
             context_trimmer,
             HashMap::new(),
             "default".to_string(),
+            HashMap::new(),
         );
 
         (orch, global_tx_for_test, client_tx, grpc_rx)
@@ -1220,6 +1343,235 @@ mod tests {
     }
 
     // ── W3: Orchestrator 持有 sub-agent JoinHandle ───────────────────────
+
+    #[tokio::test]
+    async fn test_subagent_applies_agent_model_override() {
+        // Verify that when an agent definition has a `model` key,
+        // the sub-session's LlmConfig is overridden with the correct model info.
+        let (_cancel_tx, cancel_rx) = mpsc::channel(16);
+        let (global_tx, global_rx) = mpsc::channel(256);
+        let (grpc_tx, grpc_rx) = mpsc::channel::<AgentEventFrame>(256);
+        let (_client_tx, client_rx) = mpsc::channel(64);
+
+        let store: Box<dyn visp_core::session::SessionStore> =
+            Box::new(InMemorySessionStore::new());
+        let session_mgr = Arc::new(SessionManager::new(store));
+
+        // Parent session with default model
+        let parent = session_mgr
+            .create(&PathBuf::from("/tmp"), LlmConfig::default())
+            .unwrap();
+        let parent_id = parent.id.clone();
+
+        // Register a sub-agent with a specific model key and temperature
+        let mut agent_registry = AgentRegistry::new();
+        agent_registry
+            .register(AgentDefinition {
+                name: "explorer".to_string(),
+                description: String::new(),
+                mode: AgentMode::Subagent,
+                model: Some("Opencode/deepseek-v4-flash".to_string()),
+                temperature: Some(0.1),
+                steps: Some(10),
+                permission: vec![],
+                system_prompt: String::new(),
+            })
+            .ok();
+        let agent_registry = Arc::new(agent_registry);
+
+        let tool_registry = Arc::new(ToolRegistry::new());
+        let rule_engine = Arc::new(RuleEngine::new(&PathBuf::from(".")).unwrap());
+        let agent_config = AgentConfig::default();
+        let context_trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(NoopTrimmer);
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(visp_llm::mock::MockProvider::new(vec![]));
+        let mut providers = HashMap::new();
+        providers.insert("Opencode/deepseek-v4-flash".to_string(), provider);
+
+        // Build model_infos with the matching model
+        let mut model_infos: HashMap<String, ModelInfo> = HashMap::new();
+        model_infos.insert(
+            "Opencode/deepseek-v4-flash".to_string(),
+            ModelInfo {
+                model: "deepseek-v4-flash".to_string(),
+                provider: Some("Opencode".to_string()),
+                temperature: Some(0.5),
+                max_tokens: Some(8192),
+                max_context_tokens: Some(64000),
+            },
+        );
+
+        let mut orch = Orchestrator::new(
+            cancel_rx,
+            global_rx,
+            global_tx,
+            client_rx,
+            grpc_tx,
+            session_mgr,
+            agent_registry,
+            tool_registry,
+            rule_engine,
+            agent_config,
+            context_trimmer,
+            providers,
+            "default".to_string(),
+            model_infos,
+        );
+
+        // Spawn the sub-agent
+        let envelope = Envelope {
+            session_id: parent_id.clone(),
+            message: AgentMessage::SpawnRequest {
+                call_id: "call-model-test".to_string(),
+                subagent_type: "explorer".to_string(),
+                description: "test task".to_string(),
+                task_id: None,
+                trace_context: None,
+            },
+            trace_context: None,
+        };
+        orch.handle_agent_message(envelope).await;
+
+        // Find the sub-session and verify its config was overridden
+        let sessions = orch.session_mgr.list().unwrap();
+        let sub_session = sessions
+            .iter()
+            .find(|s| s.agent_name == "explorer" && s.parent_id == Some(parent_id.clone()))
+            .expect("sub-session should exist");
+
+        // Model should be overridden from parent's "claude-3-7-sonnet-20250219" to "deepseek-v4-flash"
+        assert_eq!(
+            sub_session.config.model, "deepseek-v4-flash",
+            "sub-session model should be overridden by agent def"
+        );
+        assert_eq!(
+            sub_session.config.model_key,
+            Some("Opencode/deepseek-v4-flash".to_string()),
+            "sub-session model_key should match agent def model"
+        );
+        assert_eq!(
+            sub_session.config.provider,
+            Some("Opencode".to_string()),
+            "sub-session provider should be overridden"
+        );
+        // Temperature: agent_def.temperature (0.1) takes precedence over model_info (0.5)
+        assert!(
+            (sub_session.config.temperature - 0.1).abs() < 1e-5,
+            "sub-session temperature should be overridden by agent def temperature, got: {}",
+            sub_session.config.temperature
+        );
+        // max_tokens from model_info
+        assert_eq!(
+            sub_session.config.max_tokens, 8192,
+            "sub-session max_tokens should be overridden by model info"
+        );
+        // max_context_tokens from model_info
+        assert_eq!(
+            sub_session.config.max_context_tokens, 64000,
+            "sub-session max_context_tokens should be overridden by model info"
+        );
+
+        // Drop grpc_rx to avoid warnings
+        drop(grpc_rx);
+    }
+
+    #[tokio::test]
+    async fn test_subagent_inherits_parent_config_when_no_model_override() {
+        // Verify that when an agent definition has NO `model` key,
+        // the sub-session inherits the parent's config unchanged.
+        let (_cancel_tx, cancel_rx) = mpsc::channel(16);
+        let (global_tx, global_rx) = mpsc::channel(256);
+        let (grpc_tx, grpc_rx) = mpsc::channel::<AgentEventFrame>(256);
+        let (_client_tx, client_rx) = mpsc::channel(64);
+
+        let store: Box<dyn visp_core::session::SessionStore> =
+            Box::new(InMemorySessionStore::new());
+        let session_mgr = Arc::new(SessionManager::new(store));
+
+        // Parent session with custom model
+        let parent_config = LlmConfig {
+            model: "parent-model".to_string(),
+            temperature: 0.8,
+            ..LlmConfig::default()
+        };
+        let parent = session_mgr
+            .create(&PathBuf::from("/tmp"), parent_config)
+            .unwrap();
+        let parent_id = parent.id.clone();
+
+        // Register a sub-agent with NO model override
+        let mut agent_registry = AgentRegistry::new();
+        agent_registry
+            .register(AgentDefinition {
+                name: "explorer".to_string(),
+                description: String::new(),
+                mode: AgentMode::Subagent,
+                model: None,
+                temperature: None,
+                steps: None,
+                permission: vec![],
+                system_prompt: String::new(),
+            })
+            .ok();
+        let agent_registry = Arc::new(agent_registry);
+
+        let tool_registry = Arc::new(ToolRegistry::new());
+        let rule_engine = Arc::new(RuleEngine::new(&PathBuf::from(".")).unwrap());
+        let agent_config = AgentConfig::default();
+        let context_trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(NoopTrimmer);
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(visp_llm::mock::MockProvider::new(vec![]));
+        let mut providers = HashMap::new();
+        providers.insert("default".to_string(), provider);
+
+        let mut orch = Orchestrator::new(
+            cancel_rx,
+            global_rx,
+            global_tx,
+            client_rx,
+            grpc_tx,
+            session_mgr,
+            agent_registry,
+            tool_registry,
+            rule_engine,
+            agent_config,
+            context_trimmer,
+            providers,
+            "default".to_string(),
+            HashMap::new(), // empty model_infos
+        );
+
+        let envelope = Envelope {
+            session_id: parent_id.clone(),
+            message: AgentMessage::SpawnRequest {
+                call_id: "call-no-override".to_string(),
+                subagent_type: "explorer".to_string(),
+                description: "test task".to_string(),
+                task_id: None,
+                trace_context: None,
+            },
+            trace_context: None,
+        };
+        orch.handle_agent_message(envelope).await;
+
+        let sessions = orch.session_mgr.list().unwrap();
+        let sub_session = sessions
+            .iter()
+            .find(|s| s.agent_name == "explorer" && s.parent_id == Some(parent_id.clone()))
+            .expect("sub-session should exist");
+
+        // Should inherit parent's model
+        assert_eq!(
+            sub_session.config.model, "parent-model",
+            "sub-session should inherit parent model when no agent model override"
+        );
+        assert!(
+            (sub_session.config.temperature - 0.8).abs() < f64::EPSILON,
+            "sub-session should inherit parent temperature when no agent override"
+        );
+
+        drop(grpc_rx);
+    }
 
     #[tokio::test]
     async fn test_orchestrator_tracks_sub_agent_join_handles() {
@@ -1594,6 +1946,7 @@ mod tests {
             context_trimmer,
             providers,
             "default".to_string(),
+            HashMap::new(),
         );
 
         (orch, global_tx, grpc_rx, parent_id)

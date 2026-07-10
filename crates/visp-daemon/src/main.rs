@@ -356,6 +356,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // 8.5b. Build model_infos map (keyed same as providers) for agent-level model overrides
+    let mut model_infos: HashMap<String, visp_core::provider::ModelInfo> = HashMap::new();
+    for mc in &model_configs {
+        let info = visp_core::provider::ModelInfo {
+            model: mc.model.clone(),
+            provider: mc.provider.clone().or(Some(mc.protocol.clone())),
+            temperature: mc.temperature,
+            max_tokens: mc.max_tokens,
+            max_context_tokens: mc.max_context_tokens,
+        };
+        model_infos.insert(mc.key(), info.clone());
+        // Also register under model alias
+        let provider_name = mc.provider.as_deref().unwrap_or(&mc.protocol);
+        let model_alias = format!("{provider_name}/{}", mc.model);
+        if model_alias != mc.key() {
+            model_infos.insert(model_alias, info);
+        }
+    }
+
     // 8.6. Load agent definitions
     let builtin_overrides: Vec<visp_agent::agent_loader::BuiltinAgentOverride> = config
         .agent
@@ -412,6 +431,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         context_trimmer.clone(),
         providers,
         default_model_key,
+        model_infos,
     );
     tokio::spawn(async move {
         orchestrator.run().await;

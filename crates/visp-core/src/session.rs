@@ -530,6 +530,7 @@ impl SessionManager {
             permission_rules,
             agent_kind: crate::agent::AgentKind::Primary,
             depth: 0,
+            parent_session_id: session.parent_id.clone().unwrap_or_else(|| id.to_string()),
         })
     }
 

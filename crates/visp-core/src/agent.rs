@@ -199,6 +199,8 @@ pub struct AgentLoopContext {
     pub agent_kind: AgentKind,
     /// Nesting depth (0 for root, incremented per sub-agent level).
     pub depth: u32,
+    /// 父 agent 的 session_id；主 agent 为自身 session_id（自引用）
+    pub parent_session_id: String,
 }
 
 /// Agent 执行配置
@@ -981,6 +983,7 @@ mod tests {
             permission_rules: None,
             agent_kind: AgentKind::Primary,
             depth: 0,
+            parent_session_id: "sess-1".into(),
         };
         assert_eq!(ctx.session_id, "sess-1");
         assert!(ctx.history.is_empty());

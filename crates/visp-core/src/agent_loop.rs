@@ -1484,6 +1484,7 @@ pub async fn run_agent_loop(
             langfuse.trace.metadata = tracing::field::Empty,
             visp.agent.kind = %ctx.agent_kind,
             visp.agent.depth = ctx.depth,
+            visp.agent.parent_session_id = %ctx.parent_session_id,
             langfuse.observation.type = tracing::field::Empty,
             langfuse.observation.input = tracing::field::Empty,
             langfuse.observation.output = tracing::field::Empty,
@@ -1499,6 +1500,7 @@ pub async fn run_agent_loop(
             gen_ai.provider.name = %provider_name,
             visp.agent.kind = %ctx.agent_kind,
             visp.agent.depth = ctx.depth,
+            visp.agent.parent_session_id = %ctx.parent_session_id,
             visp.span.w3c_id = tracing::field::Empty,
             trace_id = tracing::field::Empty,
             parent_span_id = tracing::field::Empty,
@@ -1970,6 +1972,7 @@ mod tests {
             permission_rules: None,
             agent_kind: AgentKind::Primary,
             depth: 0,
+            parent_session_id: "test".into(),
         };
         let cfg = AgentConfig {
             llm_retry_attempts: 5,
