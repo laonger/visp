@@ -66,8 +66,31 @@ pub fn load_agents(agent_dirs: &[&Path], overrides: &[BuiltinAgentOverride]) -> 
                 if path.extension().and_then(|e| e.to_str()) == Some("md") && path.is_file() {
                     match parse_agent_file(&path) {
                         Ok(def) => {
-                            // Use register_or_replace so file agents overwrite built-in defaults
-                            registry.register_or_replace(def);
+                            // For existing agents (e.g. built-in), do field-level merge to
+                            // preserve [[agent.builtin]] overrides (model/temperature/steps)
+                            // when the .md file doesn't explicitly specify them.
+                            if let Some(existing) = registry.get_mut(&def.name) {
+                                // Always overwrite: .md is the source of truth for these
+                                existing.description = def.description;
+                                existing.mode = def.mode;
+                                existing.permission = def.permission;
+                                existing.system_prompt = def.system_prompt;
+
+                                // Only overwrite if .md explicitly provides them:
+                                // preserves [[agent.builtin]] overrides when absent.
+                                if let Some(model) = def.model {
+                                    existing.model = Some(model);
+                                }
+                                if let Some(temp) = def.temperature {
+                                    existing.temperature = Some(temp);
+                                }
+                                if let Some(steps) = def.steps {
+                                    existing.steps = Some(steps);
+                                }
+                            } else {
+                                // New custom agent — register directly
+                                registry.register_or_replace(def);
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -578,5 +601,115 @@ Only in project.
         let shared = registry.get("shared").unwrap();
         assert!(shared.system_prompt.contains("Project prompt"));
         assert!(!shared.system_prompt.contains("Global prompt"));
+    }
+
+    #[test]
+    fn test_file_agent_merges_model_with_builtin_override() {
+        let dir = std::env::temp_dir().join(format!("agent_test_{}", uuid::Uuid::new_v4()));
+        let agents_dir = dir.join(".visp/agents/");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+
+        // Write explorer.md WITHOUT model field — tests that model from
+        // [[agent.builtin]] override is preserved during field-level merge
+        write_agent_file(
+            &agents_dir,
+            "explorer.md",
+            r#"---
+name: explorer
+description: Custom explorer
+mode: subagent
+temperature: 0.7
+permission: deny edit_file *
+permission: allow read_file *
+---
+
+You are a custom explorer.
+"#,
+        );
+
+        let overrides = vec![BuiltinAgentOverride {
+            name: "explorer".to_string(),
+            model: Some("Opencode/deepseek-v4-flash".to_string()),
+            temperature: Some(0.05),
+            steps: None,
+        }];
+
+        let registry = load_agents(&[agents_dir.as_path()], &overrides);
+
+        let explorer = registry.get("explorer").unwrap();
+
+        // model should be preserved from override (.md has no model field)
+        assert_eq!(
+            explorer.model.as_deref(),
+            Some("Opencode/deepseek-v4-flash")
+        );
+
+        // temperature should come from .md (explicitly set, overrides override)
+        assert!((explorer.temperature.unwrap() - 0.7).abs() < f32::EPSILON);
+
+        // description should come from .md
+        assert_eq!(explorer.description, "Custom explorer");
+
+        // system_prompt should come from .md body
+        assert!(
+            explorer
+                .system_prompt
+                .contains("You are a custom explorer.")
+        );
+
+        // permission should come from .md
+        assert_eq!(explorer.permission.len(), 2);
+        assert_eq!(explorer.permission[0].permission, "edit_file");
+        assert_eq!(explorer.permission[0].action, PermissionAction::Deny);
+        assert_eq!(explorer.permission[1].permission, "read_file");
+        assert_eq!(explorer.permission[1].action, PermissionAction::Allow);
+    }
+
+    #[test]
+    fn test_file_agent_model_overrides_builtin_when_specified() {
+        let dir = std::env::temp_dir().join(format!("agent_test_{}", uuid::Uuid::new_v4()));
+        let agents_dir = dir.join(".visp/agents/");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+
+        // Write explorer.md WITH explicit model field — tests that .md can
+        // still override the [[agent.builtin]] model when explicitly specified
+        write_agent_file(
+            &agents_dir,
+            "explorer.md",
+            r#"---
+name: explorer
+description: Custom explorer with explicit model
+mode: subagent
+model: Opencode/deepseek-v3
+temperature: 0.3
+---
+
+You are a custom explorer with explicit model.
+"#,
+        );
+
+        let overrides = vec![BuiltinAgentOverride {
+            name: "explorer".to_string(),
+            model: Some("Opencode/deepseek-v4-flash".to_string()),
+            temperature: None,
+            steps: None,
+        }];
+
+        let registry = load_agents(&[agents_dir.as_path()], &overrides);
+
+        let explorer = registry.get("explorer").unwrap();
+
+        // model should come from .md (explicitly specified, overrides override)
+        assert_eq!(explorer.model.as_deref(), Some("Opencode/deepseek-v3"));
+
+        // temperature should come from .md
+        assert!((explorer.temperature.unwrap() - 0.3).abs() < f32::EPSILON);
+
+        // system_prompt should come from .md body
+        assert!(
+            explorer
+                .system_prompt
+                .contains("You are a custom explorer with explicit model.")
+        );
     }
 }
