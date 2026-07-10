@@ -1,236 +1,218 @@
-# 工具调用与结果的差异化显示设计
+# 工具展示样式 - 设计文档
 
-## 现状与问题
+## 背景
 
-### 当前实现
+当前 TUI 中工具调用和结果的显示较为粗糙：
 
-1. **ToolCall 消息**：来自服务端 `ToolCall` 事件 → `add_tool_line(LineType::ToolCall, args_display, call_id)`
-2. **ToolResult 消息**：来自服务端 `ToolResult` 事件 → `insert_tool_result(call_id, "Output/Error: ...")`，结果**追加**到同 `call_id` 的 ToolCall 消息中
-3. `LineType::ToolResult` **枚举存在但从未使用**，所有结果都混在 `ToolCall` 里
-4. 渲染截断：超过 5 行的工具内容显示 `... [truncated, NNNB]`，不管工具类型
+1. **工具调用**：直接显示原始 JSON 参数字符串（如 `📖 read_file {"path":"src/main.rs","start_line":10,"end_line":50}`），`tc_display()` 函数虽存在但是死代码，从未被调用。
+2. **工具结果**：`result_summary()` 只实现了 `read_file`，其他工具全部裸输出原始内容，靠 `max_lines_for_tool()` 做简单截断。
 
-### 核心痛点
+## 目标
 
-1. **所有工具一视同仁**：read_file、bash、edit_file 的结果都显示同样的格式，没有差异化
-2. **不该显示的也显示**：read_file 的结果直接在终端里刷出大量文件内容，干扰对话
-3. **格式单一丑陋**：工具调用首行黄色、后续灰色，没有统一的美观设计
-4. **LineType::ToolResult 被废弃**：为空泛的枚举变体，实际没人用
+为每个工具提供定制化的调用参数摘要和结果摘要，让 TUI 展示更简洁、更可读。
 
-## 设计目标
+---
 
-1. **统一风格**：所有工具调用采用相同的视觉框架（统一的 BlockStyle 风格、一致的头部格式）
-2. **差异化展示**：不同工具类型有不同显示策略（是否显示结果、结果折叠、结果高亮）
-3. **语义清晰**：明确区分"调用中"、"已完成"、"有错误"三种状态
+## 现有工具清单
 
-## 方案设计
+### Common 工具（category: `common`）
 
-### 1. LineType 拆分
+| 工具名 | 图标 | 参数 | 返回数据 |
+|--------|------|------|----------|
+| `read_file` | 📖 | `path`(必填), `paths`(可选, string[]), `start_line`(可选, int), `end_line`(可选, int) | 文件内容文本，含可选行号范围信息 |
+| `write_file` | 📝 | `path`(必填), `content`(必填) | 成功消息 |
+| `edit_file` | ✏️ | `path`(必填), `old_string`(必填), `new_string`(必填) | 成功消息 + unified diff |
+| `grep` | 🔍 | `pattern`(必填), `path`(可选), `include`(可选), `context`(可选, int), `max_matches`(可选, int) | 匹配行（含 file:line） |
+| `glob` | 📂 | `pattern`(必填), `path`(可选) | 匹配文件路径列表 |
+| `bash` | 💻 | `command`(必填), `timeout`(可选, int), `workdir`(可选) | stdout+stderr 输出 |
 
-将 `LineType::ToolCall` 拆分为两个独立类型，并添加工具名称元信息：
+### Network 工具（category: `network`）
 
-```rust
-pub enum LineType {
-    User,
-    Assistant,
-    Thinking,
-    ToolCall { name: String },    // 包含工具名
-    ToolResult { name: String },  // 包含工具名，独立于 ToolCall
-    ToolError { name: String },   // 工具执行错误
-    Error,
-    Status,
-    Usage,
-}
-```
+| 工具名 | 图标 | 参数 | 返回数据 |
+|--------|------|------|----------|
+| `fetch_web` | 🌐 | `url`(必填), `timeout`(可选, int) | URL 内容提取为 Markdown 文本 |
 
-**变更说明**：
-- `ToolCall` 和 `ToolResult` 成为两条独立的消息，不再混在一起
-- 工具名（`name`）作为类型参数，渲染时可据此差异化
-- `ChatLine` 的 `call_id` 字段用于关联 Call 和 Result
+### Agent 工具（category: `agent`）
 
-### 2. 消息流变更
+| 工具名 | 图标 | 参数 | 返回数据 |
+|--------|------|------|----------|
+| `task` | 🔧 | `subagent_type`(必填), `description`(必填), `task_id`(可选) | 子 agent 执行结果 |
+| `skill` | 🔧 | `name`(必填) | Skill 指令文本 |
 
-当前：
-```
-[ToolCall (call_id="tc1")]            ← 调用信息 + 结果全部追加在这里
-```
+### Analyze 工具（category: `analyze`）
 
-变更后：
-```
-[ToolCall (call_id="tc1", name="read_file")]    ← 只显示调用参数
-[ToolResult (call_id="tc1", name="read_file")]  ← 独立消息，显示结果
-```
+| 工具名 | 图标 | 参数 | 返回数据 |
+|--------|------|------|----------|
+| `codegraph_rebuild` | 🔎 | 无 | 成功/失败消息 |
+| `codegraph_search` | 🔎 | `query`(必填), `limit`(可选, int, 默认20) | 符号搜索结果 |
+| `codegraph_get_details` | 🔎 | `name`(必填) | 定义位置、源码、callers、callees |
+| `codegraph_context` | 🔎 | `task`(必填), `detail`(可选, 默认"overview"), `max_nodes`(可选, 默认20) | 入口点、调用关系、源码 |
+| `codegraph_trace` | 🔎 | `from`(必填), `to`(必填) | 调用链（含 file:line） |
+| `codegraph_impact` | 🔎 | `symbol`(必填), `depth`(可选, int, 默认1) | callers 和 callees |
 
-服务端事件处理（`event.rs`）：
-- `ToolCall` 事件 → `add_tool_line(LineType::ToolCall { name }, args_display, call_id)`
-- `ToolResult` 事件 → `add_tool_line(LineType::ToolResult { name }, content, call_id)`（新增独立消息）
-- 不再调用 `insert_tool_result()` 追加到 ToolCall
+---
 
-### 3. 显示策略矩阵
+## 当前渲染流程
 
-不同工具类型的不同显示行为：
-
-| 工具 | 调用显示 | 结果显示 | 截断策略 |
-|------|----------|----------|----------|
-| `read_file` | 显示 `read_file: <path>` | **不显示**（仅显示"OK"或行数） | N/A |
-| `edit_file` | 显示 `edit_file: <path>` | 完全显示 diff 结果 | 不截断 |
-| `write_file` | 显示 `write_file: <path>` | 完全显示 | 不截断 |
-| `grep` | 显示 `grep: <pattern>` | 显示前 N 行 | 截断（最多 20 行） |
-| `glob` | 显示 `glob: <pattern>` | 显示匹配文件列表 | 截断（最多 15 行） |
-| `bash` | 显示 `bash: <command>` | 显示完整输出 | 截断（最多 30 行） |
-| `fetch_web` | 显示 `fetch: <url>` | 显示提取内容 | 截断（最多 20 行） |
-| `codegraph_*` | 显示 `codegraph_xxx: <query>` | 显示结果摘要 | 截断（最多 20 行） |
-
-**默认策略**（未知工具）：
-- 调用：显示 `name: <参数摘要>`
-- 结果：完全显示
-- 截断：最多 20 行
-
-### 4. 视觉样式设计
-
-统一的视觉框架，由工具类型决定细节：
+### 数据流
 
 ```
-┌──────────────────────────────────────────┐
-│ 🔧 read_file: "src/main.rs"              │  ← 调用行（黄色图标 + 白色工具名）
-│ ✓ Loaded 847 bytes (42 lines)            │  ← 结果行（绿色 ✓ + 灰色摘要）
-└──────────────────────────────────────────┘
+ServerMessage::ToolCall { tool_name, arguments(JSON string), call_id }
+  → TabEntry::render_pending()
+    → push_chat_line(LineType::ToolCall { name: tool_name }, arguments, call_id)
+      → ChatLine { content: arguments }  // 原始 JSON 字符串
 
-┌──────────────────────────────────────────┐
-│ 📝 edit_file: "src/main.rs"              │  ← 调用行
-│ --- a/src/main.rs                        │
-│ +++ b/src/main.rs                        │  ← 结果内容完全显示
-│ @@ -1,5 +1,6 @@                          │
-│ ...                                      │
-└──────────────────────────────────────────┘
-
-┌──────────────────────────────────────────┐
-│ 💻 bash: "cargo test"                    │  ← 调用行
-│    Compiling visp-core v0.1.0            │
-│    Compiling visp-tools v0.1.0           │  ← 输出（可能截断）
-│    Finished test [unoptimized] ...       │
-│ ... [truncated, 42 more lines]           │
-└──────────────────────────────────────────┘
-
-┌──────────────────────────────────────────┐
-│ ❌ read_file: "nonexistent.rs"           │  ← 错误调用
-│ Error: No such file or directory         │  ← 错误行（红色）
-└──────────────────────────────────────────┘
+ServerMessage::ToolResult { call_id, content, is_error, tool_name }
+  → push_chat_line(LineType::ToolResult { name }, content, call_id)
+    → ChatLine { content: raw_output }
 ```
 
-**关键视觉元素**：
-1. **工具图标 emoji**：每种工具一个唯一图标，快速区分
-2. **工具名 + 参数摘要**：始终显示在第一行
-3. **结果状态行**：结果的第一行显示成功/失败状态 + 摘要
-4. **结果内容**：差异化显示（包含/不包含/截断）
-5. **错误信息**：红色标记，始终完整显示
+### 渲染逻辑（`MessageCache::from_message`）
 
-### 5. 图标映射
+**ToolCall 渲染** (`app.rs:777`):
+- 首行: `format!("{} {} {}", icon, name, content)` — content 是原始 JSON
+- 后续行: 原始 JSON 续行
+- 最多 5 行，超出截断
 
-| 工具 | 图标 | 含义 |
+**ToolResult 渲染** (`app.rs:810`):
+- `max_lines_for_tool(name)` 决定最大行数
+- `Some(0)`: 只显示摘要行 `✓ {icon} {name} {summary}`
+- 其他: 首行作为状态头 `✓ {icon} {name} {first_line}`，剩余内容高亮显示
+- bash 特殊处理: 不加状态头，全部内容直接高亮
+
+### 当前辅助函数
+
+| 函数 | 位置 | 说明 |
 |------|------|------|
-| `read_file` | 📖 | 打开文件 |
-| `write_file` | 📝 | 写入文件 |
-| `edit_file` | ✏️ | 编辑文件 |
-| `grep` | 🔍 | 搜索 |
-| `glob` | 📂 | 文件浏览 |
-| `bash` | 💻 | 命令执行 |
-| `fetch_web` | 🌐 | 网络请求 |
-| `codegraph_*` | 🔎 | 代码分析 |
-| 未知工具 | 🔧 | 通用工具 |
+| `tool_icon(name)` | `app.rs:248` | 工具名→emoji 映射 |
+| `max_lines_for_tool(name)` | `app.rs:263` | 结果最大行数限制 |
+| `result_summary(name, content)` | `app.rs:274` | 结果摘要（**只实现了 read_file**） |
+| `tc_display(tc)` | `event.rs:998` | 格式化工具调用参数（**死代码，从未调用**） |
 
-### 6. BlockStyle 统一
+---
 
-所有工具使用同一套 `BlockStyle`，不再区分 `ToolCall` 和 `ToolResult` 的样式：
+## 设计方案
 
+### 新增模块：`crates/visp-cli/src/tool_display.rs`
+
+包含两个核心函数 + 更新现有函数。
+
+### 1. `format_tool_call(name: &str, args_json: &str) -> String`
+
+将原始 JSON 参数格式化为简洁摘要。解析 JSON 失败时 fallback 显示原始字符串。
+
+| 工具 | 示例参数 | 输出 |
+|------|----------|------|
+| `read_file` | `{"path":"src/main.rs","start_line":10,"end_line":50}` | `src/main.rs:10-50` |
+| `read_file` | `{"path":"src/main.rs"}` | `src/main.rs` |
+| `read_file` | `{"paths":["a.rs","b.rs"]}` | `a.rs, b.rs` |
+| `write_file` | `{"path":"src/main.rs","content":"..."}` | `src/main.rs` |
+| `edit_file` | `{"path":"src/main.rs","old_string":"...","new_string":"..."}` | `src/main.rs` |
+| `grep` | `{"pattern":"fn\\s+\\w+","include":"*.rs"}` | `"fn\s+\w+"` `in *.rs` |
+| `glob` | `{"pattern":"**/*.rs"}` | `**/*.rs` |
+| `bash` | `{"command":"echo hello","timeout":30}` | `$ echo hello` |
+| `fetch_web` | `{"url":"https://example.com"}` | `https://example.com` |
+| `task` | `{"subagent_type":"fixer","description":"..."}` | `fixer` |
+| `skill` | `{"name":"technical-design"}` | `technical-design` |
+| `codegraph_search` | `{"query":"parse"}` | `"parse"` |
+| `codegraph_get_details` | `{"name":"parse"}` | `parse` |
+| `codegraph_context` | `{"task":"auth module"}` | `"auth module"` |
+| `codegraph_trace` | `{"from":"main","to":"parse"}` | `main → parse` |
+| `codegraph_impact` | `{"symbol":"parse","depth":2}` | `parse` `(depth=2)` |
+| `codegraph_rebuild` | `{}` | *(空)* |
+| 其他/MCP | 任意 | 原始 JSON 的 string 值拼接 |
+
+### 2. `format_tool_result(name: &str, content: &str, is_error: bool) -> String`
+
+生成结果摘要行。摘要后的完整内容仍按 `max_lines_for_tool` 截断显示。
+
+| 工具 | 成功时 | 错误时 |
+|------|--------|--------|
+| `read_file` | `Read 1.2KB (30 lines)` | 错误消息首行 |
+| `write_file` | `Written 256B to src/main.rs` | 错误消息首行 |
+| `edit_file` | `Replaced 1 occurrence in src/main.rs` | 错误消息首行 |
+| `grep` | `5 matches` / `No matches` | 错误消息首行 |
+| `glob` | `3 files found` / `No files found` | 错误消息首行 |
+| `bash` | `exit 0, 128B output` | `exit 1, error` |
+| `fetch_web` | `Fetched 5.2KB` | 错误消息首行 |
+| `task` | 子 agent 结果首行 | 错误消息首行 |
+| `skill` | `Loaded skill: technical-design` | 错误消息首行 |
+| `codegraph_*` | 结果首行摘要 | 错误消息首行 |
+| 其他/MCP | 内容前 60 字符 | 内容前 60 字符 |
+
+### 3. 更新 `tool_icon(name)` — 补充缺失图标
+
+当前 `task` 和 `skill` 使用默认 🔧，改为：
+
+| 工具 | 旧图标 | 新图标 |
+|------|--------|--------|
+| `task` | 🔧 | 📋 |
+| `skill` | 🔧 | 🎨 |
+
+---
+
+## 改动点
+
+| 文件 | 变更 |
+|------|------|
+| `crates/visp-cli/src/tool_display.rs` | **新建**：`format_tool_call()` + `format_tool_result()` |
+| `crates/visp-cli/src/main.rs` | 添加 `mod tool_display;` |
+| `crates/visp-cli/src/app.rs` | `tool_icon()` 补充 task/skill 图标；`result_summary()` 替换为调用 `tool_display::format_tool_result()`；`MessageCache::from_message` 的 ToolCall 分支调用 `format_tool_call()` |
+| `crates/visp-cli/src/event.rs` | 删除死代码 `tc_display()` |
+
+### ToolCall 渲染改动（`app.rs:777`）
+
+**Before:**
 ```rust
-pub const TOOL_STYLE: BlockStyle = BlockStyle {
-    margin_vertical: 1,
-    margin_horizontal: 1,
-    bg_fill: Some(TOOL_BG),        // 深灰色底色
-    shadow: true,                  // 阴影
-    bottom_pad: 1,                 // 底部留白
+let display = if i == 0 {
+    format!("{} {} {}", icon, name, content)  // content = 原始 JSON
+} else {
+    content
 };
 ```
 
-**不再需要** `TOOL_RESULT_STYLE`（与 `TOOL_STYLE` 完全一致）。
-
-### 7. 调用与结果缩进对齐
-
-为了实现视觉上的关联性，ToolResult 可以采用**缩进+无阴影**的风格：
-
+**After:**
 ```rust
-// ToolCall 的样式（完整）
-pub const TOOL_CALL_STYLE: BlockStyle = BlockStyle {
-    margin_vertical: 1,
-    margin_horizontal: 1,
-    bg_fill: Some(TOOL_BG),
-    shadow: true,
-    bottom_pad: 0,
-};
-
-// ToolResult 的样式（缩进 2 格，无阴影，表示从属关系）
-pub const TOOL_RESULT_STYLE: BlockStyle = BlockStyle {
-    margin_vertical: 0,
-    margin_horizontal: 3,    // 缩进 2 格
-    bg_fill: Some(TOOL_BG),
-    shadow: false,            // 无阴影，视觉上附属于调用
-    bottom_pad: 1,
+let summary = tool_display::format_tool_call(name, &msg.content);
+let display = if i == 0 {
+    format!("{} {} {}", icon, name, summary)
+} else {
+    String::new()  // 摘要通常一行就够了
 };
 ```
 
-这样 ToolCall 和 ToolResult 在视觉上形成"主-从"关系。
+ToolCall 不再需要多行换行，摘要控制在单行内（超长由 `wrap_text` 自然折行）。
 
-### 8. 截断策略实现
+### ToolResult 渲染改动（`app.rs:810`）
 
-在 `MessageCache::from_message` 中根据 `LineType` 中的工具名决定截断策略：
-
+**Before:**
 ```rust
-fn max_lines_for_tool(name: &str) -> Option<usize> {
-    match name {
-        "read_file" => Some(0),       // 不显示内容
-        "edit_file" | "write_file" => None,  // 不截断
-        "bash" => Some(30),
-        "grep" => Some(20),
-        "glob" => Some(15),
-        "fetch_web" => Some(20),
-        _ if name.starts_with("codegraph_") => Some(20),
-        _ => Some(20),  // 默认截断
-    }
-}
+let summary = result_summary(name, &msg.content);  // 只有 read_file 有摘要
 ```
 
-## 实施计划
+**After:**
+```rust
+let summary = tool_display::format_tool_result(name, &msg.content, is_error);
+// 所有工具都有摘要
+```
 
-### Phase 1: 数据结构变更
+---
 
-1. 修改 `LineType` 枚举，为 `ToolCall` 和 `ToolResult` 添加 `name` 字段
-2. 恢复 `ToolResult` 的实际使用（当前被废弃）
-3. 修改 `ChatLine` 以支持工具名
+## 验证清单
 
-### Phase 2: 消息流改造
-
-1. 修改 `event.rs` 中的 `ToolResult` 处理：不再追加到 ToolCall，而是创建独立消息
-2. 修改 `AppState::insert_tool_result()` → `add_tool_line(LineType::ToolResult{...}, ...)`
-3. 修改服务端/客户端消息传递，确保工具名传递正确
-
-### Phase 3: 渲染改造
-
-1. 在 `theme.rs` 中添加图标映射函数
-2. 在 `MessageCache::from_message` 中实现截断策略矩阵
-3. 改造 `ToolResult` 的渲染逻辑
-4. 调整 BlockStyle 为 ToolCall/ToolResult 差异化
-
-### Phase 4: 测试
-
-1. 测试每种工具类型的显示策略
-2. 测试截断逻辑
-3. 测试调用-结果关联渲染
-
-## 验证标准
-
-1. `read_file` 结果不显示文件内容，只显示 "Loaded N bytes"
-2. `edit_file` / `write_file` 结果完整显示，无截断
-3. `bash` 结果最多显示 30 行
-4. 每种工具有唯一图标
-5. ToolCall 和 ToolResult 视觉上明显区分但有从属关系
-6. 错误工具调用显示为红色
+| # | 验证项 | 预期 |
+|---|--------|------|
+| 1 | `read_file` 调用显示 | `📖 read_file src/main.rs:10-50` |
+| 2 | `read_file` 结果显示 | `✓ 📖 read_file Read 1.2KB (30 lines)` |
+| 3 | `write_file` 调用显示 | `📝 write_file src/main.rs` |
+| 4 | `edit_file` 调用显示 | `✏️ edit_file src/main.rs` |
+| 5 | `grep` 调用显示 | `🔍 grep "fn\s+\w+"` |
+| 6 | `bash` 调用显示 | `💻 bash $ echo hello` |
+| 7 | `bash` 结果显示 | `✓ 💻 bash exit 0, 128B output` |
+| 8 | `task` 调用显示 | `📋 task fixer` |
+| 9 | `skill` 调用显示 | `🎨 skill technical-design` |
+| 10 | `codegraph_trace` 调用显示 | `🔎 codegraph_trace main → parse` |
+| 11 | MCP 工具调用 | 显示原始 JSON string 值拼接 |
+| 12 | MCP 工具结果 | 显示内容前 60 字符摘要 |
+| 13 | JSON 解析失败 | fallback 显示原始参数字符串 |
+| 14 | `tc_display()` 已删除 | 编译无 warning |
