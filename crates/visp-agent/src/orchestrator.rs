@@ -254,19 +254,21 @@ impl Orchestrator {
                 subagent_type,
                 description,
                 task_id,
-                ..
+                trace_context,
             } => {
-                // W2-S4: Extract OTel-based TraceContext from current span.
-                // If OTel is inactive (no OpenTelemetryLayer), falls back to
-                // UUID-based W3C IDs (W1 behavior).
-                let trace_context = Some(crate::observability::extract_trace_context());
+                // 优先使用 SpawnRequest 携带的 TraceContext（由父 agent 的
+                // agent_loop 用父 trace_id 构造），确保子 agent 跨 mpsc
+                // 边界继承父 trace_id。仅当未携带时才回退到从当前 span 提取
+                // （OTel 不活跃时走 UUID fallback）。
+                let trace_context = trace_context
+                    .unwrap_or_else(crate::observability::extract_trace_context);
                 self.spawn_sub_agent(
                     &envelope.session_id,
                     &call_id,
                     &subagent_type,
                     &description,
                     task_id.as_deref(),
-                    trace_context,
+                    Some(trace_context),
                 )
                 .await;
             }
@@ -2111,9 +2113,9 @@ mod tests {
         };
         orch.handle_agent_message(envelope).await;
 
-        // W2-S4: orchestrator 不再使用 envelope 的 TraceContext，而是通过
-        // extract_trace_context() 生成（无 OTel 时走 UUID fallback）。
-        // 验证 spawn span 记录了生成的 trace_id / parent_span_id。
+        // orchestrator 优先使用 envelope/SpawnRequest 携带的 TraceContext，
+        // 确保子 agent 跨 mpsc 边界继承父 trace_id。验证 spawn span 记录了
+        // 传入的 trace_id / parent_span_id / trace_state（而非 fallback）。
         let captured = spans.lock().unwrap();
         let spawn_span = captured
             .iter()
@@ -2128,18 +2130,29 @@ mod tests {
 
         let trace_id = field_map
             .get("trace_id")
-            .expect("trace_id should be recorded (W2 fallback UUID)");
-        assert_eq!(trace_id.len(), 32, "trace_id must be 32 hex chars");
+            .copied()
+            .expect("trace_id should be recorded");
+        assert_eq!(
+            trace_id,
+            "0af7651916cd43dd8448eb211c80319c",
+            "trace_id 必须是 envelope 携带的，而非 fallback UUID"
+        );
 
         let psid = field_map
             .get("parent_span_id")
-            .expect("parent_span_id should be recorded (W2 fallback)");
-        assert_eq!(psid.len(), 16, "parent_span_id must be 16 hex chars");
+            .copied()
+            .expect("parent_span_id should be recorded");
+        assert_eq!(
+            psid,
+            "aaaaaaaaaaaaaaaa",
+            "parent_span_id 必须是 envelope 携带的"
+        );
 
-        // trace_state = None（fallback 不设置）
-        assert!(
-            !field_map.contains_key("trace_state"),
-            "trace_state should NOT be recorded (W2 fallback sets None)"
+        // trace_state 来自传入的 TraceContext
+        assert_eq!(
+            field_map.get("trace_state").copied(),
+            Some("congo=toto"),
+            "trace_state 应来自传入的 TraceContext"
         );
     }
 
@@ -2149,8 +2162,8 @@ mod tests {
         let _guard = make_tracing_guard(&spans, &_events, &_tcs);
         let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
 
-        // Envelope 不带 trace_context（None），但 W2-S4 orchestrator
-        // 始终通过 extract_trace_context() 生成 fallback TraceContext。
+        // Envelope 不带 trace_context（None），orchestrator 回退到
+        // extract_trace_context() 生成 fallback TraceContext。
         let envelope = Envelope {
             session_id: parent_id.clone(),
             message: AgentMessage::SpawnRequest {
@@ -2455,6 +2468,67 @@ mod tests {
             run_span.parent_id,
             Some(spawn_span.id),
             "visp.agent.run parent should be visp.subagent.spawn"
+        );
+    }
+
+    /// Regression: handle_agent_message 必须使用 SpawnRequest 携带的
+    /// TraceContext，而不是从当前 span 重新提取。否则在跨 mpsc 边界
+    /// （orchestrator 在独立 task 中处理消息）且 OTel 不活跃时，
+    /// extract_trace_context() 走 UUID fallback 生成全新 trace_id，
+    /// 导致子 agent 的 trace_id 与父 agent 不同。
+    #[tokio::test]
+    async fn test_spawn_uses_incoming_trace_context_not_reextracted() {
+        let (spans, _events, _tcs, _guard) = setup_tracing_with_otel();
+
+        // 32-hex trace_id，期望传播到 spawn span
+        let expected_trace_id = "0123456789abcdef0123456789abcdef";
+        let tc = visp_core::TraceContext::new(
+            expected_trace_id.to_string(),
+            "0123456789abcdef".to_string(),
+            1,
+            None,
+            Some("fedcba9876543210".to_string()),
+        )
+        .expect("valid TraceContext");
+
+        let (mut orch, _gtx, _grx, session_id) = make_orchestrator_for_spawn();
+        let envelope = Envelope {
+            session_id: session_id.clone(),
+            message: AgentMessage::SpawnRequest {
+                call_id: "call-w2s5-6".to_string(),
+                subagent_type: "default".to_string(),
+                description: "incoming tc test".to_string(),
+                task_id: None,
+                trace_context: Some(tc.clone()),
+            },
+            trace_context: Some(tc),
+        };
+
+        orch.handle_agent_message(envelope).await;
+
+        // 等待 spawned task 完成
+        let sub_sessions: Vec<String> = orch.sub_agent_handles.keys().cloned().collect();
+        for sid in &sub_sessions {
+            if let Some(handle) = orch.sub_agent_handles.remove(sid) {
+                let _ = handle.await;
+            }
+        }
+
+        let captured = spans.lock().unwrap();
+        let spawn_span = captured
+            .iter()
+            .find(|s| s.name == "visp.subagent.spawn")
+            .expect("should find visp.subagent.spawn span");
+        let trace_id_field = spawn_span
+            .fields
+            .iter()
+            .find(|(k, _)| k == "trace_id")
+            .map(|(_, v)| v.as_str())
+            .expect("spawn_span should have a trace_id field");
+        assert_eq!(
+            trace_id_field,
+            expected_trace_id,
+            "spawn_span 必须使用传入 TraceContext 的 trace_id，而非重新提取的"
         );
     }
 
