@@ -565,6 +565,9 @@ impl TabBar {
             TabEntry::new(session_id, agent_name)
         };
         self.tabs.insert(1, entry);
+        if !view_only {
+            self.tabs[1].generating = true;
+        }
         if self.active >= 1 {
             self.active += 1;
         }
@@ -3387,6 +3390,88 @@ mod tests {
         // After rendering: messages populated, all frames processed
         assert!(!app.tab_bar.tabs[1].messages.is_empty());
         assert_eq!(app.tab_bar.tabs[1].rendered_up_to, 5);
+    }
+
+    #[test]
+    fn test_e2e_sub_tab_shows_own_data_not_main() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
+        // 主 tab 收到 TextDelta
+        let main_frame = make_text_delta_frame("main-sid", "", "main-delta");
+        app.route_frame(main_frame);
+        assert!(app.tab_bar.tabs[0].streaming_text.contains("main-delta"));
+
+        // 子 agent 收到 TextDelta（创建 tab 1，帧累积）
+        let sub_frame = make_text_delta_frame("sub-1", "agentA", "sub-delta");
+        app.route_frame(sub_frame);
+        assert_eq!(app.tab_bar.tabs.len(), 2);
+        assert!(app.tab_bar.tabs[1].streaming_text.is_empty()); // 非活跃，未渲染
+        assert_eq!(app.tab_bar.tabs[1].frames.len(), 1);
+
+        // 子 agent 更多帧
+        let sub_frame2 = make_text_delta_frame("sub-1", "agentA", " more");
+        app.route_frame(sub_frame2);
+
+        // 切换到子 tab
+        app.tab_bar.activate(1);
+
+        // 子 tab 应显示子 agent 数据，而非主 agent 数据
+        assert!(
+            !app.tab_bar.tabs[1].streaming_text.contains("main-delta"),
+            "sub tab 不应包含主 agent 数据"
+        );
+        assert!(
+            app.tab_bar.tabs[1].streaming_text.contains("sub-delta"),
+            "sub tab 应包含子 agent 数据"
+        );
+        assert_eq!(app.tab_bar.tabs[1].streaming_text, "sub-delta more");
+
+        // 主 tab 的 streaming_text 应保持不变
+        assert_eq!(app.tab_bar.tabs[0].streaming_text, "main-delta");
+    }
+
+    #[test]
+    fn test_e2e_sub_tab_tool_call_messages_independent() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
+        // 主 tab 收到 ToolCall（活跃，立即渲染）
+        let main_tc = make_tool_call_frame("main-sid", "", "main-c1", "read", "{}");
+        app.route_frame(main_tc);
+        assert_eq!(app.tab_bar.tabs[0].messages.len(), 1);
+
+        // 子 agent 收到 ToolCall（非活跃，只累积帧）
+        let sub_tc = make_tool_call_frame("sub-1", "agentA", "sub-c1", "bash", "{}");
+        app.route_frame(sub_tc);
+        assert_eq!(app.tab_bar.tabs[1].messages.len(), 0); // 非活跃未渲染
+        assert_eq!(app.tab_bar.tabs[1].frames.len(), 1);
+
+        // 切换到子 tab
+        app.tab_bar.activate(1);
+
+        // 子 tab 的 messages 应该是子 agent 的 ToolCall
+        assert_eq!(app.tab_bar.tabs[1].messages.len(), 1);
+        assert_eq!(
+            app.tab_bar.tabs[1].messages[0].line_type,
+            LineType::ToolCall { name: "bash".into() }
+        );
+        assert_eq!(app.tab_bar.tabs[1].messages[0].call_id, Some("sub-c1".into()));
+
+        // 主 tab 的 messages 应保持不变
+        assert_eq!(app.tab_bar.tabs[0].messages.len(), 1);
+        assert_eq!(
+            app.tab_bar.tabs[0].messages[0].call_id,
+            Some("main-c1".into())
+        );
+    }
+
+    #[test]
+    fn test_e2e_sub_agent_generating_flag() {
+        let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
+        let frame = make_text_delta_frame("sub-1", "agentA", "hello");
+        app.route_frame(frame);
+        // 子 agent 正在运行，generating 应为 true
+        assert!(
+            app.tab_bar.tabs[1].generating,
+            "子 agent tab 的 generating 应为 true"
+        );
     }
 
     #[test]

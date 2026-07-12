@@ -933,19 +933,18 @@ fn handle_grpc_message(
 
             // 按 session_id 定位 tab 并设置 generating = false
             let idx = if is_main {
-                0
-            } else if let Some(i) = app.tab_bar.find_index_by_session(&e.session_id) {
-                i
+                Some(0)
             } else {
-                // 未知 session 的 Error，交给 route_frame 处理显示
-                return;
+                app.tab_bar.find_index_by_session(&e.session_id)
             };
-            app.tab_bar.tabs[idx].generating = false;
-
-            // current_request_id 仅与主 session 相关
-            if is_main {
-                app.current_request_id = None;
+            if let Some(idx) = idx {
+                app.tab_bar.tabs[idx].generating = false;
+                // current_request_id 仅与主 session 相关
+                if is_main {
+                    app.current_request_id = None;
+                }
             }
+            // 未知 session 的 Error 会 fall through 到 route_frame 创建 tab 并处理
         }
         Some(server_message::Payload::Done(d)) => {
             let is_main = d.session_id.is_empty() || d.session_id == app.main_session_id;
@@ -958,21 +957,19 @@ fn handle_grpc_message(
 
             // 按 session_id 定位 tab 并设置 generating = false
             let idx = if is_main {
-                0
-            } else if let Some(i) = app.tab_bar.find_index_by_session(&d.session_id) {
-                i
+                Some(0)
             } else {
-                // 未知 session 的 Done，交给 route_frame 处理显示
-                return;
+                app.tab_bar.find_index_by_session(&d.session_id)
             };
-            app.tab_bar.tabs[idx].generating = false;
-
-            app.apply_done_token_settlement(&d.session_id);
-
-            // current_request_id + ack 仅与主 session 相关
-            if is_main && let Some(rid) = app.current_request_id.take() {
-                chat_handle.send_ack(&rid);
+            if let Some(idx) = idx {
+                app.tab_bar.tabs[idx].generating = false;
+                app.apply_done_token_settlement(&d.session_id);
+                // current_request_id + ack 仅与主 session 相关
+                if is_main && let Some(rid) = app.current_request_id.take() {
+                    chat_handle.send_ack(&rid);
+                }
             }
+            // 未知 session 的 Done 会 fall through 到 route_frame 创建 tab 并处理
         }
         _ => {}
     }
