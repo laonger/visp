@@ -931,6 +931,7 @@ async fn execute_tool_calls(
                         prompt: prompt.clone(),
                         task_id: task_id.clone(),
                         trace_context: Some(visp_tc.clone()),
+                        response_tx: None,
                     },
                     trace_context: Some(visp_tc),
                 });

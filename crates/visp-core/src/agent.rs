@@ -133,6 +133,8 @@ pub enum AgentMessage {
         prompt: String,
         task_id: Option<String>,
         trace_context: Option<crate::TraceContext>,
+        /// 用于将子 agent 的响应发送回调用方
+        response_tx: Option<tokio::sync::oneshot::Sender<String>>,
     },
     Done,
 }
@@ -2277,6 +2279,7 @@ mod tests {
             prompt: "do work".into(),
             task_id: None,
             trace_context: Some(tc.clone()),
+            response_tx: None,
         };
         match &spawn {
             AgentMessage::SpawnRequest { trace_context, .. } => {
@@ -2295,6 +2298,7 @@ mod tests {
             prompt: "do work".into(),
             task_id: None,
             trace_context: None,
+            response_tx: None,
         };
         match &spawn {
             AgentMessage::SpawnRequest { trace_context, .. } => {
@@ -2302,6 +2306,48 @@ mod tests {
             }
             _ => panic!("expected SpawnRequest"),
         }
+    }
+
+    #[test]
+    fn test_spawn_request_response_tx_none_by_default() {
+        let spawn = AgentMessage::SpawnRequest {
+            call_id: "call-1".into(),
+            subagent_type: "default".into(),
+            description: "do work".into(),
+            prompt: "do work".into(),
+            task_id: None,
+            trace_context: None,
+            response_tx: None,
+        };
+        match &spawn {
+            AgentMessage::SpawnRequest { response_tx, .. } => {
+                assert!(response_tx.is_none());
+            }
+            _ => panic!("expected SpawnRequest"),
+        }
+    }
+
+    #[test]
+    fn test_spawn_request_response_tx_send_receive() {
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<String>();
+        let spawn = AgentMessage::SpawnRequest {
+            call_id: "call-2".into(),
+            subagent_type: "default".into(),
+            description: "do work".into(),
+            prompt: "do work".into(),
+            task_id: None,
+            trace_context: None,
+            response_tx: Some(tx),
+        };
+        if let AgentMessage::SpawnRequest {
+            response_tx: Some(sender),
+            ..
+        } = spawn
+        {
+            sender.send("hello".to_string()).ok();
+        }
+        let result = rx.try_recv();
+        assert_eq!(result, Ok("hello".to_string()));
     }
 
     #[test]

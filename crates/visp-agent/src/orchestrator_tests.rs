@@ -127,6 +127,7 @@ async fn test_spawn_request_creates_sub_agent() {
             prompt: "test task".into(),
             task_id: None,
             trace_context: None,
+            response_tx: None,
         },
         trace_context: None,
     };
@@ -335,6 +336,7 @@ async fn test_subagent_applies_agent_model_override() {
             prompt: "test task".into(),
             task_id: None,
             trace_context: None,
+            response_tx: None,
         },
         trace_context: None,
     };
@@ -457,6 +459,7 @@ async fn test_subagent_inherits_parent_config_when_no_model_override() {
             prompt: "test task".into(),
             task_id: None,
             trace_context: None,
+            response_tx: None,
         },
         trace_context: None,
     };
@@ -874,6 +877,7 @@ async fn test_subagent_spawn_span_created_in_orchestrator() {
             prompt: "test task".into(),
             task_id: None,
             trace_context: None,
+            response_tx: None,
         },
         trace_context: None,
     };
@@ -907,6 +911,7 @@ async fn test_subagent_spawn_fields() {
             prompt: "test task".into(),
             task_id: Some("task-42".to_string()),
             trace_context: None,
+            response_tx: None,
         },
         trace_context: None,
     };
@@ -966,6 +971,7 @@ async fn test_subagent_run_loop_attached_via_instrument() {
             prompt: "test task".into(),
             task_id: None,
             trace_context: None,
+            response_tx: None,
         },
         trace_context: None,
     };
@@ -1017,7 +1023,9 @@ async fn test_orchestrator_reads_trace_context_from_envelope() {
             prompt: "test task".into(),
             task_id: None,
             trace_context: Some(tc.clone()),
+            response_tx: None,
         },
+
         trace_context: Some(tc.clone()),
     };
     orch.handle_agent_message(envelope).await;
@@ -1080,6 +1088,7 @@ async fn test_orchestrator_missing_trace_context_falls_back_to_orphan() {
             prompt: "test task".into(),
             task_id: None,
             trace_context: None,
+            response_tx: None,
         },
         trace_context: None,
     };
@@ -1140,6 +1149,7 @@ async fn test_subagent_spawn_span_records_trace_fields_for_observation() {
             prompt: "test task".into(),
             task_id: None,
             trace_context: None,
+            response_tx: None,
         },
         trace_context: None,
     };
@@ -1226,6 +1236,7 @@ async fn test_orchestrator_spawn_span_inherits_parent_via_set_parent() {
             prompt: "test task".into(),
             task_id: Some("task-w2s5-1".to_string()),
             trace_context: None,
+            response_tx: None,
         },
         trace_context: None,
     };
@@ -1274,6 +1285,7 @@ async fn test_subagent_root_span_auto_parented_to_spawn_span() {
             prompt: "test task".into(),
             task_id: None,
             trace_context: None,
+            response_tx: None,
         },
         trace_context: None,
     };
@@ -1342,6 +1354,7 @@ async fn test_subagent_full_trace_chain_single_trace_id() {
             prompt: "test task".into(),
             task_id: None,
             trace_context: None,
+            response_tx: None,
         },
         trace_context: None,
     };
@@ -1413,6 +1426,7 @@ async fn test_spawn_uses_incoming_trace_context_not_reextracted() {
             prompt: "test task".into(),
             task_id: None,
             trace_context: Some(tc.clone()),
+            response_tx: None,
         },
         trace_context: Some(tc),
     };
@@ -1471,6 +1485,7 @@ async fn test_set_parent_fallback_when_trace_context_invalid() {
             prompt: "test task".into(),
             task_id: None,
             trace_context: Some(invalid_tc),
+            response_tx: None,
         },
         trace_context: None,
     };
@@ -1576,6 +1591,7 @@ async fn test_subagent_spawn_langfuse_disabled_no_langfuse_fields() {
             prompt: "test task".into(),
             task_id: None,
             trace_context: None,
+            response_tx: None,
         },
         trace_context: None,
     };
@@ -1632,6 +1648,7 @@ async fn test_subagent_spawn_langfuse_enabled_all_fields() {
             prompt: "test task".into(),
             task_id: Some("task-42".to_string()),
             trace_context: None,
+            response_tx: None,
         },
         trace_context: None,
     };
@@ -1717,6 +1734,7 @@ async fn test_subagent_spawn_langfuse_enabled_partial() {
             prompt: "test task".into(),
             task_id: None,
             trace_context: None,
+            response_tx: None,
         },
         trace_context: None,
     };
@@ -1791,6 +1809,7 @@ async fn test_subagent_spawn_langfuse_enabled_public_false() {
             prompt: "test task".into(),
             task_id: None,
             trace_context: None,
+            response_tx: None,
         },
         trace_context: None,
     };

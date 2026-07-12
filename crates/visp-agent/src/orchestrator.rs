@@ -256,6 +256,7 @@ impl Orchestrator {
                 prompt,
                 task_id,
                 trace_context,
+                response_tx: _response_tx,
             } => {
                 // 优先使用 SpawnRequest 携带的 TraceContext（由父 agent 的
                 // agent_loop 用父 trace_id 构造），确保子 agent 跨 mpsc
