@@ -20,7 +20,8 @@ use crate::provider::LlmProvider;
 use crate::rules::RuleEngine;
 use crate::session::SessionManager;
 use crate::session::SessionStatus;
-use crate::tool::{ToolContext, ToolResult};
+use crate::tool::{ToolContext, ToolResult, ToolType};
+use async_trait::async_trait;
 use crate::tool_registry::ToolRegistry;
 
 use tokio::sync::mpsc;
@@ -177,6 +178,64 @@ impl std::fmt::Display for AgentKind {
             AgentKind::Primary => write!(f, "primary"),
             AgentKind::Sub => write!(f, "sub"),
         }
+    }
+}
+
+/// A tool that delegates a task to a sub-agent.
+/// Created dynamically for each sub-agent in the AgentRegistry.
+pub struct AgentTool {
+    agent_name: String,
+    agent_description: String,
+}
+
+impl AgentTool {
+    pub fn new(name: String, description: String) -> Self {
+        Self {
+            agent_name: name,
+            agent_description: description,
+        }
+    }
+}
+
+#[async_trait]
+impl crate::tool::Tool for AgentTool {
+    fn name(&self) -> &str {
+        &self.agent_name
+    }
+
+    fn description(&self) -> &str {
+        &self.agent_description
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "The detailed, self-contained task to delegate to the sub-agent"
+                }
+            },
+            "required": ["prompt"]
+        })
+    }
+
+    async fn execute(&self, _arguments: serde_json::Value, context: &ToolContext) -> ToolResult {
+        if context.global_tx.is_none() {
+            return ToolResult::error(
+                "[SubAgent Error] Agent tool requires multi-agent mode (global_tx not available)",
+            );
+        }
+        // Full execute_agent_spawn implementation is part of Wave 2a
+        ToolResult::error("[SubAgent Error] Agent tool execution not fully implemented yet")
+    }
+
+    fn category(&self) -> &str {
+        "agent"
+    }
+
+    fn tool_type(&self) -> ToolType {
+        ToolType::Agent
     }
 }
 

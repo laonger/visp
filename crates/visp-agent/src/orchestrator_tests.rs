@@ -111,12 +111,6 @@ fn test_resolve_provider_fallback() {
 async fn test_spawn_request_creates_sub_agent() {
     let (mut orch, _global_tx, _client_tx, mut _grpc_rx) = make_orchestrator();
 
-    // Register TaskTool in the tool_registry via internal access
-    // Since orch.tool_registry is pub, we can register directly
-    orch.tool_registry
-        .register(Arc::new(visp_tools::task::TaskTool))
-        .ok();
-
     // Inject a SpawnRequest
     let envelope = Envelope {
         session_id: "parent-1".to_string(),
@@ -2093,4 +2087,156 @@ async fn test_pending_responses_cleanup_on_error() {
         !orch.pending_responses.contains_key(&child_id),
         "pending_responses should be cleaned up after handle_agent_error"
     );
+}
+
+// ── Wave 3a: 子 Agent 工具筛选 ─────────────────────────────────────
+
+use async_trait::async_trait;
+use visp_core::tool::ToolType;
+
+/// 可指定 tool_type 的 mock 工具
+struct MockTypedTool {
+    name: String,
+    kind: ToolType,
+}
+
+#[async_trait]
+impl visp_core::tool::Tool for MockTypedTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        "mock typed tool"
+    }
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        _ctx: &visp_core::tool::ToolContext,
+    ) -> visp_core::tool::ToolResult {
+        visp_core::tool::ToolResult::success("ok")
+    }
+    fn tool_type(&self) -> ToolType {
+        self.kind
+    }
+}
+
+fn mock_tool(name: &str, kind: ToolType) -> std::sync::Arc<dyn visp_core::tool::Tool> {
+    std::sync::Arc::new(MockTypedTool {
+        name: name.to_string(),
+        kind,
+    })
+}
+
+/// Test: allowed_sub_agents 为空时，子 Agent 看不到任何 agent 工具
+#[test]
+fn test_sub_agent_no_allowed_sub_agents() {
+    let registry = ToolRegistry::new();
+    registry
+        .register(mock_tool("builtin-read", ToolType::Builtin))
+        .unwrap();
+    registry
+        .register(mock_tool("mcp-write", ToolType::Mcp))
+        .unwrap();
+    registry
+        .register(mock_tool("agent-fixer", ToolType::Agent))
+        .unwrap();
+    registry
+        .register(mock_tool("agent-explorer", ToolType::Agent))
+        .unwrap();
+    registry
+        .register(mock_tool("skill-deploy", ToolType::Skill))
+        .unwrap();
+
+    let filtered = filter_tools_for_sub_agent(&registry, &[]);
+    let names = filtered.names();
+
+    assert!(names.contains(&"builtin-read".to_string()));
+    assert!(names.contains(&"mcp-write".to_string()));
+    assert!(names.contains(&"skill-deploy".to_string()));
+    assert!(!names.contains(&"agent-fixer".to_string()));
+    assert!(!names.contains(&"agent-explorer".to_string()));
+}
+
+/// Test: allowed_sub_agents 有值时，只保留列表中指定的 agent 工具
+#[test]
+fn test_sub_agent_with_allowed_sub_agents() {
+    let registry = ToolRegistry::new();
+    registry
+        .register(mock_tool("builtin-read", ToolType::Builtin))
+        .unwrap();
+    registry
+        .register(mock_tool("agent-fixer", ToolType::Agent))
+        .unwrap();
+    registry
+        .register(mock_tool("agent-explorer", ToolType::Agent))
+        .unwrap();
+    registry
+        .register(mock_tool("agent-oracle", ToolType::Agent))
+        .unwrap();
+
+    let allowed = vec!["agent-fixer".to_string(), "agent-oracle".to_string()];
+    let filtered = filter_tools_for_sub_agent(&registry, &allowed);
+    let names = filtered.names();
+
+    assert!(names.contains(&"builtin-read".to_string()));
+    assert!(names.contains(&"agent-fixer".to_string()));
+    assert!(names.contains(&"agent-oracle".to_string()));
+    assert!(!names.contains(&"agent-explorer".to_string()));
+}
+
+/// Test: compute_depth 检查在工具筛选后仍生效
+#[tokio::test]
+async fn test_sub_agent_depth_limit_still_applies() {
+    let agent_config = AgentConfig {
+        max_depth: 0,
+        ..AgentConfig::default()
+    };
+    let (mut orch, _global_tx, _grpc_rx, parent_id) =
+        make_orchestrator_for_spawn_with_config(agent_config);
+
+    // 注册 parent agent，使其在 active_agents 中可查
+    let cancel = CancellationToken::new();
+    let (parent_inbox_tx, mut parent_inbox_rx) = mpsc::channel(16);
+    orch.active_agents.register(ActiveAgent {
+        session_id: parent_id.clone(),
+        parent_session_id: None,
+        agent_name: "root".to_string(),
+        cancel_token: cancel,
+        inbox: parent_inbox_tx,
+        pending_call_id: None,
+        started_at: Instant::now(),
+    });
+
+    // Try to spawn: parent depth=0 >= max_depth=0 → error
+    let envelope = Envelope {
+        session_id: parent_id.clone(),
+        message: AgentMessage::SpawnRequest {
+            call_id: "call-depth-test".to_string(),
+            subagent_type: "default".to_string(),
+            description: "depth test".to_string(),
+            prompt: "test".into(),
+            task_id: None,
+            trace_context: None,
+            response_tx: None,
+        },
+        trace_context: None,
+    };
+    orch.handle_agent_message(envelope).await;
+
+    let msg = parent_inbox_rx
+        .try_recv()
+        .expect("parent inbox should receive SubAgentError");
+    match msg {
+        OrchestratorMessage::SubAgentError { call_id, error } => {
+            assert_eq!(call_id, "call-depth-test");
+            assert!(
+                error.contains("Max depth exceeded"),
+                "depth check error expected, got: {error}"
+            );
+        }
+        _ => panic!("expected SubAgentError, got a different variant"),
+    }
 }

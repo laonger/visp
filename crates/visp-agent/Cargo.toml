@@ -22,5 +22,6 @@ thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 serial_test = "3"

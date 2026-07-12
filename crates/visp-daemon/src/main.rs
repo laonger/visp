@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 use visp_core::{
-    agent::AgentConfig,
+    agent::{AgentConfig, AgentTool, Envelope},
+    agent_registry::AgentRegistry,
     context::ContextTrimmer,
     provider::LlmProvider,
     rules::RuleEngine,
@@ -28,11 +29,32 @@ use visp_tools::{
     fetch::WebFetch,
     file::{EditFile, ReadFile, WriteFile},
     search::{Glob, Grep},
-    task::TaskTool,
 };
 
 use crate::config::{DaemonConfig, LlmModelConfig};
 use crate::service::CoderDaemonService;
+
+/// Register agent tools from the AgentRegistry into the ToolRegistry.
+/// In single-agent mode (global_tx is None), agent tools are skipped.
+fn register_agent_tools(
+    tool_registry: &ToolRegistry,
+    agent_registry: &AgentRegistry,
+    global_tx: Option<&mpsc::Sender<Envelope>>,
+) -> Result<(), String> {
+    if global_tx.is_none() {
+        return Ok(());
+    }
+    for agent_def in agent_registry.list_subagents() {
+        let tool = Arc::new(AgentTool::new(
+            agent_def.name.clone(),
+            agent_def.description.clone(),
+        ));
+        tool_registry
+            .register(tool)
+            .map_err(|e| format!("register agent tool '{}': {e}", agent_def.name))?;
+    }
+    Ok(())
+}
 
 /// Create an LLM provider from a model config.
 fn create_llm_provider(config: &LlmModelConfig) -> Result<Arc<dyn LlmProvider>, String> {
@@ -174,10 +196,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )))
         .map_err(|e| format!("register codegraph_impact: {e}"))?;
 
-    // ── 子 Agent 委派工具 ──
-    tool_registry
-        .register(Arc::new(TaskTool))
-        .map_err(|e| format!("register task: {e}"))?;
     // ── 技能工具（description 内嵌可用技能列表）──
     let cwd = std::env::current_dir()?;
     tool_registry
@@ -416,6 +434,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mpsc::channel::<visp_core::agent::AgentEventFrame>(256);
     let (client_tx, client_rx) = mpsc::channel(64);
 
+    // 8.7.5. Register agent tools from AgentRegistry (skip in single-agent mode)
+    register_agent_tools(&tool_registry, &agent_registry, Some(&global_tx))
+        .map_err(|e| format!("register agent tools: {e}"))?;
+
     // 8.8. Create and start Orchestrator
     let mut orchestrator = Orchestrator::new(
         cancel_rx,
@@ -472,4 +494,108 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     server_handle.abort();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use visp_core::agent_definition::{AgentDefinition, AgentMode};
+
+    fn make_agent(name: &str, mode: AgentMode) -> AgentDefinition {
+        AgentDefinition {
+            name: name.to_string(),
+            description: format!("Agent {name}"),
+            mode,
+            model: None,
+            temperature: None,
+            steps: None,
+            permission: vec![],
+            allowed_sub_agents: Vec::new(),
+            system_prompt: String::new(),
+        }
+    }
+
+    fn make_registry(subagent_names: &[&str]) -> AgentRegistry {
+        let mut registry = AgentRegistry::new();
+        for name in subagent_names {
+            registry
+                .register(make_agent(name, AgentMode::Subagent))
+                .unwrap();
+        }
+        // Also register a primary agent to verify it's not included
+        registry
+            .register(make_agent("primary", AgentMode::Primary))
+            .unwrap();
+        registry
+    }
+
+    #[test]
+    fn test_agent_tools_registered_from_registry() {
+        let registry = make_registry(&["fixer", "explorer"]);
+        let tool_registry = ToolRegistry::new();
+        let (tx, _rx) = mpsc::channel::<Envelope>(16);
+
+        let result = register_agent_tools(&tool_registry, &registry, Some(&tx));
+        assert!(result.is_ok());
+
+        let defs = tool_registry.definitions();
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"fixer"));
+        assert!(names.contains(&"explorer"));
+        // Primary agent should NOT be registered
+        assert!(!names.contains(&"primary"));
+    }
+
+    #[test]
+    fn test_agent_tools_not_registered_in_single_agent_mode() {
+        let registry = make_registry(&["fixer", "explorer"]);
+        let tool_registry = ToolRegistry::new();
+
+        // global_tx is None → single agent mode
+        let result = register_agent_tools(&tool_registry, &registry, None);
+        assert!(result.is_ok());
+
+        let defs = tool_registry.definitions();
+        assert!(
+            defs.is_empty(),
+            "No agent tools should be registered in single-agent mode"
+        );
+    }
+
+    #[test]
+    fn test_agent_tool_names_match_agent_definition() {
+        let registry = make_registry(&["fixer", "explorer", "designer"]);
+        let tool_registry = ToolRegistry::new();
+        let (tx, _rx) = mpsc::channel::<Envelope>(16);
+
+        let result = register_agent_tools(&tool_registry, &registry, Some(&tx));
+        assert!(result.is_ok());
+
+        let defs = tool_registry.definitions();
+        for def in &defs {
+            // Each registered tool name should match an agent definition name
+            let agent = registry.get(&def.name);
+            assert!(
+                agent.is_some(),
+                "Tool '{}' should have a matching AgentDefinition",
+                def.name
+            );
+            assert_eq!(
+                agent.unwrap().name,
+                def.name,
+                "Tool name should match AgentDefinition.name"
+            );
+        }
+        // Verify tool_type for all registered tools
+        for def in &defs {
+            let tool = tool_registry.get(&def.name).unwrap();
+            assert_eq!(
+                tool.tool_type(),
+                visp_core::tool::ToolType::Agent,
+                "Agent tool '{}' should have ToolType::Agent",
+                def.name
+            );
+        }
+    }
 }

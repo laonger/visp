@@ -28,9 +28,37 @@ use visp_core::message::Message;
 use visp_core::provider::{LlmProvider, ModelInfo};
 use visp_core::rules::RuleEngine;
 use visp_core::session::{SessionManager, SessionStatus, SubSessionParams};
+use visp_core::tool::ToolType;
 use visp_core::tool_registry::ToolRegistry;
 
 use crate::active_agent::{ActiveAgent, ActiveAgentRegistry};
+
+/// 根据 allowed_sub_agents 筛选子 Agent 的工具列表
+fn filter_tools_for_sub_agent(
+    tool_registry: &ToolRegistry,
+    allowed_sub_agents: &[String],
+) -> Arc<ToolRegistry> {
+    let filtered = ToolRegistry::new();
+    for name in tool_registry.names() {
+        if let Some(tool) = tool_registry.get(&name) {
+            let should_include = match tool.tool_type() {
+                ToolType::Agent => {
+                    if allowed_sub_agents.is_empty() {
+                        false
+                    } else {
+                        allowed_sub_agents.iter().any(|a| a == tool.name())
+                    }
+                }
+                _ => true,
+            };
+            if should_include {
+                // register 返回 Err 仅当名称重复——此处不会发生
+                let _ = filtered.register(tool);
+            }
+        }
+    }
+    Arc::new(filtered)
+}
 
 /// 从 AgentRegistry 动态构建子 agent 列表（用于注入 system prompt）
 fn build_subagent_prompt(registry: &AgentRegistry) -> String {
@@ -744,7 +772,10 @@ impl Orchestrator {
         });
 
         let provider = provider.clone();
-        let tool_registry = self.tool_registry.clone();
+        let tool_registry = filter_tools_for_sub_agent(
+            &self.tool_registry,
+            &agent_def.allowed_sub_agents,
+        );
         let rule_engine = self.rule_engine.clone();
         let session_mgr = self.session_mgr.clone();
         let mut config = self.agent_config.clone();

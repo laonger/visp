@@ -4255,6 +4255,7 @@ dependencies = [
 name = "visp-agent"
 version = "0.4.1"
 dependencies = [
+ "async-trait",
  "futures",
  "opentelemetry",
  "opentelemetry_sdk",
