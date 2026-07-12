@@ -220,14 +220,57 @@ impl crate::tool::Tool for AgentTool {
         })
     }
 
-    async fn execute(&self, _arguments: serde_json::Value, context: &ToolContext) -> ToolResult {
-        if context.global_tx.is_none() {
-            return ToolResult::error(
-                "[SubAgent Error] Agent tool requires multi-agent mode (global_tx not available)",
-            );
+    async fn execute(&self, arguments: serde_json::Value, context: &ToolContext) -> ToolResult {
+        let global_tx = match &context.global_tx {
+            Some(tx) => tx.clone(),
+            None => {
+                return ToolResult::error(
+                    "[SubAgent Error] Agent tool requires multi-agent mode (global_tx not available)",
+                );
+            }
+        };
+
+        let prompt = match arguments.get("prompt").and_then(|v| v.as_str()) {
+            Some(p) => p.to_string(),
+            None => {
+                return ToolResult::error("[SubAgent Error] Missing required 'prompt' argument");
+            }
+        };
+
+        let (response_tx, response_rx) = oneshot::channel::<String>();
+
+        let trace_context = context.visp_trace_id.as_ref().and_then(|trace_id| {
+            context.iter_span_w3c_id.as_ref().and_then(|span_id| {
+                crate::TraceContext::new(trace_id.clone(), span_id.clone(), 1, None, None).ok()
+            })
+        });
+
+        let envelope = Envelope {
+            session_id: context.session_id.clone().unwrap_or_default(),
+            message: AgentMessage::SpawnRequest {
+                call_id: uuid::Uuid::new_v4().to_string(),
+                subagent_type: self.agent_name.clone(),
+                description: self.agent_description.clone(),
+                prompt,
+                task_id: None,
+                trace_context: trace_context.clone(),
+                response_tx: Some(response_tx),
+            },
+            trace_context,
+        };
+
+        if let Err(e) = global_tx.send(envelope).await {
+            return ToolResult::error(format!(
+                "[SubAgent Error] Failed to send spawn request: {e}"
+            ));
         }
-        // Full execute_agent_spawn implementation is part of Wave 2a
-        ToolResult::error("[SubAgent Error] Agent tool execution not fully implemented yet")
+
+        match response_rx.await {
+            Ok(content) => ToolResult::success(content),
+            Err(_) => {
+                ToolResult::error("[SubAgent Error] Sub-agent response channel closed unexpectedly")
+            }
+        }
     }
 
     fn category(&self) -> &str {
@@ -2243,6 +2286,96 @@ mod tests {
                 || guide.contains("@designer"),
             "should list agent tool names like @explorer, got: {guide}"
         );
+    }
+
+    // ── AgentTool::execute ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_agent_tool_execute_sends_spawn_request_and_returns_response() {
+        let tool = AgentTool::new("explorer".to_string(), "Search codebase".to_string());
+        let (tx, mut rx) = mpsc::channel::<Envelope>(8);
+
+        let ctx = ToolContext {
+            working_dir: PathBuf::from("/tmp"),
+            session_id: Some("test-session".to_string()),
+            permission_rules: None,
+            global_tx: Some(tx),
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
+        };
+
+        let handle = tokio::spawn(async move {
+            let env = rx.recv().await.expect("should receive envelope");
+            assert_eq!(env.session_id, "test-session");
+            match env.message {
+                AgentMessage::SpawnRequest {
+                    subagent_type,
+                    description,
+                    prompt,
+                    response_tx,
+                    task_id,
+                    ..
+                } => {
+                    assert_eq!(subagent_type, "explorer");
+                    assert_eq!(description, "Search codebase");
+                    assert_eq!(prompt, "find all TODOs");
+                    assert!(task_id.is_none());
+                    if let Some(tx) = response_tx {
+                        let _ = tx.send("found 3 TODOs".to_string());
+                    }
+                }
+                _ => panic!("expected SpawnRequest"),
+            }
+        });
+
+        let result = tool
+            .execute(serde_json::json!({"prompt": "find all TODOs"}), &ctx)
+            .await;
+
+        assert!(!result.is_error);
+        assert_eq!(result.content, "found 3 TODOs");
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_agent_tool_execute_error_without_global_tx() {
+        let tool = AgentTool::new("fixer".to_string(), "Fix things".to_string());
+
+        let ctx = ToolContext {
+            working_dir: PathBuf::from("/tmp"),
+            session_id: None,
+            permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
+        };
+
+        let result = tool
+            .execute(serde_json::json!({"prompt": "do something"}), &ctx)
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("global_tx not available"));
+    }
+
+    #[tokio::test]
+    async fn test_agent_tool_execute_error_missing_prompt() {
+        let tool = AgentTool::new("explorer".to_string(), "Search".to_string());
+        let (tx, _rx) = mpsc::channel::<Envelope>(8);
+
+        let ctx = ToolContext {
+            working_dir: PathBuf::from("/tmp"),
+            session_id: None,
+            permission_rules: None,
+            global_tx: Some(tx),
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
+        };
+
+        let result = tool.execute(serde_json::json!({}), &ctx).await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("Missing required 'prompt'"));
     }
 
     // ── cleanup_orphan_tool_uses ──────────────────────────────────────────────
