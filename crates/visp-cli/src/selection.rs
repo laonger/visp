@@ -6,6 +6,7 @@
 //! - Esc 清除选择
 
 use ratatui::buffer::Buffer;
+use unicode_width::UnicodeWidthStr;
 
 /// 文本选择范围（内容坐标：row 包含 scroll 偏移，滚动时高亮跟随文字）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -206,12 +207,16 @@ pub fn extract_selected_text(buf: &Buffer, selection: &TextSelection, scroll_y: 
             area.right().saturating_sub(1)
         };
 
-        for col in col_start..=col_end {
+        let mut col = col_start;
+        while col <= col_end {
             if col >= area.right() || row >= area.bottom() {
                 break;
             }
             let cell = &buf[(col, row)];
-            line.push_str(cell.symbol());
+            let symbol = cell.symbol();
+            let width = UnicodeWidthStr::width(symbol).max(1) as u16;
+            line.push_str(symbol);
+            col = col.saturating_add(width);
         }
         // 去掉行尾空格（padding）
         let trimmed = line.trim_end();
@@ -387,5 +392,24 @@ mod tests {
         };
         let text = extract_selected_text(&buf, &sel, 0);
         assert_eq!(text, "ne1\nLine");
+    }
+
+    #[test]
+    fn test_extract_selected_text_chinese() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::style::Style;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 20, 3));
+        // 使用 set_string 正确渲染中文（会自动处理全角字符的 continuation cells）
+        buf.set_string(0, 1, "你好世界", Style::default());
+        buf.set_string(0, 2, "Hello 你好", Style::default());
+        // 选择整行
+        let sel = TextSelection {
+            start: Some((0, 1)),
+            end: Some((19, 2)),
+        };
+        let text = extract_selected_text(&buf, &sel, 0);
+        // 不应有空格在中文之间
+        assert_eq!(text, "你好世界\nHello 你好");
     }
 }
