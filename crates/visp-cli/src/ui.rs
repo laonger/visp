@@ -498,6 +498,29 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     app.chat_area_rect = (area.x, area.y, area.width, area.height);
 
     let content_w = area.width.saturating_sub(1);
+
+    // ── 调试日志：打印当前 tab 信息及前 5 条消息 ──────────────────
+    debug_log!(
+        "render_chat_area: active_tab_idx={} session_id={} msg_count={}",
+        app.tab_bar.active,
+        app.active_tab().session_id,
+        app.messages().len(),
+    );
+    for (i, msg) in app.messages().iter().take(5).enumerate() {
+        let preview = if msg.content.len() > 80 {
+            &msg.content[..80]
+        } else {
+            &msg.content
+        };
+        debug_log!(
+            "  msg[{}]: id={} type={:?} content={}",
+            i,
+            msg.id,
+            &msg.line_type,
+            preview.replace('\n', "\\n"),
+        );
+    }
+
     // render_block 中 content_w_adj = content_w - margin_horizontal*2
     // 所有 style 的 margin_horizontal 均为 1，按渲染实际宽度折行
     let render_w = content_w.saturating_sub(2);
