@@ -73,7 +73,7 @@ fn build_subagent_prompt(registry: &AgentRegistry) -> String {
     }
 
     let mut prompt = String::from("\n## Delegation Guidelines\n\n");
-    prompt.push_str("Available sub-agents (use via the `task` tool):\n");
+    prompt.push_str("Available sub-agents (delegate via @agent_name):\n");
     for def in subs {
         prompt.push_str(&format!("  - `{}` — {}\n", def.name, def.description));
     }

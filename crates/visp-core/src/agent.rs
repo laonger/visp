@@ -585,7 +585,8 @@ pub(crate) fn render_tool_guide(registry: &ToolRegistry) -> String {
          lookups and call-chain tracing. \
          When you need to discover code (find files, locate patterns, search \
          the codebase) or execute bounded implementation tasks, \
-         delegate to the appropriate sub-agent via the `task` tool. \
+         delegate to the appropriate sub-agent (e.g. @explorer, @fixer, \
+         @designer, @oracle, @librarian). \
          See the sub-agent list in the Task Delegation section for details. \
          Only use `bash` when no other tool fits \
          (e.g. running build commands, git operations, or multi-step shell scripts)."
@@ -2173,6 +2174,75 @@ mod tests {
         assert!(guide.contains("codegraph"));
         assert!(guide.contains("Network"));
         assert!(guide.contains("fetch"));
+    }
+
+    #[test]
+    fn test_render_tool_guide_no_task_reference() {
+        use crate::tool::ToolContext;
+        use crate::tool::ToolResult;
+
+        struct DummyTool;
+
+        #[async_trait::async_trait]
+        impl Tool for DummyTool {
+            fn name(&self) -> &str {
+                "bash"
+            }
+            fn description(&self) -> &str {
+                "run commands"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn execute(&self, _args: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+                ToolResult::success("ok")
+            }
+        }
+
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(DummyTool)).unwrap();
+        let guide = render_tool_guide(&registry);
+        assert!(!guide.is_empty());
+        assert!(
+            !guide.contains("`task` tool"),
+            "should not reference the `task` tool, got: {guide}"
+        );
+    }
+
+    #[test]
+    fn test_render_tool_guide_lists_agent_tools() {
+        use crate::tool::ToolContext;
+        use crate::tool::ToolResult;
+
+        struct DummyTool;
+
+        #[async_trait::async_trait]
+        impl Tool for DummyTool {
+            fn name(&self) -> &str {
+                "bash"
+            }
+            fn description(&self) -> &str {
+                "run commands"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn execute(&self, _args: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+                ToolResult::success("ok")
+            }
+        }
+
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(DummyTool)).unwrap();
+        let guide = render_tool_guide(&registry);
+        assert!(!guide.is_empty());
+        // Should mention at least one agent tool name like @explorer or @fixer
+        assert!(
+            guide.contains("@explorer")
+                || guide.contains("@fixer")
+                || guide.contains("@designer"),
+            "should list agent tool names like @explorer, got: {guide}"
+        );
     }
 
     // ── cleanup_orphan_tool_uses ──────────────────────────────────────────────

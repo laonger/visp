@@ -2240,3 +2240,178 @@ async fn test_sub_agent_depth_limit_still_applies() {
         _ => panic!("expected SubAgentError, got a different variant"),
     }
 }
+
+// ── Wave 4a: System Prompt — "task" tool → agent tools ────────────────
+
+#[test]
+fn test_build_subagent_prompt_no_task_reference() {
+    use visp_core::agent_definition::AgentMode;
+
+    let mut registry = AgentRegistry::new();
+    registry
+        .register(AgentDefinition {
+            name: "explorer".to_string(),
+            description: "code search".to_string(),
+            mode: AgentMode::Subagent,
+            model: None,
+            temperature: None,
+            steps: None,
+            permission: vec![],
+            allowed_sub_agents: Vec::new(),
+            system_prompt: String::new(),
+        })
+        .unwrap();
+    registry
+        .register(AgentDefinition {
+            name: "fixer".to_string(),
+            description: "implementation".to_string(),
+            mode: AgentMode::Subagent,
+            model: None,
+            temperature: None,
+            steps: None,
+            permission: vec![],
+            allowed_sub_agents: Vec::new(),
+            system_prompt: String::new(),
+        })
+        .unwrap();
+
+    let prompt = build_subagent_prompt(&registry);
+    assert!(!prompt.is_empty(), "prompt should not be empty");
+    assert!(
+        !prompt.contains("`task`"),
+        "should not reference the `task` tool, got: {prompt}"
+    );
+}
+
+#[test]
+fn test_build_subagent_prompt_agent_tools_guidance() {
+    use visp_core::agent_definition::AgentMode;
+
+    let mut registry = AgentRegistry::new();
+    registry
+        .register(AgentDefinition {
+            name: "explorer".to_string(),
+            description: "code search".to_string(),
+            mode: AgentMode::Subagent,
+            model: None,
+            temperature: None,
+            steps: None,
+            permission: vec![],
+            allowed_sub_agents: Vec::new(),
+            system_prompt: String::new(),
+        })
+        .unwrap();
+
+    let prompt = build_subagent_prompt(&registry);
+    assert!(!prompt.is_empty());
+    // Should mention agent tools (e.g. @agent_name or delegate pattern)
+    assert!(
+        prompt.contains("@explorer")
+            || prompt.contains("@fixer")
+            || prompt.contains("@agent_name")
+            || prompt.contains("agent tool"),
+        "should contain agent tool guidance, got: {prompt}"
+    );
+    assert!(
+        prompt.contains("explorer"),
+        "should list the registered agent name, got: {prompt}"
+    );
+}
+
+// ── Wave 4b: 全量回归 + 端到端集成测试 ─────────────────────────────
+
+#[tokio::test]
+async fn test_end_to_end_agent_tool_spawn() {
+    // 端到端测试：agent 工具调用 → spawn 子 Agent → 完成 → 结果返回
+    //
+    // 1. 创建 Orchestrator，注册 explorer 子 Agent
+    // 2. 通过 global_tx 发送 SpawnRequest（模拟 agent 工具调用）
+    // 3. 验证 Orchestrator 正确处理 spawn → run → done 流程
+    // 4. 验证 oneshot response_tx 收到结果
+    // 5. 验证结果包含预期内容
+
+    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+
+    // Register parent agent in active_agents so the sub-agent has a parent context
+    let cancel = CancellationToken::new();
+    let (parent_inbox_tx, _parent_inbox_rx) = mpsc::channel(16);
+    orch.active_agents.register(ActiveAgent {
+        session_id: parent_id.clone(),
+        parent_session_id: None,
+        agent_name: "root".to_string(),
+        cancel_token: cancel.clone(),
+        inbox: parent_inbox_tx,
+        pending_call_id: None,
+        started_at: Instant::now(),
+    });
+
+    // ── Step 2: Send SpawnRequest via handle_agent_message ──────────
+    let envelope = Envelope {
+        session_id: parent_id.clone(),
+        message: AgentMessage::SpawnRequest {
+            call_id: "call-e2e-1".to_string(),
+            subagent_type: "default".to_string(),
+            description: "E2E integration test task".to_string(),
+            prompt: "do something".into(),
+            task_id: Some("task-e2e".to_string()),
+            trace_context: None,
+            response_tx: Some(tx),
+        },
+        trace_context: None,
+    };
+    orch.handle_agent_message(envelope).await;
+
+    // ── Step 3: Verify spawn succeeded ─────────────────────────────
+    let child_id = find_child_id(&orch, &parent_id);
+    assert!(
+        orch.active_agents.get(&child_id).is_some(),
+        "sub-agent should be active after spawn"
+    );
+    assert!(
+        orch.pending_responses.contains_key(&child_id),
+        "pending_responses should track the child session"
+    );
+    assert!(
+        orch.sub_agent_handles.contains_key(&child_id),
+        "sub_agent_handles should track the child JoinHandle"
+    );
+
+    // ── Step 4: Wait for spawned run_agent_loop task to complete ───
+    // The MockProvider (empty response vec) causes the agent loop to
+    // finish immediately. The spawned task sends AgentMessage::Done
+    // via global_tx after completion.
+    if let Some(handle) = orch.sub_agent_handles.remove(&child_id) {
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("sub-agent task should complete within timeout");
+    }
+
+    // ── Step 5: Process the Done message ───────────────────────────
+    // The spawned task sent Done through global_tx. We simulate the
+    // orchestrator's run loop by calling handle_agent_message directly.
+    orch.handle_agent_message(Envelope {
+        session_id: child_id.clone(),
+        message: AgentMessage::Done,
+        trace_context: None,
+    })
+    .await;
+
+    // ── Step 6: Verify result via oneshot ──────────────────────────
+    let result = rx
+        .await
+        .expect("should receive result via oneshot response_tx");
+    assert!(
+        !orch.pending_responses.contains_key(&child_id),
+        "pending_responses should be cleaned up after handle_done"
+    );
+    assert!(
+        orch.active_agents.get(&child_id).is_none(),
+        "sub-agent should be removed from active_agents after done"
+    );
+    // With MockProvider (empty vec), no assistant messages → empty result
+    assert_eq!(
+        result, "",
+        "result from empty MockProvider session should be empty"
+    );
+}
