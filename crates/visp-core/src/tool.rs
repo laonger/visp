@@ -5,6 +5,19 @@ use std::sync::Arc;
 
 use crate::agent_definition::PermissionRule;
 
+/// 工具类型
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolType {
+    /// 内置工具
+    Builtin,
+    /// MCP 工具
+    Mcp,
+    /// Agent 工具
+    Agent,
+    /// Skill 工具
+    Skill,
+}
+
 /// 工具执行上下文
 #[derive(Debug, Clone)]
 pub struct ToolContext {
@@ -90,6 +103,12 @@ pub trait Tool: Send + Sync {
     fn category(&self) -> &str {
         "other"
     }
+
+    /// 工具类型（用于区分工具的来源/种类）
+    /// 默认返回 Builtin，各工具可根据需要覆盖
+    fn tool_type(&self) -> ToolType {
+        ToolType::Builtin
+    }
 }
 
 #[cfg(test)]
@@ -174,5 +193,115 @@ mod tests_tool_approval {
     fn test_tool_default_category() {
         let tool = NoApprovalTool;
         assert_eq!(tool.category(), "other");
+    }
+}
+
+#[cfg(test)]
+mod tests_tool_type {
+    use super::*;
+
+    struct BuiltinMockTool;
+
+    #[async_trait]
+    impl Tool for BuiltinMockTool {
+        fn name(&self) -> &str {
+            "builtin_mock"
+        }
+        fn description(&self) -> &str {
+            "Builtin mock tool"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn execute(&self, _args: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::success("ok")
+        }
+    }
+
+    struct McpMockTool;
+
+    #[async_trait]
+    impl Tool for McpMockTool {
+        fn name(&self) -> &str {
+            "mcp_mock"
+        }
+        fn description(&self) -> &str {
+            "MCP mock tool"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn execute(&self, _args: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::success("ok")
+        }
+        fn tool_type(&self) -> ToolType {
+            ToolType::Mcp
+        }
+    }
+
+    struct AgentMockTool;
+
+    #[async_trait]
+    impl Tool for AgentMockTool {
+        fn name(&self) -> &str {
+            "agent_mock"
+        }
+        fn description(&self) -> &str {
+            "Agent mock tool"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn execute(&self, _args: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::success("ok")
+        }
+        fn tool_type(&self) -> ToolType {
+            ToolType::Agent
+        }
+    }
+
+    struct SkillMockTool;
+
+    #[async_trait]
+    impl Tool for SkillMockTool {
+        fn name(&self) -> &str {
+            "skill_mock"
+        }
+        fn description(&self) -> &str {
+            "Skill mock tool"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn execute(&self, _args: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::success("ok")
+        }
+        fn tool_type(&self) -> ToolType {
+            ToolType::Skill
+        }
+    }
+
+    #[test]
+    fn test_tool_type_default_is_builtin() {
+        let tool = BuiltinMockTool;
+        assert_eq!(tool.tool_type(), ToolType::Builtin);
+    }
+
+    #[test]
+    fn test_tool_type_mcp_returns_mcp() {
+        let tool = McpMockTool;
+        assert_eq!(tool.tool_type(), ToolType::Mcp);
+    }
+
+    #[test]
+    fn test_tool_type_agent_returns_agent() {
+        let tool = AgentMockTool;
+        assert_eq!(tool.tool_type(), ToolType::Agent);
+    }
+
+    #[test]
+    fn test_tool_type_skill_returns_skill() {
+        let tool = SkillMockTool;
+        assert_eq!(tool.tool_type(), ToolType::Skill);
     }
 }

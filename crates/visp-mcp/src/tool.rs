@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use async_trait::async_trait;
-use visp_core::tool::{Tool, ToolContext, ToolResult};
+use visp_core::tool::{Tool, ToolContext, ToolResult, ToolType};
 
 use crate::client::{McpSession, McpToolDefinition, call_tool_result_to_text};
 use crate::error::McpError;
@@ -160,6 +160,10 @@ impl Tool for McpToolAdapter {
 
     fn category(&self) -> &str {
         "mcp"
+    }
+
+    fn tool_type(&self) -> ToolType {
+        ToolType::Mcp
     }
 }
 
