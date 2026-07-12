@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::agent::Envelope;
+
 use crate::agent_definition::PermissionRule;
 
 /// 工具类型
@@ -27,6 +29,12 @@ pub struct ToolContext {
     pub session_id: Option<String>,
     /// 权限规则集（多 Agent 模式）
     pub permission_rules: Option<Arc<Vec<PermissionRule>>>,
+    /// 全局事件总线发送端（用于子 Agent 向父 Agent 上报事件）
+    pub global_tx: Option<tokio::sync::mpsc::Sender<Envelope>>,
+    /// 追踪 ID（W3C traceparent 的 trace-id 部分）
+    pub visp_trace_id: Option<String>,
+    /// W3C traceparent 的 span-id（迭代级别），用于可观测性
+    pub iter_span_w3c_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -40,9 +48,39 @@ mod tests_toolcontext {
             working_dir: PathBuf::from("/tmp"),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         assert_eq!(ctx.session_id, None);
         assert_eq!(ctx.working_dir, Path::new("/tmp"));
+    }
+
+    #[test]
+    fn test_tool_context_global_tx_none_by_default() {
+        let ctx = ToolContext {
+            working_dir: PathBuf::from("/tmp"),
+            session_id: None,
+            permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
+        };
+        assert!(ctx.global_tx.is_none());
+    }
+
+    #[test]
+    fn test_tool_context_trace_fields_none_by_default() {
+        let ctx = ToolContext {
+            working_dir: PathBuf::from("/tmp"),
+            session_id: None,
+            permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
+        };
+        assert_eq!(ctx.visp_trace_id, None);
+        assert_eq!(ctx.iter_span_w3c_id, None);
     }
 }
 

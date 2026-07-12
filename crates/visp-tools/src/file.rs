@@ -593,6 +593,9 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let args = serde_json::json!({"path": "test.txt"});
 
@@ -615,6 +618,9 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let args = serde_json::json!({"path": "nonexistent.txt"});
 
@@ -636,6 +642,9 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let args = serde_json::json!({"path": "large.txt"});
 
@@ -660,6 +669,9 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let args = serde_json::json!({"path": "binary.bin"});
 
@@ -682,6 +694,9 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let args = serde_json::json!({
             "path": "ranges.txt",
@@ -714,6 +729,9 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let args = serde_json::json!({
             "path": "ranges.txt",
@@ -750,6 +768,9 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let args = serde_json::json!({
             "path": "single.txt",
@@ -780,6 +801,9 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let args = serde_json::json!({
             "path": "small.txt",
@@ -804,6 +828,9 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let args = serde_json::json!({
             "path": "small.txt",
@@ -829,6 +856,9 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let args = serde_json::json!({
             "path": "small.txt",
@@ -855,6 +885,9 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let args = serde_json::json!({"path": "whole.txt"});
 
@@ -880,6 +913,9 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let args = serde_json::json!({"paths": ["a.rs", "b.rs"]});
 
@@ -907,6 +943,9 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let args = serde_json::json!({"paths": ["a.rs", "nonexistent.rs"]});
 
@@ -936,6 +975,9 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         // 同时传 path 和 paths，path 优先
         let args = serde_json::json!({
@@ -964,6 +1006,9 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let args = serde_json::json!({"path": "written.txt", "content": "hello write"});
 
@@ -988,6 +1033,9 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let args = serde_json::json!({"path": "subdir/nested/file.txt", "content": "nested"});
 
@@ -1019,6 +1067,9 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let args = serde_json::json!({
             "path": "edit.txt",
@@ -1050,6 +1101,9 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let args = serde_json::json!({
             "path": "edit.txt",
@@ -1075,6 +1129,9 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let args = serde_json::json!({
             "path": "edit.txt",
@@ -1103,6 +1160,9 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let args = serde_json::json!({
             "path": "edit.txt",
@@ -1176,6 +1236,9 @@ mod tests {
             working_dir: tmp.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let args = serde_json::json!({
             "path": "edit_too_large.txt",

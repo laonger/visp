@@ -464,6 +464,9 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let result = grep
             .execute(serde_json::json!({"pattern": "hello"}), &ctx)
@@ -490,6 +493,9 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let result = grep.execute(serde_json::json!({}), &ctx).await;
         assert!(result.is_error);
@@ -508,6 +514,9 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let result = glob
             .execute(serde_json::json!({"pattern": "*.rs"}), &ctx)
@@ -544,6 +553,9 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let result = glob
             .execute(serde_json::json!({"pattern": "*.rs"}), &ctx)
@@ -570,6 +582,9 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let result = glob.execute(serde_json::json!({}), &ctx).await;
         assert!(result.is_error);
@@ -658,6 +673,9 @@ timeout_secs = 0
             working_dir: dir.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let result = grep
             .execute(serde_json::json!({"pattern": "MATCH", "context": 2}), &ctx)
@@ -699,6 +717,9 @@ timeout_secs = 0
             working_dir: dir.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let result = grep
             .execute(
@@ -742,6 +763,9 @@ timeout_secs = 0
             working_dir: dir.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let result = grep
             .execute(
@@ -775,6 +799,9 @@ timeout_secs = 0
             working_dir: dir.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         // context=100 should be clamped to 50; at minimum no crash
         let result = grep
@@ -804,6 +831,9 @@ timeout_secs = 0
             working_dir: dir.path().to_path_buf(),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         // max_matches=0 should be clamped to 1
         let result = grep

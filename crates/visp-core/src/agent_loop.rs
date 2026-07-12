@@ -1150,6 +1150,9 @@ async fn execute_tool_calls(
                     working_dir: working_dir.clone(),
                     session_id: Some(session_id),
                     permission_rules: permissions.clone(),
+                    global_tx: None,
+                    visp_trace_id: None,
+                    iter_span_w3c_id: None,
                 };
 
                 let start = std::time::Instant::now();

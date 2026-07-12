@@ -991,6 +991,9 @@ impl CoderDaemon for CoderDaemonService {
             working_dir,
             session_id: Some(req.session_id),
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
 
         let mut args = serde_json::json!({ "path": path });

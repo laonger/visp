@@ -180,6 +180,9 @@ mod tests {
             working_dir: PathBuf::from("/tmp"),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let result = tool.execute(json!({"name": ""}), &ctx).await;
         assert!(result.is_error);
@@ -193,6 +196,9 @@ mod tests {
             working_dir: PathBuf::from("/nonexistent"),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let result = tool
             .execute(json!({"name": "nonexistent-skill"}), &ctx)

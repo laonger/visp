@@ -306,6 +306,9 @@ mod tests {
             working_dir: std::path::PathBuf::from("/tmp"),
             session_id: None,
             permission_rules: None,
+            global_tx: None,
+            visp_trace_id: None,
+            iter_span_w3c_id: None,
         };
         let result = adapter
             .execute(serde_json::json!({"param": "value"}), &ctx)
