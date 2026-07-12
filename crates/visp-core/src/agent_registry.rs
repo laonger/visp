@@ -90,6 +90,7 @@ mod tests {
             temperature: None,
             steps: None,
             permission: vec![],
+            allowed_sub_agents: Vec::new(),
             system_prompt: String::new(),
         }
     }

@@ -282,6 +282,7 @@ async fn test_subagent_applies_agent_model_override() {
             temperature: Some(0.1),
             steps: Some(10),
             permission: vec![],
+            allowed_sub_agents: Vec::new(),
             system_prompt: String::new(),
         })
         .ok();
@@ -419,6 +420,7 @@ async fn test_subagent_inherits_parent_config_when_no_model_override() {
             temperature: None,
             steps: None,
             permission: vec![],
+            allowed_sub_agents: Vec::new(),
             system_prompt: String::new(),
         })
         .ok();
@@ -828,6 +830,7 @@ fn make_orchestrator_for_spawn_with_config(
             temperature: None,
             steps: None,
             permission: vec![],
+            allowed_sub_agents: Vec::new(),
             system_prompt: String::new(),
         })
         .ok();

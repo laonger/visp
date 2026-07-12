@@ -223,6 +223,7 @@ fn parse_agent_file(path: &Path) -> Result<AgentDefinition, String> {
         temperature,
         steps,
         permission,
+        allowed_sub_agents: Vec::new(),
         system_prompt: body,
     })
 }

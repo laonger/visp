@@ -20,6 +20,7 @@ fn register_default(registry: &mut AgentRegistry) {
         temperature: None,
         steps: None,
         permission: Vec::new(),
+        allowed_sub_agents: Vec::new(),
         system_prompt: String::new(),
     };
     registry.register(default_agent).ok();
@@ -81,6 +82,7 @@ fn register_explorer(registry: &mut AgentRegistry) {
                 action: PermissionAction::Allow,
             },
         ],
+        allowed_sub_agents: Vec::new(),
         system_prompt: concat!(
             "你是 Explorer —— 快速代码库导航专家。\n",
             "\n",
@@ -140,6 +142,7 @@ fn register_fixer(registry: &mut AgentRegistry) {
                 action: PermissionAction::Allow,
             },
         ],
+        allowed_sub_agents: Vec::new(),
         system_prompt: concat!(
             "你是 Fixer —— 快速、专注的实现专家。\n",
             "\n",

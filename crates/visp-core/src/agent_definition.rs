@@ -40,6 +40,8 @@ pub struct AgentDefinition {
     pub steps: Option<u32>,
     /// 权限规则集
     pub permission: Vec<PermissionRule>,
+    /// 允许调用的子 Agent 名称列表（空列表表示不限制，仅指业务逻辑层面）
+    pub allowed_sub_agents: Vec<String>,
     /// 系统提示词
     pub system_prompt: String,
 }
@@ -294,6 +296,42 @@ mod tests {
             check_permission("safe", &serde_json::json!({}), &rules),
             PermissionDecision::Allowed
         );
+    }
+
+    // ── allowed_sub_agents ──────────────────────────────────────────────
+
+    #[test]
+    fn test_agent_definition_allowed_sub_agents_default_empty() {
+        let def = AgentDefinition {
+            name: "test".to_string(),
+            description: String::new(),
+            mode: AgentMode::Primary,
+            model: None,
+            temperature: None,
+            steps: None,
+            permission: vec![],
+            system_prompt: String::new(),
+            allowed_sub_agents: Vec::new(),
+        };
+        assert!(def.allowed_sub_agents.is_empty());
+    }
+
+    #[test]
+    fn test_agent_definition_with_allowed_sub_agents() {
+        let def = AgentDefinition {
+            name: "test".to_string(),
+            description: String::new(),
+            mode: AgentMode::Primary,
+            model: None,
+            temperature: None,
+            steps: None,
+            permission: vec![],
+            system_prompt: String::new(),
+            allowed_sub_agents: vec!["fixer".to_string(), "explorer".to_string()],
+        };
+        assert_eq!(def.allowed_sub_agents.len(), 2);
+        assert!(def.allowed_sub_agents.contains(&"fixer".to_string()));
+        assert!(def.allowed_sub_agents.contains(&"explorer".to_string()));
     }
 
     #[test]
