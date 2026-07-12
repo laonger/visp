@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use crate::ProviderMetadata;
 use crate::agent::{
-    AgentConfig, AgentEvent, AgentLoopContext, AgentMessage, Envelope, OrchestratorMessage,
-    PendingSpawn, ToolExecResult, UserQueryResult, cleanup_orphan_tool_uses, extract_thinking_text,
+    AgentConfig, AgentEvent, AgentLoopContext, AgentMessage, Envelope, ToolExecResult,
+    UserQueryResult, cleanup_orphan_tool_uses, extract_thinking_text,
     format_tool_args, llm_error_to_code, parse_user_query_marker, render_tool_guide,
     strip_user_query_marker,
 };
@@ -510,18 +510,6 @@ enum StreamDecision {
 
 /// Drain pending sub-agent spawns into error ToolExecResults.
 /// Used on cancel/inbox-close paths to prevent orphan tool_uses.
-fn drain_pending_spawns(pending: &mut Vec<PendingSpawn>, reason: &str) -> Vec<ToolExecResult> {
-    pending
-        .drain(..)
-        .map(|ps| ToolExecResult {
-            index: ps.index,
-            call_id: ps.call_id,
-            result: ToolResult::error(reason),
-            duration_ms: None,
-        })
-        .collect()
-}
-
 /// f. Handle stream result: check [USER_QUERY] marker or return Done/Continue
 /// On error, sends error events via send_event and returns Err(()).
 async fn handle_stream_result(
@@ -772,8 +760,8 @@ async fn execute_tool_calls(
     cfg: &AgentConfig,
     doom_loop_window: &mut Vec<Vec<(String, serde_json::Value)>>,
     doom_loop_warned: &mut bool,
-    visp_trace_id: &str,
-    iter_span_w3c_id: &str,
+    _visp_trace_id: &str,
+    _iter_span_w3c_id: &str,
 ) -> bool {
     // Append assistant message with tool_calls
     *total_tool_calls += tool_calls.len() as u32;
@@ -878,74 +866,14 @@ async fn execute_tool_calls(
         }
     }
 
-    // h. Execute tools in parallel (Phase 1: dispatch)
+    // h. Execute tools in parallel
     let num_tools = tool_calls.len();
     let mut exec_tasks = Vec::with_capacity(num_tools);
-    let mut pending_spawns: Vec<PendingSpawn> = Vec::new();
     let tool_ids: Vec<String> = tool_calls.iter().map(|tc| tc.id.clone()).collect();
-    let is_multi_agent = ctx.global_tx.is_some() && ctx.inbox_rx.is_some();
     let langfuse_enabled = cfg.langfuse_enabled;
 
     for (i, tc) in tool_calls.iter().enumerate() {
-        // Multi-agent: intercept "task" tool calls
-        if is_multi_agent && tc.name == "task" {
-            let task_args: serde_json::Value =
-                serde_json::from_str(&tc.arguments).unwrap_or_default();
-            let subagent_type = task_args
-                .get("subagent_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("default")
-                .to_string();
-            let description = task_args
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let prompt = task_args
-                .get("prompt")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| description.clone());
-            let task_id = task_args
-                .get("task_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            if let Some(ref gtx) = ctx.global_tx {
-                // Generate W3C TraceContext for cross-mpsc propagation
-                let span_id = generate_w3c_span_id();
-                let visp_tc = crate::TraceContext::new(
-                    visp_trace_id.to_string(),
-                    span_id,
-                    1, // sampled
-                    None,
-                    Some(iter_span_w3c_id.to_string()),
-                )
-                .expect("TraceContext construction should not fail with valid IDs");
-                let _ = gtx.try_send(Envelope {
-                    session_id: ctx.session_id.clone(),
-                    message: AgentMessage::SpawnRequest {
-                        call_id: tc.id.clone(),
-                        subagent_type: subagent_type.clone(),
-                        description: description.clone(),
-                        prompt: prompt.clone(),
-                        task_id: task_id.clone(),
-                        trace_context: Some(visp_tc.clone()),
-                        response_tx: None,
-                    },
-                    trace_context: Some(visp_tc),
-                });
-            }
-
-            pending_spawns.push(PendingSpawn {
-                index: i,
-                call_id: tc.id.clone(),
-                subagent_type,
-            });
-            continue;
-        }
-
-        // Regular tool execution (original spawn logic)
+        // Regular tool execution
         let tx = tx.clone();
         let global_tx = ctx.global_tx.clone();
         let cancel = ctx.cancel_token.clone();
@@ -1214,215 +1142,37 @@ async fn execute_tool_calls(
         }.instrument(tool_span)));
     }
 
-    // Phase 2: Collect results
-    let task_results = if is_multi_agent {
-        let mut collected: Vec<ToolExecResult> = Vec::new();
-        let mut regular_done = exec_tasks.is_empty();
-        let mut inbox = ctx.inbox_rx.take();
-
-        loop {
-            if ctx.cancel_token.is_cancelled() {
-                for h in &exec_tasks {
-                    h.abort();
-                }
-                collected.extend(drain_pending_spawns(&mut pending_spawns, "agent cancelled"));
-                break;
+    // Collect results
+    let mut exec_tasks = Some(exec_tasks);
+    let task_results = tokio::select! {
+        biased;
+        _ = ctx.cancel_token.cancelled() => {
+            if let Some(tasks) = exec_tasks.take() {
+                for h in &tasks { h.abort(); }
             }
-
-            let has_tasks = !exec_tasks.is_empty();
-            let has_pending = !pending_spawns.is_empty();
-
-            if !has_tasks && !has_pending {
-                break;
-            }
-
-            if has_tasks && inbox.is_some() && has_pending {
-                let all_tasks = std::mem::take(&mut exec_tasks);
-                let join_fut = futures::future::join_all(all_tasks);
-                let recv_fut = async { inbox.as_mut().unwrap().recv().await };
-
-                tokio::select! {
-                    biased;
-                    results = join_fut => {
-                        for r in results {
-                            match r {
-                                Ok(result) => collected.push(result),
-                                Err(e) if e.is_cancelled() => {},
-                                Err(e) => {
-                                    tracing::warn!("tool task failed: {e}");
-                                }
-                            }
-                        }
-                        regular_done = true;
-                    }
-                    msg = recv_fut => {
-                        match msg {
-                            Some(OrchestratorMessage::SubAgentComplete { call_id, content, task_id: _ }) => {
-                                if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id) {
-                                    let ps = pending_spawns.remove(pos);
-                                    collected.push(ToolExecResult {
-                                        index: ps.index,
-                                        call_id,
-                                        result: ToolResult::success(content),
-                                        duration_ms: None,
-                                    });
-                                }
-                            }
-                            Some(OrchestratorMessage::SubAgentError { call_id, error }) => {
-                                if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id) {
-                                    let ps = pending_spawns.remove(pos);
-                                    collected.push(ToolExecResult {
-                                        index: ps.index,
-                                        call_id,
-                                        result: ToolResult::error(error),
-                                        duration_ms: None,
-                                    });
-                                }
-                            }
-                            Some(OrchestratorMessage::Cancelled) => {
-                                collected.extend(drain_pending_spawns(
-                                    &mut pending_spawns,
-                                    "agent cancelled",
-                                ));
-                                break;
-                            }
-                            None => {
-                                // inbox 关闭兜底——orchestrator 已断开，
-                                // 把所有未完成的 pending_spawns 合成失败 ToolResult，
-                                // 避免父 agent 死等 + 下一轮 LLM 调用因缺失 tool_result 而 400。
-                                tracing::error!(
-                                    pending_count = pending_spawns.len(),
-                                    "sub-agent inbox closed before all spawns completed; synthesizing error ToolResults"
-                                );
-                                collected.extend(drain_pending_spawns(
-                                    &mut pending_spawns,
-                                    "sub-agent inbox closed before completing",
-                                ));
-                                inbox = None;
-                                break;
-                            }
-                        }
-                    }
-                }
-            } else if has_tasks {
-                let all_tasks = std::mem::take(&mut exec_tasks);
-                let results = futures::future::join_all(all_tasks).await;
-                for r in results {
-                    match r {
-                        Ok(result) => collected.push(result),
-                        Err(e) if e.is_cancelled() => {}
-                        Err(e) => {
-                            tracing::warn!("tool task failed: {e}");
-                        }
-                    }
-                }
-                regular_done = true;
-            } else if let Some(ref mut rx) = inbox {
-                tokio::select! {
-                    biased;
-                    _ = ctx.cancel_token.cancelled() => {
-                        for h in &exec_tasks { h.abort(); }
-                        collected.extend(drain_pending_spawns(
-                            &mut pending_spawns,
-                            "agent cancelled",
-                        ));
-                        break;
-                    }
-                    msg = rx.recv() => {
-                        match msg {
-                            Some(OrchestratorMessage::SubAgentComplete {
-                                call_id,
-                                content,
-                                task_id: _,
-                            }) => {
-                                if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id)
-                                {
-                                    let ps = pending_spawns.remove(pos);
-                                    collected.push(ToolExecResult {
-                                        index: ps.index,
-                                        call_id,
-                                        result: ToolResult::success(content),
-                                        duration_ms: None,
-                                    });
-                                }
-                            }
-                            Some(OrchestratorMessage::SubAgentError { call_id, error }) => {
-                                if let Some(pos) = pending_spawns.iter().position(|p| p.call_id == call_id)
-                                {
-                                    let ps = pending_spawns.remove(pos);
-                                    collected.push(ToolExecResult {
-                                        index: ps.index,
-                                        call_id,
-                                        result: ToolResult::error(error),
-                                        duration_ms: None,
-                                    });
-                                }
-                            }
-                            Some(OrchestratorMessage::Cancelled) => {
-                                collected.extend(drain_pending_spawns(
-                                    &mut pending_spawns,
-                                    "agent cancelled",
-                                ));
-                                break;
-                            }
-                            None => {
-                                // inbox 关闭兜底——orchestrator 已断开，
-                                // 把所有未完成的 pending_spawns 合成失败 ToolResult。
-                                tracing::error!(
-                                    pending_count = pending_spawns.len(),
-                                    "sub-agent inbox closed before all spawns completed (no tasks branch); synthesizing error ToolResults"
-                                );
-                                collected.extend(drain_pending_spawns(
-                                    &mut pending_spawns,
-                                    "sub-agent inbox closed before completing",
-                                ));
-                                inbox = None;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if regular_done && pending_spawns.is_empty() {
-                break;
-            }
+            Vec::new()
         }
-
-        ctx.inbox_rx = inbox;
-        collected
-    } else {
-        let mut exec_tasks = Some(exec_tasks);
-        tokio::select! {
-            biased;
-            _ = ctx.cancel_token.cancelled() => {
-                if let Some(tasks) = exec_tasks.take() {
-                    for h in &tasks { h.abort(); }
+        results = futures::future::join_all(
+            exec_tasks.take().unwrap()
+        ) => {
+            results.into_iter().enumerate().filter_map(|(idx, r)| match r {
+                Ok(result) => Some(result),
+                Err(e) if e.is_cancelled() => None,
+                Err(e) => {
+                    tracing::warn!("tool task {} failed: {e}", idx);
+                    let call_id = tool_ids.get(idx).cloned().unwrap_or_default();
+                    Some(ToolExecResult {
+                        index: idx,
+                        call_id,
+                        result: ToolResult::error(format!("Tool execution panicked: {e}")),
+                        duration_ms: None,
+                    })
                 }
-                Vec::new()
-            }
-            results = futures::future::join_all(
-                exec_tasks.take().unwrap()
-            ) => {
-                results.into_iter().enumerate().filter_map(|(idx, r)| match r {
-                    Ok(result) => Some(result),
-                    Err(e) if e.is_cancelled() => None,
-                    Err(e) => {
-                        tracing::warn!("tool task {} failed: {e}", idx);
-                        let call_id = tool_ids.get(idx).cloned().unwrap_or_default();
-                        Some(ToolExecResult {
-                            index: idx,
-                            call_id,
-                            result: ToolResult::error(format!("Tool execution panicked: {e}")),
-                            duration_ms: None,
-                        })
-                    }
-                }).collect()
-            }
+            }).collect()
         }
     };
 
-    // Append tool results to history (in original order)
+    // Append tool results to history (in original order)    // Append tool results to history (in original order)
     let mut sorted_results: Vec<ToolExecResult> = task_results;
     sorted_results.sort_by_key(|r| r.index);
 
@@ -1978,7 +1728,6 @@ mod tests {
             cancel_token: cancel.clone(),
             context_trimmer: Arc::new(NoopTrimmer),
             global_tx: None,
-            inbox_rx: None,
             permission_rules: None,
             agent_kind: AgentKind::Primary,
             depth: 0,
@@ -2016,146 +1765,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_drain_pending_spawns_returns_error_results() {
-        let mut pending = vec![
-            PendingSpawn {
-                index: 0,
-                call_id: "call_1".into(),
-                subagent_type: "test".into(),
-            },
-            PendingSpawn {
-                index: 1,
-                call_id: "call_2".into(),
-                subagent_type: "test".into(),
-            },
-        ];
-
-        let results = drain_pending_spawns(&mut pending, "test reason");
-        assert_eq!(results.len(), 2, "should drain all pending spawns");
-        assert!(pending.is_empty(), "pending should be empty after drain");
-        assert_eq!(results[0].index, 0);
-        assert_eq!(results[0].call_id, "call_1");
-        assert!(results[0].result.is_error);
-        assert_eq!(results[1].index, 1);
-        assert_eq!(results[1].call_id, "call_2");
-        assert!(results[1].result.is_error);
-    }
-
     struct Phase2MockTrimmer;
     impl crate::context::ContextTrimmer for Phase2MockTrimmer {
         fn trim(&self, h: &[Message], _: u32, _: u32, _: u32) -> Vec<Message> {
             h.to_vec()
         }
-    }
-
-    /// Provider that returns a single tool_use on first call, then Done on subsequent.
-    struct Phase2ToolProvider {
-        call_count: AtomicUsize,
-    }
-
-    #[async_trait::async_trait]
-    impl LlmProvider for Phase2ToolProvider {
-        async fn chat_stream(
-            &self,
-            _messages: &[Message],
-            _tools: &[ToolDefinition],
-            _config: &LlmConfig,
-            _cancel: &tokio_util::sync::CancellationToken,
-        ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>
-        {
-            let count = self.call_count.fetch_add(1, Ordering::SeqCst);
-            if count == 0 {
-                // First call: return a tool_use to trigger sub-agent spawn
-                let events: Vec<Result<ChatEvent, LlmError>> = vec![
-                    Ok(ChatEvent::ToolCall {
-                        id: "call_1".into(),
-                        name: "task".into(),
-                        arguments: r#"{"subagent_type": "general", "description": "test", "prompt": "detailed task for sub-agent"}"#.into(),
-                    }),
-                    Ok(ChatEvent::Done),
-                ];
-                Ok(Box::pin(stream::iter(events)))
-            } else {
-                // Subsequent calls — shouldn't happen if cancel works
-                Ok(Box::pin(stream::iter(vec![Ok(ChatEvent::Done)])))
-            }
-        }
-    }
-
-    #[serial]
-    #[tokio::test]
-    async fn test_phase2_cancel_drains_pending_spawns() {
-        use crate::rules::RuleEngine;
-        use crate::session::InMemorySessionStore;
-        use crate::tool_registry::ToolRegistry;
-        use std::path::Path;
-
-        let (global_tx, _global_rx) = mpsc::channel::<Envelope>(16);
-        let (_inbox_tx, inbox_rx) = mpsc::channel::<OrchestratorMessage>(16);
-        let permission_rules = std::sync::Arc::new(Vec::new());
-
-        let session_mgr = std::sync::Arc::new(SessionManager::new(InMemorySessionStore::new()));
-        let session = session_mgr
-            .create(Path::new("/tmp"), LlmConfig::default())
-            .unwrap();
-        let sid = session.id.clone();
-        let trimmer: std::sync::Arc<dyn crate::context::ContextTrimmer + Send + Sync> =
-            std::sync::Arc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(
-                &sid,
-                &trimmer,
-                Some(global_tx),
-                Some(inbox_rx),
-                Some(permission_rules),
-            )
-            .unwrap();
-        let handle_cancel = ctx.cancel_token.clone();
-
-        let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::new(Phase2ToolProvider {
-            call_count: AtomicUsize::new(0),
-        });
-        let rule_engine = std::sync::Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
-        let registry = ToolRegistry::new();
-        let config = AgentConfig {
-            hard_limit: 10,
-            ..Default::default()
-        };
-        let (tx, _rx) = mpsc::channel(64);
-
-        let sm_clone = session_mgr.clone();
-        let handle = tokio::spawn(async move {
-            run_agent_loop(
-                provider,
-                std::sync::Arc::new(registry),
-                rule_engine,
-                sm_clone,
-                ctx,
-                &config,
-                Message::user("Do something"),
-                tx,
-            )
-            .await;
-        });
-
-        // Give agent time to enter Phase 2 and wait for inbox
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        handle_cancel.cancel();
-
-        let result = tokio::time::timeout(std::time::Duration::from_secs(1), handle)
-            .await
-            .expect("agent loop should exit within 1s after cancel");
-
-        // finish_loop 现在尊重传入的 status 参数（cancel 走 Error 路径）
-        let final_session = session_mgr.get(&sid).unwrap();
-        assert_eq!(
-            final_session.status,
-            crate::session::SessionStatus::Error,
-            "session should end in Error after cancel"
-        );
-        // Cancel should not panic
-        assert!(result.is_ok() || (result.is_err() && result.unwrap_err().is_cancelled()));
     }
 
     /// Provider that returns TextDelta + UsageInfo + Done with explicit token counts
@@ -2206,14 +1820,12 @@ mod tests {
         let trimmer: std::sync::Arc<dyn crate::context::ContextTrimmer + Send + Sync> =
             std::sync::Arc::new(Phase2MockTrimmer);
         let (global_tx, _global_rx) = mpsc::channel::<Envelope>(16);
-        let (_inbox_tx, inbox_rx) = mpsc::channel::<OrchestratorMessage>(16);
         let permission_rules = std::sync::Arc::new(Vec::new());
         let ctx = session_mgr
             .start_loop(
                 &sid,
                 &trimmer,
                 Some(global_tx),
-                Some(inbox_rx),
                 Some(permission_rules),
             )
             .unwrap();
@@ -2350,7 +1962,7 @@ mod tests {
         let trimmer: std::sync::Arc<dyn crate::context::ContextTrimmer + Send + Sync> =
             std::sync::Arc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::new(OneToolCallProvider {
@@ -2452,7 +2064,7 @@ mod tests {
         let trimmer: std::sync::Arc<dyn crate::context::ContextTrimmer + Send + Sync> =
             std::sync::Arc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::new(MetadataProvider {
@@ -2567,7 +2179,7 @@ mod tests {
         let trimmer: std::sync::Arc<dyn crate::context::ContextTrimmer + Send + Sync> =
             std::sync::Arc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         let provider: std::sync::Arc<dyn LlmProvider> =
@@ -2832,7 +2444,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         let provider: StdArc<dyn LlmProvider> =
@@ -2881,7 +2493,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         let provider: StdArc<dyn LlmProvider> =
@@ -2954,7 +2566,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         let provider: StdArc<dyn LlmProvider> =
@@ -3010,7 +2622,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         let provider: StdArc<dyn LlmProvider> =
@@ -3097,7 +2709,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         let provider: StdArc<dyn LlmProvider> =
@@ -3267,7 +2879,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         let provider: StdArc<dyn LlmProvider> =
@@ -3327,7 +2939,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         let provider: StdArc<dyn LlmProvider> =
@@ -3407,7 +3019,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         // Provider that returns text + Done
@@ -3490,7 +3102,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         let provider: StdArc<dyn LlmProvider> =
@@ -3551,7 +3163,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         // Provider returns text but capture is disabled
@@ -3615,7 +3227,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         let provider: StdArc<dyn LlmProvider> =
@@ -3664,7 +3276,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         // Cancel before starting
@@ -3716,7 +3328,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         // Provider always returns a tool call, so we hit hard_limit=1 immediately
@@ -3783,7 +3395,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         let provider: StdArc<dyn LlmProvider> =
@@ -3865,7 +3477,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
         let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
 
@@ -3922,7 +3534,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         // Use a provider that does one tool call then done, giving us 2 iterations
@@ -4046,7 +3658,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         let provider: StdArc<dyn LlmProvider> = StdArc::new(OneToolCallProvider {
@@ -4163,7 +3775,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         let provider: StdArc<dyn LlmProvider> = StdArc::new(ThreeToolProvider {
@@ -4267,7 +3879,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         let provider: StdArc<dyn LlmProvider> = StdArc::new(OneToolCallProvider {
@@ -4381,7 +3993,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         let provider: StdArc<dyn LlmProvider> = StdArc::new(OneToolCallProvider {
@@ -4501,7 +4113,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         let provider: StdArc<dyn LlmProvider> = StdArc::new(ErrorToolProvider {
@@ -4585,7 +4197,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         // Use the tool that records duration in history
@@ -4718,7 +4330,7 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None, None)
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
         let provider: StdArc<dyn LlmProvider> = StdArc::new(ErrorToolProvider {
@@ -4761,23 +4373,72 @@ mod tests {
         );
     }
 
-    // ── W1-S3a-7/8: TraceContext injection ─────────────────────────────────
+    // ── Wave 2c: agent_loop simplification ──────────────────────────────────
+
+    /// Provider: first call returns a "task" tool call, then Done.
+    struct TaskNameProvider {
+        call_count: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for TaskNameProvider {
+        async fn chat_stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _config: &LlmConfig,
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>
+        {
+            let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if count == 0 {
+                let events: Vec<Result<ChatEvent, LlmError>> = vec![
+                    Ok(ChatEvent::ToolCall {
+                        id: "call_1".into(),
+                        name: "task".into(),
+                        arguments: r#"{"prompt": "test"}"#.into(),
+                    }),
+                    Ok(ChatEvent::Done),
+                ];
+                Ok(Box::pin(stream::iter(events)))
+            } else {
+                Ok(Box::pin(stream::iter(vec![Ok(ChatEvent::Done)])))
+            }
+        }
+    }
+
+    /// A tool that registers itself as "task" in the registry.
+    /// This verifies the agent loop treats "task" as a regular tool name
+    /// (no longer intercepted for sub-agent spawning).
+    #[async_trait::async_trait]
+    impl crate::tool::Tool for TaskNameTool {
+        fn name(&self) -> &str {
+            "task"
+        }
+        fn description(&self) -> &str {
+            "a regular tool named 'task'"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &crate::tool::ToolContext,
+        ) -> crate::tool::ToolResult {
+            crate::tool::ToolResult::success("task tool executed")
+        }
+    }
+
+    struct TaskNameTool;
 
     #[serial]
     #[tokio::test]
-    async fn test_task_tool_intercepts_and_attaches_trace_context() {
-        let (spans, events) = setup_tracing();
-        let _guard = make_guard(&spans, &events);
-
+    async fn test_no_task_name_interception() {
         use crate::rules::RuleEngine;
         use crate::session::InMemorySessionStore;
         use crate::tool_registry::ToolRegistry;
         use std::path::Path;
-
-        // Set up multi-agent mode with global_tx
-        let (global_tx, mut global_rx) = mpsc::channel::<Envelope>(16);
-        let (_inbox_tx, inbox_rx) = mpsc::channel::<OrchestratorMessage>(16);
-        let permission_rules = Arc::new(Vec::new());
 
         let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
         let session = session_mgr
@@ -4787,28 +4448,143 @@ mod tests {
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr
-            .start_loop(
-                &sid,
-                &trimmer,
-                Some(global_tx),
-                Some(inbox_rx),
-                Some(permission_rules),
-            )
+            .start_loop(&sid, &trimmer, None, None)
             .unwrap();
 
-        // Provider returns a "task" tool call
-        let provider: StdArc<dyn LlmProvider> = StdArc::new(Phase2ToolProvider {
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(TaskNameProvider {
             call_count: AtomicUsize::new(0),
         });
         let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
         let registry = ToolRegistry::new();
+        registry
+            .register(StdArc::new(TaskNameTool))
+            .expect("register 'task' tool");
         let config = AgentConfig {
             hard_limit: 10,
             ..Default::default()
         };
-        let (tx, mut rx) = mpsc::channel::<AgentEvent>(64);
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
 
-        // Run agent loop in background
+        // Run agent loop — should NOT hang (no Phase 2 blocking on inbox).
+        // The "task" tool call should be executed as a regular tool.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("use task tool"),
+            tx,
+        ))
+        .await;
+
+        assert!(result.is_ok(), "agent loop should complete without hanging");
+
+        // Verify the tool was actually executed (history has tool result)
+        let final_session = session_mgr.get(&sid).unwrap();
+        let tool_msgs: Vec<_> = final_session
+            .history
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .collect();
+        assert_eq!(tool_msgs.len(), 1, "expected 1 tool result message");
+        assert!(
+            tool_msgs[0].content.contains("task tool executed"),
+            "task tool should have been executed as regular tool"
+        );
+    }
+
+    /// A tool that sleeps for a long time — used to verify cancel aborts execution.
+    struct SlowTool;
+
+    #[async_trait::async_trait]
+    impl crate::tool::Tool for SlowTool {
+        fn name(&self) -> &str {
+            "slow"
+        }
+        fn description(&self) -> &str {
+            "slow tool for cancel testing"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &crate::tool::ToolContext,
+        ) -> crate::tool::ToolResult {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            crate::tool::ToolResult::success("done")
+        }
+    }
+
+    /// Provider: first call returns a "slow" tool call, then Done.
+    struct SlowToolProvider {
+        call_count: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for SlowToolProvider {
+        async fn chat_stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _config: &LlmConfig,
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>
+        {
+            let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if count == 0 {
+                let events: Vec<Result<ChatEvent, LlmError>> = vec![
+                    Ok(ChatEvent::ToolCall {
+                        id: "call_slow".into(),
+                        name: "slow".into(),
+                        arguments: "{}".into(),
+                    }),
+                    Ok(ChatEvent::Done),
+                ];
+                Ok(Box::pin(stream::iter(events)))
+            } else {
+                Ok(Box::pin(stream::iter(vec![Ok(ChatEvent::Done)])))
+            }
+        }
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn test_cancel_aborts_agent_tool() {
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr
+            .start_loop(&sid, &trimmer, None, None)
+            .unwrap();
+        let cancel_token = ctx.cancel_token.clone();
+
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(SlowToolProvider {
+            call_count: AtomicUsize::new(0),
+        });
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        registry
+            .register(StdArc::new(SlowTool))
+            .expect("register slow tool");
+        let config = AgentConfig {
+            hard_limit: 10,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+
         let sm_clone = session_mgr.clone();
         let handle = tokio::spawn(async move {
             run_agent_loop(
@@ -4818,39 +4594,32 @@ mod tests {
                 sm_clone,
                 ctx,
                 &config,
-                Message::user("spawn sub-agent"),
+                Message::user("do slow"),
                 tx,
             )
             .await;
         });
 
-        // Cancel to avoid waiting forever
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // Give agent time to start executing the slow tool
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancel_token.cancel();
 
-        // Drain events
-        while rx.try_recv().is_ok() {}
+        // Should exit quickly (not wait 10s)
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .expect("agent loop should exit within 2s after cancel");
 
-        // Cancel
-        handle.abort();
+        assert!(
+            result.is_ok() || (result.is_err() && result.unwrap_err().is_cancelled()),
+            "agent loop should complete or be cancelled"
+        );
 
-        // Check the global_tx for Envelope with SpawnRequest containing trace_context
-        let mut found_tc = false;
-        while let Ok(envelope) = global_rx.try_recv() {
-            if let AgentMessage::SpawnRequest {
-                trace_context: Some(tc),
-                prompt,
-                ..
-            } = &envelope.message
-            {
-                found_tc = true;
-                assert_eq!(prompt, "detailed task for sub-agent");
-                assert_eq!(tc.trace_id.len(), 32, "trace_id should be 32 hex chars");
-                assert_eq!(tc.span_id.len(), 16, "span_id should be 16 hex chars");
-                assert!(tc.trace_id.chars().all(|c| c.is_ascii_hexdigit()));
-                assert!(tc.span_id.chars().all(|c| c.is_ascii_hexdigit()));
-            }
-        }
-
-        assert!(found_tc, "expected SpawnRequest with trace_context set");
+        // Session should be in Error state
+        let final_session = session_mgr.get(&sid).unwrap();
+        assert_eq!(
+            final_session.status,
+            crate::session::SessionStatus::Error,
+            "session should end in Error after cancel"
+        );
     }
 }

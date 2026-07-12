@@ -101,6 +101,8 @@ pub struct Orchestrator {
     /// 持有 sub-agent run_agent_loop 的 JoinHandle，便于诊断与未来扩展（如 abort）。
     /// key = sub session_id；handle 仅作引用持有，drop 不会 abort。
     sub_agent_handles: HashMap<String, JoinHandle<()>>,
+    /// 待处理的 oneshot 响应通道，key 为 session_id
+    pending_responses: HashMap<String, tokio::sync::oneshot::Sender<String>>,
 
     // ── 共享依赖 ─────────────────────────────────────────────
     session_mgr: Arc<SessionManager>,
@@ -142,6 +144,7 @@ impl Orchestrator {
             active_agents: ActiveAgentRegistry::new(),
             pending_queries: HashMap::new(),
             sub_agent_handles: HashMap::new(),
+            pending_responses: HashMap::new(),
             session_mgr,
             agent_registry,
             tool_registry,
@@ -256,7 +259,7 @@ impl Orchestrator {
                 prompt,
                 task_id,
                 trace_context,
-                response_tx: _response_tx,
+                response_tx,
             } => {
                 // 优先使用 SpawnRequest 携带的 TraceContext（由父 agent 的
                 // agent_loop 用父 trace_id 构造），确保子 agent 跨 mpsc
@@ -272,6 +275,7 @@ impl Orchestrator {
                     &prompt,
                     task_id.as_deref(),
                     Some(trace_context),
+                    response_tx,
                 )
                 .await;
             }
@@ -365,7 +369,7 @@ impl Orchestrator {
         }
 
         // Create inbox
-        let (inbox_tx, inbox_rx) = mpsc::channel(64);
+        let (inbox_tx, _inbox_rx) = mpsc::channel(64);
 
         // Register active agent
         self.active_agents.register(ActiveAgent {
@@ -441,7 +445,6 @@ impl Orchestrator {
             session_id,
             &self.context_trimmer,
             Some(self.global_tx.clone()),
-            Some(inbox_rx),
             Some(Arc::new(permissions)),
         ) {
             Ok(ctx) => ctx,
@@ -516,6 +519,7 @@ impl Orchestrator {
         prompt: &str,
         _task_id: Option<&str>,
         trace_context: Option<visp_core::TraceContext>,
+        response_tx: Option<tokio::sync::oneshot::Sender<String>>,
     ) {
         // 1. Depth check
         let depth = self.active_agents.compute_depth(parent_session_id);
@@ -654,7 +658,7 @@ impl Orchestrator {
         }
 
         // 7. Create inbox + register active agent
-        let (inbox_tx, inbox_rx) = mpsc::channel(64);
+        let (inbox_tx, _inbox_rx) = mpsc::channel(64);
         self.active_agents.register(ActiveAgent {
             session_id: sub_session_id.clone(),
             parent_session_id: Some(parent_session_id.to_string()),
@@ -670,7 +674,6 @@ impl Orchestrator {
             &sub_session_id,
             &self.context_trimmer,
             Some(self.global_tx.clone()),
-            Some(inbox_rx),
             Some(Arc::new(merged_rules)),
         ) {
             Ok(ctx) => ctx,
@@ -832,6 +835,10 @@ impl Orchestrator {
         self.sub_agent_handles
             .insert(sub_session_id.clone(), loop_handle);
 
+        if let Some(tx) = response_tx {
+            self.pending_responses.insert(sub_session_id.clone(), tx);
+        }
+
         tracing::info!(
             parent = parent_session_id,
             child = sub_session_id,
@@ -871,6 +878,13 @@ impl Orchestrator {
         let _ = self
             .session_mgr
             .finish_loop(session_id, SessionStatus::Idle);
+
+        // Check pending_responses first (oneshot path)
+        if let Some(tx) = self.pending_responses.remove(session_id) {
+            let content = self.extract_result(session_id);
+            let _ = tx.send(content);
+            return;
+        }
 
         // Send result to parent if this is a sub-agent
         if let Some(ref parent_id) = parent_id {
@@ -997,6 +1011,12 @@ impl Orchestrator {
         let _ = self
             .session_mgr
             .finish_loop(session_id, SessionStatus::Error);
+
+        // Check pending_responses first (oneshot path)
+        if let Some(tx) = self.pending_responses.remove(session_id) {
+            let _ = tx.send(format!("[SubAgent Error] {}", normalized_message));
+            return;
+        }
 
         if let Some(ref parent_id) = parent_id {
             let call_id = pending_call_id.unwrap_or_default();

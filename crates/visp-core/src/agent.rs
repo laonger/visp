@@ -196,8 +196,6 @@ pub struct AgentLoopContext {
     pub context_trimmer: Arc<dyn crate::context::ContextTrimmer + Send + Sync>,
     /// 全局事件总线发送端（多 Agent 模式）
     pub global_tx: Option<mpsc::Sender<Envelope>>,
-    /// 专属收件箱接收端（多 Agent 模式）
-    pub inbox_rx: Option<mpsc::Receiver<OrchestratorMessage>>,
     /// 权限规则集
     pub permission_rules: Option<Arc<Vec<PermissionRule>>>,
     /// Agent kind (Primary or Sub), used for observability.
@@ -722,7 +720,7 @@ mod tests {
             .unwrap();
         let trimmer: StdArc<dyn ContextTrimmer + Send + Sync> = StdArc::new(MockTrimmer);
         let ctx = session_mgr
-            .start_loop(&session.id, &trimmer, None, None, None)
+            .start_loop(&session.id, &trimmer, None, None)
             .unwrap();
         let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
         TestSetup {
@@ -984,7 +982,6 @@ mod tests {
             cancel_token: cancel.clone(),
             context_trimmer: trimmer,
             global_tx: None,
-            inbox_rx: None,
             permission_rules: None,
             agent_kind: AgentKind::Primary,
             depth: 0,
@@ -1992,7 +1989,6 @@ mod tests {
         let trimmer: StdArc<dyn ContextTrimmer + Send + Sync> = StdArc::new(MockTrimmer);
 
         let (global_tx, mut global_rx) = mpsc::channel::<Envelope>(16);
-        let (_inbox_tx, inbox_rx) = mpsc::channel::<OrchestratorMessage>(16);
         let permission_rules = StdArc::new(Vec::new());
 
         let ctx = session_mgr
@@ -2000,7 +1996,6 @@ mod tests {
                 &sid,
                 &trimmer,
                 Some(global_tx),
-                Some(inbox_rx),
                 Some(permission_rules),
             )
             .unwrap();

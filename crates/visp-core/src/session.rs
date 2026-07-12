@@ -9,7 +9,6 @@ use uuid::Uuid;
 
 use crate::agent::AgentLoopContext;
 use crate::agent::Envelope;
-use crate::agent::OrchestratorMessage;
 use crate::agent_definition::PermissionRule;
 use crate::error::SessionError;
 use crate::message::Message;
@@ -487,14 +486,13 @@ impl SessionManager {
     /// 启动 agent 循环，检查状态必须为 Idle
     /// 启动 agent 循环。
     ///
-    /// `global_tx` / `inbox_rx` / `permission_rules` 用于多 Agent 模式；
+    /// `global_tx` / `permission_rules` 用于多 Agent 模式；
     /// 单 Agent 模式（测试 / 旧路径）传 `None` 即可。
     pub fn start_loop(
         &self,
         id: &str,
         context_trimmer: &Arc<dyn crate::context::ContextTrimmer + Send + Sync>,
         global_tx: Option<mpsc::Sender<Envelope>>,
-        inbox_rx: Option<mpsc::Receiver<OrchestratorMessage>>,
         permission_rules: Option<Arc<Vec<PermissionRule>>>,
     ) -> Result<AgentLoopContext, SessionError> {
         let token = CancellationToken::new();
@@ -526,7 +524,6 @@ impl SessionManager {
             cancel_token: token,
             context_trimmer: Arc::clone(context_trimmer),
             global_tx,
-            inbox_rx,
             permission_rules,
             agent_kind: crate::agent::AgentKind::Primary,
             depth: 0,
@@ -876,7 +873,7 @@ mod tests {
 
         let trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(MockTrimmer);
         let ctx = manager
-            .start_loop(&session.id, &trimmer, None, None, None)
+            .start_loop(&session.id, &trimmer, None, None)
             .unwrap();
         assert_eq!(ctx.session_id, session.id);
         assert_eq!(ctx.working_dir, Path::new("/tmp"));
@@ -894,10 +891,10 @@ mod tests {
 
         let trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(MockTrimmer);
         let _ctx = manager
-            .start_loop(&session.id, &trimmer, None, None, None)
+            .start_loop(&session.id, &trimmer, None, None)
             .unwrap();
 
-        match manager.start_loop(&session.id, &trimmer, None, None, None) {
+        match manager.start_loop(&session.id, &trimmer, None, None) {
             Err(SessionError::SessionBusy { session_id }) => {
                 assert_eq!(session_id, session.id);
             }
@@ -914,7 +911,7 @@ mod tests {
 
         let trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(MockTrimmer);
         let _ctx = manager
-            .start_loop(&session.id, &trimmer, None, None, None)
+            .start_loop(&session.id, &trimmer, None, None)
             .unwrap();
         manager
             .finish_loop(&session.id, SessionStatus::Completed)
@@ -933,7 +930,7 @@ mod tests {
 
         let trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(MockTrimmer);
         let ctx = manager
-            .start_loop(&session.id, &trimmer, None, None, None)
+            .start_loop(&session.id, &trimmer, None, None)
             .unwrap();
         let token = ctx.cancel_token.clone();
         assert!(!token.is_cancelled());

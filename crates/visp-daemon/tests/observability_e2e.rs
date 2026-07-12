@@ -319,7 +319,7 @@ fn build_harness(provider_phases: Vec<Vec<ChatEvent>>) -> E2eTestHarness {
 
     let trimmer: Arc<dyn visp_core::context::ContextTrimmer + Send + Sync> = Arc::new(NoopTrimmer);
     let ctx = session_mgr
-        .start_loop(&session_id, &trimmer, None, None, None)
+        .start_loop(&session_id, &trimmer, None, None)
         .expect("start loop");
 
     let provider: Arc<dyn LlmProvider> = Arc::new(E2eMockProvider::new(provider_phases));

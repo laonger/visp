@@ -1836,3 +1836,261 @@ async fn test_subagent_spawn_langfuse_enabled_public_false() {
         "public=false should be recorded as 'false'"
     );
 }
+
+// ── Wave 2b: Oneshot response path ────────────────────────────
+
+fn find_child_id(orch: &Orchestrator, parent_id: &str) -> String {
+    let sessions = orch.session_mgr.list().unwrap();
+    sessions
+        .iter()
+        .find(|s| s.parent_id.as_deref() == Some(parent_id))
+        .map(|s| s.id.clone())
+        .expect("child session should exist")
+}
+
+#[tokio::test]
+async fn test_spawn_sub_agent_with_response_tx() {
+    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (tx, _rx) = oneshot::channel();
+
+    orch.spawn_sub_agent(
+        &parent_id,
+        "call-1",
+        "default",
+        "test description",
+        "test prompt",
+        None,
+        None,
+        Some(tx),
+    )
+    .await;
+
+    let child_id = find_child_id(&orch, &parent_id);
+    assert!(
+        orch.pending_responses.contains_key(&child_id),
+        "pending_responses should contain the child session_id"
+    );
+}
+
+#[tokio::test]
+async fn test_handle_done_response_tx_some() {
+    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (tx, mut rx) = oneshot::channel();
+
+    orch.spawn_sub_agent(
+        &parent_id,
+        "call-1",
+        "default",
+        "test description",
+        "test prompt",
+        None,
+        None,
+        Some(tx),
+    )
+    .await;
+
+    let child_id = find_child_id(&orch, &parent_id);
+    assert!(orch.pending_responses.contains_key(&child_id));
+
+    orch.handle_done(&child_id).await;
+
+    // Should receive result via oneshot
+    let result = rx.await.expect("should receive result via oneshot");
+    assert!(
+        !orch.pending_responses.contains_key(&child_id),
+        "pending_responses should be cleaned up after handle_done"
+    );
+    // result may be empty string (no assistant messages in session), which is fine
+    assert_eq!(result, "", "result content from empty session should be empty");
+}
+
+#[tokio::test]
+async fn test_handle_done_response_tx_none() {
+    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let cancel = CancellationToken::new();
+    let (parent_inbox_tx, mut parent_inbox_rx) = mpsc::channel(16);
+
+    // Register parent agent explicitly (needed for inbox path)
+    orch.active_agents.register(ActiveAgent {
+        session_id: parent_id.clone(),
+        parent_session_id: None,
+        agent_name: "root".to_string(),
+        cancel_token: cancel,
+        inbox: parent_inbox_tx,
+        pending_call_id: None,
+        started_at: Instant::now(),
+    });
+
+    orch.spawn_sub_agent(
+        &parent_id,
+        "call-1",
+        "default",
+        "test description",
+        "test prompt",
+        None,
+        None,
+        None, // No response_tx
+    )
+    .await;
+
+    let child_id = find_child_id(&orch, &parent_id);
+
+    orch.handle_done(&child_id).await;
+
+    // Should go through inbox path (existing logic)
+    let msg = parent_inbox_rx
+        .try_recv()
+        .expect("parent inbox should receive SubAgentComplete");
+    match msg {
+        OrchestratorMessage::SubAgentComplete { .. } => {} // expected
+        _ => panic!("expected SubAgentComplete, got a different variant"),
+    }
+}
+
+#[tokio::test]
+async fn test_handle_agent_error_response_tx_some() {
+    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (tx, mut rx) = oneshot::channel();
+
+    orch.spawn_sub_agent(
+        &parent_id,
+        "call-1",
+        "default",
+        "test description",
+        "test prompt",
+        None,
+        None,
+        Some(tx),
+    )
+    .await;
+
+    let child_id = find_child_id(&orch, &parent_id);
+
+    orch
+        .handle_agent_error(
+            &child_id,
+            AgentErrorCode::Internal,
+            "something went wrong".to_string(),
+        )
+        .await;
+
+    let result = rx.await.expect("should receive error via oneshot");
+    assert!(
+        result.contains("[SubAgent Error]"),
+        "error message should contain '[SubAgent Error]', got: {result}"
+    );
+    assert!(
+        result.contains("something went wrong"),
+        "error message should contain original error text, got: {result}"
+    );
+}
+
+#[tokio::test]
+async fn test_handle_agent_error_response_tx_none() {
+    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let cancel = CancellationToken::new();
+    let (parent_inbox_tx, mut parent_inbox_rx) = mpsc::channel(16);
+
+    orch.active_agents.register(ActiveAgent {
+        session_id: parent_id.clone(),
+        parent_session_id: None,
+        agent_name: "root".to_string(),
+        cancel_token: cancel,
+        inbox: parent_inbox_tx,
+        pending_call_id: None,
+        started_at: Instant::now(),
+    });
+
+    orch.spawn_sub_agent(
+        &parent_id,
+        "call-1",
+        "default",
+        "test description",
+        "test prompt",
+        None,
+        None,
+        None, // No response_tx
+    )
+    .await;
+
+    let child_id = find_child_id(&orch, &parent_id);
+
+    orch
+        .handle_agent_error(
+            &child_id,
+            AgentErrorCode::Internal,
+            "some error".to_string(),
+        )
+        .await;
+
+    // Should go through inbox path (existing logic)
+    let msg = parent_inbox_rx
+        .try_recv()
+        .expect("parent inbox should receive SubAgentError");
+    match msg {
+        OrchestratorMessage::SubAgentError { .. } => {} // expected
+        _ => panic!("expected SubAgentError, got a different variant"),
+    }
+}
+
+#[tokio::test]
+async fn test_pending_responses_cleanup_on_done() {
+    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (tx, _rx) = oneshot::channel();
+
+    orch.spawn_sub_agent(
+        &parent_id,
+        "call-1",
+        "default",
+        "test description",
+        "test prompt",
+        None,
+        None,
+        Some(tx),
+    )
+    .await;
+
+    let child_id = find_child_id(&orch, &parent_id);
+    assert!(orch.pending_responses.contains_key(&child_id));
+
+    orch.handle_done(&child_id).await;
+
+    assert!(
+        !orch.pending_responses.contains_key(&child_id),
+        "pending_responses should be cleaned up after handle_done"
+    );
+}
+
+#[tokio::test]
+async fn test_pending_responses_cleanup_on_error() {
+    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (tx, _rx) = oneshot::channel();
+
+    orch.spawn_sub_agent(
+        &parent_id,
+        "call-1",
+        "default",
+        "test description",
+        "test prompt",
+        None,
+        None,
+        Some(tx),
+    )
+    .await;
+
+    let child_id = find_child_id(&orch, &parent_id);
+    assert!(orch.pending_responses.contains_key(&child_id));
+
+    orch
+        .handle_agent_error(
+            &child_id,
+            AgentErrorCode::Internal,
+            "error".to_string(),
+        )
+        .await;
+
+    assert!(
+        !orch.pending_responses.contains_key(&child_id),
+        "pending_responses should be cleaned up after handle_agent_error"
+    );
+}
