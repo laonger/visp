@@ -119,7 +119,7 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = concat!(
     "\n",
     "C. Dispatch\n",
     "- Wait for tool results before acting on them. Independent tools may run in parallel.\n",
-    "- Task descriptions: state the goal not the method, include relevant paths/keywords, set scope.\n",
+    "- Task prompts: write a self-contained task for the sub-agent - include the goal, relevant context/paths, constraints, and expected output. Never forward the user's raw request; rewrite a focused task the sub-agent can act on autonomously.\n",
     "- Spawn independent sub-agents in parallel; serialize only when results are needed next.\n",
     "- Reference style: file:line and summaries, not full file contents.\n",
     "\n",
@@ -158,7 +158,7 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = concat!(
     "\n",
     "- Use file:line references and summaries — don't paste entire files.\n",
     "- Don't repeat previous findings or re-explain known context.\n",
-    "- Keep sub-agent task descriptions under ~300 tokens.\n",
+    "- Keep sub-agent prompts focused but self-contained - include enough context that the sub-agent need not re-read the whole session.\n",
 );
 
 pub fn user_query_instruction() -> &'static str {

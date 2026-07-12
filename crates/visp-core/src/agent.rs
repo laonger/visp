@@ -128,6 +128,9 @@ pub enum AgentMessage {
         call_id: String,
         subagent_type: String,
         description: String,
+        /// 传给子 agent 的详细、自包含任务说明（目标+上下文+约束+期望输出）。
+        /// 由调用方 LLM 编写，子 agent 将其作为首条 user message。
+        prompt: String,
         task_id: Option<String>,
         trace_context: Option<crate::TraceContext>,
     },
@@ -2271,6 +2274,7 @@ mod tests {
             call_id: "call-1".into(),
             subagent_type: "default".into(),
             description: "do work".into(),
+            prompt: "do work".into(),
             task_id: None,
             trace_context: Some(tc.clone()),
         };
@@ -2288,6 +2292,7 @@ mod tests {
             call_id: "call-1".into(),
             subagent_type: "default".into(),
             description: "do work".into(),
+            prompt: "do work".into(),
             task_id: None,
             trace_context: None,
         };

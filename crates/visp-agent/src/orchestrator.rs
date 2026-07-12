@@ -253,6 +253,7 @@ impl Orchestrator {
                 call_id,
                 subagent_type,
                 description,
+                prompt,
                 task_id,
                 trace_context,
             } => {
@@ -267,6 +268,7 @@ impl Orchestrator {
                     &call_id,
                     &subagent_type,
                     &description,
+                    &prompt,
                     task_id.as_deref(),
                     Some(trace_context),
                 )
@@ -503,12 +505,14 @@ impl Orchestrator {
     }
 
     /// 启动子 Agent（响应 SpawnRequest）
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_sub_agent(
         &mut self,
         parent_session_id: &str,
         call_id: &str,
         subagent_type: &str,
         description: &str,
+        prompt: &str,
         _task_id: Option<&str>,
         trace_context: Option<visp_core::TraceContext>,
     ) {
@@ -697,8 +701,15 @@ impl Orchestrator {
             }
         };
 
-        // 10. Send initial user message with the task description
-        let msg = Message::user(description);
+        // 10. Send initial user message with the task prompt (fallback to description).
+        //     `prompt` is the self-contained task written by the parent agent for the
+        //     sub-agent; `description` is only a short label, used when prompt is empty.
+        let task_msg = if prompt.is_empty() {
+            description
+        } else {
+            prompt
+        };
+        let msg = Message::user(task_msg);
 
         // Create forwarding task: agent_tx → grpc_tx with session context
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);

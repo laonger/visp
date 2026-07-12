@@ -16,8 +16,10 @@ impl Tool for TaskTool {
 
     fn description(&self) -> &str {
         "Delegate a task to a specialized sub-agent for better precision and cost efficiency. \
-         Use this for code exploration, search, implementation, or testing tasks. \
-         See the Delegation Guidelines in the system prompt for when to use each sub-agent."
+         The `prompt` field MUST be a detailed, self-contained task description (goal + relevant \
+         context/paths + constraints + expected output) so the sub-agent can act autonomously \
+         without re-analyzing the whole conversation. NEVER just copy the user's original request \
+         into `prompt` - rewrite a focused task. See Delegation Guidelines in the system prompt."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -30,14 +32,18 @@ impl Tool for TaskTool {
                 },
                 "description": {
                     "type": "string",
-                    "description": "Detailed description of the task to delegate"
+                    "description": "Short summary of the task (used for display/logging)."
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Detailed, self-contained task description for the sub-agent. Must include: the goal, relevant context/file paths, constraints, and what the sub-agent should return. Do NOT forward the user's original request - rewrite a focused task the sub-agent can act on autonomously."
                 },
                 "task_id": {
                     "type": "string",
                     "description": "Optional task ID for tracking"
                 }
             },
-            "required": ["subagent_type", "description"]
+            "required": ["subagent_type", "prompt"]
         })
     }
 
@@ -94,8 +100,18 @@ mod tests {
         let required = params["required"].as_array().unwrap();
         let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(required_strs.contains(&"subagent_type"));
-        assert!(required_strs.contains(&"description"));
+        assert!(required_strs.contains(&"prompt"));
+        assert!(!required_strs.contains(&"description"));
         assert_eq!(required.len(), 2);
+    }
+
+    #[test]
+    fn test_parameters_has_prompt() {
+        let tool = TaskTool;
+        let params = tool.parameters();
+        let props = params["properties"].as_object().unwrap();
+        assert!(props.contains_key("prompt"));
+        assert_eq!(props["prompt"]["type"], "string");
     }
 
     #[test]

@@ -901,6 +901,11 @@ async fn execute_tool_calls(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            let prompt = task_args
+                .get("prompt")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| description.clone());
             let task_id = task_args
                 .get("task_id")
                 .and_then(|v| v.as_str())
@@ -923,6 +928,7 @@ async fn execute_tool_calls(
                         call_id: tc.id.clone(),
                         subagent_type: subagent_type.clone(),
                         description: description.clone(),
+                        prompt: prompt.clone(),
                         task_id: task_id.clone(),
                         trace_context: Some(visp_tc.clone()),
                     },
@@ -2061,7 +2067,7 @@ mod tests {
                     Ok(ChatEvent::ToolCall {
                         id: "call_1".into(),
                         name: "task".into(),
-                        arguments: r#"{"subagent_type": "general", "description": "test"}"#.into(),
+                        arguments: r#"{"subagent_type": "general", "description": "test", "prompt": "detailed task for sub-agent"}"#.into(),
                     }),
                     Ok(ChatEvent::Done),
                 ];
@@ -4828,10 +4834,12 @@ mod tests {
         while let Ok(envelope) = global_rx.try_recv() {
             if let AgentMessage::SpawnRequest {
                 trace_context: Some(tc),
+                prompt,
                 ..
             } = &envelope.message
             {
                 found_tc = true;
+                assert_eq!(prompt, "detailed task for sub-agent");
                 assert_eq!(tc.trace_id.len(), 32, "trace_id should be 32 hex chars");
                 assert_eq!(tc.span_id.len(), 16, "span_id should be 16 hex chars");
                 assert!(tc.trace_id.chars().all(|c| c.is_ascii_hexdigit()));
