@@ -760,8 +760,8 @@ async fn execute_tool_calls(
     cfg: &AgentConfig,
     doom_loop_window: &mut Vec<Vec<(String, serde_json::Value)>>,
     doom_loop_warned: &mut bool,
-    _visp_trace_id: &str,
-    _iter_span_w3c_id: &str,
+    visp_trace_id: &str,
+    iter_span_w3c_id: &str,
 ) -> bool {
     // Append assistant message with tool_calls
     *total_tool_calls += tool_calls.len() as u32;
@@ -884,6 +884,8 @@ async fn execute_tool_calls(
         let sm = sm.clone();
         let permissions = ctx.permission_rules.clone();
         let sid2 = sid.to_string();
+        let tool_visp_trace_id = visp_trace_id.to_string();
+        let tool_iter_span_w3c_id = iter_span_w3c_id.to_string();
 
         // Pre-clone for tool span
         let tool_span_name = tc.name.clone();
@@ -1079,9 +1081,9 @@ async fn execute_tool_calls(
                     working_dir: working_dir.clone(),
                     session_id: Some(session_id),
                     permission_rules: permissions.clone(),
-                    global_tx: None,
-                    visp_trace_id: None,
-                    iter_span_w3c_id: None,
+                    global_tx: global_tx.clone(),
+                    visp_trace_id: Some(tool_visp_trace_id.clone()),
+                    iter_span_w3c_id: Some(tool_iter_span_w3c_id.clone()),
                 };
 
                 let start = std::time::Instant::now();
