@@ -508,7 +508,8 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     );
     for (i, msg) in app.messages().iter().take(5).enumerate() {
         let preview = if msg.content.len() > 80 {
-            &msg.content[..80]
+            let end = msg.content.floor_char_boundary(80);
+            &msg.content[..end]
         } else {
             &msg.content
         };
