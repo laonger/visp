@@ -26,7 +26,9 @@ fn test_migrate_creates_indexes() {
     let conn = setup_db();
 
     let indexes: Vec<String> = conn
-        .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%' ORDER BY name")
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%' ORDER BY name",
+        )
         .unwrap()
         .query_map([], |row| row.get(0))
         .unwrap()
@@ -158,9 +160,7 @@ fn test_migrate_v1_to_v2() {
 
     // Verify tool_calls_json column exists
     let has_column: bool = conn
-        .prepare(
-            "SELECT COUNT(*) FROM pragma_table_info('message') WHERE name='tool_calls_json'",
-        )
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('message') WHERE name='tool_calls_json'")
         .and_then(|mut s| s.query_row([], |row| row.get::<_, i64>(0)))
         .map(|c| c > 0)
         .unwrap_or(false);
@@ -431,9 +431,7 @@ fn test_migrate_self_heals_when_version_exceeds_schema() {
 
     // Before migration: tool_call_count column is missing
     let has_before: bool = conn
-        .prepare(
-            "SELECT COUNT(*) FROM pragma_table_info('message') WHERE name='tool_call_count'",
-        )
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('message') WHERE name='tool_call_count'")
         .and_then(|mut s| s.query_row([], |row| row.get::<_, i64>(0)))
         .map(|c| c > 0)
         .unwrap_or(false);
@@ -448,9 +446,7 @@ fn test_migrate_self_heals_when_version_exceeds_schema() {
 
     // After migration: tool_call_count column exists (self-healed)
     let has_after: bool = conn
-        .prepare(
-            "SELECT COUNT(*) FROM pragma_table_info('message') WHERE name='tool_call_count'",
-        )
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('message') WHERE name='tool_call_count'")
         .and_then(|mut s| s.query_row([], |row| row.get::<_, i64>(0)))
         .map(|c| c > 0)
         .unwrap_or(false);

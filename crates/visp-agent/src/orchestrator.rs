@@ -772,10 +772,8 @@ impl Orchestrator {
         });
 
         let provider = provider.clone();
-        let tool_registry = filter_tools_for_sub_agent(
-            &self.tool_registry,
-            &agent_def.allowed_sub_agents,
-        );
+        let tool_registry =
+            filter_tools_for_sub_agent(&self.tool_registry, &agent_def.allowed_sub_agents);
         let rule_engine = self.rule_engine.clone();
         let session_mgr = self.session_mgr.clone();
         let mut config = self.agent_config.clone();

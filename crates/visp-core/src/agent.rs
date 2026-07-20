@@ -21,8 +21,8 @@ use crate::rules::RuleEngine;
 use crate::session::SessionManager;
 use crate::session::SessionStatus;
 use crate::tool::{ToolContext, ToolResult, ToolType};
-use async_trait::async_trait;
 use crate::tool_registry::ToolRegistry;
+use async_trait::async_trait;
 
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -2095,12 +2095,7 @@ mod tests {
         let permission_rules = StdArc::new(Vec::new());
 
         let ctx = session_mgr
-            .start_loop(
-                &sid,
-                &trimmer,
-                Some(global_tx),
-                Some(permission_rules),
-            )
+            .start_loop(&sid, &trimmer, Some(global_tx), Some(permission_rules))
             .unwrap();
 
         let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
@@ -2281,9 +2276,7 @@ mod tests {
         assert!(!guide.is_empty());
         // Should mention at least one agent tool name like @explorer or @fixer
         assert!(
-            guide.contains("@explorer")
-                || guide.contains("@fixer")
-                || guide.contains("@designer"),
+            guide.contains("@explorer") || guide.contains("@fixer") || guide.contains("@designer"),
             "should list agent tool names like @explorer, got: {guide}"
         );
     }

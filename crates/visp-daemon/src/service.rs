@@ -1685,9 +1685,7 @@ mod tests {
         let session = mgr.create(Path::new("/tmp"), LlmConfig::default()).unwrap();
         let trimmer: Arc<dyn ContextTrimmer + Send + Sync> =
             Arc::new(visp_core::context::NoopTrimmer);
-        let ctx = mgr
-            .start_loop(&session.id, &trimmer, None, None)
-            .unwrap();
+        let ctx = mgr.start_loop(&session.id, &trimmer, None, None).unwrap();
         let token = ctx.cancel_token.clone();
         assert!(
             !token.is_cancelled(),

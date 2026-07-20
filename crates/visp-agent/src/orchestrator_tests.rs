@@ -1895,7 +1895,10 @@ async fn test_handle_done_response_tx_some() {
         "pending_responses should be cleaned up after handle_done"
     );
     // result may be empty string (no assistant messages in session), which is fine
-    assert_eq!(result, "", "result content from empty session should be empty");
+    assert_eq!(
+        result, "",
+        "result content from empty session should be empty"
+    );
 }
 
 #[tokio::test]
@@ -1960,13 +1963,12 @@ async fn test_handle_agent_error_response_tx_some() {
 
     let child_id = find_child_id(&orch, &parent_id);
 
-    orch
-        .handle_agent_error(
-            &child_id,
-            AgentErrorCode::Internal,
-            "something went wrong".to_string(),
-        )
-        .await;
+    orch.handle_agent_error(
+        &child_id,
+        AgentErrorCode::Internal,
+        "something went wrong".to_string(),
+    )
+    .await;
 
     let result = rx.await.expect("should receive error via oneshot");
     assert!(
@@ -2009,13 +2011,12 @@ async fn test_handle_agent_error_response_tx_none() {
 
     let child_id = find_child_id(&orch, &parent_id);
 
-    orch
-        .handle_agent_error(
-            &child_id,
-            AgentErrorCode::Internal,
-            "some error".to_string(),
-        )
-        .await;
+    orch.handle_agent_error(
+        &child_id,
+        AgentErrorCode::Internal,
+        "some error".to_string(),
+    )
+    .await;
 
     // Should go through inbox path (existing logic)
     let msg = parent_inbox_rx
@@ -2075,12 +2076,7 @@ async fn test_pending_responses_cleanup_on_error() {
     let child_id = find_child_id(&orch, &parent_id);
     assert!(orch.pending_responses.contains_key(&child_id));
 
-    orch
-        .handle_agent_error(
-            &child_id,
-            AgentErrorCode::Internal,
-            "error".to_string(),
-        )
+    orch.handle_agent_error(&child_id, AgentErrorCode::Internal, "error".to_string())
         .await;
 
     assert!(

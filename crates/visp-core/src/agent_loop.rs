@@ -6,9 +6,8 @@ use std::time::Duration;
 use crate::ProviderMetadata;
 use crate::agent::{
     AgentConfig, AgentEvent, AgentLoopContext, AgentMessage, Envelope, ToolExecResult,
-    UserQueryResult, cleanup_orphan_tool_uses, extract_thinking_text,
-    format_tool_args, llm_error_to_code, parse_user_query_marker, render_tool_guide,
-    strip_user_query_marker,
+    UserQueryResult, cleanup_orphan_tool_uses, extract_thinking_text, format_tool_args,
+    llm_error_to_code, parse_user_query_marker, render_tool_guide, strip_user_query_marker,
 };
 use crate::error::AgentErrorCode;
 use crate::error::LlmError;
@@ -1824,12 +1823,7 @@ mod tests {
         let (global_tx, _global_rx) = mpsc::channel::<Envelope>(16);
         let permission_rules = std::sync::Arc::new(Vec::new());
         let ctx = session_mgr
-            .start_loop(
-                &sid,
-                &trimmer,
-                Some(global_tx),
-                Some(permission_rules),
-            )
+            .start_loop(&sid, &trimmer, Some(global_tx), Some(permission_rules))
             .unwrap();
 
         let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::new(TokenProvider {
@@ -1963,9 +1957,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: std::sync::Arc<dyn crate::context::ContextTrimmer + Send + Sync> =
             std::sync::Arc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::new(OneToolCallProvider {
             call_count: AtomicUsize::new(0),
@@ -2065,9 +2057,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: std::sync::Arc<dyn crate::context::ContextTrimmer + Send + Sync> =
             std::sync::Arc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::new(MetadataProvider {
             metadata: metadata.clone(),
@@ -2180,9 +2170,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: std::sync::Arc<dyn crate::context::ContextTrimmer + Send + Sync> =
             std::sync::Arc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         let provider: std::sync::Arc<dyn LlmProvider> =
             std::sync::Arc::new(TwoRoundMetadataProvider {
@@ -2445,9 +2433,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         let provider: StdArc<dyn LlmProvider> =
             StdArc::new(SimpleProvider::new(vec![vec![ChatEvent::Done]]));
@@ -2494,9 +2480,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         let provider: StdArc<dyn LlmProvider> =
             StdArc::new(SimpleProvider::new(vec![vec![ChatEvent::Done]]));
@@ -2567,9 +2551,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         let provider: StdArc<dyn LlmProvider> =
             StdArc::new(SimpleProvider::new(vec![vec![ChatEvent::Done]]));
@@ -2623,9 +2605,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         let provider: StdArc<dyn LlmProvider> =
             StdArc::new(SimpleProvider::new(vec![vec![ChatEvent::Done]]));
@@ -2710,9 +2690,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         let provider: StdArc<dyn LlmProvider> =
             StdArc::new(SimpleProvider::new(vec![vec![ChatEvent::Done]]));
@@ -2880,9 +2858,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         let provider: StdArc<dyn LlmProvider> =
             StdArc::new(SimpleProvider::new(vec![vec![ChatEvent::Done]]));
@@ -2940,9 +2916,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         let provider: StdArc<dyn LlmProvider> =
             StdArc::new(SimpleProvider::new(vec![vec![ChatEvent::Done]]));
@@ -3020,9 +2994,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         // Provider that returns text + Done
         let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![vec![
@@ -3103,9 +3075,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         let provider: StdArc<dyn LlmProvider> =
             StdArc::new(SimpleProvider::new(vec![vec![ChatEvent::Done]]));
@@ -3164,9 +3134,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         // Provider returns text but capture is disabled
         let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![vec![
@@ -3228,9 +3196,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         let provider: StdArc<dyn LlmProvider> =
             StdArc::new(SimpleProvider::new(vec![vec![ChatEvent::Done]]));
@@ -3277,9 +3243,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         // Cancel before starting
         ctx.cancel_token.cancel();
@@ -3329,9 +3293,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         // Provider always returns a tool call, so we hit hard_limit=1 immediately
         let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![vec![
@@ -3396,9 +3358,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         let provider: StdArc<dyn LlmProvider> =
             StdArc::new(SimpleProvider::new(vec![vec![ChatEvent::Done]]));
@@ -3478,9 +3438,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
         let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
 
         run_agent_loop(
@@ -3535,9 +3493,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         // Use a provider that does one tool call then done, giving us 2 iterations
         let provider: StdArc<dyn LlmProvider> = StdArc::new(OneToolCallProvider {
@@ -3659,9 +3615,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         let provider: StdArc<dyn LlmProvider> = StdArc::new(OneToolCallProvider {
             call_count: AtomicUsize::new(0),
@@ -3776,9 +3730,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         let provider: StdArc<dyn LlmProvider> = StdArc::new(ThreeToolProvider {
             call_count: AtomicUsize::new(0),
@@ -3880,9 +3832,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         let provider: StdArc<dyn LlmProvider> = StdArc::new(OneToolCallProvider {
             call_count: AtomicUsize::new(0),
@@ -3994,9 +3944,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         let provider: StdArc<dyn LlmProvider> = StdArc::new(OneToolCallProvider {
             call_count: AtomicUsize::new(0),
@@ -4114,9 +4062,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         let provider: StdArc<dyn LlmProvider> = StdArc::new(ErrorToolProvider {
             call_count: AtomicUsize::new(0),
@@ -4198,9 +4144,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         // Use the tool that records duration in history
         let provider: StdArc<dyn LlmProvider> = StdArc::new(OneToolCallProvider {
@@ -4331,9 +4275,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         let provider: StdArc<dyn LlmProvider> = StdArc::new(ErrorToolProvider {
             call_count: AtomicUsize::new(0),
@@ -4449,9 +4391,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
         let provider: StdArc<dyn LlmProvider> = StdArc::new(TaskNameProvider {
             call_count: AtomicUsize::new(0),
@@ -4469,16 +4409,19 @@ mod tests {
 
         // Run agent loop — should NOT hang (no Phase 2 blocking on inbox).
         // The "task" tool call should be executed as a regular tool.
-        let result = tokio::time::timeout(std::time::Duration::from_secs(5), run_agent_loop(
-            provider,
-            StdArc::new(registry),
-            rule_engine,
-            session_mgr.clone(),
-            ctx,
-            &config,
-            Message::user("use task tool"),
-            tx,
-        ))
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_agent_loop(
+                provider,
+                StdArc::new(registry),
+                rule_engine,
+                session_mgr.clone(),
+                ctx,
+                &config,
+                Message::user("use task tool"),
+                tx,
+            ),
+        )
         .await;
 
         assert!(result.is_ok(), "agent loop should complete without hanging");
@@ -4568,9 +4511,7 @@ mod tests {
         let sid = session.id.clone();
         let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
             StdArc::new(Phase2MockTrimmer);
-        let ctx = session_mgr
-            .start_loop(&sid, &trimmer, None, None)
-            .unwrap();
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
         let cancel_token = ctx.cancel_token.clone();
 
         let provider: StdArc<dyn LlmProvider> = StdArc::new(SlowToolProvider {

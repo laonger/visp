@@ -3450,9 +3450,14 @@ mod tests {
         assert_eq!(app.tab_bar.tabs[1].messages.len(), 1);
         assert_eq!(
             app.tab_bar.tabs[1].messages[0].line_type,
-            LineType::ToolCall { name: "bash".into() }
+            LineType::ToolCall {
+                name: "bash".into()
+            }
         );
-        assert_eq!(app.tab_bar.tabs[1].messages[0].call_id, Some("sub-c1".into()));
+        assert_eq!(
+            app.tab_bar.tabs[1].messages[0].call_id,
+            Some("sub-c1".into())
+        );
 
         // 主 tab 的 messages 应保持不变
         assert_eq!(app.tab_bar.tabs[0].messages.len(), 1);
