@@ -63,7 +63,9 @@ async fn test_watcher_file_create() {
 async fn test_watcher_file_modify() {
     let (_tmp, project, store, indexer, config) = setup();
 
-    let _watcher = Watcher::start(&project, indexer.clone(), config).await.unwrap();
+    let _watcher = Watcher::start(&project, indexer.clone(), config)
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let file_path = project.join("a.ts");
