@@ -667,6 +667,8 @@ fn byte_stream_to_chat_events(
     struct StreamState {
         stream: Pin<Box<dyn Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send>>,
         buf: String,
+        /// 跨 chunk 的不完整 UTF-8 尾字节缓冲（修复多字节字符被 TCP chunk 切坏的问题）
+        pending_bytes: Vec<u8>,
         tools: HashMap<String, ToolAcc>,
         thinking_acc: HashMap<String, ThinkingAcc>,
         input_tokens: u32,
@@ -702,6 +704,7 @@ fn byte_stream_to_chat_events(
     let state = StreamState {
         stream: Box::pin(byte_stream),
         buf: String::new(),
+        pending_bytes: Vec::new(),
         tools: HashMap::new(),
         thinking_acc: HashMap::new(),
         input_tokens: 0,
@@ -1018,10 +1021,17 @@ fn byte_stream_to_chat_events(
 
                 match state.stream.next().await {
                     Some(Ok(bytes)) => {
-                        if let Ok(s) = std::str::from_utf8(&bytes) {
-                            state.buf.push_str(s);
-                        } else {
-                            return Some((Err(LlmError::Stream("Invalid UTF-8".into())), state));
+                        state.pending_bytes.extend_from_slice(&bytes);
+                        // 只解码完整的 UTF-8 部分，不完整的尾字节留到下一个 chunk
+                        let safe_end = match std::str::from_utf8(&state.pending_bytes) {
+                            Ok(_) => state.pending_bytes.len(),
+                            Err(e) => e.valid_up_to(),
+                        };
+                        if safe_end > 0 {
+                            state.buf.push_str(&String::from_utf8_lossy(
+                                &state.pending_bytes[..safe_end],
+                            ));
+                            state.pending_bytes = state.pending_bytes[safe_end..].to_vec();
                         }
                     }
                     Some(Err(e)) => {
@@ -1552,6 +1562,120 @@ mod tests {
             "latency_ms ({}) should be >= 20",
             meta.latency_ms
         );
+    }
+
+    // --- UTF-8 跨 chunk 边界测试 ---
+
+    /// 收集 ChatEvent 流，接收字节 chunk（用于测试跨 chunk 的 UTF-8 切分）
+    async fn collect_anthropic_events_from_bytes(chunks: Vec<Vec<u8>>) -> Vec<ChatEvent> {
+        let byte_stream =
+            futures::stream::iter(chunks.into_iter().map(|b| Ok(bytes::Bytes::from(b))));
+        let start = std::time::Instant::now();
+        let span = tracing::Span::current();
+        let event_stream = byte_stream_to_chat_events(
+            byte_stream,
+            start,
+            span,
+            "test-model".to_string(),
+            false,
+            20000,
+            true,
+        );
+        event_stream
+            .filter_map(|e| futures::future::ready(e.ok()))
+            .collect()
+            .await
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_utf8_multibyte_split_across_chunks() {
+        let message_start = r#"{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"test-model","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#;
+        let block_start =
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        let text_delta = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"之间"}}"#;
+        let block_stop = r#"{"type":"content_block_stop","index":0}"#;
+        let message_delta = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}"#;
+        let message_stop = r#"{"type":"message_stop"}"#;
+
+        let sse = format!(
+            "{}{}{}{}{}{}",
+            sse_line("message_start", message_start),
+            sse_line("content_block_start", block_start),
+            sse_line("content_block_delta", text_delta),
+            sse_line("content_block_stop", block_stop),
+            sse_line("message_delta", message_delta),
+            sse_line("message_stop", message_stop),
+        );
+        let full_bytes = sse.into_bytes();
+        let zhishi = "之间".as_bytes();
+        let split_offset = full_bytes
+            .windows(zhishi.len())
+            .position(|w| w == zhishi)
+            .expect("should find 之间 in SSE");
+        // 在 "之" 的第 2 字节后切分：e4 b9 | 8b e9 97 b4
+        let cut = split_offset + 2;
+        let chunk1 = full_bytes[..cut].to_vec();
+        let chunk2 = full_bytes[cut..].to_vec();
+
+        let events = collect_anthropic_events_from_bytes(vec![chunk1, chunk2]).await;
+
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ChatEvent::TextDelta(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            text, "之间",
+            "Anthropic Chinese text should survive chunk split"
+        );
+        assert!(
+            !text.contains('\u{FFFD}'),
+            "no U+FFFD replacement char allowed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_utf8_multibyte_split_at_char_boundary() {
+        let message_start = r#"{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"test-model","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#;
+        let block_start =
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        let text_delta = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"之间"}}"#;
+        let block_stop = r#"{"type":"content_block_stop","index":0}"#;
+        let message_delta = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}"#;
+        let message_stop = r#"{"type":"message_stop"}"#;
+
+        let sse = format!(
+            "{}{}{}{}{}{}",
+            sse_line("message_start", message_start),
+            sse_line("content_block_start", block_start),
+            sse_line("content_block_delta", text_delta),
+            sse_line("content_block_stop", block_stop),
+            sse_line("message_delta", message_delta),
+            sse_line("message_stop", message_stop),
+        );
+        let full_bytes = sse.into_bytes();
+        let zhi = "之".as_bytes();
+        let split_offset = full_bytes
+            .windows(zhi.len())
+            .position(|w| w == zhi)
+            .expect("should find 之 in SSE");
+        let cut = split_offset + zhi.len();
+        let chunk1 = full_bytes[..cut].to_vec();
+        let chunk2 = full_bytes[cut..].to_vec();
+
+        let events = collect_anthropic_events_from_bytes(vec![chunk1, chunk2]).await;
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ChatEvent::TextDelta(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "之间");
+        assert!(!text.contains('\u{FFFD}'));
     }
 
     // ── Tracing / gen_ai.client.operation span tests ────────────────────────

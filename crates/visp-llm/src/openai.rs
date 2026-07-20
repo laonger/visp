@@ -414,6 +414,8 @@ fn byte_stream_to_chat_events(
     struct StreamState {
         stream: Pin<Box<dyn Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send>>,
         buf: String,
+        /// 跨 chunk 的不完整 UTF-8 尾字节缓冲（修复多字节字符被 TCP chunk 切坏的问题）
+        pending_bytes: Vec<u8>,
         /// 累积中的工具调用: index -> (id, name, arguments)
         tool_acc: HashMap<usize, (String, String, String)>,
         /// 待发射的工具调用列表: (id, name, arguments)
@@ -478,6 +480,7 @@ fn byte_stream_to_chat_events(
     let state = StreamState {
         stream: Box::pin(byte_stream),
         buf: String::new(),
+        pending_bytes: Vec::new(),
         tool_acc: HashMap::new(),
         pending_tool_calls: Vec::new(),
         tool_call_count: 0,
@@ -731,8 +734,18 @@ fn byte_stream_to_chat_events(
             // [D] 从底层流读取更多数据
             match state.stream.next().await {
                 Some(Ok(chunk)) => {
-                    state.buf.push_str(&String::from_utf8_lossy(&chunk));
-                    // 下一轮循环会处理缓冲区
+                    state.pending_bytes.extend_from_slice(&chunk);
+                    // 只解码完整的 UTF-8 部分，不完整的尾字节留到下一个 chunk
+                    let safe_end = match std::str::from_utf8(&state.pending_bytes) {
+                        Ok(_) => state.pending_bytes.len(),
+                        Err(e) => e.valid_up_to(),
+                    };
+                    if safe_end > 0 {
+                        state
+                            .buf
+                            .push_str(&String::from_utf8_lossy(&state.pending_bytes[..safe_end]));
+                        state.pending_bytes = state.pending_bytes[safe_end..].to_vec();
+                    }
                 }
                 Some(Err(e)) => {
                     return Some((Err(LlmError::Network(e.to_string())), state));

@@ -438,8 +438,7 @@ fn make_stop_chunk(finish_reason: &str) -> serde_json::Value {
 
 /// 收集 ChatEvent 流到 Vec
 async fn collect_events(chunks: Vec<String>) -> Vec<ChatEvent> {
-    let byte_stream =
-        futures::stream::iter(chunks.into_iter().map(|s| Ok(bytes::Bytes::from(s))));
+    let byte_stream = futures::stream::iter(chunks.into_iter().map(|s| Ok(bytes::Bytes::from(s))));
     let span = tracing::Span::current();
     let event_stream = byte_stream_to_chat_events(
         byte_stream,
@@ -717,6 +716,95 @@ async fn test_byte_stream_reasoning_only() {
     assert!(matches!(&events[1], ChatEvent::UsageInfo { .. }));
     assert!(matches!(&events[2], ChatEvent::OutputMetadata(_)));
     assert!(matches!(&events[3], ChatEvent::Done));
+}
+
+// --- UTF-8 跨 chunk 边界测试 ---
+
+/// 收集 ChatEvent 流，接收字节 chunk（用于测试跨 chunk 的 UTF-8 切分）
+async fn collect_events_from_bytes(chunks: Vec<Vec<u8>>) -> Vec<ChatEvent> {
+    let byte_stream = futures::stream::iter(chunks.into_iter().map(|b| Ok(bytes::Bytes::from(b))));
+    let span = tracing::Span::current();
+    let event_stream = byte_stream_to_chat_events(
+        byte_stream,
+        std::time::Instant::now(),
+        span,
+        "test-model".to_string(),
+        false,
+        20000,
+        true,
+    );
+    event_stream
+        .filter_map(|e| futures::future::ready(e.ok()))
+        .collect()
+        .await
+}
+
+#[tokio::test]
+async fn test_utf8_multibyte_split_across_chunks() {
+    // 中文 "之间" = e4 b9 8b e9 97 b4 (6 字节)
+    // 故意在 "之" 字中间 (e4 b9 | 8b) 切分，验证不产生 U+FFFD
+    let sse = format!(
+        "{}{}",
+        make_sse(&make_text_chunk("之间")),
+        sse_line("[DONE]"),
+    );
+    let full_bytes = sse.into_bytes();
+    let zhishi = "之间".as_bytes(); // [e4, b9, 8b, e9, 97, b4]
+    let split_offset = full_bytes
+        .windows(zhishi.len())
+        .position(|w| w == zhishi)
+        .expect("should find 之间 in SSE");
+    // 在 "之"(e4 b9 8b) 的第 2 字节后切分：e4 b9 | 8b e9 97 b4
+    let cut = split_offset + 2;
+    let chunk1 = full_bytes[..cut].to_vec();
+    let chunk2 = full_bytes[cut..].to_vec();
+
+    let events = collect_events_from_bytes(vec![chunk1, chunk2]).await;
+
+    // 提取所有 TextDelta
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            ChatEvent::TextDelta(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(text, "之间", "Chinese text should survive chunk split");
+    assert!(
+        !text.contains('\u{FFFD}'),
+        "no U+FFFD replacement char allowed"
+    );
+}
+
+#[tokio::test]
+async fn test_utf8_multibyte_split_at_char_boundary() {
+    // 在 "之"(3字节) 和 "间"(3字节) 之间切分，验证正常边界也工作
+    let sse = format!(
+        "{}{}",
+        make_sse(&make_text_chunk("之间")),
+        sse_line("[DONE]"),
+    );
+    let full_bytes = sse.into_bytes();
+    let zhi = "之".as_bytes(); // [e4, b9, 8b]
+    let split_offset = full_bytes
+        .windows(zhi.len())
+        .position(|w| w == zhi)
+        .expect("should find 之 in SSE");
+    let cut = split_offset + zhi.len(); // 在完整字符后切分
+    let chunk1 = full_bytes[..cut].to_vec();
+    let chunk2 = full_bytes[cut..].to_vec();
+
+    let events = collect_events_from_bytes(vec![chunk1, chunk2]).await;
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            ChatEvent::TextDelta(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "之间");
+    assert!(!text.contains('\u{FFFD}'));
 }
 
 // --- truncate_for_log 测试（回归：UTF-8 char boundary panic） ---
