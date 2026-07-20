@@ -1869,7 +1869,7 @@ async fn test_spawn_sub_agent_with_response_tx() {
 #[tokio::test]
 async fn test_handle_done_response_tx_some() {
     let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
-    let (tx, mut rx) = oneshot::channel();
+    let (tx, rx) = oneshot::channel();
 
     orch.spawn_sub_agent(
         &parent_id,
@@ -1947,7 +1947,7 @@ async fn test_handle_done_response_tx_none() {
 #[tokio::test]
 async fn test_handle_agent_error_response_tx_some() {
     let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
-    let (tx, mut rx) = oneshot::channel();
+    let (tx, rx) = oneshot::channel();
 
     orch.spawn_sub_agent(
         &parent_id,
@@ -2327,7 +2327,7 @@ async fn test_end_to_end_agent_tool_spawn() {
     // 5. 验证结果包含预期内容
 
     let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
-    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    let (tx, rx) = tokio::sync::oneshot::channel();
 
     // Register parent agent in active_agents so the sub-agent has a parent context
     let cancel = CancellationToken::new();
