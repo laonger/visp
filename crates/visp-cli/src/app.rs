@@ -45,7 +45,7 @@ impl ScrollState {
 }
 
 /// 用 syntect 高亮代码块，返回 ratatui 行
-fn highlight_code_block(lang: &str, code: &str) -> Vec<Line<'static>> {
+pub(crate) fn highlight_code_block(lang: &str, code: &str) -> Vec<Line<'static>> {
     use syntect::easy::HighlightLines;
     use syntect::highlighting::ThemeSet;
     use syntect::parsing::SyntaxSet;
@@ -239,49 +239,6 @@ pub enum LineType {
     Usage,
 }
 
-/// 工具名称 → emoji 图标映射
-pub fn tool_icon(name: &str) -> &'static str {
-    match name {
-        "read_file" | "read_files" => "📖",
-        "write_file" => "📝",
-        "edit_file" => "✏️",
-        "grep" => "🔍",
-        "glob" => "📂",
-        "bash" | "cmd" | "powershell" => "💻",
-        "fetch_web" | "fetch" => "🌐",
-        n if n.starts_with("codegraph_") => "🔎",
-        _ => "🔧",
-    }
-}
-
-/// 根据工具名获取结果最大行数
-/// - None = 不截断
-/// - Some(0) = 不显示内容
-/// - Some(N) = 最多 N 行
-pub fn max_lines_for_tool(name: &str) -> Option<usize> {
-    match name {
-        "read_file" | "read_files" => Some(0),
-        "edit_file" | "write_file" => None,
-        "bash" | "cmd" | "powershell" => Some(30),
-        "grep" => Some(20),
-        "glob" => Some(15),
-        "fetch_web" | "fetch" => Some(20),
-        n if n.starts_with("codegraph_") => Some(20),
-        _ => Some(20),
-    }
-}
-
-/// read_file 类工具的摘要行
-pub fn result_summary(name: &str, content: &str) -> String {
-    match name {
-        "read_file" | "read_files" => {
-            let lines = content.lines().count();
-            let bytes = content.len();
-            format!("Read {} bytes ({} lines)", bytes, lines)
-        }
-        _ => String::new(),
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct ChatLine {
@@ -290,6 +247,10 @@ pub struct ChatLine {
     pub line_type: LineType,
     pub content: String,
     pub call_id: Option<String>,
+    /// Result content merged from ToolResult (for collapsible ToolCall blocks)
+    pub tool_result: Option<String>,
+    /// Whether the result was an error
+    pub tool_error: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,6 +313,8 @@ impl TabEntry {
             line_type,
             content,
             call_id,
+            tool_result: None,
+            tool_error: false,
         });
     }
 
@@ -415,8 +378,7 @@ impl TabEntry {
             matches!(m.line_type, LineType::ToolCall { .. })
                 && m.call_id.as_deref() == Some(call_id)
         }) {
-            msg.content.push('\n');
-            msg.content.push_str(&content);
+            msg.tool_result = Some(content);
             msg.version += 1;
         } else {
             self.push_chat_line(
@@ -476,15 +438,27 @@ impl TabEntry {
                             })
                             .unwrap_or_default()
                     };
-                    self.push_chat_line(
-                        if tr.is_error {
-                            LineType::ToolError { name: tool_name }
-                        } else {
-                            LineType::ToolResult { name: tool_name }
-                        },
-                        tr.content,
-                        Some(tr.call_id),
-                    );
+
+                    // Merge into existing ToolCall ChatLine
+                    if let Some(msg) = self.messages.iter_mut().find(|m| {
+                        matches!(&m.line_type, LineType::ToolCall { .. })
+                            && m.call_id.as_deref() == Some(&tr.call_id)
+                    }) {
+                        msg.tool_result = Some(tr.content);
+                        msg.tool_error = tr.is_error;
+                        msg.version += 1;
+                    } else {
+                        // Fallback: create separate ChatLine
+                        self.push_chat_line(
+                            if tr.is_error {
+                                LineType::ToolError { name: tool_name }
+                            } else {
+                                LineType::ToolResult { name: tool_name }
+                            },
+                            tr.content,
+                            Some(tr.call_id),
+                        );
+                    }
                 }
                 Some(server_message::Payload::ThinkingBlock(tb)) => {
                     let text = format!("[Thinking] {}", tb.thinking);
@@ -741,12 +715,13 @@ pub struct MessageCache {
     pub msg_id: u64,
     pub msg_version: u64,
     pub width: u16,
+    pub expanded: bool,
     pub lines: Vec<Line<'static>>,
     pub line_count: u16,
 }
 
 impl MessageCache {
-    pub fn from_message(msg: &ChatLine, width: u16) -> Self {
+    pub fn from_message(msg: &ChatLine, width: u16, expanded: bool) -> Self {
         // 背景色由 ui.rs 的 BlockStyle::bg_fill 统一处理
         let base_style = Style::default().fg(theme::fg_for(msg.line_type.clone()));
         let lines: Vec<Line<'static>> = match msg.line_type {
@@ -777,137 +752,20 @@ impl MessageCache {
                     })
                     .collect()
             }
-            LineType::ToolCall { ref name } => {
-                let icon = tool_icon(name);
-                let mut lines = Vec::new();
-                let wrapped = wrap_text(&msg.content, width);
-                let display_lines = if wrapped.len() > 5 {
-                    let mut truncated: Vec<String> = wrapped.into_iter().take(5).collect();
-                    truncated.push(format!("... [truncated, {}B]", msg.content.len()));
-                    truncated
-                } else {
-                    wrapped
-                };
-
-                for (i, dl) in display_lines.iter().enumerate() {
-                    let content = if dl.is_empty() {
-                        " ".repeat(width as usize)
-                    } else {
-                        pad_to_width(dl, width as usize)
-                    };
-                    // 首行加图标，后续行（结果部分）灰色
-                    let line_style = if i == 0 {
-                        Style::default().fg(theme::TOOL_CALL_FG)
-                    } else {
-                        Style::default().fg(theme::TOOL_RESULT_FG)
-                    };
-                    let display = if i == 0 {
-                        format!("{} {} {}", icon, name, content)
-                    } else {
-                        content
-                    };
-                    lines.push(Line::styled(display, line_style));
-                }
+            LineType::ToolCall { .. } => {
+                let lines = crate::tool_ui::render_tool_call(msg, width, expanded);
                 let line_count = lines.len() as u16;
-                return Self {
-                    msg_id: msg.id,
-                    msg_version: msg.version,
-                    width,
-                    lines,
-                    line_count,
-                };
+                return Self { msg_id: msg.id, msg_version: msg.version, width, expanded, lines, line_count };
             }
-            LineType::ToolResult { ref name } => {
-                let max_lines = max_lines_for_tool(name);
-                let icon = tool_icon(name);
-                let mut lines = Vec::new();
-                if max_lines == Some(0) {
-                    // 不显示内容，只显示摘要
-                    let summary = result_summary(name, &msg.content);
-                    let status_line = format!("  ✓ {} {} {}", icon, name, summary);
-                    lines.push(Line::styled(
-                        pad_to_width(&status_line, width as usize),
-                        Style::default().fg(theme::TOOL_RESULT_FG),
-                    ));
-                } else {
-                    // bash/shell 输出：首行就是内容，不走"灰色状态头"模式
-                    let is_shell = matches!(name.as_str(), "bash" | "cmd" | "powershell");
-
-                    let content_body = if is_shell {
-                        // shell：全部内容传语法高亮，不加灰色头
-                        &msg.content
-                    } else if let Some((first, rest)) = msg.content.split_once('\n') {
-                        // 其他工具：第一行作为灰色状态头
-                        let status = format!("  ✓ {} {} {}", icon, name, first);
-                        lines.push(Line::styled(
-                            pad_to_width(&status, width as usize),
-                            Style::default().fg(theme::TOOL_RESULT_FG),
-                        ));
-                        rest
-                    } else {
-                        let summary = msg.content.clone();
-                        let status = format!("  ✓ {} {}", icon, summary);
-                        lines.push(Line::styled(
-                            pad_to_width(&status, width as usize),
-                            Style::default().fg(theme::TOOL_RESULT_FG),
-                        ));
-                        return Self {
-                            msg_id: msg.id,
-                            msg_version: msg.version,
-                            width,
-                            lines,
-                            line_count: 1,
-                        };
-                    };
-
-                    let mut highlighted = highlight_code_block("", content_body);
-                    let total_len = highlighted.len();
-                    if let Some(max) = max_lines
-                        && total_len > max
-                    {
-                        highlighted.truncate(max);
-                        let remaining = total_len.saturating_sub(max);
-                        highlighted.push(Line::styled(
-                            format!("... [truncated, {} more lines]", remaining),
-                            Style::default().fg(theme::TOOL_RESULT_FG),
-                        ));
-                    }
-                    // 填充每行到完整宽度
-                    for line in &mut highlighted {
-                        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                        let w = text.len();
-                        if (w as u16) < width {
-                            line.spans
-                                .push(Span::raw(" ".repeat((width - w as u16) as usize)));
-                        }
-                    }
-                    lines.extend(highlighted);
-                }
+            LineType::ToolResult { .. } => {
+                let lines = crate::tool_ui::render_tool_result(msg, width);
                 let line_count = lines.len() as u16;
-                return Self {
-                    msg_id: msg.id,
-                    msg_version: msg.version,
-                    width,
-                    lines,
-                    line_count,
-                };
+                return Self { msg_id: msg.id, msg_version: msg.version, width, expanded, lines, line_count };
             }
-            LineType::ToolError { ref name } => {
-                let icon = tool_icon(name);
-                let mut lines = Vec::new();
-                let error_line = format!("❌ {} {} {}", icon, name, msg.content);
-                lines.push(Line::styled(
-                    pad_to_width(&error_line, width as usize),
-                    Style::default().fg(theme::ERROR_FG),
-                ));
+            LineType::ToolError { .. } => {
+                let lines = crate::tool_ui::render_tool_error(msg, width);
                 let line_count = lines.len() as u16;
-                return Self {
-                    msg_id: msg.id,
-                    msg_version: msg.version,
-                    width,
-                    lines,
-                    line_count,
-                };
+                return Self { msg_id: msg.id, msg_version: msg.version, width, expanded, lines, line_count };
             }
             _ => {
                 let mut lines = Vec::new();
@@ -925,6 +783,7 @@ impl MessageCache {
                     msg_id: msg.id,
                     msg_version: msg.version,
                     width,
+                    expanded,
                     lines,
                     line_count,
                 };
@@ -936,13 +795,14 @@ impl MessageCache {
             msg_id: msg.id,
             msg_version: msg.version,
             width,
+            expanded,
             lines,
             line_count,
         }
     }
 
-    pub fn matches(&self, msg: &ChatLine, width: u16) -> bool {
-        self.msg_id == msg.id && self.msg_version == msg.version && self.width == width
+    pub fn matches(&self, msg: &ChatLine, width: u16, expanded: bool) -> bool {
+        self.msg_id == msg.id && self.msg_version == msg.version && self.width == width && self.expanded == expanded
     }
 }
 
@@ -1120,6 +980,8 @@ pub struct AppState {
     pub project_path: String,
     /// Tab 补全状态：记录原始前缀和匹配列表，用于循环切换
     pub tab_completion: Option<TabCompletionState>,
+    /// 已展开的工具调用 call_id 集合（点击切换）
+    pub expanded_tool_calls: std::collections::HashSet<String>,
 }
 
 /// Tab 补全循环状态
@@ -1181,6 +1043,7 @@ impl AppState {
             model_select: None,
             project_path,
             tab_completion: None,
+            expanded_tool_calls: std::collections::HashSet::new(),
         }
     }
 
@@ -1190,6 +1053,15 @@ impl AppState {
         ta.set_wrap_mode(WrapMode::WordOrGlyph);
         ta.set_placeholder_text("Type your message...");
         ta
+    }
+
+    /// 切换工具调用块的展开/折叠状态
+    pub fn toggle_tool_call_expansion(&mut self, call_id: &str) {
+        if self.expanded_tool_calls.contains(call_id) {
+            self.expanded_tool_calls.remove(call_id);
+        } else {
+            self.expanded_tool_calls.insert(call_id.to_string());
+        }
     }
 
     // ── Tab 访问方法 ────────────────────────────────────────

@@ -823,7 +823,16 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 && m.row < cy + ch;
 
             if in_chat && !app.show_help {
-                // 记录起点（内容坐标），清除旧选择
+                // 检查是否点击在工具调用块头部（切换展开/折叠）
+                let virtual_row = m.row.saturating_sub(cy) + app.scroll_state.y;
+
+                if let Some(call_id) = crate::tool_ui::tool_block_hit_test(&app.messages(), &app.message_caches, virtual_row) {
+                    app.toggle_tool_call_expansion(&call_id);
+                    app.needs_render = true;
+                    return false;
+                }
+
+                // 没有点击在工具调用头部：记录起点（内容坐标），清除旧选择
                 let content_row = m.row + app.scroll_state.y;
                 app.text_selection.clear();
                 app.text_selection.start = Some((m.column, content_row));

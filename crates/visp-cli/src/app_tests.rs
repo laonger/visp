@@ -204,8 +204,10 @@
             line_type: LineType::User,
             content: "hello world".into(),
             call_id: None,
+            tool_result: None,
+            tool_error: false,
         };
-        let cache = MessageCache::from_message(&msg, 80);
+        let cache = MessageCache::from_message(&msg, 80, false);
         assert_eq!(cache.msg_id, 0);
         assert_eq!(cache.msg_version, 0);
         assert_eq!(cache.width, 80);
@@ -221,15 +223,17 @@
             line_type: LineType::User,
             content: "hello".into(),
             call_id: None,
+            tool_result: None,
+            tool_error: false,
         };
-        let cache = MessageCache::from_message(&msg, 80);
-        assert!(cache.matches(&msg, 80));
+        let cache = MessageCache::from_message(&msg, 80, false);
+        assert!(cache.matches(&msg, 80, false));
         // 不同 version 不匹配
         let mut msg2 = msg.clone();
         msg2.version = 1;
-        assert!(!cache.matches(&msg2, 80));
+        assert!(!cache.matches(&msg2, 80, false));
         // 不同 width 不匹配
-        assert!(!cache.matches(&msg, 40));
+        assert!(!cache.matches(&msg, 40, false));
         // 不同 id 不匹配
         let msg3 = ChatLine {
             id: 1,
@@ -237,8 +241,10 @@
             line_type: LineType::User,
             content: "hello".into(),
             call_id: None,
+            tool_result: None,
+            tool_error: false,
         };
-        assert!(!cache.matches(&msg3, 80));
+        assert!(!cache.matches(&msg3, 80, false));
     }
 
     #[test]
@@ -249,8 +255,10 @@
             line_type: LineType::User,
             content: "hello".into(),
             call_id: None,
+            tool_result: None,
+            tool_error: false,
         };
-        let cache = MessageCache::from_message(&msg, 80);
+        let cache = MessageCache::from_message(&msg, 80, false);
         // User 消息背景由 bg_fill 处理，行级不带 padding
         assert!(cache.line_count >= 1);
     }
@@ -263,12 +271,14 @@
             line_type: LineType::ToolCall {
                 name: "bash".into(),
             },
-            content: "line1\nline2\nline3\nline4\nline5\nline6\nline7".into(),
+            content: r#"{"cmd":"echo hello"}"#.into(),
             call_id: None,
+            tool_result: None,
+            tool_error: false,
         };
-        let cache = MessageCache::from_message(&msg, 80);
-        // 首行是图标+第一行内容，后续 4 行 + 1 行 [...] = 共 6 行
-        assert_eq!(cache.line_count, 6);
+        let cache = MessageCache::from_message(&msg, 80, false);
+        // With collapsible design: icon + name + formatted args (fits on one line)
+        assert_eq!(cache.line_count, 1);
     }
 
     #[test]
@@ -277,7 +287,7 @@
         app.add_message(LineType::User, "hello".into());
         // 手动添加一个 cache 模拟渲染后的状态
         app.message_caches
-            .push(MessageCache::from_message(&app.messages()[0], 80));
+            .push(MessageCache::from_message(&app.messages()[0], 80, false));
         assert_eq!(app.message_caches.len(), 1);
         app.clear_messages();
         assert!(app.messages().is_empty());
@@ -315,8 +325,9 @@
             "id2",
         );
         app.insert_tool_result("id1", "result1".into());
-        // result 追加到匹配的 cmd1 后面
-        assert_eq!(app.messages()[0].content, "cmd1\nresult1");
+        // result 存储在 tool_result 字段
+        assert_eq!(app.messages()[0].content, "cmd1");
+        assert_eq!(app.messages()[0].tool_result.as_deref(), Some("result1"));
         assert_eq!(app.messages()[1].content, "cmd2");
         assert!(matches!(
             app.messages()[1].line_type,
@@ -359,9 +370,11 @@
         );
         app.insert_tool_result("b", "result2".into());
         app.insert_tool_result("a", "result1".into());
-        // result 追加到各自的 call 后面
-        assert_eq!(app.messages()[0].content, "cmd1\nresult1");
-        assert_eq!(app.messages()[1].content, "cmd2\nresult2");
+        // result 存储在各自的 tool_result 字段
+        assert_eq!(app.messages()[0].content, "cmd1");
+        assert_eq!(app.messages()[0].tool_result.as_deref(), Some("result1"));
+        assert_eq!(app.messages()[1].content, "cmd2");
+        assert_eq!(app.messages()[1].tool_result.as_deref(), Some("result2"));
     }
 
     #[test]
@@ -706,19 +719,15 @@
         tab.frames.push(tool_call("bash", "c1", r#"{}"#));
         tab.frames.push(tool_result("c1", "", "ok", false));
         tab.render_pending();
-        assert_eq!(tab.messages.len(), 2);
+        // ToolResult is merged into the ToolCall message
+        assert_eq!(tab.messages.len(), 1);
         assert_eq!(
             tab.messages[0].line_type,
             LineType::ToolCall {
                 name: "bash".into()
             }
         );
-        assert_eq!(
-            tab.messages[1].line_type,
-            LineType::ToolResult {
-                name: "bash".into()
-            }
-        );
+        assert_eq!(tab.messages[0].tool_result.as_deref(), Some("ok"));
     }
 
     #[test]

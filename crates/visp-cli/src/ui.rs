@@ -475,13 +475,16 @@ fn ensure_all_caches(app: &mut AppState, width: u16) {
     // Clone to avoid borrow conflict: app.messages() borrows all of &self.
     let msgs = app.messages().to_vec();
     for msg in &msgs {
+        let expanded = msg.call_id.as_ref()
+            .map(|cid| app.expanded_tool_calls.contains(cid))
+            .unwrap_or(false);
         if let Some(&idx) = cache_map.get(&msg.id) {
-            if !app.message_caches[idx].matches(msg, width) {
-                app.message_caches[idx] = MessageCache::from_message(msg, width);
+            if !app.message_caches[idx].matches(msg, width, expanded) {
+                app.message_caches[idx] = MessageCache::from_message(msg, width, expanded);
             }
         } else {
             app.message_caches
-                .push(MessageCache::from_message(msg, width));
+                .push(MessageCache::from_message(msg, width, expanded));
         }
     }
     app.message_caches

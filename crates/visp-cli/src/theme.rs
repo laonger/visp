@@ -19,8 +19,8 @@ pub const USER_BG: Color = Color::from_u32(0x001A3A5E);
 /// 助理消息块底色（深灰蓝）
 pub const ASSISTANT_BG: Color = Color::from_u32(0x00222A3E);
 
-/// 工具调用/结果块底色（深灰）
-pub const TOOL_BG: Color = Color::from_u32(0x00222222);
+/// 工具调用/结果块底色（比窗体背景略暗的同色调）
+pub const TOOL_BG: Color = Color::from_u32(0x00141428);
 
 /// 输入区背景
 pub const INPUT_BG: Color = Color::from_u32(0x00111111);
@@ -190,14 +190,14 @@ pub const TOOL_STYLE: BlockStyle = BlockStyle {
     bottom_pad: 0,
 };
 
-/// 工具调用样式（完整框 + 阴影）
+/// 工具调用样式（有背景无阴影）
 pub const TOOL_CALL_STYLE: BlockStyle = BlockStyle {
     top_margin: 1,
     margin_vertical: 1,
     margin_horizontal: 1,
-    bg_fill: None,
+    bg_fill: Some(TOOL_BG),
     shadow: false,
-    bottom_pad: 0,
+    bottom_pad: 1,
 };
 
 /// 工具结果样式（纯文本缩进，无底色，从属于调用）

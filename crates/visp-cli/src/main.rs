@@ -4,6 +4,7 @@ mod command;
 mod event;
 mod selection;
 mod theme;
+mod tool_ui;
 mod ui;
 
 use clap::Parser;
