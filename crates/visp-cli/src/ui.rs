@@ -997,12 +997,20 @@ fn render_help_popup(f: &mut Frame, area: Rect) {
     ];
     let key_items = [
         ("F1 / /help", "Toggle this help popup"),
-        ("Mouse drag", "Select & auto-copy to clipboard"),
-        ("Esc", "Clear text selection"),
-        ("Ctrl+C", "Cancel generation"),
+        ("Enter", "Send message / confirm"),
+        ("Alt+Enter", "Insert newline (without sending)"),
         ("↑ / ↓", "Input history navigation"),
+        ("PgUp / PgDn", "Scroll chat 10 lines"),
+        ("Tab", "Command auto-completion"),
+        ("Alt+, / Alt+.", "Cycle Sub-Agent tabs"),
+        ("Alt+Shift+← / →", "Tab pagination"),
+        ("Ctrl+W", "Close finished Sub-Agent tab"),
+        ("Ctrl+C", "Cancel generation / clear input"),
         ("Ctrl+D", "Quit"),
-        ("Enter", "Send message / confirm selection"),
+        ("← / →", "Switch option in confirm dialog"),
+        ("Esc", "Cancel / clear text selection"),
+        ("Mouse drag", "Select & auto-copy to clipboard"),
+        ("Mouse wheel", "Scroll chat area"),
     ];
 
     let mut lines: Vec<Line<'static>> = Vec::new();

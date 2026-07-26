@@ -155,7 +155,7 @@ MCP 工具与内置工具同属一个 Registry，Agent 循环自动识别与调�
 内置 OpenTelemetry 集成，支持 OTLP 导出 trace 到 [Langfuse](https://langfuse.com/) 或任意 OTel 兼容后端。覆盖完整的 Agent 调用链：`agent.run` → `iteration` → `gen_ai.client.operation` → `tool.execute`，Sub-Agent 通过 `visp.subagent.spawn` span 建立父子关系。内置 PII 脱敏、`sample_rate` 采样控制、零采样快速路径。
 
 ### CLI 多 Tab 界面
-Sub-Agent 委托时自动创建独立 Tab，实时展示每个 Agent 的运行状态（Running / Done / Error）。支持 `Alt+←/→` 循环切换、鼠标点击切换、`Ctrl+W` 关闭已完成的 Tab。三层 Token 追踪（Tab 级 / 请求级 / 会话级）实时显示用量。
+Sub-Agent 委托时自动创建独立 Tab，实时展示每个 Agent 的运行状态（Running / Done / Error）。支持 `Alt+,` / `Alt+.` 循环切换、鼠标点击切换、`Ctrl+W` 关闭已完成的 Tab。三层 Token 追踪（Tab 级 / 请求级 / 会话级）实时显示用量。
 
 ## 快速开始
 
@@ -302,16 +302,19 @@ cargo build --release
 |------|------|
 | `Enter` | 发送消息 / 确认审批 |
 | `Alt+Enter` | 插入换行（不发送） |
-| `Alt+M` / `Ctrl+M` | 切换鼠标捕获模式（任何时候生效） |
 | `↑` / `↓` | 上/下一条历史输入 |
 | `PgUp` / `PgDn` | 向上/下滚动 10 行 |
 | `Tab` | 命令自动补全 |
-| `Alt+←` / `Alt+->` | 切换 Sub-Agent Tab（循环） |
+| `Alt+,` / `Alt+.` | 循环切换 Sub-Agent Tab（前一个/后一个） |
+| `Alt+Shift+←` / `Alt+Shift+→` | Tab 翻页（上一页/下一页） |
 | `Ctrl+W` | 关闭已完成的 Sub-Agent Tab |
-| `Ctrl+C` | 中断正在生成的请求 |
+| `Ctrl+C` | 中断正在生成的请求（idle 时清空输入框） |
 | `Ctrl+D` | 无条件退出程序 |
+| `F1` | 切换帮助弹窗 |
 | `←` / `→` | 审批弹窗中切换选项 |
-| `Esc` | 取消/拒绝审批 |
+| `Esc` | 取消/拒绝审批 / 清除文本选择 |
+| `↑` / `↓` / `Enter` / `Esc` / `q` | Session/Model 选择器导航 |
+| 鼠标拖拽 | 选中文本并自动复制到剪贴板 |
 | 鼠标滚轮 | 滚动对话区域 |
 
 ### TUI 内命令
