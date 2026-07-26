@@ -201,12 +201,5 @@ impl ChatHandle {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_client_connect_invalid_addr() {
-        let result = VispClient::connect("invalid:0").await;
-        assert!(result.is_err());
-    }
-}
+#[path = "client_tests.rs"]
+mod tests;
