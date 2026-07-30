@@ -50,6 +50,35 @@ pub fn result_summary(name: &str, content: &str) -> String {
             let bytes = content.len();
             format!("Read {} bytes ({} lines)", bytes, lines)
         }
+        "write_file" => {
+            // WriteFile 成功结果格式: "Written N bytes to PATH\n<content>"
+            // 闭合态摘要：显示写入的字节数和行数
+            if let Some(first_line) = content.lines().next() {
+                // 尝试从 "Written N bytes to PATH" 提取字节数
+                if let Some(bytes) = first_line
+                    .strip_prefix("Written ")
+                    .and_then(|s| s.split_whitespace().next())
+                    .and_then(|s| s.parse::<usize>().ok())
+                {
+                    let line_count = content.lines().count().saturating_sub(1); // 减去首行
+                    format!("Written {} bytes ({} lines)", bytes, line_count)
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            }
+        }
+        "edit_file" => {
+            // EditFile 成功结果格式: "Replaced 1 occurrence in PATH\n<unified diff>"
+            // 闭合态摘要：显示 diff 行数
+            if content.starts_with("Replaced") {
+                let diff_lines = content.lines().count().saturating_sub(1); // 减去首行 "Replaced..."
+                format!("Diff {} lines", diff_lines)
+            } else {
+                String::new()
+            }
+        }
         _ => String::new(),
     }
 }
@@ -70,6 +99,26 @@ pub(crate) fn format_tool_args_summary(tool_name: &str, args_json: &str) -> Stri
                     (None, Some(e)) => format!("{}:-{}", path, e),
                     (None, None) => path.to_string(),
                 }
+            } else {
+                args_json.to_string()
+            }
+        }
+        "write_file" => {
+            if let Ok(args) = serde_json::from_str::<serde_json::Value>(args_json) {
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+                let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                let lines = content.lines().count();
+                format!("{}: {}", path, lines)
+            } else {
+                args_json.to_string()
+            }
+        }
+        "edit_file" => {
+            if let Ok(args) = serde_json::from_str::<serde_json::Value>(args_json) {
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+                let new_string = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+                let lines = new_string.lines().count();
+                format!("{}: {}", path, lines)
             } else {
                 args_json.to_string()
             }
@@ -288,4 +337,107 @@ pub(crate) fn tool_block_hit_test(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── format_tool_args_summary: write_file ──────────────
+
+    #[test]
+    fn test_args_summary_write_file() {
+        let args = r#"{"path":"src/main.rs","content":"fn main() {}\n"}"#;
+        let summary = format_tool_args_summary("write_file", args);
+        assert_eq!(summary, "src/main.rs: 1");
+    }
+
+    #[test]
+    fn test_args_summary_write_file_empty_content() {
+        let args = r#"{"path":"empty.txt","content":""}"#;
+        let summary = format_tool_args_summary("write_file", args);
+        assert_eq!(summary, "empty.txt: 0");
+    }
+
+    #[test]
+    fn test_args_summary_write_file_missing_content() {
+        let args = r#"{"path":"no_content.rs"}"#;
+        let summary = format_tool_args_summary("write_file", args);
+        assert_eq!(summary, "no_content.rs: 0");
+    }
+
+    #[test]
+    fn test_args_summary_write_file_invalid_json() {
+        let summary = format_tool_args_summary("write_file", "not json");
+        assert_eq!(summary, "not json");
+    }
+
+    // ── result_summary: write_file ────────────────────────
+
+    #[test]
+    fn test_result_summary_write_file() {
+        let content = "Written 20 bytes to src/main.rs\nfn main() {}\n";
+        let summary = result_summary("write_file", content);
+        assert_eq!(summary, "Written 20 bytes (1 lines)");
+    }
+
+    #[test]
+    fn test_result_summary_write_file_no_content_body() {
+        let content = "Written 0 bytes to empty.txt\n";
+        let summary = result_summary("write_file", content);
+        assert_eq!(summary, "Written 0 bytes (0 lines)");
+    }
+
+    #[test]
+    fn test_result_summary_write_file_error_result() {
+        // 错误结果不是 "Written..." 开头，应返回空
+        let content = "Failed to write file: permission denied";
+        let summary = result_summary("write_file", content);
+        assert_eq!(summary, "");
+    }
+
+    // ── format_tool_args_summary: edit_file ───────────────
+
+    #[test]
+    fn test_args_summary_edit_file() {
+        let args = r#"{"path":"src/lib.rs","old_string":"foo","new_string":"bar\nbaz"}"#;
+        let summary = format_tool_args_summary("edit_file", args);
+        assert_eq!(summary, "src/lib.rs: 2");
+    }
+
+    #[test]
+    fn test_args_summary_edit_file_empty_new_string() {
+        let args = r#"{"path":"src/lib.rs","old_string":"foo","new_string":""}"#;
+        let summary = format_tool_args_summary("edit_file", args);
+        assert_eq!(summary, "src/lib.rs: 0");
+    }
+
+    #[test]
+    fn test_args_summary_edit_file_missing_new_string() {
+        let args = r#"{"path":"src/lib.rs","old_string":"foo"}"#;
+        let summary = format_tool_args_summary("edit_file", args);
+        assert_eq!(summary, "src/lib.rs: 0");
+    }
+
+    #[test]
+    fn test_args_summary_edit_file_invalid_json() {
+        let summary = format_tool_args_summary("edit_file", "bad json");
+        assert_eq!(summary, "bad json");
+    }
+
+    // ── result_summary: edit_file ─────────────────────────
+
+    #[test]
+    fn test_result_summary_edit_file_success() {
+        let content = "Replaced 1 occurrence in src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,1 +1,2 @@\n-old\n+new\n+new2\n";
+        let summary = result_summary("edit_file", content);
+        assert_eq!(summary, "Diff 6 lines");
+    }
+
+    #[test]
+    fn test_result_summary_edit_file_error() {
+        let content = "No matches found for 'foo'";
+        let summary = result_summary("edit_file", content);
+        assert_eq!(summary, "");
+    }
 }
