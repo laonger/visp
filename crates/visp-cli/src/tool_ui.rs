@@ -42,6 +42,27 @@ pub fn max_lines_for_tool(name: &str) -> Option<usize> {
     }
 }
 
+/// 统计 unified diff 中的删除行数和新增行数。
+/// diff 内容中，以 `-` 开头的行是删除行（排除 `---` header），以 `+` 开头的行是新增行（排除 `+++` header）。
+fn count_diff_lines(content: &str) -> (usize, usize) {
+    let mut removed = 0usize;
+    let mut added = 0usize;
+    for line in content.lines() {
+        if line.starts_with("---") {
+            continue;
+        }
+        if line.starts_with("+++") {
+            continue;
+        }
+        if line.starts_with('-') {
+            removed += 1;
+        } else if line.starts_with('+') {
+            added += 1;
+        }
+    }
+    (removed, added)
+}
+
 /// read_file 类工具的摘要行
 pub fn result_summary(name: &str, content: &str) -> String {
     match name {
@@ -71,10 +92,10 @@ pub fn result_summary(name: &str, content: &str) -> String {
         }
         "edit_file" => {
             // EditFile 成功结果格式: "Replaced 1 occurrence in PATH\n<unified diff>"
-            // 闭合态摘要：显示 diff 行数
+            // 闭合态摘要：xx lines remove, xx lines add
             if content.starts_with("Replaced") {
-                let diff_lines = content.lines().count().saturating_sub(1); // 减去首行 "Replaced..."
-                format!("Diff {} lines", diff_lines)
+                let (removed, added) = count_diff_lines(content);
+                format!("{} lines remove, {} lines add", removed, added)
             } else {
                 String::new()
             }
@@ -114,11 +135,26 @@ pub(crate) fn format_tool_args_summary(tool_name: &str, args_json: &str) -> Stri
             }
         }
         "edit_file" => {
+            // EditFile 参数: path/old_string/new_string
+            // 闭合态 header: file_name (remove/add 行数从结果 diff 中统计)
             if let Ok(args) = serde_json::from_str::<serde_json::Value>(args_json) {
-                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
-                let new_string = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
-                let lines = new_string.lines().count();
-                format!("{}: {}", path, lines)
+                args.get("path").and_then(|v| v.as_str()).unwrap_or("?").to_string()
+            } else {
+                args_json.to_string()
+            }
+        }
+        "bash" | "cmd" | "powershell" => {
+            // Bash 闭合态 header: command
+            if let Ok(args) = serde_json::from_str::<serde_json::Value>(args_json) {
+                let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                // 截断过长的命令
+                let chars: Vec<char> = cmd.chars().collect();
+                if chars.len() > 60 {
+                    let truncated: String = chars.into_iter().take(57).collect();
+                    format!("{}...", truncated)
+                } else {
+                    cmd.to_string()
+                }
             } else {
                 args_json.to_string()
             }
@@ -402,21 +438,7 @@ mod tests {
     fn test_args_summary_edit_file() {
         let args = r#"{"path":"src/lib.rs","old_string":"foo","new_string":"bar\nbaz"}"#;
         let summary = format_tool_args_summary("edit_file", args);
-        assert_eq!(summary, "src/lib.rs: 2");
-    }
-
-    #[test]
-    fn test_args_summary_edit_file_empty_new_string() {
-        let args = r#"{"path":"src/lib.rs","old_string":"foo","new_string":""}"#;
-        let summary = format_tool_args_summary("edit_file", args);
-        assert_eq!(summary, "src/lib.rs: 0");
-    }
-
-    #[test]
-    fn test_args_summary_edit_file_missing_new_string() {
-        let args = r#"{"path":"src/lib.rs","old_string":"foo"}"#;
-        let summary = format_tool_args_summary("edit_file", args);
-        assert_eq!(summary, "src/lib.rs: 0");
+        assert_eq!(summary, "src/lib.rs");
     }
 
     #[test]
@@ -425,13 +447,64 @@ mod tests {
         assert_eq!(summary, "bad json");
     }
 
+    // ── format_tool_args_summary: bash ────────────────────
+
+    #[test]
+    fn test_args_summary_bash() {
+        let args = r#"{"command":"ls -la"}"#;
+        let summary = format_tool_args_summary("bash", args);
+        assert_eq!(summary, "ls -la");
+    }
+
+    #[test]
+    fn test_args_summary_bash_long_command() {
+        let long_cmd = "a".repeat(70);
+        let args = format!(r#"{{"command":"{}"}}"#, long_cmd);
+        let summary = format_tool_args_summary("bash", &args);
+        assert_eq!(summary, format!("{}...", "a".repeat(57)));
+    }
+
+    #[test]
+    fn test_args_summary_bash_missing_command() {
+        let args = r#"{"timeout":30}"#;
+        let summary = format_tool_args_summary("bash", args);
+        assert_eq!(summary, "");
+    }
+
+    #[test]
+    fn test_args_summary_bash_invalid_json() {
+        let summary = format_tool_args_summary("bash", "bad json");
+        assert_eq!(summary, "bad json");
+    }
+
+    // ── count_diff_lines ──────────────────────────────────
+
+    #[test]
+    fn test_count_diff_lines_basic() {
+        let diff = "Replaced 1 occurrence in src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,1 +1,2 @@\n-old\n+new\n+new2\n";
+        assert_eq!(count_diff_lines(diff), (1, 2));
+    }
+
+    #[test]
+    fn test_count_diff_lines_context_lines() {
+        // context 行不以 + 或 - 开头，不计入
+        let diff = "--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n same\n-old\n+new\n same\n";
+        assert_eq!(count_diff_lines(diff), (1, 1));
+    }
+
+    #[test]
+    fn test_count_diff_lines_no_changes() {
+        let diff = "--- a/f\n+++ b/f\n@@ -1,1 +1,1 @@\n same\n";
+        assert_eq!(count_diff_lines(diff), (0, 0));
+    }
+
     // ── result_summary: edit_file ─────────────────────────
 
     #[test]
     fn test_result_summary_edit_file_success() {
         let content = "Replaced 1 occurrence in src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,1 +1,2 @@\n-old\n+new\n+new2\n";
         let summary = result_summary("edit_file", content);
-        assert_eq!(summary, "Diff 6 lines");
+        assert_eq!(summary, "1 lines remove, 2 lines add");
     }
 
     #[test]
