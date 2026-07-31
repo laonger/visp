@@ -240,7 +240,6 @@ pub enum LineType {
     Usage,
 }
 
-
 #[derive(Debug, Clone)]
 pub struct ChatLine {
     pub id: u64,
@@ -436,22 +435,26 @@ impl TabEntry {
                         self.messages
                             .iter()
                             .find(|m| {
-                                matches!(&m.line_type, LineType::ToolCall { .. } | LineType::AgentCall { .. })
-                                    && m.call_id.as_deref() == Some(&tr.call_id)
+                                matches!(
+                                    &m.line_type,
+                                    LineType::ToolCall { .. } | LineType::AgentCall { .. }
+                                ) && m.call_id.as_deref() == Some(&tr.call_id)
                             })
-                            .and_then(|m| {
-                                match &m.line_type {
-                                    LineType::ToolCall { name } | LineType::AgentCall { name } => Some(name.clone()),
-                                    _ => None,
+                            .and_then(|m| match &m.line_type {
+                                LineType::ToolCall { name } | LineType::AgentCall { name } => {
+                                    Some(name.clone())
                                 }
+                                _ => None,
                             })
                             .unwrap_or_default()
                     };
 
                     // Merge into existing ToolCall/AgentCall ChatLine
                     if let Some(msg) = self.messages.iter_mut().find(|m| {
-                        matches!(&m.line_type, LineType::ToolCall { .. } | LineType::AgentCall { .. })
-                            && m.call_id.as_deref() == Some(&tr.call_id)
+                        matches!(
+                            &m.line_type,
+                            LineType::ToolCall { .. } | LineType::AgentCall { .. }
+                        ) && m.call_id.as_deref() == Some(&tr.call_id)
                     }) {
                         msg.tool_result = Some(tr.content);
                         msg.tool_error = tr.is_error;
@@ -745,7 +748,11 @@ impl TabBar {
             return Some(idx);
         }
         // 从 closed_tabs 恢复
-        if let Some(pos) = self.closed_tabs.iter().position(|t| t.session_id == session_id) {
+        if let Some(pos) = self
+            .closed_tabs
+            .iter()
+            .position(|t| t.session_id == session_id)
+        {
             let mut tab = self.closed_tabs.remove(pos);
             tab.render_pending();
             self.tabs.insert(1, tab);
@@ -755,7 +762,11 @@ impl TabBar {
             return Some(1);
         }
         // 从 hidden_tabs 恢复
-        if let Some(pos) = self.hidden_tabs.iter().position(|t| t.session_id == session_id) {
+        if let Some(pos) = self
+            .hidden_tabs
+            .iter()
+            .position(|t| t.session_id == session_id)
+        {
             let mut tab = self.hidden_tabs.remove(pos);
             tab.generating = tab.status == AgentStatus::Running;
             tab.render_pending();
@@ -771,7 +782,10 @@ impl TabBar {
     /// 按 session_id 查找 hidden_tab 的可变引用（用于路由帧到隐藏 tab）。
     /// 如果不存在则创建一个。
     fn find_or_create_hidden_tab(&mut self, session_id: &str, agent_name: &str) -> &mut TabEntry {
-        let pos = self.hidden_tabs.iter().position(|t| t.session_id == session_id);
+        let pos = self
+            .hidden_tabs
+            .iter()
+            .position(|t| t.session_id == session_id);
         match pos {
             Some(i) => &mut self.hidden_tabs[i],
             None => {
@@ -835,22 +849,50 @@ impl MessageCache {
             LineType::ToolCall { .. } => {
                 let lines = crate::tool_ui::render_tool_call(msg, width, expanded);
                 let line_count = lines.len() as u16;
-                return Self { msg_id: msg.id, msg_version: msg.version, width, expanded, lines, line_count };
+                return Self {
+                    msg_id: msg.id,
+                    msg_version: msg.version,
+                    width,
+                    expanded,
+                    lines,
+                    line_count,
+                };
             }
             LineType::AgentCall { .. } => {
                 let lines = crate::tool_ui::render_agent_call(msg, width, expanded);
                 let line_count = lines.len() as u16;
-                return Self { msg_id: msg.id, msg_version: msg.version, width, expanded, lines, line_count };
+                return Self {
+                    msg_id: msg.id,
+                    msg_version: msg.version,
+                    width,
+                    expanded,
+                    lines,
+                    line_count,
+                };
             }
             LineType::ToolResult { .. } => {
                 let lines = crate::tool_ui::render_tool_result(msg, width);
                 let line_count = lines.len() as u16;
-                return Self { msg_id: msg.id, msg_version: msg.version, width, expanded, lines, line_count };
+                return Self {
+                    msg_id: msg.id,
+                    msg_version: msg.version,
+                    width,
+                    expanded,
+                    lines,
+                    line_count,
+                };
             }
             LineType::ToolError { .. } => {
                 let lines = crate::tool_ui::render_tool_error(msg, width);
                 let line_count = lines.len() as u16;
-                return Self { msg_id: msg.id, msg_version: msg.version, width, expanded, lines, line_count };
+                return Self {
+                    msg_id: msg.id,
+                    msg_version: msg.version,
+                    width,
+                    expanded,
+                    lines,
+                    line_count,
+                };
             }
             _ => {
                 let mut lines = Vec::new();
@@ -887,7 +929,10 @@ impl MessageCache {
     }
 
     pub fn matches(&self, msg: &ChatLine, width: u16, expanded: bool) -> bool {
-        self.msg_id == msg.id && self.msg_version == msg.version && self.width == width && self.expanded == expanded
+        self.msg_id == msg.id
+            && self.msg_version == msg.version
+            && self.width == width
+            && self.expanded == expanded
     }
 }
 
@@ -1398,10 +1443,11 @@ impl AppState {
             if !agent_name.is_empty() && self.tab_bar.tabs[i].agent_name == "agent" {
                 self.tab_bar.tabs[i].agent_name = agent_name.clone();
             }
-            if !agent_name.is_empty() && self.tab_bar.tabs[i].task_prompt.is_none() {
-                if let Some(prompt) = self.extract_prompt_for_sub_agent(&agent_name) {
-                    self.tab_bar.tabs[i].task_prompt = Some(prompt);
-                }
+            if !agent_name.is_empty()
+                && self.tab_bar.tabs[i].task_prompt.is_none()
+                && let Some(prompt) = self.extract_prompt_for_sub_agent(&agent_name)
+            {
+                self.tab_bar.tabs[i].task_prompt = Some(prompt);
             }
             if !agent_name.is_empty() {
                 self.try_upgrade_toolcall_to_agentcall(&agent_name, &session_id);
@@ -1411,7 +1457,11 @@ impl AppState {
             // 子 agent 帧路由到 hidden_tab（不自动创建活跃 tab）
             let view_only = matches!(&frame.payload,
                 Some(server_message::Payload::StatusUpdate(su)) if su.view_only);
-            let title = if agent_name.is_empty() { "agent".to_string() } else { agent_name.clone() };
+            let title = if agent_name.is_empty() {
+                "agent".to_string()
+            } else {
+                agent_name.clone()
+            };
             // ViewOnly 帧优先取 input_history[0] 作为 task_prompt（与历史行为一致）；
             // 否则从主 tab 中已升级的 ToolCall 提取 prompt
             let prompt = if view_only && !self.input_history.is_empty() {
@@ -1428,10 +1478,8 @@ impl AppState {
             if !agent_name.is_empty() && tab.agent_name == "agent" {
                 tab.agent_name = agent_name.clone();
             }
-            if let Some(prompt) = prompt {
-                if tab.task_prompt.is_none() {
-                    tab.task_prompt = Some(prompt);
-                }
+            if let Some(prompt) = prompt && tab.task_prompt.is_none() {
+                tab.task_prompt = Some(prompt);
             }
             // 状态更新
             match &frame.payload {
@@ -1496,7 +1544,6 @@ impl AppState {
         cache_create: u32,
         cache_read: u32,
     ) {
-
         let is_main = session_id.is_empty() || session_id == self.main_session_id;
 
         // 按 session_id 路由：空 ID 或主 session -> default tab

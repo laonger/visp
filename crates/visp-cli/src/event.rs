@@ -831,17 +831,22 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
 
                 // 子 tab 的 task_prompt 占据渲染最顶部的若干行，
                 // hit test 需要扣除这部分高度偏移
-                let prompt_h: u16 = app.active_tab().task_prompt.as_ref().map(|p| {
-                    let text = format!("📋 {}", p);
-                    let lc = crate::app::wrap_text(&text, content_w).len() as u16;
-                    crate::theme::USER_STYLE.total_height(lc)
-                }).unwrap_or(0);
+                let prompt_h: u16 = app
+                    .active_tab()
+                    .task_prompt
+                    .as_ref()
+                    .map(|p| {
+                        let text = format!("📋 {}", p);
+                        let lc = crate::app::wrap_text(&text, content_w).len() as u16;
+                        crate::theme::USER_STYLE.total_height(lc)
+                    })
+                    .unwrap_or(0);
                 let virtual_row = virtual_row.saturating_sub(prompt_h);
 
                 // 先检查是否点击了 AgentCall 块的 "[show in new tab]" 按钮
                 let rel_col = m.column.saturating_sub(cx);
                 if let Some(sub_sid) = crate::tool_ui::agent_open_tab_hit_test(
-                    &app.messages(),
+                    app.messages(),
                     &app.message_caches,
                     virtual_row,
                     rel_col,
@@ -857,7 +862,11 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 }
 
                 // 检查是否点击在工具调用块头部（切换展开/折叠）
-                if let Some(call_id) = crate::tool_ui::tool_block_hit_test(&app.messages(), &app.message_caches, virtual_row) {
+                if let Some(call_id) = crate::tool_ui::tool_block_hit_test(
+                    app.messages(),
+                    &app.message_caches,
+                    virtual_row,
+                ) {
                     app.toggle_tool_call_expansion(&call_id);
                     app.scroll_following = false;
                     app.needs_render = true;

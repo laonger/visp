@@ -335,8 +335,12 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
         .as_ref()
         .map(|c| calc_confirm_height(c, area.width))
         .unwrap_or(0);
-    let bottom_chunks_height =
-        input_area_height + (if app.confirm.is_some() { confirm_height + 2 } else { 4 });
+    let bottom_chunks_height = input_area_height
+        + (if app.confirm.is_some() {
+            confirm_height + 2
+        } else {
+            4
+        });
 
     // 纵向分割：Tab栏(2) | 对话区 | 分隔线 | 底部区域
     let main_chunks = Layout::default()
@@ -571,7 +575,9 @@ pub(crate) fn ensure_all_caches(app: &mut AppState, width: u16) {
     // Clone to avoid borrow conflict: app.messages() borrows all of &self.
     let msgs = app.messages().to_vec();
     for msg in &msgs {
-        let expanded = msg.call_id.as_ref()
+        let expanded = msg
+            .call_id
+            .as_ref()
             .map(|cid| app.expanded_tool_calls.contains(cid))
             .unwrap_or(false);
         if let Some(&idx) = cache_map.get(&msg.id) {
@@ -649,10 +655,15 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     };
 
     // task_prompt 的渲染高度（子 tab 第一行）
-    let prompt_lines: u16 = app.active_tab().task_prompt.as_ref().map(|p| {
-        let text = format!("📋 {}", p);
-        crate::app::wrap_text(&text, render_w).len() as u16
-    }).unwrap_or(0);
+    let prompt_lines: u16 = app
+        .active_tab()
+        .task_prompt
+        .as_ref()
+        .map(|p| {
+            let text = format!("📋 {}", p);
+            crate::app::wrap_text(&text, render_w).len() as u16
+        })
+        .unwrap_or(0);
     let prompt_h = if prompt_lines > 0 {
         theme::USER_STYLE.total_height(prompt_lines)
     } else {
@@ -684,15 +695,16 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
         let wrapped = crate::app::wrap_text(&prompt_text, render_w);
         let lines: Vec<Line<'static>> = wrapped
             .iter()
-            .map(|s| Line::styled(
-                crate::app::pad_to_width(s, render_w as usize),
-                Style::default().fg(theme::USER_FG),
-            ))
+            .map(|s| {
+                Line::styled(
+                    crate::app::pad_to_width(s, render_w as usize),
+                    Style::default().fg(theme::USER_FG),
+                )
+            })
             .collect();
         let line_count = lines.len() as u16;
         let h = style.total_height(line_count);
-        if let Some((rel_y, visible_h)) =
-            viewport_intersect(y, h, scroll_y, visible, area.bottom())
+        if let Some((rel_y, visible_h)) = viewport_intersect(y, h, scroll_y, visible, area.bottom())
         {
             let hidden_top = scroll_y.saturating_sub(y);
             let remain = line_count.saturating_sub(hidden_top);
@@ -700,7 +712,14 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
             if visible_lines > 0 {
                 let start = hidden_top as usize;
                 let end = (start + visible_lines as usize).min(lines.len());
-                render_block(f, area, style, &lines[start..end], visible_lines, area.y + rel_y);
+                render_block(
+                    f,
+                    area,
+                    style,
+                    &lines[start..end],
+                    visible_lines,
+                    area.y + rel_y,
+                );
             }
         }
         y += h;
@@ -1250,7 +1269,6 @@ fn render_model_select(f: &mut Frame, area: Rect, app: &mut AppState) {
         f.render_stateful_widget(list, popup_area, &mut ms.state);
     }
 }
-
 
 #[cfg(test)]
 #[path = "ui_tests.rs"]

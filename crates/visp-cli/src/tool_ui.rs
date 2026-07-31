@@ -109,7 +109,9 @@ pub(crate) fn format_tool_args_summary(tool_name: &str, args_json: &str) -> Stri
     match tool_name {
         "read_file" | "read_files" => {
             if let Ok(args) = serde_json::from_str::<serde_json::Value>(args_json) {
-                let path = args.get("path").and_then(|v| v.as_str())
+                let path = args
+                    .get("path")
+                    .and_then(|v| v.as_str())
                     .or_else(|| args.get("paths").and_then(|v| v.as_str()))
                     .unwrap_or("?");
                 let start = args.get("start_line").and_then(|v| v.as_i64());
@@ -138,7 +140,10 @@ pub(crate) fn format_tool_args_summary(tool_name: &str, args_json: &str) -> Stri
             // EditFile 参数: path/old_string/new_string
             // 闭合态 header: file_name (remove/add 行数从结果 diff 中统计)
             if let Ok(args) = serde_json::from_str::<serde_json::Value>(args_json) {
-                args.get("path").and_then(|v| v.as_str()).unwrap_or("?").to_string()
+                args.get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string()
             } else {
                 args_json.to_string()
             }
@@ -162,19 +167,22 @@ pub(crate) fn format_tool_args_summary(tool_name: &str, args_json: &str) -> Stri
         _ => {
             if let Ok(args) = serde_json::from_str::<serde_json::Value>(args_json) {
                 if let Some(obj) = args.as_object() {
-                    let parts: Vec<String> = obj.iter().map(|(k, v)| {
-                        let val_str = match v {
-                            serde_json::Value::String(s) => s.clone(),
-                            _ => v.to_string(),
-                        };
-                        let char_count = val_str.chars().count();
-                        if char_count > 40 {
-                            let truncated: String = val_str.chars().take(37).collect();
-                            format!("{}:{}...", k, truncated)
-                        } else {
-                            format!("{}:{}", k, val_str)
-                        }
-                    }).collect();
+                    let parts: Vec<String> = obj
+                        .iter()
+                        .map(|(k, v)| {
+                            let val_str = match v {
+                                serde_json::Value::String(s) => s.clone(),
+                                _ => v.to_string(),
+                            };
+                            let char_count = val_str.chars().count();
+                            if char_count > 40 {
+                                let truncated: String = val_str.chars().take(37).collect();
+                                format!("{}:{}...", k, truncated)
+                            } else {
+                                format!("{}:{}", k, val_str)
+                            }
+                        })
+                        .collect();
                     parts.join(" ")
                 } else {
                     args_json.to_string()
@@ -211,7 +219,10 @@ pub(crate) fn render_tool_call(msg: &ChatLine, width: u16, expanded: bool) -> Ve
         } else {
             pad_to_width(dl, width as usize)
         };
-        lines.push(Line::styled(content, Style::default().fg(theme::TOOL_CALL_FG)));
+        lines.push(Line::styled(
+            content,
+            Style::default().fg(theme::TOOL_CALL_FG),
+        ));
     }
 
     // If we have a merged result, show it
@@ -257,7 +268,10 @@ pub(crate) fn render_tool_call(msg: &ChatLine, width: u16, expanded: bool) -> Ve
                     } else {
                         pad_to_width(sl, width as usize)
                     };
-                    lines.push(Line::styled(content, Style::default().fg(theme::TOOL_RESULT_FG)));
+                    lines.push(Line::styled(
+                        content,
+                        Style::default().fg(theme::TOOL_RESULT_FG),
+                    ));
                 }
             }
         }
@@ -488,11 +502,13 @@ pub(crate) fn tool_block_hit_test(
             let h = style.total_height(cache.line_count);
             if virtual_row >= y && virtual_row < y + h {
                 // Clicked on this message
-                if matches!(msg.line_type, LineType::ToolCall { .. } | LineType::AgentCall { .. }) {
-                    if let Some(ref call_id) = msg.call_id {
-                        // 整个 tool/agent block（含展开的结果内容）均可点击切换展开/折叠
-                        return Some(call_id.clone());
-                    }
+                if matches!(
+                    msg.line_type,
+                    LineType::ToolCall { .. } | LineType::AgentCall { .. }
+                ) && let Some(ref call_id) = msg.call_id
+                {
+                    // 整个 tool/agent block（含展开的结果内容）均可点击切换展开/折叠
+                    return Some(call_id.clone());
                 }
                 break;
             }
@@ -529,15 +545,17 @@ pub(crate) fn agent_open_tab_hit_test(
                 // header 行 = y + top_margin + margin_vertical（与 render_block 一致）
                 if matches!(msg.line_type, LineType::AgentCall { .. })
                     && virtual_row == y + style.top_margin + style.margin_vertical
+                    && let Some(ref sub_sid) = msg.sub_session_id
                 {
-                    if let Some(ref sub_sid) = msg.sub_session_id {
-                        // 按钮位置：margin_horizontal(1) + content_width - right_gap - button_len
-                        // 到 margin_horizontal(1) + content_width - right_gap
-                        let button_start = 1u16 + content_width.saturating_sub(OPEN_TAB_RIGHT_GAP as u16 + OPEN_TAB_BUTTON_LEN as u16);
-                        let button_end = 1u16 + content_width.saturating_sub(OPEN_TAB_RIGHT_GAP as u16);
-                        if column >= button_start && column < button_end {
-                            return Some(sub_sid.clone());
-                        }
+                    // 按钮位置：margin_horizontal(1) + content_width - right_gap - button_len
+                    // 到 margin_horizontal(1) + content_width - right_gap
+                    let button_start = 1u16
+                        + content_width.saturating_sub(
+                            OPEN_TAB_RIGHT_GAP as u16 + OPEN_TAB_BUTTON_LEN as u16,
+                        );
+                    let button_end = 1u16 + content_width.saturating_sub(OPEN_TAB_RIGHT_GAP as u16);
+                    if column >= button_start && column < button_end {
+                        return Some(sub_sid.clone());
                     }
                 }
                 break;
@@ -694,7 +712,9 @@ mod tests {
         let msg = ChatLine {
             id: 1,
             version: 0,
-            line_type: LineType::AgentCall { name: "explorer".into() },
+            line_type: LineType::AgentCall {
+                name: "explorer".into(),
+            },
             content: r#"{"prompt":"Find all TODOs\nIn the codebase"}"#.into(),
             call_id: Some("call-1".into()),
             tool_result: None,
@@ -719,7 +739,9 @@ mod tests {
         let msg = ChatLine {
             id: 1,
             version: 0,
-            line_type: LineType::AgentCall { name: "fixer".into() },
+            line_type: LineType::AgentCall {
+                name: "fixer".into(),
+            },
             content: r#"{"prompt":"Fix the bug\nIn module X"}"#.into(),
             call_id: Some("call-2".into()),
             tool_result: None,
@@ -733,7 +755,11 @@ mod tests {
         assert!(header.contains("fixer"));
         assert!(header.contains("[show in new tab]"));
         // Full prompt is shown
-        let all_text: String = lines.iter().flat_map(|l| l.spans.iter()).map(|s| s.content.as_ref()).collect();
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
         assert!(all_text.contains("Fix the bug"));
         assert!(all_text.contains("In module X"));
     }
@@ -743,7 +769,9 @@ mod tests {
         let msg = ChatLine {
             id: 1,
             version: 0,
-            line_type: LineType::AgentCall { name: "explorer".into() },
+            line_type: LineType::AgentCall {
+                name: "explorer".into(),
+            },
             content: r#"{"prompt":"Search"}"#.into(),
             call_id: Some("call-3".into()),
             tool_result: None,
@@ -780,7 +808,9 @@ mod tests {
         let msg = ChatLine {
             id: 1,
             version: 0,
-            line_type: LineType::AgentCall { name: "explorer".into() },
+            line_type: LineType::AgentCall {
+                name: "explorer".into(),
+            },
             content: r#"{"prompt":"test"}"#.into(),
             call_id: Some("call-1".into()),
             tool_result: None,
@@ -801,7 +831,9 @@ mod tests {
         let msg = ChatLine {
             id: 1,
             version: 0,
-            line_type: LineType::AgentCall { name: "explorer".into() },
+            line_type: LineType::AgentCall {
+                name: "explorer".into(),
+            },
             content: r#"{"prompt":"test"}"#.into(),
             call_id: Some("call-1".into()),
             tool_result: None,
@@ -822,7 +854,9 @@ mod tests {
         let msg = ChatLine {
             id: 1,
             version: 0,
-            line_type: LineType::AgentCall { name: "explorer".into() },
+            line_type: LineType::AgentCall {
+                name: "explorer".into(),
+            },
             content: r#"{"prompt":"test"}"#.into(),
             call_id: Some("call-1".into()),
             tool_result: None,
@@ -845,7 +879,9 @@ mod tests {
         let msg = ChatLine {
             id: 1,
             version: 0,
-            line_type: LineType::AgentCall { name: "explorer".into() },
+            line_type: LineType::AgentCall {
+                name: "explorer".into(),
+            },
             content: r#"{"prompt":"Find all TODOs\nIn the codebase"}"#.into(),
             call_id: Some("call-1".into()),
             tool_result: None,
@@ -853,7 +889,9 @@ mod tests {
             sub_session_id: Some("sub-sess-123".into()),
         };
         let cache = MessageCache::from_message(&msg, 60, false);
-        let style = crate::theme::style_for(LineType::AgentCall { name: "explorer".into() });
+        let style = crate::theme::style_for(LineType::AgentCall {
+            name: "explorer".into(),
+        });
         let h = style.total_height(cache.line_count);
         let messages = vec![msg];
         let caches = vec![cache];
@@ -865,7 +903,8 @@ mod tests {
                 result.as_deref(),
                 Some("call-1"),
                 "row {} should hit the block (h={})",
-                row, h
+                row,
+                h
             );
         }
         // Row h should NOT hit
@@ -889,7 +928,9 @@ mod tests {
         let agent_msg = ChatLine {
             id: 1,
             version: 0,
-            line_type: LineType::AgentCall { name: "explorer".into() },
+            line_type: LineType::AgentCall {
+                name: "explorer".into(),
+            },
             content: r#"{"prompt":"Find all TODOs"}"#.into(),
             call_id: Some("call-1".into()),
             tool_result: None,
@@ -902,13 +943,13 @@ mod tests {
         let caches = vec![user_cache, agent_cache];
 
         let user_style = crate::theme::style_for(LineType::User);
-        let user_h = user_style.total_height(
-            caches.iter().find(|c| c.msg_id == 0).unwrap().line_count
-        );
-        let agent_style = crate::theme::style_for(LineType::AgentCall { name: "explorer".into() });
-        let _agent_h = agent_style.total_height(
-            caches.iter().find(|c| c.msg_id == 1).unwrap().line_count
-        );
+        let user_h =
+            user_style.total_height(caches.iter().find(|c| c.msg_id == 0).unwrap().line_count);
+        let agent_style = crate::theme::style_for(LineType::AgentCall {
+            name: "explorer".into(),
+        });
+        let _agent_h =
+            agent_style.total_height(caches.iter().find(|c| c.msg_id == 1).unwrap().line_count);
 
         // Click on header row of AgentCall (first content line = y + top_margin + margin_vertical)
         let header_row = user_h + agent_style.top_margin + agent_style.margin_vertical;

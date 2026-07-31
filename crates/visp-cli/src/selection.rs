@@ -231,7 +231,6 @@ pub fn extract_selected_text(buf: &Buffer, selection: &TextSelection, scroll_y: 
     lines.join("\n")
 }
 
-
 #[cfg(test)]
 #[path = "selection_tests.rs"]
 mod tests;
