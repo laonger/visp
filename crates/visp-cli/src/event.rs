@@ -583,7 +583,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 return false;
             }
 
-            // Ctrl+W: 关闭 sub-agent tab（仅 Done/Error 状态允许）
+            // Ctrl+W: 关闭当前 sub-agent tab（Running 状态也可关闭，不打断 agent 工作）
             if (key.code == KeyCode::Char('w') || key.code == KeyCode::Char('W'))
                 && key.modifiers == KeyModifiers::CONTROL
             {
@@ -823,8 +823,22 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
             if in_chat && !app.show_help {
                 let virtual_row = m.row.saturating_sub(cy) + app.scroll_state.y;
 
-                // 先检查是否点击了 AgentCall 块的 "[open tab]" 按钮
+                // 确保缓存是最新的（渲染可能被流节流跳过，导致缓存过时）
                 let content_w = app.cache_width;
+                if content_w > 0 {
+                    crate::ui::ensure_all_caches(app, content_w);
+                }
+
+                // 子 tab 的 task_prompt 占据渲染最顶部的若干行，
+                // hit test 需要扣除这部分高度偏移
+                let prompt_h: u16 = app.active_tab().task_prompt.as_ref().map(|p| {
+                    let text = format!("📋 {}", p);
+                    let lc = crate::app::wrap_text(&text, content_w).len() as u16;
+                    crate::theme::USER_STYLE.total_height(lc)
+                }).unwrap_or(0);
+                let virtual_row = virtual_row.saturating_sub(prompt_h);
+
+                // 先检查是否点击了 AgentCall 块的 "[open tab]" 按钮
                 let rel_col = m.column.saturating_sub(cx);
                 if let Some(sub_sid) = crate::tool_ui::agent_open_tab_hit_test(
                     &app.messages(),
@@ -845,6 +859,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 // 检查是否点击在工具调用块头部（切换展开/折叠）
                 if let Some(call_id) = crate::tool_ui::tool_block_hit_test(&app.messages(), &app.message_caches, virtual_row) {
                     app.toggle_tool_call_expansion(&call_id);
+                    app.scroll_following = false;
                     app.needs_render = true;
                     return false;
                 }
@@ -861,7 +876,15 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
             // 不在 chat area 内：清除选择，走原有逻辑
             app.text_selection.clear();
 
-            // 优先：tab bar 点击切换 tab
+            // 优先：点击子 tab 的 ✕ 关闭按钮
+            if let Some(idx) = crate::ui::tab_close_at_screen(&app.tab_bar, m.column, m.row) {
+                if app.tab_bar.close_tab(idx) {
+                    app.needs_render = true;
+                }
+                return false;
+            }
+
+            // tab bar 点击切换 tab
             if let Some(idx) = crate::ui::tab_at_screen(&app.tab_bar, m.column, m.row) {
                 if idx != app.tab_bar.active {
                     app.tab_bar.activate(idx);

@@ -277,6 +277,10 @@ pub struct TabEntry {
     pub pending_usage: Option<(u32, u32, u32, u32, u32)>,
     pub next_message_id: u64,
     pub scroll: usize,
+    /// 是否为主 tab（不可关闭）
+    pub is_main: bool,
+    /// 子 agent 的 task prompt（渲染时画为子 tab 第一行，不进 messages）
+    pub task_prompt: Option<String>,
 }
 
 impl TabEntry {
@@ -293,6 +297,8 @@ impl TabEntry {
             pending_usage: None,
             next_message_id: 0,
             scroll: 0,
+            is_main: false,
+            task_prompt: None,
         }
     }
 
@@ -517,8 +523,10 @@ pub struct TabBar {
 
 impl TabBar {
     pub fn new(main_session_id: String) -> Self {
+        let mut main_tab = TabEntry::new(main_session_id, "default");
+        main_tab.is_main = true;
         Self {
-            tabs: vec![TabEntry::new(main_session_id, "default")],
+            tabs: vec![main_tab],
             active: 0,
             page_start: 0,
             last_term_width: 0,
@@ -685,17 +693,32 @@ impl TabBar {
     }
 
     /// Close the active sub-agent tab.
-    /// Only allowed when active > 0 and the tab's status is Done or Error.
+    /// Only allowed when active > 0 (sub tab).
     /// Returns true if the tab was closed; false otherwise.
     pub fn close_active(&mut self) -> bool {
         if self.active == 0 {
             return false;
         }
-        if self.tabs[self.active].status == AgentStatus::Running {
-            return false;
-        }
         self.tabs.remove(self.active);
         if self.active > 0 {
+            self.active -= 1;
+        }
+        self.tabs[self.active].render_pending();
+        self.ensure_active_visible(self.last_term_width);
+        true
+    }
+
+    /// Close a specific sub-agent tab by index.
+    /// Only allowed for sub tabs (index > 0).
+    /// Returns true if the tab was closed; false otherwise.
+    /// Note: closing a Running tab does not cancel the agent; the agent
+    /// continues in the background and its output is simply not displayed.
+    pub fn close_tab(&mut self, idx: usize) -> bool {
+        if idx == 0 || idx >= self.tabs.len() {
+            return false;
+        }
+        self.tabs.remove(idx);
+        if self.active >= idx && self.active > 0 {
             self.active -= 1;
         }
         self.tabs[self.active].render_pending();
@@ -1272,6 +1295,41 @@ impl AppState {
         self.message_caches.clear();
     }
 
+    /// 尝试将主 tab 中匹配的 ToolCall 转为 AgentCall，并关联 sub_session_id。
+    /// 匹配条件：tool_name == agent_name 且尚未收到 result 且尚未关联 session。
+    /// 幂等：已升级的 AgentCall 不会被重复处理（sub_session_id 已设置）。
+    fn try_upgrade_toolcall_to_agentcall(&mut self, agent_name: &str, session_id: &str) {
+        if let Some(main_msg) = self.tab_bar.tabs[0].messages.iter_mut().find(|m| {
+            matches!(&m.line_type, LineType::ToolCall { name } if name == agent_name)
+                && m.tool_result.is_none()
+                && m.sub_session_id.is_none()
+        }) {
+            main_msg.sub_session_id = Some(session_id.to_string());
+            let name = match &main_msg.line_type {
+                LineType::ToolCall { name } => name.clone(),
+                _ => agent_name.to_string(),
+            };
+            main_msg.line_type = LineType::AgentCall { name };
+            main_msg.version += 1;
+        }
+    }
+
+    /// 从主 tab 中查找尚未关联 session 的 ToolCall，提取 prompt。
+    fn extract_prompt_for_sub_agent(&self, agent_name: &str) -> Option<String> {
+        self.tab_bar.tabs[0].messages.iter().find_map(|m| {
+            if matches!(&m.line_type, LineType::ToolCall { name } if name == agent_name)
+                && m.tool_result.is_none()
+                && m.sub_session_id.is_none()
+            {
+                serde_json::from_str::<serde_json::Value>(&m.content)
+                    .ok()
+                    .and_then(|v| v.get("prompt").and_then(|p| p.as_str()).map(String::from))
+            } else {
+                None
+            }
+        })
+    }
+
     /// 根据 session_id 将 ServerMessage 路由到正确的 tab，
     /// 如果是 active tab 则立即调用 render_pending()。
     pub fn route_frame(&mut self, frame: ServerMessage) {
@@ -1286,6 +1344,19 @@ impl AppState {
             if !agent_name.is_empty() && self.tab_bar.tabs[i].agent_name == "agent" {
                 self.tab_bar.tabs[i].agent_name = agent_name.clone();
             }
+            // 延迟设置 task_prompt：首帧无 agent_name 导致创建 tab 时未设置，
+            // 后续带 agent_name 的帧到达时补设（仅当 task_prompt 尚未设置时）
+            if !agent_name.is_empty() && self.tab_bar.tabs[i].task_prompt.is_none() {
+                if let Some(prompt) = self.extract_prompt_for_sub_agent(&agent_name) {
+                    self.tab_bar.tabs[i].task_prompt = Some(prompt);
+                }
+            }
+            // 尝试将主 tab 中匹配的 ToolCall 转为 AgentCall（延迟升级）。
+            // 首帧可能无 agent_name（ThinkingBlock/UsageInfo），导致创建 tab 时
+            // 跳过了升级；后续带 agent_name 的帧到达时补做升级。
+            if !agent_name.is_empty() {
+                self.try_upgrade_toolcall_to_agentcall(&agent_name, &session_id);
+            }
             i
         } else {
             let title = if agent_name.is_empty() {
@@ -1298,28 +1369,19 @@ impl AppState {
             let idx = self
                 .tab_bar
                 .insert_sub_agent(session_id.clone(), title, view_only);
-            // For ViewOnly tabs, add task prompt from input_history[0]
+            // 创建子 tab 时立即设置 task_prompt
             if view_only && !self.input_history.is_empty() {
-                let prompt = format!("[task prompt] {}", self.input_history[0]);
-                self.tab_bar.tabs[idx].push_chat_line(LineType::Status, prompt, None);
+                self.tab_bar.tabs[idx].task_prompt = Some(self.input_history[0].clone());
+            } else if !agent_name.is_empty() {
+                if let Some(prompt) = self.extract_prompt_for_sub_agent(&agent_name) {
+                    self.tab_bar.tabs[idx].task_prompt = Some(prompt);
+                }
             }
             // 子 agent 首帧到达：将主 tab 中匹配的 ToolCall 转为 AgentCall，
             // 并关联 sub_session_id（用于"打开 tab"按钮）。
             // 匹配条件：tool_name == agent_name 且尚未收到 result（tool_result 为 None）。
             if !agent_name.is_empty() {
-                if let Some(main_msg) = self.tab_bar.tabs[0].messages.iter_mut().find(|m| {
-                    matches!(&m.line_type, LineType::ToolCall { name } if name == &agent_name)
-                        && m.tool_result.is_none()
-                        && m.sub_session_id.is_none()
-                }) {
-                    main_msg.sub_session_id = Some(session_id.clone());
-                    let name = match &main_msg.line_type {
-                        LineType::ToolCall { name } => name.clone(),
-                        _ => agent_name.clone(),
-                    };
-                    main_msg.line_type = LineType::AgentCall { name };
-                    main_msg.version += 1;
-                }
+                self.try_upgrade_toolcall_to_agentcall(&agent_name, &session_id);
             }
             idx
         };

@@ -41,21 +41,40 @@ fn tab_label_line(tab: &TabEntry, is_active: bool) -> Line<'static> {
         AgentStatus::ViewOnly => ("◷ ", Color::DarkGray),
     };
     let (lpad, rpad) = if is_active { ("[", "]") } else { (" ", " ") };
-    Line::from(vec![
+    // 子 tab 显示 ✕ 关闭按钮（Running 状态也可关闭，不打断 agent 工作）
+    let can_close = !tab.is_main;
+    let mut spans = vec![
         Span::raw(lpad),
         Span::styled(symbol, Style::default().fg(color)),
         Span::styled(tab.agent_name.clone(), Style::default().fg(theme::TAB_FG)),
         Span::raw(rpad),
-    ])
+    ];
+    if can_close {
+        spans.push(Span::styled("✕", Style::default().fg(Color::DarkGray)));
+    }
+    Line::from(spans)
 }
 
 /// 计算单个 tab title 在屏幕上的渲染宽度（cols）。
-/// = 前置空格(1) + symbol(2 cols) + agent_name 的 unicode 宽度 + 后置空格(1)。
+/// = 前置空格(1) + symbol(2 cols) + agent_name 的 unicode 宽度 + 后置空格(1)
+/// + 关闭按钮(1 col, 仅可关闭的子 tab)。
 pub(crate) fn tab_label_render_width(tab: &TabEntry) -> u16 {
     // 所有状态的 symbol 都是 "<符号><空格>"，宽度 2
     let symbol_w: u16 = 2;
     let name_w = UnicodeWidthStr::width(tab.agent_name.as_str()) as u16;
-    1 + symbol_w + name_w + 1
+    let close_w = if !tab.is_main { 1 } else { 0 };
+    1 + symbol_w + name_w + 1 + close_w
+}
+
+/// 关闭按钮 ✕ 在 tab label 内的相对列偏移（从 label 起始处算起）。
+/// = lpad(1) + symbol(2) + name_w + rpad(1)
+/// 返回 None 表示该 tab 没有关闭按钮。
+fn tab_close_button_offset(tab: &TabEntry) -> Option<u16> {
+    if tab.is_main {
+        return None;
+    }
+    let name_w = UnicodeWidthStr::width(tab.agent_name.as_str()) as u16;
+    Some(1 + 2 + name_w + 1) // lpad + symbol + name + rpad
 }
 
 /// ratatui Tabs widget 在 title 之间渲染 divider 的宽度（我们用 `│`，1 col）
@@ -130,6 +149,53 @@ pub(crate) fn tab_at_screen(
     } else {
         Some(range.start + visible_idx - 1)
     }
+}
+
+/// 屏幕坐标 (col,row) -> 可关闭的 tab 索引。
+/// 仅当点击落在子 tab 的 ✕ 关闭按钮上才返回 Some。
+pub(crate) fn tab_close_at_screen(
+    tab_bar: &crate::app::TabBar,
+    click_col: u16,
+    click_row: u16,
+) -> Option<usize> {
+    if click_row != tab_bar.last_tab_area_y {
+        return None;
+    }
+    if click_col < tab_bar.last_tab_area_x {
+        return None;
+    }
+    let rel_x = click_col - tab_bar.last_tab_area_x;
+    if rel_x >= tab_bar.last_term_width {
+        return None;
+    }
+
+    let range = tab_bar.current_page_subs(tab_bar.last_term_width);
+
+    // 遍历可见 tab，计算每个 tab 的起始 x 和关闭按钮位置
+    let mut x: u16 = 0;
+    // 主 tab
+    let main_w = tab_label_render_width(&tab_bar.tabs[0]);
+    x += TAB_PADDING_L + main_w + TAB_PADDING_R + TAB_DIVIDER_W;
+
+    for i in range.clone() {
+        let tab = &tab_bar.tabs[i];
+        let w = tab_label_render_width(tab);
+        let tab_span = TAB_PADDING_L + w + TAB_PADDING_R;
+
+        // 检查关闭按钮
+        if let Some(close_off) = tab_close_button_offset(tab) {
+            let close_x = x + close_off;
+            if rel_x == close_x {
+                return Some(i);
+            }
+        }
+
+        x += tab_span;
+        if i < range.end {
+            x += TAB_DIVIDER_W;
+        }
+    }
+    None
 }
 
 /// 渲染顶部 Tab 栏（2 行：1 行 tab 内容 + 1 行分隔线）
@@ -494,7 +560,7 @@ fn render_block(
 }
 
 /// 确保所有消息的渲染缓存有效（惰性渲染）
-fn ensure_all_caches(app: &mut AppState, width: u16) {
+pub(crate) fn ensure_all_caches(app: &mut AppState, width: u16) {
     if width != app.cache_width {
         app.cache_width = width;
     }
@@ -582,7 +648,18 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
         theme::ASSISTANT_STYLE.total_height(app.streaming_lines_count() as u16)
     };
 
-    let total_lines = total + stream_lines;
+    // task_prompt 的渲染高度（子 tab 第一行）
+    let prompt_lines: u16 = app.active_tab().task_prompt.as_ref().map(|p| {
+        let text = format!("📋 {}", p);
+        crate::app::wrap_text(&text, render_w).len() as u16
+    }).unwrap_or(0);
+    let prompt_h = if prompt_lines > 0 {
+        theme::USER_STYLE.total_height(prompt_lines)
+    } else {
+        0
+    };
+
+    let total_lines = total + stream_lines + prompt_h;
     let visible = area.height;
     let max_scroll = total_lines.saturating_sub(visible);
 
@@ -600,26 +677,31 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
 
     let mut y: u16 = CHAT_PAD;
 
-    // Render task prompt header for ViewOnly tab
-    if app.active_tab().status == AgentStatus::ViewOnly && !app.input_history.is_empty() {
-        let prompt_text = format!("[task prompt] {}", app.input_history[0]);
-        let task_style = theme::BlockStyle {
-            top_margin: 1,
-            margin_vertical: 1,
-            margin_horizontal: 1,
-            bg_fill: Some(theme::BG),
-            shadow: false,
-            bottom_pad: 0,
-        };
-        let task_lines = vec![Line::styled(
-            pad_to_width(&prompt_text, render_w as usize),
-            Style::default().fg(Color::DarkGray),
-        )];
-        let h = task_style.total_height(1);
-        if let Some((rel_y, _visible_h)) =
+    // 子 tab 的 task prompt（渲染为第一条，不依赖 message_caches）
+    if let Some(ref prompt) = app.active_tab().task_prompt {
+        let prompt_text = format!("📋 {}", prompt);
+        let style = theme::USER_STYLE;
+        let wrapped = crate::app::wrap_text(&prompt_text, render_w);
+        let lines: Vec<Line<'static>> = wrapped
+            .iter()
+            .map(|s| Line::styled(
+                crate::app::pad_to_width(s, render_w as usize),
+                Style::default().fg(theme::USER_FG),
+            ))
+            .collect();
+        let line_count = lines.len() as u16;
+        let h = style.total_height(line_count);
+        if let Some((rel_y, visible_h)) =
             viewport_intersect(y, h, scroll_y, visible, area.bottom())
         {
-            render_block(f, area, task_style, &task_lines, 1, area.y + rel_y);
+            let hidden_top = scroll_y.saturating_sub(y);
+            let remain = line_count.saturating_sub(hidden_top);
+            let visible_lines = remain.min(visible_h);
+            if visible_lines > 0 {
+                let start = hidden_top as usize;
+                let end = (start + visible_lines as usize).min(lines.len());
+                render_block(f, area, style, &lines[start..end], visible_lines, area.y + rel_y);
+            }
         }
         y += h;
     }

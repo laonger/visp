@@ -826,4 +826,100 @@ mod tests {
         let result = agent_open_tab_hit_test(&messages, &caches, 1, 55, 60);
         assert!(result.is_none());
     }
+
+    // ── tool_block_hit_test: 整个 block 可点击 ──────────────
+
+    #[test]
+    fn test_tool_block_hit_test_agent_call_all_rows() {
+        use crate::app::MessageCache;
+        let msg = ChatLine {
+            id: 1,
+            version: 0,
+            line_type: LineType::AgentCall { name: "explorer".into() },
+            content: r#"{"prompt":"Find all TODOs\nIn the codebase"}"#.into(),
+            call_id: Some("call-1".into()),
+            tool_result: None,
+            tool_error: false,
+            sub_session_id: Some("sub-sess-123".into()),
+        };
+        let cache = MessageCache::from_message(&msg, 60, false);
+        let style = crate::theme::style_for(LineType::AgentCall { name: "explorer".into() });
+        let h = style.total_height(cache.line_count);
+        let messages = vec![msg];
+        let caches = vec![cache];
+
+        // Every row from 0 to h-1 should hit the block
+        for row in 0..h {
+            let result = tool_block_hit_test(&messages, &caches, row);
+            assert_eq!(
+                result.as_deref(),
+                Some("call-1"),
+                "row {} should hit the block (h={})",
+                row, h
+            );
+        }
+        // Row h should NOT hit
+        assert!(tool_block_hit_test(&messages, &caches, h).is_none());
+    }
+
+    #[test]
+    fn test_tool_block_hit_test_after_user_message() {
+        // Simulate: User message + AgentCall, click on prompt row of AgentCall
+        use crate::app::MessageCache;
+        let user_msg = ChatLine {
+            id: 0,
+            version: 0,
+            line_type: LineType::User,
+            content: "Find TODOs please".into(),
+            call_id: None,
+            tool_result: None,
+            tool_error: false,
+            sub_session_id: None,
+        };
+        let agent_msg = ChatLine {
+            id: 1,
+            version: 0,
+            line_type: LineType::AgentCall { name: "explorer".into() },
+            content: r#"{"prompt":"Find all TODOs"}"#.into(),
+            call_id: Some("call-1".into()),
+            tool_result: None,
+            tool_error: false,
+            sub_session_id: Some("sub-sess-123".into()),
+        };
+        let user_cache = MessageCache::from_message(&user_msg, 60, false);
+        let agent_cache = MessageCache::from_message(&agent_msg, 60, false);
+        let messages = vec![user_msg, agent_msg];
+        let caches = vec![user_cache, agent_cache];
+
+        let user_style = crate::theme::style_for(LineType::User);
+        let user_h = user_style.total_height(
+            caches.iter().find(|c| c.msg_id == 0).unwrap().line_count
+        );
+        let agent_style = crate::theme::style_for(LineType::AgentCall { name: "explorer".into() });
+        let _agent_h = agent_style.total_height(
+            caches.iter().find(|c| c.msg_id == 1).unwrap().line_count
+        );
+
+        // Click on header row of AgentCall (first content line = y + top_margin + margin_vertical)
+        let header_row = user_h + agent_style.top_margin + agent_style.margin_vertical;
+        assert_eq!(
+            tool_block_hit_test(&messages, &caches, header_row).as_deref(),
+            Some("call-1"),
+            "header row should hit"
+        );
+
+        // Click on prompt row of AgentCall (second content line)
+        let prompt_row = header_row + 1;
+        assert_eq!(
+            tool_block_hit_test(&messages, &caches, prompt_row).as_deref(),
+            Some("call-1"),
+            "prompt row should hit"
+        );
+
+        // agent_open_tab_hit_test should return None for prompt row (not a button click)
+        assert!(
+            agent_open_tab_hit_test(&messages, &caches, prompt_row, 55, 60).is_none(),
+            "agent_open_tab_hit_test should return None for prompt row"
+        );
+    }
 }

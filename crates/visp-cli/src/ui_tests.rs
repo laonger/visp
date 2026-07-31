@@ -132,7 +132,8 @@
     #[test]
     fn test_tab_label_render_width_unchanged_for_active() {
         // 方括号与空格同宽（1 col），label 渲染宽度对 active/inactive 一致
-        let tab = TabEntry::new("sid".to_string(), "default");
+        let mut tab = TabEntry::new("sid".to_string(), "default");
+        tab.is_main = true; // 主 tab 无 ✕
         assert_eq!(tab_label_render_width(&tab), 11);
     }
 
@@ -140,14 +141,16 @@
 
     #[test]
     fn test_tab_label_render_width_ascii_name() {
-        let tab = TabEntry::new("sid".to_string(), "default");
+        let mut tab = TabEntry::new("sid".to_string(), "default");
+        tab.is_main = true; // 主 tab 无 ✕
         // 1 (左空格) + 2 (符号 "▶ ") + 7 ("default") + 1 (右空格) = 11
         assert_eq!(tab_label_render_width(&tab), 11);
     }
 
     #[test]
     fn test_tab_label_render_width_short_name() {
-        let tab = TabEntry::new("sid".to_string(), "X");
+        let mut tab = TabEntry::new("sid".to_string(), "X");
+        tab.is_main = true; // 主 tab 无 ✕
         // 1 + 2 + 1 + 1 = 5
         assert_eq!(tab_label_render_width(&tab), 5);
     }
@@ -198,18 +201,18 @@
     #[test]
     fn test_tab_at_screen_sub_tab() {
         let mut tab_bar = crate::app::TabBar::new("main".into());
-        tab_bar.insert_sub_agent("sub-1", "X", false); // label_w = 1+2+1+1 = 5
+        tab_bar.insert_sub_agent("sub-1", "X", false); // label_w = 1+2+1+1+1(✕) = 6
         tab_bar.last_tab_area_x = 2;
         tab_bar.last_tab_area_y = 1;
         tab_bar.last_term_width = 80;
-        // 布局（rel_x 起算）：default span=12 [0..12) + divider[12..13) + sub span=6 [13..19)
+        // 布局（rel_x 起算）：default span=12 [0..12) + divider[12..13) + sub span=7 [13..20)
         // 屏幕坐标 = 2 + rel_x
         assert_eq!(tab_at_screen(&tab_bar, 2, 1), Some(0)); // default 起点
         assert_eq!(tab_at_screen(&tab_bar, 13, 1), Some(0)); // default 末位
         assert_eq!(tab_at_screen(&tab_bar, 14, 1), None); // divider (rel_x=12)
         assert_eq!(tab_at_screen(&tab_bar, 15, 1), Some(1)); // sub 起点 (rel_x=13)
-        assert_eq!(tab_at_screen(&tab_bar, 20, 1), Some(1)); // sub 末位 (rel_x=18)
-        assert_eq!(tab_at_screen(&tab_bar, 21, 1), None); // 超出
+        assert_eq!(tab_at_screen(&tab_bar, 21, 1), Some(1)); // sub 末位 (rel_x=19)
+        assert_eq!(tab_at_screen(&tab_bar, 22, 1), None); // 超出
     }
 
     #[test]
@@ -230,4 +233,71 @@
         tab_bar.last_tab_area_y = 1;
         tab_bar.last_term_width = 80;
         assert_eq!(tab_at_screen(&tab_bar, 4, 1), None);
+    }
+
+    // ── 关闭按钮 ✕ 测试 ──────────────────────────────────────────
+
+    #[test]
+    fn test_tab_label_done_has_close_button() {
+        let mut tab = TabEntry::new("sid".to_string(), "agent");
+        tab.status = AgentStatus::Done;
+        let line = tab_label_line(&tab, false);
+        // 最后一个 span 是 ✕
+        let last = line.spans.last().unwrap();
+        assert_eq!(last.content, "✕");
+    }
+
+    #[test]
+    fn test_tab_label_running_has_close_button() {
+        let tab = TabEntry::new("sid".to_string(), "agent");
+        // 默认 Running，子 tab 也显示 ✕
+        let line = tab_label_line(&tab, false);
+        let last = line.spans.last().unwrap();
+        assert_eq!(last.content, "✕");
+    }
+
+    #[test]
+    fn test_tab_label_main_no_close_button() {
+        let mut tab = TabEntry::new("main".to_string(), "default");
+        tab.is_main = true;
+        tab.status = AgentStatus::Done;
+        let line = tab_label_line(&tab, false);
+        let last = line.spans.last().unwrap();
+        assert_ne!(last.content, "✕");
+    }
+
+    #[test]
+    fn test_tab_label_render_width_includes_close_button() {
+        let mut tab = TabEntry::new("sid".to_string(), "agent");
+        tab.status = AgentStatus::Done;
+        // 1(lpad) + 2(symbol) + 5("agent") + 1(rpad) + 1(✕) = 10
+        assert_eq!(tab_label_render_width(&tab), 10);
+    }
+
+    #[test]
+    fn test_tab_label_render_width_running_has_close() {
+        let tab = TabEntry::new("sid".to_string(), "agent");
+        // Running: 1+2+5+1+1(✕) = 10
+        assert_eq!(tab_label_render_width(&tab), 10);
+    }
+
+    #[test]
+    fn test_close_tab_by_index() {
+        let mut tb = crate::app::TabBar::new("main".into());
+        tb.insert_sub_agent("sub1".to_string(), "agentA".to_string(), false);
+        tb.insert_sub_agent("sub2".to_string(), "agentB".to_string(), false);
+        // insert_sub_agent inserts at index 1, so order is [main, sub2, sub1]
+        assert_eq!(tb.tabs[1].agent_name, "agentB");
+        assert_eq!(tb.tabs[2].agent_name, "agentA");
+
+        // Running tabs can now be closed (agent continues in background)
+        assert!(tb.close_tab(1));
+        assert_eq!(tb.tabs.len(), 2);
+        assert_eq!(tb.tabs[1].agent_name, "agentA");
+    }
+
+    #[test]
+    fn test_close_tab_main_returns_false() {
+        let mut tb = crate::app::TabBar::new("main".into());
+        assert!(!tb.close_tab(0));
     }

@@ -1201,12 +1201,10 @@
         // Send StatusUpdate with view_only=true
         let frame = make_status_update_frame_with_view_only("sub-1", "agentA", "restored", true);
         app.route_frame(frame);
-        // ViewOnly tab should have task prompt message
+        // ViewOnly tab should have task_prompt set
         let tab = &app.tab_bar.tabs[1];
         assert_eq!(tab.status, AgentStatus::ViewOnly);
-        assert!(!tab.messages.is_empty());
-        assert!(tab.messages[0].content.contains("[task prompt]"));
-        assert!(tab.messages[0].content.contains("my original task prompt"));
+        assert_eq!(tab.task_prompt.as_deref(), Some("my original task prompt"));
     }
 
     // ════════════════════════════════════════════════════════════
@@ -1278,18 +1276,9 @@
         app.input_history.push("task prompt text".into());
         let frame = make_status_update_frame_with_view_only("sub-1", "agentA", "hi", true);
         app.route_frame(frame);
-        // ViewOnly tab should have a task prompt message
+        // ViewOnly tab should have task_prompt set
         let tab = &app.tab_bar.tabs[1];
-        assert!(
-            tab.messages
-                .iter()
-                .any(|m| m.content.contains("[task prompt]"))
-        );
-        assert!(
-            tab.messages
-                .iter()
-                .any(|m| m.content.contains("task prompt text"))
-        );
+        assert_eq!(tab.task_prompt.as_deref(), Some("task prompt text"));
     }
 
     #[test]
@@ -1650,14 +1639,14 @@
     }
 
     #[test]
-    fn test_ctrl_w_on_running_sub_is_noop() {
+    fn test_ctrl_w_on_running_sub_closes_tab() {
         let mut tb = TabBar::new("main".into());
         tb.insert_sub_agent("sub-1", "agentA", false);
         tb.active = 1;
-        // status defaults to Running
+        // status defaults to Running, but closing is now allowed
         assert_eq!(tb.tabs[1].status, AgentStatus::Running);
-        assert!(!tb.close_active());
-        assert_eq!(tb.tabs.len(), 2);
+        assert!(tb.close_active());
+        assert_eq!(tb.tabs.len(), 1);
     }
 
     #[test]
@@ -2034,6 +2023,82 @@
             LineType::ToolCall { name: "explorer".into() }
         );
         assert!(app.tab_bar.tabs[0].messages[0].sub_session_id.is_none());
+    }
+
+    #[test]
+    fn test_route_frame_thinking_first_then_text_upgrades_toolcall() {
+        // 子 agent 首帧是 ThinkingBlock（无 agent_name），
+        // 第二帧 TextDelta 带 agent_name，应延迟升级 ToolCall -> AgentCall
+        let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+        app.route_frame(tool_call("explorer", "call-1", r#"{"prompt":"Find TODOs"}"#));
+
+        // 首帧：ThinkingBlock（agent_name 为空）
+        let thinking = visp_proto::visp::ServerMessage {
+            payload: Some(visp_proto::visp::server_message::Payload::ThinkingBlock(
+                visp_proto::visp::ThinkingBlock {
+                    thinking: "thinking...".into(),
+                    signature: String::new(),
+                    session_id: "sub-sess-xyz".into(),
+                },
+            )),
+        };
+        app.route_frame(thinking);
+
+        // 首帧后：tab 已创建但 ToolCall 尚未升级
+        assert_eq!(
+            app.tab_bar.tabs[0].messages[0].line_type,
+            LineType::ToolCall { name: "explorer".into() }
+        );
+        assert!(app.tab_bar.tabs[0].messages[0].sub_session_id.is_none());
+
+        // 第二帧：TextDelta 带 agent_name = "explorer"
+        app.route_frame(make_text_delta_frame("sub-sess-xyz", "explorer", "hello"));
+
+        // 延迟升级应已发生
+        assert_eq!(
+            app.tab_bar.tabs[0].messages[0].line_type,
+            LineType::AgentCall { name: "explorer".into() }
+        );
+        assert_eq!(
+            app.tab_bar.tabs[0].messages[0].sub_session_id.as_deref(),
+            Some("sub-sess-xyz")
+        );
+    }
+
+    #[test]
+    fn test_route_frame_sets_task_prompt_on_sub_tab() {
+        let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+        app.route_frame(tool_call("explorer", "call-1", r#"{"prompt":"Find all TODOs in the codebase"}"#));
+        app.route_frame(make_text_delta_frame("sub-sess-abc", "explorer", "hello"));
+
+        // 子 tab 创建时 task_prompt 应已设置
+        let sub_tab = &app.tab_bar.tabs[1];
+        assert_eq!(sub_tab.task_prompt.as_deref(), Some("Find all TODOs in the codebase"));
+    }
+
+    #[test]
+    fn test_route_frame_task_prompt_set_via_delayed_upgrade() {
+        // ThinkingBlock 首帧 -> 延迟升级 -> task_prompt 应被设置
+        let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+        app.route_frame(tool_call("explorer", "call-1", r#"{"prompt":"Delayed prompt"}"#));
+
+        let thinking = visp_proto::visp::ServerMessage {
+            payload: Some(visp_proto::visp::server_message::Payload::ThinkingBlock(
+                visp_proto::visp::ThinkingBlock {
+                    thinking: "thinking...".into(),
+                    signature: String::new(),
+                    session_id: "sub-delayed".into(),
+                },
+            )),
+        };
+        app.route_frame(thinking);
+
+        // 首帧后：tab 已创建但 task_prompt 尚未设置
+        assert!(app.tab_bar.tabs[1].task_prompt.is_none());
+
+        // 第二帧带 agent_name -> 延迟设置 task_prompt
+        app.route_frame(make_text_delta_frame("sub-delayed", "explorer", "hello"));
+        assert_eq!(app.tab_bar.tabs[1].task_prompt.as_deref(), Some("Delayed prompt"));
     }
 
     #[test]

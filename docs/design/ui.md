@@ -149,14 +149,14 @@
 ```
 
 
-
-
 ## 子Agent 在主agent tab中的ui
+
+`show in new tab` 是一个按钮，点击可以打开子agent tab。
 
 ``` 闭合
 
  ┌─────────────────────────────────────────────────────┐ 
- │ agent_name: agent_session_id       [open tab button]│ 
+ │ agent_name: agent_session_id   [show in new tab]    │ 
  │ agent prompt第一行                                  │ 
  └─────────────────────────────────────────────────────┘ 
 
@@ -165,10 +165,12 @@
 ```  tool block 点击后展开状态
 
  ┌─────────────────────────────────────────────────────┐
- │ agent_name: agent_session_id       [open tab button]│
+ │ agent_name: agent_session_id   [show in new tab]    │ 
  │ agent 完整 prompt                                   │
- │                                                     │
+ │ agent result                                        │
  │                                                     │
  └─────────────────────────────────────────────────────┘
 
 ```
+
+
