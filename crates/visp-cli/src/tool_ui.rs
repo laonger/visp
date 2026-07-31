@@ -550,9 +550,8 @@ pub(crate) fn agent_open_tab_hit_test(
                     // 按钮位置：margin_horizontal(1) + content_width - right_gap - button_len
                     // 到 margin_horizontal(1) + content_width - right_gap
                     let button_start = 1u16
-                        + content_width.saturating_sub(
-                            OPEN_TAB_RIGHT_GAP as u16 + OPEN_TAB_BUTTON_LEN as u16,
-                        );
+                        + content_width
+                            .saturating_sub(OPEN_TAB_RIGHT_GAP as u16 + OPEN_TAB_BUTTON_LEN as u16);
                     let button_end = 1u16 + content_width.saturating_sub(OPEN_TAB_RIGHT_GAP as u16);
                     if column >= button_start && column < button_end {
                         return Some(sub_sid.clone());

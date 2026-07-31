@@ -1478,7 +1478,9 @@ impl AppState {
             if !agent_name.is_empty() && tab.agent_name == "agent" {
                 tab.agent_name = agent_name.clone();
             }
-            if let Some(prompt) = prompt && tab.task_prompt.is_none() {
+            if let Some(prompt) = prompt
+                && tab.task_prompt.is_none()
+            {
                 tab.task_prompt = Some(prompt);
             }
             // 状态更新

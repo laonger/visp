@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::app::AppState;
 use visp_proto::visp::{Done, Error, ServerMessage, server_message};
