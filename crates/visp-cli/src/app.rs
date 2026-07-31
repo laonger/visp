@@ -519,6 +519,10 @@ pub struct TabBar {
     pub last_tab_area_x: u16,
     /// 上次渲染时 tabs widget content_area 的 y 坐标（tab 内容行，分隔线在 y+1）
     pub last_tab_area_y: u16,
+    /// 已关闭的子 agent tab（按 session_id 索引），用于重新打开时恢复
+    pub closed_tabs: Vec<TabEntry>,
+    /// 尚未打开的子 agent tab（默认不自动创建活跃 tab，帧暂存于此）
+    pub hidden_tabs: Vec<TabEntry>,
 }
 
 impl TabBar {
@@ -532,6 +536,8 @@ impl TabBar {
             last_term_width: 0,
             last_tab_area_x: 0,
             last_tab_area_y: 0,
+            closed_tabs: Vec::new(),
+            hidden_tabs: Vec::new(),
         }
     }
 
@@ -694,12 +700,14 @@ impl TabBar {
 
     /// Close the active sub-agent tab.
     /// Only allowed when active > 0 (sub tab).
+    /// The tab is moved to closed_tabs for later restoration.
     /// Returns true if the tab was closed; false otherwise.
     pub fn close_active(&mut self) -> bool {
         if self.active == 0 {
             return false;
         }
-        self.tabs.remove(self.active);
+        let removed = self.tabs.remove(self.active);
+        self.closed_tabs.push(removed);
         if self.active > 0 {
             self.active -= 1;
         }
@@ -710,6 +718,7 @@ impl TabBar {
 
     /// Close a specific sub-agent tab by index.
     /// Only allowed for sub tabs (index > 0).
+    /// The tab is moved to closed_tabs for later restoration.
     /// Returns true if the tab was closed; false otherwise.
     /// Note: closing a Running tab does not cancel the agent; the agent
     /// continues in the background and its output is simply not displayed.
@@ -717,13 +726,59 @@ impl TabBar {
         if idx == 0 || idx >= self.tabs.len() {
             return false;
         }
-        self.tabs.remove(idx);
+        let removed = self.tabs.remove(idx);
+        self.closed_tabs.push(removed);
         if self.active >= idx && self.active > 0 {
             self.active -= 1;
         }
         self.tabs[self.active].render_pending();
         self.ensure_active_visible(self.last_term_width);
         true
+    }
+
+    /// 查找或恢复子 agent tab。
+    /// 如果活跃 tabs 中存在则返回索引；否则从 closed_tabs 或 hidden_tabs 恢复。
+    /// 返回 Some(idx) 表示找到或恢复成功。
+    pub fn find_or_restore_tab(&mut self, session_id: &str) -> Option<usize> {
+        // 先在活跃 tabs 中查找
+        if let Some(idx) = self.find_index_by_session(session_id) {
+            return Some(idx);
+        }
+        // 从 closed_tabs 恢复
+        if let Some(pos) = self.closed_tabs.iter().position(|t| t.session_id == session_id) {
+            let mut tab = self.closed_tabs.remove(pos);
+            tab.render_pending();
+            self.tabs.insert(1, tab);
+            if self.active >= 1 {
+                self.active += 1;
+            }
+            return Some(1);
+        }
+        // 从 hidden_tabs 恢复
+        if let Some(pos) = self.hidden_tabs.iter().position(|t| t.session_id == session_id) {
+            let mut tab = self.hidden_tabs.remove(pos);
+            tab.generating = tab.status == AgentStatus::Running;
+            tab.render_pending();
+            self.tabs.insert(1, tab);
+            if self.active >= 1 {
+                self.active += 1;
+            }
+            return Some(1);
+        }
+        None
+    }
+
+    /// 按 session_id 查找 hidden_tab 的可变引用（用于路由帧到隐藏 tab）。
+    /// 如果不存在则创建一个。
+    fn find_or_create_hidden_tab(&mut self, session_id: &str, agent_name: &str) -> &mut TabEntry {
+        let pos = self.hidden_tabs.iter().position(|t| t.session_id == session_id);
+        match pos {
+            Some(i) => &mut self.hidden_tabs[i],
+            None => {
+                self.hidden_tabs.push(TabEntry::new(session_id, agent_name));
+                self.hidden_tabs.last_mut().unwrap()
+            }
+        }
     }
 }
 
@@ -1296,12 +1351,11 @@ impl AppState {
     }
 
     /// 尝试将主 tab 中匹配的 ToolCall 转为 AgentCall，并关联 sub_session_id。
-    /// 匹配条件：tool_name == agent_name 且尚未收到 result 且尚未关联 session。
+    /// 匹配条件：tool_name == agent_name 且尚未关联 session。
     /// 幂等：已升级的 AgentCall 不会被重复处理（sub_session_id 已设置）。
     fn try_upgrade_toolcall_to_agentcall(&mut self, agent_name: &str, session_id: &str) {
         if let Some(main_msg) = self.tab_bar.tabs[0].messages.iter_mut().find(|m| {
             matches!(&m.line_type, LineType::ToolCall { name } if name == agent_name)
-                && m.tool_result.is_none()
                 && m.sub_session_id.is_none()
         }) {
             main_msg.sub_session_id = Some(session_id.to_string());
@@ -1332,64 +1386,76 @@ impl AppState {
 
     /// 根据 session_id 将 ServerMessage 路由到正确的 tab，
     /// 如果是 active tab 则立即调用 render_pending()。
+    /// 子 agent 帧默认路由到 hidden_tabs（不自动创建活跃 tab），
+    /// 仅 ViewOnly 帧和用户点击按钮时才创建活跃 tab。
     pub fn route_frame(&mut self, frame: ServerMessage) {
         let (session_id, agent_name) = extract_session_and_agent(&frame);
 
         let idx = if session_id.is_empty() || session_id == self.main_session_id {
             0
         } else if let Some(i) = self.tab_bar.find_index_by_session(&session_id) {
-            // 升级 fallback "agent" 名字为真实 agent_name
-            // 首帧可能是 UsageInfo/ThinkingBlock 等无 agent_name 字段的 payload，
-            // 导致 tab 创建时名字退化为 "agent"；后续带 agent_name 的帧来时升级
+            // 活跃 tabs 中已有 -> 路由到此
             if !agent_name.is_empty() && self.tab_bar.tabs[i].agent_name == "agent" {
                 self.tab_bar.tabs[i].agent_name = agent_name.clone();
             }
-            // 延迟设置 task_prompt：首帧无 agent_name 导致创建 tab 时未设置，
-            // 后续带 agent_name 的帧到达时补设（仅当 task_prompt 尚未设置时）
             if !agent_name.is_empty() && self.tab_bar.tabs[i].task_prompt.is_none() {
                 if let Some(prompt) = self.extract_prompt_for_sub_agent(&agent_name) {
                     self.tab_bar.tabs[i].task_prompt = Some(prompt);
                 }
             }
-            // 尝试将主 tab 中匹配的 ToolCall 转为 AgentCall（延迟升级）。
-            // 首帧可能无 agent_name（ThinkingBlock/UsageInfo），导致创建 tab 时
-            // 跳过了升级；后续带 agent_name 的帧到达时补做升级。
             if !agent_name.is_empty() {
                 self.try_upgrade_toolcall_to_agentcall(&agent_name, &session_id);
             }
             i
         } else {
-            let title = if agent_name.is_empty() {
-                "agent".to_string()
-            } else {
-                agent_name.clone()
-            };
+            // 子 agent 帧路由到 hidden_tab（不自动创建活跃 tab）
             let view_only = matches!(&frame.payload,
                 Some(server_message::Payload::StatusUpdate(su)) if su.view_only);
-            let idx = self
-                .tab_bar
-                .insert_sub_agent(session_id.clone(), title, view_only);
-            // 创建子 tab 时立即设置 task_prompt
-            if view_only && !self.input_history.is_empty() {
-                self.tab_bar.tabs[idx].task_prompt = Some(self.input_history[0].clone());
+            let title = if agent_name.is_empty() { "agent".to_string() } else { agent_name.clone() };
+            // ViewOnly 帧优先取 input_history[0] 作为 task_prompt（与历史行为一致）；
+            // 否则从主 tab 中已升级的 ToolCall 提取 prompt
+            let prompt = if view_only && !self.input_history.is_empty() {
+                Some(self.input_history[0].clone())
             } else if !agent_name.is_empty() {
-                if let Some(prompt) = self.extract_prompt_for_sub_agent(&agent_name) {
-                    self.tab_bar.tabs[idx].task_prompt = Some(prompt);
+                self.extract_prompt_for_sub_agent(&agent_name)
+            } else {
+                None
+            };
+            let tab = self.tab_bar.find_or_create_hidden_tab(&session_id, &title);
+            if view_only {
+                tab.status = AgentStatus::ViewOnly;
+            }
+            if !agent_name.is_empty() && tab.agent_name == "agent" {
+                tab.agent_name = agent_name.clone();
+            }
+            if let Some(prompt) = prompt {
+                if tab.task_prompt.is_none() {
+                    tab.task_prompt = Some(prompt);
                 }
             }
-            // 子 agent 首帧到达：将主 tab 中匹配的 ToolCall 转为 AgentCall，
-            // 并关联 sub_session_id（用于"打开 tab"按钮）。
-            // 匹配条件：tool_name == agent_name 且尚未收到 result（tool_result 为 None）。
+            // 状态更新
+            match &frame.payload {
+                Some(server_message::Payload::Done(_)) => {
+                    if tab.status == AgentStatus::Running {
+                        tab.status = AgentStatus::Done;
+                    }
+                }
+                Some(server_message::Payload::Error(_)) => {
+                    tab.status = AgentStatus::Error;
+                }
+                _ => {}
+            }
+            // 路由帧
+            tab.frames.push(frame);
             if !agent_name.is_empty() {
                 self.try_upgrade_toolcall_to_agentcall(&agent_name, &session_id);
             }
-            idx
+            return;
         };
 
         let active = self.tab_bar.active;
 
-        // 立即根据 payload 更新 tab.status（不依赖 render_pending），
-        // 否则非 active 的子 tab Done/Error 后图标不会刷新，需要等切过去
+        // 立即根据 payload 更新 tab.status
         match &frame.payload {
             Some(server_message::Payload::Done(_)) => {
                 if self.tab_bar.tabs[idx].status == AgentStatus::Running {
@@ -1434,13 +1500,16 @@ impl AppState {
         let is_main = session_id.is_empty() || session_id == self.main_session_id;
 
         // 按 session_id 路由：空 ID 或主 session -> default tab
+        // 子 agent 的 UsageInfo 路由到活跃 tab 或 hidden_tab，不自动创建活跃 tab
         let idx = if is_main {
             0
         } else if let Some(i) = self.tab_bar.find_index_by_session(session_id) {
             i
         } else {
-            self.tab_bar
-                .insert_sub_agent(session_id.to_string(), "agent", false)
+            // 路由到 hidden_tab
+            let tab = self.tab_bar.find_or_create_hidden_tab(session_id, "agent");
+            tab.pending_usage = Some((input, output, tool_calls, cache_create, cache_read));
+            return;
         };
         // L1: 写入 tab.pending_usage
         self.tab_bar.tabs[idx].pending_usage =

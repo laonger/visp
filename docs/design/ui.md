@@ -151,7 +151,7 @@
 
 ## 子Agent 在主agent tab中的ui
 
-`show in new tab` 是一个按钮，点击可以打开子agent tab。
+`show in new tab` 是一个按钮，点击可以打开子agent tab，如果agent tab已经打开，则切换到该tab
 
 ``` 闭合
 

@@ -1029,11 +1029,14 @@
         let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         let frame = make_text_delta_frame("sub-1", "explorer", "hello");
         app.route_frame(frame);
-        assert_eq!(app.tab_bar.tabs.len(), 2);
-        assert_eq!(app.tab_bar.tabs[1].session_id, "sub-1");
-        assert_eq!(app.tab_bar.tabs[1].agent_name, "explorer");
-        assert_eq!(app.tab_bar.tabs[1].frames.len(), 1);
-        assert!(app.tab_bar.tabs[1].messages.is_empty());
+        // 子 agent 帧路由到 hidden_tabs，不自动创建活跃 tab
+        assert_eq!(app.tab_bar.tabs.len(), 1);
+        assert_eq!(app.tab_bar.hidden_tabs.len(), 1);
+        let tab = &app.tab_bar.hidden_tabs[0];
+        assert_eq!(tab.session_id, "sub-1");
+        assert_eq!(tab.agent_name, "explorer");
+        assert_eq!(tab.frames.len(), 1);
+        assert!(tab.messages.is_empty());
     }
 
     #[test]
@@ -1061,30 +1064,34 @@
         let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         let frame = make_text_delta_frame("new-sid", "X", "hi");
         app.route_frame(frame);
-        assert_eq!(app.tab_bar.tabs.len(), 2);
-        assert_eq!(app.tab_bar.tabs[1].session_id, "new-sid");
-        assert_eq!(app.tab_bar.tabs[1].agent_name, "X");
+        assert_eq!(app.tab_bar.tabs.len(), 1);
+        assert_eq!(app.tab_bar.hidden_tabs.len(), 1);
+        assert_eq!(app.tab_bar.hidden_tabs[0].session_id, "new-sid");
+        assert_eq!(app.tab_bar.hidden_tabs[0].agent_name, "X");
 
         let frame2 = make_text_delta_frame("other-sid", "", "there");
         app.route_frame(frame2);
-        assert_eq!(app.tab_bar.tabs.len(), 3);
-        assert_eq!(app.tab_bar.tabs[1].session_id, "other-sid");
-        assert_eq!(app.tab_bar.tabs[1].agent_name, "agent");
+        assert_eq!(app.tab_bar.hidden_tabs.len(), 2);
+        assert_eq!(app.tab_bar.hidden_tabs[1].session_id, "other-sid");
+        assert_eq!(app.tab_bar.hidden_tabs[1].agent_name, "agent");
     }
 
     #[test]
     fn test_route_frame_upgrades_fallback_agent_name() {
-        // 首帧 agent_name 为空 → tab 创建为 fallback "agent"
+        // 首帧 agent_name 为空 → hidden tab 创建为 fallback "agent"
         let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         let f1 = make_text_delta_frame("sub-sid", "", "first");
         app.route_frame(f1);
-        assert_eq!(app.tab_bar.tabs[1].agent_name, "agent");
+        assert_eq!(app.tab_bar.hidden_tabs[0].agent_name, "agent");
 
-        // 后续帧带真实 agent_name → 升级 fallback "agent" 为真名
+        // 后续帧带真实 agent_name → 在 hidden_tab 内原地升级 fallback "agent" 为真名，
+        // 不恢复到活跃 tabs
         let f2 = make_text_delta_frame("sub-sid", "explorer", "second");
         app.route_frame(f2);
-        assert_eq!(app.tab_bar.tabs[1].agent_name, "explorer");
-        assert_eq!(app.tab_bar.tabs[1].frames.len(), 2);
+        assert_eq!(app.tab_bar.hidden_tabs.len(), 1);
+        assert_eq!(app.tab_bar.hidden_tabs[0].agent_name, "explorer");
+        assert_eq!(app.tab_bar.hidden_tabs[0].frames.len(), 2);
+        assert_eq!(app.tab_bar.tabs.len(), 1);
     }
 
     #[test]
@@ -1162,9 +1169,19 @@
         let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         let frame = make_status_update_frame_with_view_only("sub-1", "agentA", "hi", true);
         app.route_frame(frame);
-        assert_eq!(app.tab_bar.tabs.len(), 2);
-        assert_eq!(app.tab_bar.tabs[1].session_id, "sub-1");
-        assert_eq!(app.tab_bar.tabs[1].agent_name, "agentA");
+        // ViewOnly 帧路由到 hidden_tabs，不创建活跃子 tab
+        assert_eq!(app.tab_bar.tabs.len(), 1);
+        assert_eq!(app.tab_bar.hidden_tabs.len(), 1);
+        let hidden = app
+            .tab_bar
+            .hidden_tabs
+            .iter()
+            .find(|t| t.session_id == "sub-1")
+            .unwrap();
+        assert_eq!(hidden.agent_name, "agentA");
+        assert_eq!(hidden.status, AgentStatus::ViewOnly);
+        // 恢复后成为活跃 tab，status 保留
+        assert_eq!(app.tab_bar.find_or_restore_tab("sub-1"), Some(1));
         assert_eq!(app.tab_bar.tabs[1].status, AgentStatus::ViewOnly);
     }
 
@@ -1173,8 +1190,10 @@
         let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         let frame = make_status_update_frame_with_view_only("sub-1", "agentA", "hi", false);
         app.route_frame(frame);
-        assert_eq!(app.tab_bar.tabs.len(), 2);
-        assert_eq!(app.tab_bar.tabs[1].status, AgentStatus::Running);
+        // 非 ViewOnly 状态更新路由到 hidden_tabs（status 仍为 Running）
+        assert_eq!(app.tab_bar.tabs.len(), 1);
+        assert_eq!(app.tab_bar.hidden_tabs.len(), 1);
+        assert_eq!(app.tab_bar.hidden_tabs[0].status, AgentStatus::Running);
     }
 
     #[test]
@@ -1201,10 +1220,22 @@
         // Send StatusUpdate with view_only=true
         let frame = make_status_update_frame_with_view_only("sub-1", "agentA", "restored", true);
         app.route_frame(frame);
-        // ViewOnly tab should have task_prompt set
-        let tab = &app.tab_bar.tabs[1];
-        assert_eq!(tab.status, AgentStatus::ViewOnly);
-        assert_eq!(tab.task_prompt.as_deref(), Some("my original task prompt"));
+        // ViewOnly 帧路由到 hidden_tabs，task_prompt 已填充
+        assert_eq!(app.tab_bar.hidden_tabs.len(), 1);
+        let hidden = app
+            .tab_bar
+            .hidden_tabs
+            .iter()
+            .find(|t| t.session_id == "sub-1")
+            .unwrap();
+        assert_eq!(hidden.status, AgentStatus::ViewOnly);
+        assert_eq!(hidden.task_prompt.as_deref(), Some("my original task prompt"));
+        // 恢复后 task_prompt 保留在活跃 tab
+        assert_eq!(app.tab_bar.find_or_restore_tab("sub-1"), Some(1));
+        assert_eq!(
+            app.tab_bar.tabs[1].task_prompt.as_deref(),
+            Some("my original task prompt")
+        );
     }
 
     // ════════════════════════════════════════════════════════════
@@ -1214,15 +1245,23 @@
     #[test]
     fn route_frame_error_session_not_active_renders_hint() {
         let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
+        // 子 agent 错误帧默认路由到 hidden_tabs：status 置为 Error，但不渲染提示
         let frame = make_error_frame("sub-1", "agentA", "SessionNotActive", "session expired");
         app.route_frame(frame);
-        // Tab was created automatically by route_frame for unknown session
-        assert_eq!(app.tab_bar.tabs.len(), 2);
+        assert_eq!(app.tab_bar.tabs.len(), 1);
+        assert_eq!(app.tab_bar.hidden_tabs.len(), 1);
+        let tab = &app.tab_bar.hidden_tabs[0];
+        assert_eq!(tab.status, AgentStatus::Error);
+        assert!(tab.messages.is_empty());
+
+        // 恢复到活跃 tabs 后再发 Error -> 渲染友好提示
+        app.tab_bar.find_or_restore_tab("sub-1");
+        let frame2 = make_error_frame("sub-1", "agentA", "SessionNotActive", "session expired");
+        app.route_frame(frame2);
         let tab = &app.tab_bar.tabs[1];
         assert_eq!(tab.status, AgentStatus::Error);
-        // Should have friendly hint message
-        assert!(!tab.messages.is_empty());
-        assert!(tab.messages[0].content.contains("该会话已结束"));
+        // Should have friendly hint message (restore 时渲染的 Error 行之后)
+        assert!(tab.messages.iter().any(|m| m.content.contains("该会话已结束")));
     }
 
     #[test]
@@ -1276,9 +1315,21 @@
         app.input_history.push("task prompt text".into());
         let frame = make_status_update_frame_with_view_only("sub-1", "agentA", "hi", true);
         app.route_frame(frame);
-        // ViewOnly tab should have task_prompt set
-        let tab = &app.tab_bar.tabs[1];
-        assert_eq!(tab.task_prompt.as_deref(), Some("task prompt text"));
+        // ViewOnly 帧路由到 hidden_tabs，task_prompt 已填充
+        assert_eq!(app.tab_bar.hidden_tabs.len(), 1);
+        let hidden = app
+            .tab_bar
+            .hidden_tabs
+            .iter()
+            .find(|t| t.session_id == "sub-1")
+            .unwrap();
+        assert_eq!(hidden.task_prompt.as_deref(), Some("task prompt text"));
+        // 恢复后 task_prompt 保留在活跃 tab
+        assert_eq!(app.tab_bar.find_or_restore_tab("sub-1"), Some(1));
+        assert_eq!(
+            app.tab_bar.tabs[1].task_prompt.as_deref(),
+            Some("task prompt text")
+        );
     }
 
     #[test]
@@ -1723,22 +1774,37 @@
     #[test]
     fn test_ctrl_w_closed_session_can_reopen_on_new_event() {
         let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
-        // Route a frame to create a sub tab
+        // 首帧路由到 hidden_tabs，不自动创建活跃 tab
         let frame = make_text_delta_frame("sub-1", "agentA", "hello");
         app.route_frame(frame);
+        assert_eq!(app.tab_bar.hidden_tabs.len(), 1);
+
+        // 恢复到活跃 tabs
+        app.tab_bar.find_or_restore_tab("sub-1");
         assert_eq!(app.tab_bar.tabs.len(), 2);
 
-        // Set sub to Done and close it
+        // Set sub to Done and close it（移入 closed_tabs）
         app.tab_bar.tabs[1].status = AgentStatus::Done;
         app.tab_bar.active = 1;
         assert!(app.tab_bar.close_active());
         assert_eq!(app.tab_bar.tabs.len(), 1);
+        assert_eq!(app.tab_bar.closed_tabs.len(), 1);
 
-        // Route another frame with same session_id — should re-create tab
+        // 关闭后再来帧：不自动恢复到活跃 tabs，帧路由到 hidden_tabs 原地更新
         let frame2 = make_text_delta_frame("sub-1", "agentA", "world");
         app.route_frame(frame2);
+        assert_eq!(app.tab_bar.tabs.len(), 1);
+        assert_eq!(app.tab_bar.closed_tabs.len(), 1);
+        assert_eq!(app.tab_bar.hidden_tabs.len(), 1);
+        assert_eq!(app.tab_bar.hidden_tabs[0].session_id, "sub-1");
+        assert_eq!(app.tab_bar.hidden_tabs[0].frames.len(), 1);
+
+        // 手动 find_or_restore_tab 恢复（从 closed_tabs），重新打开成功
+        let idx = app.tab_bar.find_or_restore_tab("sub-1").expect("restore failed");
+        assert_eq!(idx, 1);
         assert_eq!(app.tab_bar.tabs.len(), 2);
         assert_eq!(app.tab_bar.tabs[1].session_id, "sub-1");
+        assert_eq!(app.tab_bar.tabs[1].frames.len(), 1);
     }
 
     // ════════════════════════════════════════════════════════════
@@ -1761,10 +1827,18 @@
         let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
         let frame = make_text_delta_frame("sub1", "explorer", "hello");
         app.route_frame(frame);
-        assert_eq!(app.tab_bar.tabs.len(), 2);
+        // 帧暂存于 hidden_tabs，不自动创建活跃 tab
+        assert_eq!(app.tab_bar.tabs.len(), 1);
+        assert_eq!(app.tab_bar.hidden_tabs.len(), 1);
+        assert_eq!(app.tab_bar.hidden_tabs[0].session_id, "sub1");
+        assert_eq!(app.tab_bar.hidden_tabs[0].agent_name, "explorer");
+        assert_eq!(app.tab_bar.active, 0);
+
+        // find_or_restore_tab 将其打开为活跃 tab (index 1)
+        let idx = app.tab_bar.find_or_restore_tab("sub1").unwrap();
+        assert_eq!(idx, 1);
         assert_eq!(app.tab_bar.tabs[1].session_id, "sub1");
         assert_eq!(app.tab_bar.tabs[1].agent_name, "explorer");
-        assert_eq!(app.tab_bar.active, 0);
     }
 
     #[test]
@@ -1797,15 +1871,22 @@
     #[test]
     fn test_e2e_subagent_inactive_does_not_pollute_default() {
         let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
-        // active defaults to 0; sub frames should go to sub tab, not default
+        // active defaults to 0; sub frames should go to hidden_tabs, not default
         let f1 = make_text_delta_frame("sub1", "agentA", "hello");
         let f2 = make_tool_call_frame("sub1", "agentA", "c1", "bash", "{}");
         app.route_frame(f1);
         app.route_frame(f2);
         // Default tab untouched
+        assert_eq!(app.tab_bar.tabs.len(), 1);
         assert_eq!(app.tab_bar.tabs[0].frames.len(), 0);
-        // Sub tab has accumulated frames
-        assert_eq!(app.tab_bar.tabs[1].frames.len(), 2);
+        // Sub frames accumulate in hidden_tabs
+        let sub = app
+            .tab_bar
+            .hidden_tabs
+            .iter()
+            .find(|t| t.session_id == "sub1")
+            .expect("sub1 hidden tab not found");
+        assert_eq!(sub.frames.len(), 2);
     }
 
     #[test]
@@ -1818,14 +1899,21 @@
         }
         let tc = make_tool_call_frame("sub1", "agentA", "c1", "bash", "{}");
         app.route_frame(tc);
-        // Before activation: lazy, no messages rendered
-        assert_eq!(app.tab_bar.tabs[1].messages.len(), 0);
-        assert_eq!(app.tab_bar.tabs[1].frames.len(), 5);
-        // Switch to sub tab → auto renders all pending frames
-        app.tab_bar.activate(1);
+        // Frames accumulate in hidden_tabs（不自动创建活跃 tab）
+        assert_eq!(app.tab_bar.tabs.len(), 1);
+        let sub = app
+            .tab_bar
+            .hidden_tabs
+            .iter()
+            .find(|t| t.session_id == "sub1")
+            .expect("sub1 hidden tab not found");
+        assert_eq!(sub.frames.len(), 5);
+        // 手动恢复并激活 → 渲染所有累积帧
+        let idx = app.tab_bar.find_or_restore_tab("sub1").expect("restore failed");
+        app.tab_bar.activate(idx);
         // After rendering: messages populated, all frames processed
-        assert!(!app.tab_bar.tabs[1].messages.is_empty());
-        assert_eq!(app.tab_bar.tabs[1].rendered_up_to, 5);
+        assert!(!app.tab_bar.tabs[idx].messages.is_empty());
+        assert_eq!(app.tab_bar.tabs[idx].rendered_up_to, 5);
     }
 
     #[test]
@@ -1836,18 +1924,19 @@
         app.route_frame(main_frame);
         assert!(app.tab_bar.tabs[0].streaming_text.contains("main-delta"));
 
-        // 子 agent 收到 TextDelta（创建 tab 1，帧累积）
+        // 子 agent 收到 TextDelta（帧暂存于 hidden_tabs）
         let sub_frame = make_text_delta_frame("sub-1", "agentA", "sub-delta");
         app.route_frame(sub_frame);
-        assert_eq!(app.tab_bar.tabs.len(), 2);
-        assert!(app.tab_bar.tabs[1].streaming_text.is_empty()); // 非活跃，未渲染
-        assert_eq!(app.tab_bar.tabs[1].frames.len(), 1);
+        assert_eq!(app.tab_bar.hidden_tabs.len(), 1);
+        assert!(app.tab_bar.hidden_tabs[0].streaming_text.is_empty()); // 隐藏未渲染
+        assert_eq!(app.tab_bar.hidden_tabs[0].frames.len(), 1);
 
         // 子 agent 更多帧
         let sub_frame2 = make_text_delta_frame("sub-1", "agentA", " more");
         app.route_frame(sub_frame2);
 
-        // 切换到子 tab
+        // 恢复到活跃 tabs 并切换到子 tab
+        app.tab_bar.find_or_restore_tab("sub-1");
         app.tab_bar.activate(1);
 
         // 子 tab 应显示子 agent 数据，而非主 agent 数据
@@ -1873,13 +1962,14 @@
         app.route_frame(main_tc);
         assert_eq!(app.tab_bar.tabs[0].messages.len(), 1);
 
-        // 子 agent 收到 ToolCall（非活跃，只累积帧）
+        // 子 agent 收到 ToolCall（路由到 hidden_tabs，只累积帧）
         let sub_tc = make_tool_call_frame("sub-1", "agentA", "sub-c1", "bash", "{}");
         app.route_frame(sub_tc);
-        assert_eq!(app.tab_bar.tabs[1].messages.len(), 0); // 非活跃未渲染
-        assert_eq!(app.tab_bar.tabs[1].frames.len(), 1);
+        assert_eq!(app.tab_bar.hidden_tabs[0].messages.len(), 0); // 隐藏未渲染
+        assert_eq!(app.tab_bar.hidden_tabs[0].frames.len(), 1);
 
-        // 切换到子 tab
+        // 恢复到活跃 tabs 并切换到子 tab
+        app.tab_bar.find_or_restore_tab("sub-1");
         app.tab_bar.activate(1);
 
         // 子 tab 的 messages 应该是子 agent 的 ToolCall
@@ -1908,7 +1998,10 @@
         let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
         let frame = make_text_delta_frame("sub-1", "agentA", "hello");
         app.route_frame(frame);
-        // 子 agent 正在运行，generating 应为 true
+        // 帧暂存于 hidden_tabs（status Running）
+        assert_eq!(app.tab_bar.hidden_tabs[0].status, AgentStatus::Running);
+        // 恢复到活跃 tabs 后，子 agent 正在运行，generating 应为 true
+        app.tab_bar.find_or_restore_tab("sub-1");
         assert!(
             app.tab_bar.tabs[1].generating,
             "子 agent tab 的 generating 应为 true"
@@ -1969,7 +2062,8 @@
         let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
         let frame = make_text_delta_frame("sub1", "agentA", "hello world");
         app.route_frame(frame);
-        // Switch to sub tab to render
+        // 恢复到活跃 tabs 并切换到子 tab 以渲染
+        app.tab_bar.find_or_restore_tab("sub1");
         app.tab_bar.activate(1);
         // No message should contain the "[sub:" prefix (removed in Step 3)
         for msg in &app.tab_bar.tabs[1].messages {
@@ -2010,19 +2104,24 @@
     #[test]
     fn test_route_frame_sub_agent_does_not_convert_completed_toolcall() {
         let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
-        // ToolCall + ToolResult (已完成)
+        // ToolCall + ToolResult (已完成，无子 agent 帧)
         app.route_frame(tool_call("explorer", "call-1", r#"{"prompt":"test"}"#));
         app.route_frame(tool_result("call-1", "explorer", "done", false));
 
-        // 子 agent 首帧到达
-        app.route_frame(make_text_delta_frame("sub-sess-abc", "explorer", "hello"));
-
-        // 已完成的 ToolCall 不应被转换
+        // 无子 agent 帧到达 -> 不应被转换
         assert_eq!(
             app.tab_bar.tabs[0].messages[0].line_type,
             LineType::ToolCall { name: "explorer".into() }
         );
         assert!(app.tab_bar.tabs[0].messages[0].sub_session_id.is_none());
+
+        // 子 agent 帧到达 -> 即使 ToolResult 已完成也应升级为 AgentCall
+        app.route_frame(make_text_delta_frame("sub-sess-abc", "explorer", "hello"));
+        assert_eq!(
+            app.tab_bar.tabs[0].messages[0].line_type,
+            LineType::AgentCall { name: "explorer".into() }
+        );
+        assert_eq!(app.tab_bar.tabs[0].messages[0].sub_session_id.as_deref(), Some("sub-sess-abc"));
     }
 
     #[test]
@@ -2071,8 +2170,13 @@
         app.route_frame(tool_call("explorer", "call-1", r#"{"prompt":"Find all TODOs in the codebase"}"#));
         app.route_frame(make_text_delta_frame("sub-sess-abc", "explorer", "hello"));
 
-        // 子 tab 创建时 task_prompt 应已设置
-        let sub_tab = &app.tab_bar.tabs[1];
+        // 子 tab 创建时 task_prompt 应已设置（帧路由到 hidden_tabs）
+        let sub_tab = app
+            .tab_bar
+            .hidden_tabs
+            .iter()
+            .find(|t| t.session_id == "sub-sess-abc")
+            .unwrap();
         assert_eq!(sub_tab.task_prompt.as_deref(), Some("Find all TODOs in the codebase"));
     }
 
@@ -2093,12 +2197,20 @@
         };
         app.route_frame(thinking);
 
-        // 首帧后：tab 已创建但 task_prompt 尚未设置
-        assert!(app.tab_bar.tabs[1].task_prompt.is_none());
+        // 首帧后：hidden tab 已创建但 task_prompt 尚未设置
+        assert_eq!(app.tab_bar.hidden_tabs.len(), 1);
+        assert!(app.tab_bar.hidden_tabs[0].task_prompt.is_none());
 
-        // 第二帧带 agent_name -> 延迟设置 task_prompt
+        // 第二帧带 agent_name -> 在 hidden_tab 上延迟设置 task_prompt，不恢复活跃 tabs
         app.route_frame(make_text_delta_frame("sub-delayed", "explorer", "hello"));
-        assert_eq!(app.tab_bar.tabs[1].task_prompt.as_deref(), Some("Delayed prompt"));
+        assert_eq!(app.tab_bar.tabs.len(), 1);
+        let hidden = app
+            .tab_bar
+            .hidden_tabs
+            .iter()
+            .find(|t| t.session_id == "sub-delayed")
+            .expect("sub-delayed hidden tab not found");
+        assert_eq!(hidden.task_prompt.as_deref(), Some("Delayed prompt"));
     }
 
     #[test]
@@ -2123,4 +2235,38 @@
         assert_eq!(tab.messages[0].sub_session_id.as_deref(), Some("sub-abc"));
         assert_eq!(tab.messages[0].tool_result.as_deref(), Some("found 3 TODOs"));
         assert!(!tab.messages[0].tool_error);
+    }
+
+    #[test]
+    fn test_button_hit_after_completion() {
+        let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+        app.route_frame(tool_call("explorer", "call-1", r#"{"prompt":"test"}"#));
+        app.route_frame(make_text_delta_frame("sub-1", "explorer", "hello"));
+        app.route_frame(make_done_frame("sub-1"));
+        app.route_frame(tool_result("call-1", "explorer", "done", false));
+
+        // 主 tab 的 ToolCall 应已升级为 AgentCall，sub_session_id 已设置
+        let main_msg = &app.tab_bar.tabs[0].messages[0];
+        assert_eq!(main_msg.line_type, LineType::AgentCall { name: "explorer".into() });
+        assert_eq!(main_msg.sub_session_id.as_deref(), Some("sub-1"));
+
+        let render_w = 80u16;
+        crate::ui::ensure_all_caches(&mut app, render_w);
+
+        // 点击按钮区域应命中 (AGENT_CALL_STYLE: top_margin=1, margin_vertical=1 -> header at y+2)
+        let result = crate::tool_ui::agent_open_tab_hit_test(
+            &app.messages(),
+            &app.message_caches,
+            2,  // virtual_row = header 行 (y + top_margin + margin_vertical)
+            70, // column 在按钮区域内
+            render_w,
+        );
+        assert_eq!(result.as_deref(), Some("sub-1"));
+
+        // find_or_restore_tab 应从 hidden_tabs 恢复
+        assert_eq!(app.tab_bar.hidden_tabs.len(), 1);
+        let idx = app.tab_bar.find_or_restore_tab("sub-1").unwrap();
+        assert_eq!(idx, 1);
+        assert_eq!(app.tab_bar.tabs.len(), 2);
+        assert_eq!(app.tab_bar.hidden_tabs.len(), 0);
     }

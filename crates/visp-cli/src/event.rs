@@ -838,7 +838,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 }).unwrap_or(0);
                 let virtual_row = virtual_row.saturating_sub(prompt_h);
 
-                // 先检查是否点击了 AgentCall 块的 "[open tab]" 按钮
+                // 先检查是否点击了 AgentCall 块的 "[show in new tab]" 按钮
                 let rel_col = m.column.saturating_sub(cx);
                 if let Some(sub_sid) = crate::tool_ui::agent_open_tab_hit_test(
                     &app.messages(),
@@ -847,8 +847,8 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                     rel_col,
                     content_w,
                 ) {
-                    // 切换到子 agent 的 tab
-                    if let Some(idx) = app.tab_bar.find_index_by_session(&sub_sid) {
+                    // 切换到或恢复子 agent 的 tab
+                    if let Some(idx) = app.tab_bar.find_or_restore_tab(&sub_sid) {
                         app.tab_bar.activate(idx);
                         app.scroll_following = true;
                         app.needs_render = true;

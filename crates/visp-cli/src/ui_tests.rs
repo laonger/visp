@@ -301,3 +301,44 @@
         let mut tb = crate::app::TabBar::new("main".into());
         assert!(!tb.close_tab(0));
     }
+
+    #[test]
+    fn test_close_tab_stores_in_closed_tabs() {
+        let mut tb = crate::app::TabBar::new("main".into());
+        tb.insert_sub_agent("sub1".to_string(), "agentA".to_string(), false);
+        assert!(tb.close_tab(1));
+        assert_eq!(tb.tabs.len(), 1);
+        assert_eq!(tb.closed_tabs.len(), 1);
+        assert_eq!(tb.closed_tabs[0].session_id, "sub1");
+    }
+
+    #[test]
+    fn test_find_or_restore_tab_from_closed() {
+        let mut tb = crate::app::TabBar::new("main".into());
+        tb.insert_sub_agent("sub1".to_string(), "agentA".to_string(), false);
+        // Close the tab -> moved to closed_tabs
+        assert!(tb.close_tab(1));
+        assert_eq!(tb.tabs.len(), 1);
+        // Restore it
+        let idx = tb.find_or_restore_tab("sub1").unwrap();
+        assert_eq!(idx, 1);
+        assert_eq!(tb.tabs.len(), 2);
+        assert_eq!(tb.tabs[1].session_id, "sub1");
+        assert_eq!(tb.closed_tabs.len(), 0);
+    }
+
+    #[test]
+    fn test_find_or_restore_tab_already_active() {
+        let mut tb = crate::app::TabBar::new("main".into());
+        tb.insert_sub_agent("sub1".to_string(), "agentA".to_string(), false);
+        // Tab is active -> find_or_restore returns existing index
+        let idx = tb.find_or_restore_tab("sub1").unwrap();
+        assert_eq!(idx, 1);
+        assert_eq!(tb.tabs.len(), 2); // no new tab created
+    }
+
+    #[test]
+    fn test_find_or_restore_tab_not_found() {
+        let mut tb = crate::app::TabBar::new("main".into());
+        assert!(tb.find_or_restore_tab("nonexistent").is_none());
+    }

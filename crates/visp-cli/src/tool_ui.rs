@@ -270,11 +270,12 @@ pub(crate) fn render_tool_call(msg: &ChatLine, width: u16, expanded: bool) -> Ve
 ///
 /// Layout:
 /// ```text
-/// 闭合:  agent_name: sub_session_id          [open tab]
-///         prompt 第一行
+/// 闭合:  agent_name: sub_session_id     [show in new tab]
+///         agent prompt第一行
 ///
-/// 展开:  agent_name: sub_session_id          [open tab]
-///         完整 prompt
+/// 展开:  agent_name: sub_session_id     [show in new tab]
+///         agent 完整 prompt
+///         agent result
 /// ```
 pub(crate) fn render_agent_call(msg: &ChatLine, width: u16, expanded: bool) -> Vec<Line<'static>> {
     let name = match &msg.line_type {
@@ -297,9 +298,9 @@ pub(crate) fn render_agent_call(msg: &ChatLine, width: u16, expanded: bool) -> V
         .map(|s| &s[..s.len().min(8)])
         .unwrap_or("...");
 
-    // Header line: "agent_name: sub_session_id"  right-aligned "[open tab]"
+    // Header line: "agent_name: sub_session_id"  right-aligned "[show in new tab]"
     let left = format!("🤖 {}: {}", name, short_sid);
-    let button = "[open tab]";
+    let button = "[show in new tab]";
     let header_line = build_header_with_button(&left, button, width as usize);
     lines.push(Line::styled(
         header_line,
@@ -375,16 +376,20 @@ pub(crate) fn render_agent_call(msg: &ChatLine, width: u16, expanded: bool) -> V
 }
 
 /// Build a header line with left text and a right-aligned button.
-/// The button is placed at the right edge of the line.
+/// The button is placed near the right edge with a small gap.
+/// Uses display width (not char count) for correct alignment with CJK/emoji.
 fn build_header_with_button(left: &str, button: &str, width: usize) -> String {
-    let left_len = left.chars().count();
-    let button_len = button.chars().count();
-    if left_len + button_len + 2 >= width {
+    use unicode_width::UnicodeWidthStr;
+    let left_len = left.width();
+    let button_len = button.width();
+    // 留 2 格右间距，按钮不贴到最右边
+    let right_gap = 2;
+    if left_len + button_len + right_gap + 1 >= width {
         // Not enough space: just show left text, truncated
         let truncated: String = left.chars().take(width).collect();
         return pad_to_width(&truncated, width);
     }
-    let gap = width - left_len - button_len;
+    let gap = width - right_gap - left_len - button_len;
     format!("{}{}{}", left, " ".repeat(gap), button)
 }
 
@@ -497,15 +502,16 @@ pub(crate) fn tool_block_hit_test(
     None
 }
 
-/// "[open tab]" 按钮文字长度
-const OPEN_TAB_BUTTON_LEN: usize = 10; // "[open tab]"
+/// "[show in new tab]" 按钮文字长度
+const OPEN_TAB_BUTTON_LEN: usize = 18; // "[show in new tab]"
+/// 按钮右侧间距（与 build_header_with_button 的 right_gap 一致）
+const OPEN_TAB_RIGHT_GAP: usize = 2;
 
-/// Check if a mouse click hits the "[open tab]" button on an AgentCall block's header line.
+/// Check if a mouse click hits the "[show in new tab]" button on an AgentCall block's header line.
 /// Returns the sub_session_id if the button was hit.
 ///
-/// The button is right-aligned at the end of the first line (header) of the agent block.
 /// `virtual_row` is the scroll-adjusted row, `column` is the screen column within the chat area
-/// (adjusted for content area offset).
+/// (adjusted for content area offset), `content_width` is the render width (= cache_width).
 pub(crate) fn agent_open_tab_hit_test(
     messages: &[ChatLine],
     caches: &[crate::app::MessageCache],
@@ -519,14 +525,17 @@ pub(crate) fn agent_open_tab_hit_test(
         if let Some(cache) = caches.iter().find(|c| c.msg_id == msg.id) {
             let h = style.total_height(cache.line_count);
             if virtual_row >= y && virtual_row < y + h {
-                // Must be an AgentCall on the header line (first line of the block)
+                // Must be an AgentCall on the header line
+                // header 行 = y + top_margin + margin_vertical（与 render_block 一致）
                 if matches!(msg.line_type, LineType::AgentCall { .. })
-                    && virtual_row == y
+                    && virtual_row == y + style.top_margin + style.margin_vertical
                 {
                     if let Some(ref sub_sid) = msg.sub_session_id {
-                        // The button is at the right edge of the line
-                        let button_start = content_width.saturating_sub(OPEN_TAB_BUTTON_LEN as u16);
-                        if column >= button_start && column < content_width {
+                        // 按钮位置：margin_horizontal(1) + content_width - right_gap - button_len
+                        // 到 margin_horizontal(1) + content_width - right_gap
+                        let button_start = 1u16 + content_width.saturating_sub(OPEN_TAB_RIGHT_GAP as u16 + OPEN_TAB_BUTTON_LEN as u16);
+                        let button_end = 1u16 + content_width.saturating_sub(OPEN_TAB_RIGHT_GAP as u16);
+                        if column >= button_start && column < button_end {
                             return Some(sub_sid.clone());
                         }
                     }
@@ -699,7 +708,7 @@ mod tests {
         let header: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(header.contains("explorer"));
         assert!(header.contains("abc123de"));
-        assert!(header.contains("[open tab]"));
+        assert!(header.contains("[show in new tab]"));
         // Second line is the first line of prompt
         let prompt_line: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(prompt_line.contains("Find all TODOs"));
@@ -722,7 +731,7 @@ mod tests {
         assert_eq!(lines.len(), 3);
         let header: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(header.contains("fixer"));
-        assert!(header.contains("[open tab]"));
+        assert!(header.contains("[show in new tab]"));
         // Full prompt is shown
         let all_text: String = lines.iter().flat_map(|l| l.spans.iter()).map(|s| s.content.as_ref()).collect();
         assert!(all_text.contains("Fix the bug"));
@@ -752,7 +761,8 @@ mod tests {
         let result = build_header_with_button("hello", "[btn]", 20);
         assert!(result.starts_with("hello"));
         assert!(result.ends_with("[btn]"));
-        assert_eq!(result.len(), 20);
+        // right_gap=2: total = left_len + gap + button_len = 5 + 8 + 5 = 18
+        assert_eq!(result.chars().count(), 18);
     }
 
     #[test]
@@ -780,8 +790,8 @@ mod tests {
         let cache = MessageCache::from_message(&msg, 60, false);
         let messages = vec![msg];
         let caches = vec![cache];
-        // Button is at the right edge (columns 50-59 for width 60)
-        let result = agent_open_tab_hit_test(&messages, &caches, 0, 55, 60);
+        // AGENT_CALL_STYLE: top_margin=1, margin_vertical=1 -> header at y+2
+        let result = agent_open_tab_hit_test(&messages, &caches, 2, 55, 60);
         assert_eq!(result.as_deref(), Some("sub-sess-123"));
     }
 
@@ -801,8 +811,8 @@ mod tests {
         let cache = MessageCache::from_message(&msg, 60, false);
         let messages = vec![msg];
         let caches = vec![cache];
-        // Click on the left side (not the button)
-        let result = agent_open_tab_hit_test(&messages, &caches, 0, 5, 60);
+        // Click on header row but left side (not the button)
+        let result = agent_open_tab_hit_test(&messages, &caches, 2, 5, 60);
         assert!(result.is_none());
     }
 
@@ -822,8 +832,8 @@ mod tests {
         let cache = MessageCache::from_message(&msg, 60, false);
         let messages = vec![msg];
         let caches = vec![cache];
-        // Click on row 1 (prompt line, not header)
-        let result = agent_open_tab_hit_test(&messages, &caches, 1, 55, 60);
+        // Click on row 3 (prompt line, not header which is at row 2)
+        let result = agent_open_tab_hit_test(&messages, &caches, 3, 55, 60);
         assert!(result.is_none());
     }
 
