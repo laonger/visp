@@ -22,6 +22,9 @@ pub const ASSISTANT_BG: Color = Color::from_u32(0x00222A3E);
 /// 工具调用/结果块底色（比窗体背景略暗的同色调）
 pub const TOOL_BG: Color = Color::from_u32(0x00141428);
 
+/// 子 Agent 调用块底色（深紫色调，与普通工具调用区分）
+pub const AGENT_CALL_BG: Color = Color::from_u32(0x002A1A3E);
+
 /// 输入区背景
 pub const INPUT_BG: Color = Color::from_u32(0x00111111);
 
@@ -58,6 +61,9 @@ pub const ERROR_FG: Color = Color::Red;
 
 /// 状态文字
 pub const STATUS_FG: Color = Color::DarkGray;
+
+/// 子 Agent 调用块文字（紫色调，与普通工具调用区分）
+pub const AGENT_CALL_FG: Color = Color::Magenta;
 
 /// notice 文字
 pub const INPUT_NOTICE_FG: Color = Color::DarkGray;
@@ -200,6 +206,16 @@ pub const TOOL_CALL_STYLE: BlockStyle = BlockStyle {
     bottom_pad: 1,
 };
 
+/// 子 Agent 调用样式（紫色底色，与工具调用同结构）
+pub const AGENT_CALL_STYLE: BlockStyle = BlockStyle {
+    top_margin: 1,
+    margin_vertical: 1,
+    margin_horizontal: 1,
+    bg_fill: Some(AGENT_CALL_BG),
+    shadow: false,
+    bottom_pad: 1,
+};
+
 /// 工具结果样式（纯文本缩进，无底色，从属于调用）
 pub const TOOL_RESULT_STYLE: BlockStyle = BlockStyle {
     top_margin: 1,
@@ -243,6 +259,7 @@ pub fn fg_for(line_type: LineType) -> Color {
         LineType::ToolCall { .. } => TOOL_CALL_FG,
         LineType::ToolResult { .. } => TOOL_RESULT_FG,
         LineType::ToolError { .. } => ERROR_FG,
+        LineType::AgentCall { .. } => AGENT_CALL_FG,
         LineType::Error => ERROR_FG,
         LineType::Status => STATUS_FG,
         LineType::Usage => TOOL_RESULT_FG,
@@ -258,6 +275,7 @@ pub fn style_for(line_type: LineType) -> BlockStyle {
         LineType::ToolCall { .. } => TOOL_CALL_STYLE,
         LineType::ToolResult { .. } => TOOL_RESULT_STYLE,
         LineType::ToolError { .. } => TOOL_ERROR_STYLE,
+        LineType::AgentCall { .. } => AGENT_CALL_STYLE,
         LineType::Usage => USAGE_STYLE,
         LineType::Error | LineType::Status => TOOL_STYLE,
     }

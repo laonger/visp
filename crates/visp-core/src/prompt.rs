@@ -7,7 +7,7 @@ pub struct PromptBuilder;
 const USER_QUERY_INSTRUCTION: &str = "\n\n## IMPORTANT: How to ask the user to choose\n\
 \n\
 When you need the user to make a decision, you MUST use the [USER_QUERY] marker at the very end of your response. \
-Do NOT ask the user to choose using plain text — it will not trigger the selection UI.\n\
+Do NOT ask the user to choose using plain text - it will not trigger the selection UI.\n\
 \n\
 ### Use regular options when the user should pick from predefined choices:\n\
 \n\
@@ -17,14 +17,14 @@ Which approach do you prefer?\n\
 - PostgreSQL\n\
 [/USER_QUERY]\n\
 \n\
-### Use allow_other=true when you want the user to speak freely or provide custom input:\n\
+### You can also include options with free-form input. An \"Other\" button is always available:\n\
 \n\
-[USER_QUERY allow_other=true]\n\
+[USER_QUERY]\n\
 What's on your mind?\n\
 [/USER_QUERY]\n\
 \n\
 Or with some suggestions:\n\
-[USER_QUERY allow_other=true]\n\
+[USER_QUERY]\n\
 How should we fix this bug?\n\
 - Refactor the module\n\
 - Add a quick patch\n\
@@ -34,9 +34,9 @@ How should we fix this bug?\n\
 - Marker MUST be at the very end of your response (not in the middle)\n\
 - Each option MUST be on its own line starting with `- `\n\
 - Options should be REAL choices, not invitations to talk\n\
-- Do NOT create \"listening\" options like \"你来说说看\" or \"I'll listen\" — use allow_other=true instead\n\
+- Do NOT create \"listening\" options like \"你来说说看\" or \"I'll listen\"\n\
 - Only use [USER_QUERY] when you genuinely need user input\n\
-- `allow_other=true` adds an \"Other\" button that opens a text input field";
+- An \"Other\" button is always shown for free-form input";
 
 #[allow(clippy::too_many_arguments)]
 impl PromptBuilder {
@@ -222,7 +222,7 @@ mod tests {
                 .starts_with("You are helpful\n\n## Instructions\n\nBe concise")
         );
         assert!(messages[0].content.contains("[USER_QUERY]"));
-        assert!(messages[0].content.contains("allow_other=true"));
+        assert!(messages[0].content.contains("\"Other\""));
         assert!(messages[0].content.contains("Current Context"));
         assert!(messages[0].content.contains("/tmp"));
         assert!(messages[0].content.contains("2026-06-09"));
@@ -346,7 +346,7 @@ mod tests {
         let instruction = user_query_instruction();
         assert!(instruction.contains("[USER_QUERY]"));
         assert!(instruction.contains("[/USER_QUERY]"));
-        assert!(instruction.contains("allow_other=true"));
+        assert!(instruction.contains("\"Other\""));
         // 语气必须强硬，不能是 suggestion
         assert!(instruction.contains("MUST"));
         assert!(!instruction.contains("you can"));

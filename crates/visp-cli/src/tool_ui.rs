@@ -266,6 +266,128 @@ pub(crate) fn render_tool_call(msg: &ChatLine, width: u16, expanded: bool) -> Ve
     lines
 }
 
+/// Render an AgentCall message block (sub-agent invocation in main tab).
+///
+/// Layout:
+/// ```text
+/// 闭合:  agent_name: sub_session_id          [open tab]
+///         prompt 第一行
+///
+/// 展开:  agent_name: sub_session_id          [open tab]
+///         完整 prompt
+/// ```
+pub(crate) fn render_agent_call(msg: &ChatLine, width: u16, expanded: bool) -> Vec<Line<'static>> {
+    let name = match &msg.line_type {
+        LineType::AgentCall { name } => name.as_str(),
+        _ => return Vec::new(),
+    };
+
+    let mut lines = Vec::new();
+
+    // Parse prompt from arguments JSON
+    let prompt = serde_json::from_str::<serde_json::Value>(&msg.content)
+        .ok()
+        .and_then(|v| v.get("prompt").and_then(|p| p.as_str()).map(String::from))
+        .unwrap_or_else(|| msg.content.clone());
+
+    // Short session ID (first 8 chars)
+    let short_sid = msg
+        .sub_session_id
+        .as_deref()
+        .map(|s| &s[..s.len().min(8)])
+        .unwrap_or("...");
+
+    // Header line: "agent_name: sub_session_id"  right-aligned "[open tab]"
+    let left = format!("🤖 {}: {}", name, short_sid);
+    let button = "[open tab]";
+    let header_line = build_header_with_button(&left, button, width as usize);
+    lines.push(Line::styled(
+        header_line,
+        Style::default().fg(theme::AGENT_CALL_FG),
+    ));
+
+    // Prompt line(s)
+    if expanded {
+        // Show full prompt
+        let prompt_wrapped = wrap_text(&prompt, width);
+        for dl in prompt_wrapped.iter() {
+            let content = if dl.is_empty() {
+                " ".repeat(width as usize)
+            } else {
+                pad_to_width(dl, width as usize)
+            };
+            lines.push(Line::styled(
+                content,
+                Style::default().fg(theme::TOOL_RESULT_FG),
+            ));
+        }
+
+        // If we have a merged result, show it
+        if let Some(ref result) = msg.tool_result {
+            lines.push(Line::styled(
+                pad_to_width("", width as usize),
+                Style::default().fg(theme::TOOL_RESULT_FG),
+            ));
+            let result_style = if msg.tool_error {
+                Style::default().fg(theme::ERROR_FG)
+            } else {
+                Style::default().fg(theme::TOOL_RESULT_FG)
+            };
+            let mut highlighted = highlight_code_block("", result);
+            for line in &mut highlighted {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                let padded = if text.is_empty() {
+                    " ".repeat(width as usize)
+                } else {
+                    pad_to_width(&text, width as usize)
+                };
+                *line = Line::styled(padded, result_style);
+            }
+            lines.extend(highlighted);
+        }
+    } else {
+        // Collapsed: show only first line of prompt
+        let first_line = prompt.lines().next().unwrap_or("");
+        let display = if first_line.is_empty() {
+            " ".repeat(width as usize)
+        } else {
+            pad_to_width(first_line, width as usize)
+        };
+        lines.push(Line::styled(
+            display,
+            Style::default().fg(theme::TOOL_RESULT_FG),
+        ));
+
+        // If we have a result, show summary
+        if let Some(ref result) = msg.tool_result {
+            let summary = result.lines().next().unwrap_or("");
+            if !summary.is_empty() {
+                let summary_line = format!("  ✓ {}", summary);
+                lines.push(Line::styled(
+                    pad_to_width(&summary_line, width as usize),
+                    Style::default().fg(theme::TOOL_RESULT_FG),
+                ));
+            }
+        }
+    }
+
+    lines
+}
+
+/// Build a header line with left text and a right-aligned button.
+/// The button is placed at the right edge of the line.
+fn build_header_with_button(left: &str, button: &str, width: usize) -> String {
+    let left_len = left.chars().count();
+    let button_len = button.chars().count();
+    if left_len + button_len + 2 >= width {
+        // Not enough space: just show left text, truncated
+        let truncated: String = left.chars().take(width).collect();
+        return pad_to_width(&truncated, width);
+    }
+    let gap = width - left_len - button_len;
+    format!("{}{}{}", left, " ".repeat(gap), button)
+}
+
 /// Render a ToolResult message block.
 pub(crate) fn render_tool_result(msg: &ChatLine, width: u16) -> Vec<Line<'static>> {
     let name = match &msg.line_type {
@@ -361,10 +483,52 @@ pub(crate) fn tool_block_hit_test(
             let h = style.total_height(cache.line_count);
             if virtual_row >= y && virtual_row < y + h {
                 // Clicked on this message
-                if matches!(msg.line_type, LineType::ToolCall { .. }) {
+                if matches!(msg.line_type, LineType::ToolCall { .. } | LineType::AgentCall { .. }) {
                     if let Some(ref call_id) = msg.call_id {
-                        // 整个 tool block（含展开的结果内容）均可点击切换展开/折叠
+                        // 整个 tool/agent block（含展开的结果内容）均可点击切换展开/折叠
                         return Some(call_id.clone());
+                    }
+                }
+                break;
+            }
+            y += h;
+        }
+    }
+    None
+}
+
+/// "[open tab]" 按钮文字长度
+const OPEN_TAB_BUTTON_LEN: usize = 10; // "[open tab]"
+
+/// Check if a mouse click hits the "[open tab]" button on an AgentCall block's header line.
+/// Returns the sub_session_id if the button was hit.
+///
+/// The button is right-aligned at the end of the first line (header) of the agent block.
+/// `virtual_row` is the scroll-adjusted row, `column` is the screen column within the chat area
+/// (adjusted for content area offset).
+pub(crate) fn agent_open_tab_hit_test(
+    messages: &[ChatLine],
+    caches: &[crate::app::MessageCache],
+    virtual_row: u16,
+    column: u16,
+    content_width: u16,
+) -> Option<String> {
+    let mut y: u16 = 0;
+    for msg in messages {
+        let style = theme::style_for(msg.line_type.clone());
+        if let Some(cache) = caches.iter().find(|c| c.msg_id == msg.id) {
+            let h = style.total_height(cache.line_count);
+            if virtual_row >= y && virtual_row < y + h {
+                // Must be an AgentCall on the header line (first line of the block)
+                if matches!(msg.line_type, LineType::AgentCall { .. })
+                    && virtual_row == y
+                {
+                    if let Some(ref sub_sid) = msg.sub_session_id {
+                        // The button is at the right edge of the line
+                        let button_start = content_width.saturating_sub(OPEN_TAB_BUTTON_LEN as u16);
+                        if column >= button_start && column < content_width {
+                            return Some(sub_sid.clone());
+                        }
                     }
                 }
                 break;
@@ -512,5 +676,154 @@ mod tests {
         let content = "No matches found for 'foo'";
         let summary = result_summary("edit_file", content);
         assert_eq!(summary, "");
+    }
+
+    // ── render_agent_call ─────────────────────────────────
+
+    #[test]
+    fn test_render_agent_call_collapsed() {
+        let msg = ChatLine {
+            id: 1,
+            version: 0,
+            line_type: LineType::AgentCall { name: "explorer".into() },
+            content: r#"{"prompt":"Find all TODOs\nIn the codebase"}"#.into(),
+            call_id: Some("call-1".into()),
+            tool_result: None,
+            tool_error: false,
+            sub_session_id: Some("abc123def456".into()),
+        };
+        let lines = render_agent_call(&msg, 60, false);
+        // Header + first line of prompt
+        assert_eq!(lines.len(), 2);
+        // Header contains agent name and short session ID
+        let header: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(header.contains("explorer"));
+        assert!(header.contains("abc123de"));
+        assert!(header.contains("[open tab]"));
+        // Second line is the first line of prompt
+        let prompt_line: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(prompt_line.contains("Find all TODOs"));
+    }
+
+    #[test]
+    fn test_render_agent_call_expanded() {
+        let msg = ChatLine {
+            id: 1,
+            version: 0,
+            line_type: LineType::AgentCall { name: "fixer".into() },
+            content: r#"{"prompt":"Fix the bug\nIn module X"}"#.into(),
+            call_id: Some("call-2".into()),
+            tool_result: None,
+            tool_error: false,
+            sub_session_id: Some("xyz789abc".into()),
+        };
+        let lines = render_agent_call(&msg, 60, true);
+        // Header + 2 prompt lines
+        assert_eq!(lines.len(), 3);
+        let header: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(header.contains("fixer"));
+        assert!(header.contains("[open tab]"));
+        // Full prompt is shown
+        let all_text: String = lines.iter().flat_map(|l| l.spans.iter()).map(|s| s.content.as_ref()).collect();
+        assert!(all_text.contains("Fix the bug"));
+        assert!(all_text.contains("In module X"));
+    }
+
+    #[test]
+    fn test_render_agent_call_no_sub_session_id() {
+        let msg = ChatLine {
+            id: 1,
+            version: 0,
+            line_type: LineType::AgentCall { name: "explorer".into() },
+            content: r#"{"prompt":"Search"}"#.into(),
+            call_id: Some("call-3".into()),
+            tool_result: None,
+            tool_error: false,
+            sub_session_id: None,
+        };
+        let lines = render_agent_call(&msg, 60, false);
+        assert_eq!(lines.len(), 2);
+        let header: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(header.contains("..."));
+    }
+
+    #[test]
+    fn test_build_header_with_button() {
+        let result = build_header_with_button("hello", "[btn]", 20);
+        assert!(result.starts_with("hello"));
+        assert!(result.ends_with("[btn]"));
+        assert_eq!(result.len(), 20);
+    }
+
+    #[test]
+    fn test_build_header_with_button_too_narrow() {
+        let result = build_header_with_button("hello world this is long", "[btn]", 10);
+        // Should just be truncated left text, no button
+        assert!(!result.contains("[btn]"));
+    }
+
+    // ── agent_open_tab_hit_test ───────────────────────────
+
+    #[test]
+    fn test_agent_open_tab_hit_test_button_hit() {
+        use crate::app::MessageCache;
+        let msg = ChatLine {
+            id: 1,
+            version: 0,
+            line_type: LineType::AgentCall { name: "explorer".into() },
+            content: r#"{"prompt":"test"}"#.into(),
+            call_id: Some("call-1".into()),
+            tool_result: None,
+            tool_error: false,
+            sub_session_id: Some("sub-sess-123".into()),
+        };
+        let cache = MessageCache::from_message(&msg, 60, false);
+        let messages = vec![msg];
+        let caches = vec![cache];
+        // Button is at the right edge (columns 50-59 for width 60)
+        let result = agent_open_tab_hit_test(&messages, &caches, 0, 55, 60);
+        assert_eq!(result.as_deref(), Some("sub-sess-123"));
+    }
+
+    #[test]
+    fn test_agent_open_tab_hit_test_button_missed() {
+        use crate::app::MessageCache;
+        let msg = ChatLine {
+            id: 1,
+            version: 0,
+            line_type: LineType::AgentCall { name: "explorer".into() },
+            content: r#"{"prompt":"test"}"#.into(),
+            call_id: Some("call-1".into()),
+            tool_result: None,
+            tool_error: false,
+            sub_session_id: Some("sub-sess-123".into()),
+        };
+        let cache = MessageCache::from_message(&msg, 60, false);
+        let messages = vec![msg];
+        let caches = vec![cache];
+        // Click on the left side (not the button)
+        let result = agent_open_tab_hit_test(&messages, &caches, 0, 5, 60);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_agent_open_tab_hit_test_non_header_row() {
+        use crate::app::MessageCache;
+        let msg = ChatLine {
+            id: 1,
+            version: 0,
+            line_type: LineType::AgentCall { name: "explorer".into() },
+            content: r#"{"prompt":"test"}"#.into(),
+            call_id: Some("call-1".into()),
+            tool_result: None,
+            tool_error: false,
+            sub_session_id: Some("sub-sess-123".into()),
+        };
+        let cache = MessageCache::from_message(&msg, 60, false);
+        let messages = vec![msg];
+        let caches = vec![cache];
+        // Click on row 1 (prompt line, not header)
+        let result = agent_open_tab_hit_test(&messages, &caches, 1, 55, 60);
+        assert!(result.is_none());
     }
 }

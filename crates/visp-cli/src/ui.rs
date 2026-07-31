@@ -5,10 +5,10 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap},
 };
 
-use crate::app::{AgentStatus, AppState, MessageCache, TabEntry, pad_to_width};
+use crate::app::{AgentStatus, AppState, ConfirmState, MessageCache, TabEntry, pad_to_width};
 use crate::debug_log;
 
 /// 将数字格式化为千位分隔符形式，如 `1234567` → `1,234,567`
@@ -25,7 +25,7 @@ fn format_number(n: u32) -> String {
 }
 
 use crate::theme;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 // ════════════════════════════════════════════════════════════════
 // Tab Bar 渲染
@@ -231,6 +231,30 @@ fn calc_input_height(textarea: &ratatui_textarea::TextArea<'static>, width_appro
     total.clamp(3, 10)
 }
 
+/// 计算确认栏所需高度：1 行消息 + 每个选项行（含折行）。
+/// 选项前缀 `[A] ` 占 4 列显示宽度。顶部 border 占 1 行。
+fn calc_confirm_height(confirm: &ConfirmState, width_approx: u16) -> u16 {
+    let content_width = if width_approx > 4 {
+        width_approx as usize - 4 // 减去 "[A] " 前缀
+    } else {
+        1
+    };
+    let options: Vec<String> = if confirm.options.is_empty() {
+        vec!["Approve".into(), "Deny".into(), "Always Allow".into()]
+    } else {
+        confirm.options.clone()
+    };
+    let mut total: u16 = 1; // 消息行
+    for opt in &options {
+        let w = UnicodeWidthStr::width(opt.as_str()) as u16;
+        total += std::cmp::max(1, w.div_ceil(content_width.max(1) as u16));
+    }
+    if !confirm.options.is_empty() {
+        total += 1; // Other 选项行
+    }
+    total + 1 // 顶部 border
+}
+
 /// 顶层渲染入口：将当前 AppState 绘制到终端
 pub fn render(app: &mut AppState, f: &mut Frame) {
     // 四周1列留白（上/下不留），绘制背景色
@@ -240,7 +264,13 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
     f.render_widget(Paragraph::new("").block(bg), f.area());
 
     let input_area_height = calc_input_height(&app.textarea, area.width);
-    let bottom_chunks_height = input_area_height + (if app.confirm.is_some() { 5 } else { 4 });
+    let confirm_height = app
+        .confirm
+        .as_ref()
+        .map(|c| calc_confirm_height(c, area.width))
+        .unwrap_or(0);
+    let bottom_chunks_height =
+        input_area_height + (if app.confirm.is_some() { confirm_height + 2 } else { 4 });
 
     // 纵向分割：Tab栏(2) | 对话区 | 分隔线 | 底部区域
     let main_chunks = Layout::default()
@@ -269,10 +299,10 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
         .direction(Direction::Vertical)
         .constraints(if app.confirm.is_some() {
             vec![
-                Constraint::Length(3), // 确认栏
-                Constraint::Min(2),    // input area
-                Constraint::Length(1), // 分隔线
-                Constraint::Length(1), // status area
+                Constraint::Length(confirm_height), // 确认栏
+                Constraint::Min(2),                 // input area
+                Constraint::Length(1),              // 分隔线
+                Constraint::Length(1),              // status area
             ]
         } else {
             vec![
@@ -668,86 +698,13 @@ fn render_confirm_bar(app: &AppState, f: &mut Frame, area: Rect) {
         } else {
             confirm.options.clone()
         };
-
-        // 计算可用宽度
-        let avail_w = area.width as usize;
-        let has_other = confirm.allow_other;
-        let other_label = "[X] Other";
-        let other_full_w = if has_other {
-            UnicodeWidthStr::width(other_label)
-        } else {
-            0
-        };
+        let has_other = !confirm.options.is_empty();
         let num_opts = options.len();
-        let sep_w = 2; // "  " between options
-        let prefix_w = 4; // "[X] "
 
-        // 先预留 Other 的完整宽度，剩余宽度平分给其他选项
-        let other_w = if has_other { other_full_w } else { 0 };
-        let other_sep = if has_other && num_opts > 0 { sep_w } else { 0 }; // Other 前的分隔符
-        let avail_for_normal = avail_w.saturating_sub(other_w + other_sep);
-
-        let total_sep_normal = num_opts.saturating_sub(1) * sep_w;
-        let total_prefix_normal = num_opts * prefix_w;
-        let text_w = if num_opts > 0 {
-            let overhead = total_prefix_normal + total_sep_normal;
-            if overhead >= avail_for_normal {
-                0
-            } else {
-                (avail_for_normal - overhead)
-                    .checked_div(num_opts)
-                    .unwrap_or(0)
-            }
-        } else {
-            0
-        };
-
-        // 截断工具函数（用 UnicodeWidthStr 确保 CJK 显示宽度正确）
-        let truncate = |s: &str, max: usize| -> String {
-            let w = UnicodeWidthStr::width(s);
-            if w <= max || max == 0 {
-                s.to_string()
-            } else if max <= 2 {
-                // 空间太小，最多放一个字符
-                let first = s.chars().next().map(|c| c.to_string()).unwrap_or_default();
-                if UnicodeWidthStr::width(first.as_str()) <= max {
-                    first
-                } else {
-                    String::new()
-                }
-            } else {
-                // 按列宽逐字符构建，预留 1 列给 "…"
-                let mut result = String::new();
-                let mut current_w = 0;
-                for c in s.chars() {
-                    let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-                    if current_w + cw < max {
-                        result.push(c);
-                        current_w += cw;
-                    } else {
-                        break;
-                    }
-                }
-                format!("{}…", result)
-            }
-        };
-
-        let all_labels: Vec<String> = {
-            let mut labels: Vec<String> = options
-                .iter()
-                .enumerate()
-                .map(|(i, opt)| {
-                    let letter = (b'A' + i as u8) as char;
-                    let truncated = truncate(opt, text_w);
-                    format!("[{}] {}", letter, truncated)
-                })
-                .collect();
-            if has_other {
-                let letter = (b'A' + num_opts as u8) as char;
-                labels.push(format!("[{}] Other", letter)); // 不截断 Other
-            }
-            labels
-        };
+        // 每个选项的字母标签 [A] [B] ...
+        let letters: Vec<char> = (0..num_opts + if has_other { 1 } else { 0 })
+            .map(|i| (b'A' + i as u8) as char)
+            .collect();
 
         // 消息行
         let msg_line = Line::from(vec![
@@ -755,55 +712,68 @@ fn render_confirm_bar(app: &AppState, f: &mut Frame, area: Rect) {
             Span::styled(&confirm.message, Style::default().fg(theme::ASSISTANT_FG)),
         ]);
 
-        // 构建选项行
-        let mut option_spans: Vec<Span> = Vec::new();
+        // 构建竖排选项行：每个选项占一行，支持折行
+        let mut lines: Vec<Line> = vec![msg_line];
 
-        for (i, label) in all_labels.iter().enumerate() {
+        for (i, opt) in options.iter().enumerate() {
             let is_selected = i == confirm.selected_index && !confirm.other_active;
-
-            if is_selected {
-                option_spans.push(Span::styled(
-                    label.clone(),
-                    Style::default()
-                        .fg(theme::CONFIRM_FG)
-                        .bg(theme::CONFIRM_SELECTED_BG),
-                ));
-            } else {
-                // 解析 [A] 部分和选项名称部分，分别着色
-                if let Some(bracket_end) = label.find(']') {
-                    let (tag, rest) = label.split_at(bracket_end + 1);
-                    option_spans.push(Span::styled(
-                        tag.to_string(),
-                        Style::default().fg(theme::CONFIRM_OPTION_LABEL_FG),
-                    ));
-                    option_spans.push(Span::styled(
-                        rest.to_string(),
-                        Style::default().fg(theme::CONFIRM_OPTION_FG),
-                    ));
-                } else {
-                    option_spans.push(Span::styled(
-                        label.clone(),
-                        Style::default().fg(theme::CONFIRM_OPTION_FG),
-                    ));
-                }
-            }
-
-            if i < all_labels.len() - 1 {
-                option_spans.push(Span::raw("  "));
-            }
+            let letter = letters[i];
+            let prefix = format!("[{}] ", letter);
+            let opt_line = build_option_line(&prefix, opt, is_selected);
+            lines.push(opt_line);
         }
 
-        // 两行文本
-        let text = Text::from(vec![msg_line, Line::from(option_spans)]);
+        if has_other {
+            let other_idx = num_opts;
+            let is_selected = other_idx == confirm.selected_index && !confirm.other_active;
+            let letter = letters[other_idx];
+            let prefix = format!("[{}] ", letter);
+            let opt_line = build_option_line(&prefix, "Other", is_selected);
+            lines.push(opt_line);
+        }
+
+        let text = Text::from(lines);
 
         let p = Paragraph::new(text)
             .style(Style::default().bg(theme::CONFIRM_FONT_BG))
+            .wrap(Wrap { trim: false })
             .block(
                 Block::default()
                     .borders(Borders::TOP)
                     .border_style(Style::default().fg(theme::CONFIRM_BLOCK_BG)),
             );
         f.render_widget(p, area);
+    }
+}
+
+/// 构建单个选项行（竖排模式）：前缀 `[A] ` 和选项文本分别着色，选中时整行高亮。
+fn build_option_line(prefix: &str, text: &str, is_selected: bool) -> Line<'static> {
+    if is_selected {
+        Line::from(vec![
+            Span::styled(
+                prefix.to_string(),
+                Style::default()
+                    .fg(theme::CONFIRM_FG)
+                    .bg(theme::CONFIRM_SELECTED_BG),
+            ),
+            Span::styled(
+                text.to_string(),
+                Style::default()
+                    .fg(theme::CONFIRM_FG)
+                    .bg(theme::CONFIRM_SELECTED_BG),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(
+                prefix.to_string(),
+                Style::default().fg(theme::CONFIRM_OPTION_LABEL_FG),
+            ),
+            Span::styled(
+                text.to_string(),
+                Style::default().fg(theme::CONFIRM_OPTION_FG),
+            ),
+        ])
     }
 }
 

@@ -234,6 +234,7 @@ pub enum LineType {
     ToolCall { name: String },
     ToolResult { name: String },
     ToolError { name: String },
+    AgentCall { name: String },
     Error,
     Status,
     Usage,
@@ -251,6 +252,8 @@ pub struct ChatLine {
     pub tool_result: Option<String>,
     /// Whether the result was an error
     pub tool_error: bool,
+    /// 子 Agent 的 session ID（仅 AgentCall 类型，用于"打开 tab"按钮）
+    pub sub_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,6 +318,7 @@ impl TabEntry {
             call_id,
             tool_result: None,
             tool_error: false,
+            sub_session_id: None,
         });
     }
 
@@ -426,22 +430,21 @@ impl TabEntry {
                         self.messages
                             .iter()
                             .find(|m| {
-                                matches!(&m.line_type, LineType::ToolCall { .. })
+                                matches!(&m.line_type, LineType::ToolCall { .. } | LineType::AgentCall { .. })
                                     && m.call_id.as_deref() == Some(&tr.call_id)
                             })
                             .and_then(|m| {
-                                if let LineType::ToolCall { name } = &m.line_type {
-                                    Some(name.clone())
-                                } else {
-                                    None
+                                match &m.line_type {
+                                    LineType::ToolCall { name } | LineType::AgentCall { name } => Some(name.clone()),
+                                    _ => None,
                                 }
                             })
                             .unwrap_or_default()
                     };
 
-                    // Merge into existing ToolCall ChatLine
+                    // Merge into existing ToolCall/AgentCall ChatLine
                     if let Some(msg) = self.messages.iter_mut().find(|m| {
-                        matches!(&m.line_type, LineType::ToolCall { .. })
+                        matches!(&m.line_type, LineType::ToolCall { .. } | LineType::AgentCall { .. })
                             && m.call_id.as_deref() == Some(&tr.call_id)
                     }) {
                         msg.tool_result = Some(tr.content);
@@ -706,7 +709,6 @@ pub struct ConfirmState {
     pub query_id: String,
     pub message: String,
     pub options: Vec<String>,
-    pub allow_other: bool,
     pub selected_index: usize,
     pub other_active: bool,
 }
@@ -754,6 +756,11 @@ impl MessageCache {
             }
             LineType::ToolCall { .. } => {
                 let lines = crate::tool_ui::render_tool_call(msg, width, expanded);
+                let line_count = lines.len() as u16;
+                return Self { msg_id: msg.id, msg_version: msg.version, width, expanded, lines, line_count };
+            }
+            LineType::AgentCall { .. } => {
+                let lines = crate::tool_ui::render_agent_call(msg, width, expanded);
                 let line_count = lines.len() as u16;
                 return Self { msg_id: msg.id, msg_version: msg.version, width, expanded, lines, line_count };
             }
@@ -1296,6 +1303,24 @@ impl AppState {
                 let prompt = format!("[task prompt] {}", self.input_history[0]);
                 self.tab_bar.tabs[idx].push_chat_line(LineType::Status, prompt, None);
             }
+            // 子 agent 首帧到达：将主 tab 中匹配的 ToolCall 转为 AgentCall，
+            // 并关联 sub_session_id（用于"打开 tab"按钮）。
+            // 匹配条件：tool_name == agent_name 且尚未收到 result（tool_result 为 None）。
+            if !agent_name.is_empty() {
+                if let Some(main_msg) = self.tab_bar.tabs[0].messages.iter_mut().find(|m| {
+                    matches!(&m.line_type, LineType::ToolCall { name } if name == &agent_name)
+                        && m.tool_result.is_none()
+                        && m.sub_session_id.is_none()
+                }) {
+                    main_msg.sub_session_id = Some(session_id.clone());
+                    let name = match &main_msg.line_type {
+                        LineType::ToolCall { name } => name.clone(),
+                        _ => agent_name.clone(),
+                    };
+                    main_msg.line_type = LineType::AgentCall { name };
+                    main_msg.version += 1;
+                }
+            }
             idx
         };
 
@@ -1343,8 +1368,11 @@ impl AppState {
         cache_create: u32,
         cache_read: u32,
     ) {
-        // 按 session_id 路由：空 ID 或主 session → default tab
-        let idx = if session_id.is_empty() || session_id == self.main_session_id {
+
+        let is_main = session_id.is_empty() || session_id == self.main_session_id;
+
+        // 按 session_id 路由：空 ID 或主 session -> default tab
+        let idx = if is_main {
             0
         } else if let Some(i) = self.tab_bar.find_index_by_session(session_id) {
             i
@@ -1355,16 +1383,22 @@ impl AppState {
         // L1: 写入 tab.pending_usage
         self.tab_bar.tabs[idx].pending_usage =
             Some((input, output, tool_calls, cache_create, cache_read));
-        // L2: 累加到 current_request_usage（仅 input/output/cache_create/cache_read）
-        self.current_request_usage.0 += input;
-        self.current_request_usage.1 += output;
-        self.current_request_usage.2 += cache_create;
-        self.current_request_usage.3 += cache_read;
-        // L3: 立即累加到 total tokens，状态栏即时显示
-        self.total_input_tokens += input;
-        self.total_output_tokens += output;
-        self.total_cache_creation_input_tokens += cache_create;
-        self.total_cache_read_input_tokens += cache_read;
+
+        // 仅主 session 的 UsageInfo 累加 L2/L3
+        // 子 agent 的 token 由 orchestrator 在子 agent 完成时
+        // 以父 session_id 发送合并的 UsageInfo，此处避免重复累加
+        if is_main {
+            // L2: 累加到 current_request_usage
+            self.current_request_usage.0 += input;
+            self.current_request_usage.1 += output;
+            self.current_request_usage.2 += cache_create;
+            self.current_request_usage.3 += cache_read;
+            // L3: 立即累加到 total tokens，状态栏即时显示
+            self.total_input_tokens += input;
+            self.total_output_tokens += output;
+            self.total_cache_creation_input_tokens += cache_create;
+            self.total_cache_read_input_tokens += cache_read;
+        }
     }
 
     /// Token 三层路由 — Done 结算

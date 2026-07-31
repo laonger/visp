@@ -452,12 +452,13 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
 
             if app.confirm.is_some() {
                 match key.code {
-                    KeyCode::Left => {
+                    KeyCode::Left | KeyCode::Up => {
                         if let Some(ref mut confirm) = app.confirm {
+                            let has_other = !confirm.options.is_empty();
                             let total = if confirm.options.is_empty() {
                                 3 // Approve, Deny, Always Allow
                             } else {
-                                confirm.options.len() + if confirm.allow_other { 1 } else { 0 }
+                                confirm.options.len() + if has_other { 1 } else { 0 }
                             };
                             if confirm.other_active {
                                 confirm.other_active = false;
@@ -468,12 +469,13 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                             }
                         }
                     }
-                    KeyCode::Right => {
+                    KeyCode::Right | KeyCode::Down => {
                         if let Some(ref mut confirm) = app.confirm {
+                            let has_other = !confirm.options.is_empty();
                             let total = if confirm.options.is_empty() {
                                 3 // Approve, Deny, Always Allow
                             } else {
-                                confirm.options.len() + if confirm.allow_other { 1 } else { 0 }
+                                confirm.options.len() + if has_other { 1 } else { 0 }
                             };
                             if confirm.other_active {
                                 confirm.other_active = false;
@@ -494,12 +496,8 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                                 let text = app.textarea.lines().join("\n");
                                 app.textarea = AppState::new_textarea();
                                 chat_handle.send_response(&q.query_id, -1, &text);
-                            } else if confirm.allow_other {
-                                let opts_len = if confirm.options.is_empty() {
-                                    3 // Approve, Deny, Always Allow
-                                } else {
-                                    confirm.options.len()
-                                };
+                            } else if !confirm.options.is_empty() {
+                                let opts_len = confirm.options.len();
                                 if confirm.selected_index == opts_len {
                                     confirm.other_active = true;
                                     return false;
@@ -823,9 +821,28 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 && m.row < cy + ch;
 
             if in_chat && !app.show_help {
-                // 检查是否点击在工具调用块头部（切换展开/折叠）
                 let virtual_row = m.row.saturating_sub(cy) + app.scroll_state.y;
 
+                // 先检查是否点击了 AgentCall 块的 "[open tab]" 按钮
+                let content_w = app.cache_width;
+                let rel_col = m.column.saturating_sub(cx);
+                if let Some(sub_sid) = crate::tool_ui::agent_open_tab_hit_test(
+                    &app.messages(),
+                    &app.message_caches,
+                    virtual_row,
+                    rel_col,
+                    content_w,
+                ) {
+                    // 切换到子 agent 的 tab
+                    if let Some(idx) = app.tab_bar.find_index_by_session(&sub_sid) {
+                        app.tab_bar.activate(idx);
+                        app.scroll_following = true;
+                        app.needs_render = true;
+                    }
+                    return false;
+                }
+
+                // 检查是否点击在工具调用块头部（切换展开/折叠）
                 if let Some(call_id) = crate::tool_ui::tool_block_hit_test(&app.messages(), &app.message_caches, virtual_row) {
                     app.toggle_tool_call_expansion(&call_id);
                     app.needs_render = true;
@@ -914,7 +931,6 @@ fn handle_grpc_message(
                 query_id: uq.query_id.clone(),
                 message: uq.message.clone(),
                 options: uq.options.clone(),
-                allow_other: uq.allow_other,
                 selected_index: 0,
                 other_active: false,
             });

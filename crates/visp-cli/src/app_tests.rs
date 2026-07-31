@@ -206,6 +206,7 @@
             call_id: None,
             tool_result: None,
             tool_error: false,
+            sub_session_id: None,
         };
         let cache = MessageCache::from_message(&msg, 80, false);
         assert_eq!(cache.msg_id, 0);
@@ -225,6 +226,7 @@
             call_id: None,
             tool_result: None,
             tool_error: false,
+            sub_session_id: None,
         };
         let cache = MessageCache::from_message(&msg, 80, false);
         assert!(cache.matches(&msg, 80, false));
@@ -243,6 +245,7 @@
             call_id: None,
             tool_result: None,
             tool_error: false,
+            sub_session_id: None,
         };
         assert!(!cache.matches(&msg3, 80, false));
     }
@@ -257,6 +260,7 @@
             call_id: None,
             tool_result: None,
             tool_error: false,
+            sub_session_id: None,
         };
         let cache = MessageCache::from_message(&msg, 80, false);
         // User 消息背景由 bg_fill 处理，行级不带 padding
@@ -275,6 +279,7 @@
             call_id: None,
             tool_result: None,
             tool_error: false,
+            sub_session_id: None,
         };
         let cache = MessageCache::from_message(&msg, 80, false);
         // With collapsible design: icon + name + formatted args (fits on one line)
@@ -383,7 +388,6 @@
             query_id: "q1".into(),
             message: "test?".into(),
             options: vec!["Yes".into(), "No".into()],
-            allow_other: false,
             selected_index: 0,
             other_active: false,
         };
@@ -397,7 +401,6 @@
             query_id: "q1".into(),
             message: "Allow tool?".into(),
             options: vec![],
-            allow_other: false,
             selected_index: 0,
             other_active: false,
         };
@@ -410,7 +413,6 @@
             query_id: "q1".into(),
             message: "Choose?".into(),
             options: vec!["Yes".into(), "No".into()],
-            allow_other: true,
             selected_index: 0,
             other_active: false,
         };
@@ -1943,13 +1945,13 @@
         );
         // No Usage message added (render_pending appends to assistant text)
         assert!(app.tab_bar.tabs[1].messages.is_empty());
-        // L2 still accumulated (sub Done does NOT clear L2)
-        assert_eq!(app.current_request_usage, (100, 200, 10, 20));
-        // L3 already updated by apply_usage_info (status bar shows immediately)
-        assert_eq!(app.total_input_tokens, 100);
-        assert_eq!(app.total_output_tokens, 200);
-        assert_eq!(app.total_cache_creation_input_tokens, 10);
-        assert_eq!(app.total_cache_read_input_tokens, 20);
+        // Sub-agent tokens NOT accumulated to L2 (orchestrator forwards them separately)
+        assert_eq!(app.current_request_usage, (0, 0, 0, 0));
+        // L3 NOT updated for sub-agent (orchestrator forwards via parent session_id)
+        assert_eq!(app.total_input_tokens, 0);
+        assert_eq!(app.total_output_tokens, 0);
+        assert_eq!(app.total_cache_creation_input_tokens, 0);
+        assert_eq!(app.total_cache_read_input_tokens, 0);
     }
 
     #[test]
@@ -1988,4 +1990,72 @@
                 msg.content
             );
         }
+    }
+    // ════════════════════════════════════════════════════════════
+    // route_frame: 子 agent 首帧将主 tab 的 ToolCall 转为 AgentCall
+    // ════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_route_frame_sub_agent_first_frame_converts_toolcall_to_agentcall() {
+        let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+        // 主 tab 收到 ToolCall (explorer)
+        app.route_frame(tool_call("explorer", "call-1", r#"{"prompt":"Find TODOs"}"#));
+        // 确认是 ToolCall
+        assert_eq!(
+            app.tab_bar.tabs[0].messages[0].line_type,
+            LineType::ToolCall { name: "explorer".into() }
+        );
+        assert!(app.tab_bar.tabs[0].messages[0].sub_session_id.is_none());
+
+        // 子 agent 首帧到达，agent_name = "explorer"
+        app.route_frame(make_text_delta_frame("sub-sess-abc", "explorer", "hello"));
+
+        // 主 tab 的 ToolCall 应被转为 AgentCall，且 sub_session_id 被设置
+        assert_eq!(
+            app.tab_bar.tabs[0].messages[0].line_type,
+            LineType::AgentCall { name: "explorer".into() }
+        );
+        assert_eq!(app.tab_bar.tabs[0].messages[0].sub_session_id.as_deref(), Some("sub-sess-abc"));
+    }
+
+    #[test]
+    fn test_route_frame_sub_agent_does_not_convert_completed_toolcall() {
+        let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+        // ToolCall + ToolResult (已完成)
+        app.route_frame(tool_call("explorer", "call-1", r#"{"prompt":"test"}"#));
+        app.route_frame(tool_result("call-1", "explorer", "done", false));
+
+        // 子 agent 首帧到达
+        app.route_frame(make_text_delta_frame("sub-sess-abc", "explorer", "hello"));
+
+        // 已完成的 ToolCall 不应被转换
+        assert_eq!(
+            app.tab_bar.tabs[0].messages[0].line_type,
+            LineType::ToolCall { name: "explorer".into() }
+        );
+        assert!(app.tab_bar.tabs[0].messages[0].sub_session_id.is_none());
+    }
+
+    #[test]
+    fn test_render_pending_tool_result_merges_into_agentcall() {
+        let mut tab = TabEntry::new("main", "agent");
+        // 模拟 ToolCall 已被转为 AgentCall（由 route_frame 完成）
+        tab.push_chat_line(
+            LineType::AgentCall { name: "explorer".into() },
+            r#"{"prompt":"test"}"#.into(),
+            Some("call-1".into()),
+        );
+        tab.messages[0].sub_session_id = Some("sub-abc".into());
+        // ToolResult 到达
+        tab.frames.push(tool_result("call-1", "explorer", "found 3 TODOs", false));
+        tab.render_pending();
+
+        assert_eq!(tab.messages.len(), 1);
+        assert_eq!(
+            tab.messages[0].line_type,
+            LineType::AgentCall { name: "explorer".into() }
+        );
+        assert_eq!(tab.messages[0].sub_session_id.as_deref(), Some("sub-abc"));
+        assert_eq!(tab.messages[0].tool_result.as_deref(), Some("found 3 TODOs"));
+        assert!(!tab.messages[0].tool_error);
     }
