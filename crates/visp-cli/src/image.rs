@@ -117,7 +117,7 @@ fn make_image_line(path: String) -> ChatLine {
 pub enum ImageEntry {
     /// Image is ready: protocol holds the encoded state, pixel_size is the original dimensions.
     Ready {
-        protocol: std::sync::Arc<tokio::sync::Mutex<StatefulProtocol>>,
+        protocol: std::sync::Arc<std::sync::Mutex<StatefulProtocol>>,
         pixel_size: (u32, u32),
     },
     /// Network image is being downloaded.
@@ -162,7 +162,7 @@ pub struct ImageMetrics<'a> {
 /// Cache for decoded images, keyed by file path or URL.
 pub struct ImageCache {
     picker: Picker,
-    cache: std::sync::Arc<tokio::sync::Mutex<HashMap<String, ImageEntry>>>,
+    cache: std::sync::Arc<std::sync::Mutex<HashMap<String, ImageEntry>>>,
     image_ready_tx: Option<mpsc::UnboundedSender<()>>,
 }
 
@@ -172,7 +172,7 @@ impl ImageCache {
         let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
         Self {
             picker,
-            cache: std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             image_ready_tx: None,
         }
     }
@@ -198,7 +198,7 @@ impl ImageCache {
     /// For local files: synchronously reads and decodes.
     /// For URLs: returns Loading on first call, spawns async download that updates the cache.
     pub fn get_or_load(&self, path: &str) {
-        let mut cache = self.cache.blocking_lock();
+        let mut cache = self.cache.lock().unwrap();
         if cache.contains_key(path) {
             return;
         }
@@ -213,7 +213,7 @@ impl ImageCache {
             tokio::spawn(async move {
                 let result = download_and_decode(&url, &picker).await;
                 {
-                    let mut cache = cache.lock().await;
+                    let mut cache = cache.lock().unwrap();
                     cache.insert(url, result);
                 }
                 if let Some(tx) = tx {
@@ -230,8 +230,8 @@ impl ImageCache {
     pub fn try_get_protocol(
         &self,
         path: &str,
-    ) -> Option<std::sync::Arc<tokio::sync::Mutex<StatefulProtocol>>> {
-        let cache = self.cache.blocking_lock();
+    ) -> Option<std::sync::Arc<std::sync::Mutex<StatefulProtocol>>> {
+        let cache = self.cache.lock().unwrap();
         match cache.get(path)? {
             ImageEntry::Ready { protocol, .. } => Some(protocol.clone()),
             _ => None,
@@ -241,7 +241,7 @@ impl ImageCache {
     /// Query the height (in terminal rows) of an image at the given path.
     /// Returns Placeholder for Loading/Error/not-found states.
     pub fn query_height(&self, path: &str, max_cols: u16) -> ImageHeightInfo {
-        let cache = self.cache.blocking_lock();
+        let cache = self.cache.lock().unwrap();
         match cache.get(path) {
             Some(ImageEntry::Ready { pixel_size, .. }) => {
                 let font_size = self.font_size();
@@ -258,13 +258,13 @@ impl ImageCache {
 
     /// Check the current state of a cached image (for cache invalidation).
     pub fn image_state(&self, path: &str) -> Option<ImageState> {
-        let cache = self.cache.blocking_lock();
+        let cache = self.cache.lock().unwrap();
         cache.get(path).map(|e| e.state())
     }
 
     /// Get error message for an Error-state image (for rendering error text).
     pub fn error_message(&self, path: &str) -> Option<String> {
-        let cache = self.cache.blocking_lock();
+        let cache = self.cache.lock().unwrap();
         match cache.get(path)? {
             ImageEntry::Error(msg) => Some(msg.clone()),
             _ => None,
@@ -273,7 +273,7 @@ impl ImageCache {
 
     /// Check if a URL image is currently loading.
     pub fn is_loading(&self, path: &str) -> bool {
-        let cache = self.cache.blocking_lock();
+        let cache = self.cache.lock().unwrap();
         matches!(cache.get(path), Some(ImageEntry::Loading))
     }
 }
@@ -319,7 +319,7 @@ fn load_local_image(path: &str, picker: &Picker) -> ImageEntry {
                 let pixel_size = (img.width(), img.height());
                 let protocol = picker.new_resize_protocol(img);
                 ImageEntry::Ready {
-                    protocol: std::sync::Arc::new(tokio::sync::Mutex::new(protocol)),
+                    protocol: std::sync::Arc::new(std::sync::Mutex::new(protocol)),
                     pixel_size,
                 }
             }
@@ -350,7 +350,7 @@ async fn download_and_decode(url: &str, picker: &Picker) -> ImageEntry {
                         let pixel_size = (img.width(), img.height());
                         let protocol = picker.new_resize_protocol(img);
                         ImageEntry::Ready {
-                            protocol: std::sync::Arc::new(tokio::sync::Mutex::new(protocol)),
+                            protocol: std::sync::Arc::new(std::sync::Mutex::new(protocol)),
                             pixel_size,
                         }
                     }
