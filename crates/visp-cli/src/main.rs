@@ -3,6 +3,7 @@ mod client;
 mod command;
 mod event;
 mod selection;
+mod image;
 mod theme;
 mod tool_ui;
 mod ui;

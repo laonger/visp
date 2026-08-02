@@ -263,6 +263,7 @@ pub fn fg_for(line_type: LineType) -> Color {
         LineType::Error => ERROR_FG,
         LineType::Status => STATUS_FG,
         LineType::Usage => TOOL_RESULT_FG,
+        LineType::Image { .. } => ASSISTANT_FG,
     }
 }
 
@@ -278,6 +279,7 @@ pub fn style_for(line_type: LineType) -> BlockStyle {
         LineType::AgentCall { .. } => AGENT_CALL_STYLE,
         LineType::Usage => USAGE_STYLE,
         LineType::Error | LineType::Status => TOOL_STYLE,
+        LineType::Image { .. } => ASSISTANT_STYLE,
     }
 }
 

@@ -238,6 +238,10 @@ pub enum LineType {
     Error,
     Status,
     Usage,
+    Image {
+        path: String,
+        alt_text: String,
+    },
 }
 
 #[derive(Debug, Clone)]

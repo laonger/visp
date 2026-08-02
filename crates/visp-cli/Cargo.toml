@@ -22,4 +22,7 @@ serde_json = "1"
 regex = "1"
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 ratatui-markdown = { version = "0.3", default-features = false, features = ["markdown"] }
+ratatui-image = { version = "11", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
+reqwest = { workspace = true }
 unicode-width = "0.2"
