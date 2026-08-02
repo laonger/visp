@@ -570,9 +570,12 @@ pub(crate) fn ensure_all_caches(app: &mut AppState, width: u16) {
     if width != app.cache_width {
         app.cache_width = width;
     }
+    // Max image height: 40% of visible terminal height, at least 3 rows
+    let max_rows = ((app.chat_area_rect.3 as u32 * 40 / 100) as u16).max(3);
     let metrics = crate::image::ImageMetrics {
         font_size: app.image_cache.font_size(),
         image_cache: &app.image_cache,
+        max_rows,
     };
     let mut cache_map: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
     for (i, cache) in app.message_caches.iter().enumerate() {
@@ -820,7 +823,7 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
 
 /// Render an image block in the chat area.
 ///
-/// - Ready: renders via `StatefulImage` widget with `Resize::Fit`
+/// - Ready: renders via stateless `Image` widget with fixed size (no mouse zoom)
 /// - Loading: renders `[加载中: path]` placeholder text
 /// - Error: renders `[图片加载失败: path (reason)]` error text
 fn render_image_block(
@@ -834,21 +837,21 @@ fn render_image_block(
     y: u16,
     render_w: u16,
 ) {
-    // Try to get the protocol for rendering
-    if let Some(protocol_arc) = image_cache.try_get_protocol(path) {
-        // Ready: render StatefulImage widget
-        use ratatui_image::{Resize, StatefulImage};
+    let img_h = visible_lines.min(line_count);
+    let target_size = (render_w, img_h);
+
+    if let Some(protocol_arc) = image_cache.try_get_protocol(path, target_size) {
+        // Ready: render stateless Image widget (fixed size, no mouse interaction)
         let image_area = Rect::new(
             area.x + 1, // margin_horizontal = 1
             y,
             render_w,
-            visible_lines.min(line_count),
+            img_h,
         );
         if image_area.width > 0 && image_area.height > 0 {
-            // Lock the protocol and render
-            if let Ok(mut protocol) = protocol_arc.try_lock() {
-                let widget = StatefulImage::default().resize(Resize::Fit(None));
-                f.render_stateful_widget(widget, image_area, &mut *protocol);
+            if let Ok(protocol) = protocol_arc.lock() {
+                use ratatui_image::Image;
+                f.render_widget(Image::new(&*protocol), image_area);
             }
         }
     } else if image_cache.is_loading(path) {

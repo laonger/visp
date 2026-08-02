@@ -891,7 +891,7 @@ impl MessageCache {
             }
             LineType::Image { ref path, .. } => {
                 let (line_count, image_state) = match image_metrics {
-                    Some(metrics) => match metrics.image_cache.query_height(path, width) {
+                    Some(metrics) => match metrics.image_cache.query_height(path, width, metrics.max_rows) {
                         ImageHeightInfo::Ready(h) => (h, Some(ImageState::Ready)),
                         ImageHeightInfo::Placeholder => {
                             // Check if it's Loading or Error

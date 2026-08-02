@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use ratatui_image::picker::Picker;
-use ratatui_image::protocol::StatefulProtocol;
+use ratatui_image::protocol::Protocol;
+use ratatui_image::Resize;
 use tokio::sync::mpsc;
 
 use crate::app::{ChatLine, LineType};
@@ -115,9 +116,15 @@ fn make_image_line(path: String) -> ChatLine {
 
 /// An entry in the image cache, representing the loading state of an image.
 pub enum ImageEntry {
-    /// Image is ready: protocol holds the encoded state, pixel_size is the original dimensions.
+    /// Image is ready.
     Ready {
-        protocol: std::sync::Arc<std::sync::Mutex<StatefulProtocol>>,
+        /// Original decoded image, kept for re-encoding when terminal size changes.
+        image: image::DynamicImage,
+        /// Cached protocol encoded at `rendered_size`. Recreated when size changes.
+        protocol: Option<std::sync::Arc<std::sync::Mutex<Protocol>>>,
+        /// The terminal size (cols, rows) at which `protocol` was encoded.
+        rendered_size: (u16, u16),
+        /// Original pixel dimensions.
         pixel_size: (u32, u32),
     },
     /// Network image is being downloaded.
@@ -157,6 +164,8 @@ pub enum ImageHeightInfo {
 pub struct ImageMetrics<'a> {
     pub font_size: (u16, u16),
     pub image_cache: &'a ImageCache,
+    /// Maximum image height in terminal rows (proportional to terminal height).
+    pub max_rows: u16,
 }
 
 /// Cache for decoded images, keyed by file path or URL.
@@ -226,21 +235,45 @@ impl ImageCache {
         }
     }
 
-    /// Try to get a ready image entry's protocol for rendering. Returns None if not Ready.
+    /// Try to get a ready image entry's protocol for rendering.
+    /// If the cached protocol was encoded at a different size, it is re-created.
+    /// Returns None if not Ready.
     pub fn try_get_protocol(
         &self,
         path: &str,
-    ) -> Option<std::sync::Arc<std::sync::Mutex<StatefulProtocol>>> {
-        let cache = self.cache.lock().unwrap();
-        match cache.get(path)? {
-            ImageEntry::Ready { protocol, .. } => Some(protocol.clone()),
+        target_size: (u16, u16),
+    ) -> Option<std::sync::Arc<std::sync::Mutex<Protocol>>> {
+        let mut cache = self.cache.lock().unwrap();
+        let entry = cache.get_mut(path)?;
+        match entry {
+            ImageEntry::Ready {
+                image,
+                protocol,
+                rendered_size,
+                ..
+            } => {
+                // Re-create protocol if size changed or not yet encoded
+                if *rendered_size != target_size || protocol.is_none() {
+                    let size = ratatui::layout::Size::new(target_size.0, target_size.1);
+                    match self.picker.new_protocol(image.clone(), size, Resize::Fit(None)) {
+                        Ok(proto) => {
+                            *protocol = Some(std::sync::Arc::new(std::sync::Mutex::new(proto)));
+                            *rendered_size = target_size;
+                        }
+                        Err(_) => {
+                            *protocol = None;
+                        }
+                    }
+                }
+                protocol.clone()
+            }
             _ => None,
         }
     }
 
     /// Query the height (in terminal rows) of an image at the given path.
     /// Returns Placeholder for Loading/Error/not-found states.
-    pub fn query_height(&self, path: &str, max_cols: u16) -> ImageHeightInfo {
+    pub fn query_height(&self, path: &str, max_cols: u16, max_rows: u16) -> ImageHeightInfo {
         let cache = self.cache.lock().unwrap();
         match cache.get(path) {
             Some(ImageEntry::Ready { pixel_size, .. }) => {
@@ -250,6 +283,7 @@ impl ImageCache {
                     pixel_size.1,
                     max_cols,
                     font_size,
+                    max_rows,
                 ))
             }
             _ => ImageHeightInfo::Placeholder,
@@ -280,11 +314,15 @@ impl ImageCache {
 
 /// Calculate the height (in terminal rows) for an image given its pixel dimensions,
 /// available terminal columns, and font cell size.
+///
+/// The image is scaled to fit within `max_cols` columns (no upscale if narrower),
+/// and the resulting height is clamped to `max_rows`.
 pub fn calc_image_height(
     pixel_w: u32,
     pixel_h: u32,
     max_cols: u16,
     font_size: (u16, u16),
+    max_rows: u16,
 ) -> u16 {
     if pixel_w == 0 || pixel_h == 0 {
         return 1;
@@ -304,11 +342,14 @@ pub fn calc_image_height(
     let scaled_h_px = pixel_h * effective_cols * font_w / pixel_w;
 
     // Convert to rows.
-    (scaled_h_px.div_ceil(font_h) as u16).max(1)
+    let rows = (scaled_h_px.div_ceil(font_h) as u16).max(1);
+
+    // Clamp to max_rows (proportional height limit based on terminal size)
+    rows.min(max_rows).max(1)
 }
 
 /// Load a local image file synchronously.
-fn load_local_image(path: &str, picker: &Picker) -> ImageEntry {
+fn load_local_image(path: &str, _picker: &Picker) -> ImageEntry {
     let path_obj = Path::new(path);
     if !path_obj.exists() {
         return ImageEntry::Error(format!("File not found: {}", path));
@@ -317,9 +358,10 @@ fn load_local_image(path: &str, picker: &Picker) -> ImageEntry {
         Ok(reader) => match reader.decode() {
             Ok(img) => {
                 let pixel_size = (img.width(), img.height());
-                let protocol = picker.new_resize_protocol(img);
                 ImageEntry::Ready {
-                    protocol: std::sync::Arc::new(std::sync::Mutex::new(protocol)),
+                    image: img,
+                    protocol: None,
+                    rendered_size: (0, 0),
                     pixel_size,
                 }
             }
@@ -330,7 +372,7 @@ fn load_local_image(path: &str, picker: &Picker) -> ImageEntry {
 }
 
 /// Download a URL image asynchronously and decode it.
-async fn download_and_decode(url: &str, picker: &Picker) -> ImageEntry {
+async fn download_and_decode(url: &str, _picker: &Picker) -> ImageEntry {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build();
@@ -348,9 +390,10 @@ async fn download_and_decode(url: &str, picker: &Picker) -> ImageEntry {
                 Ok(bytes) => match image::load_from_memory(&bytes) {
                     Ok(img) => {
                         let pixel_size = (img.width(), img.height());
-                        let protocol = picker.new_resize_protocol(img);
                         ImageEntry::Ready {
-                            protocol: std::sync::Arc::new(std::sync::Mutex::new(protocol)),
+                            image: img,
+                            protocol: None,
+                            rendered_size: (0, 0),
                             pixel_size,
                         }
                     }
@@ -737,7 +780,7 @@ mod tests {
         make_test_png(&img_path);
 
         cache.get_or_load(img_path.to_str().unwrap());
-        let height_info = cache.query_height(img_path.to_str().unwrap(), 80);
+        let height_info = cache.query_height(img_path.to_str().unwrap(), 80, 100);
         match height_info {
             ImageHeightInfo::Ready(h) => assert!(h >= 1),
             ImageHeightInfo::Placeholder => panic!("Expected Ready, got Placeholder"),
@@ -752,7 +795,7 @@ mod tests {
         let path = "/nonexistent/image.png";
 
         cache.get_or_load(path);
-        let height_info = cache.query_height(path, 80);
+        let height_info = cache.query_height(path, 80, 100);
         assert!(matches!(height_info, ImageHeightInfo::Placeholder));
     }
 
@@ -762,7 +805,7 @@ mod tests {
         // natural_cols = 200/10 = 20 < 40, so effective_cols = 20
         // scaled_h_px = 100 * 20 * 10 / 200 = 100
         // rows = ceil(100 / 20) = 5
-        let h = calc_image_height(200, 100, 40, (10, 20));
+        let h = calc_image_height(200, 100, 40, (10, 20), 100);
         assert_eq!(h, 5);
     }
 
@@ -772,7 +815,7 @@ mod tests {
         // natural_cols = 20/10 = 2 < 80, so effective_cols = 2
         // scaled_h_px = 40 * 2 * 10 / 20 = 40
         // rows = ceil(40 / 20) = 2
-        let h = calc_image_height(20, 40, 80, (10, 20));
+        let h = calc_image_height(20, 40, 80, (10, 20), 100);
         assert_eq!(h, 2);
     }
 
@@ -782,7 +825,7 @@ mod tests {
         // natural_cols = 800/10 = 80 > 40, so effective_cols = 40
         // scaled_h_px = 100 * 40 * 10 / 800 = 50
         // rows = ceil(50 / 20) = 3
-        let h = calc_image_height(800, 100, 40, (10, 20));
+        let h = calc_image_height(800, 100, 40, (10, 20), 100);
         assert_eq!(h, 3);
     }
 }
