@@ -1113,6 +1113,8 @@ fn extract_session_and_agent(msg: &ServerMessage) -> (String, String) {
         Some(server_message::Payload::ThinkingBlock(d)) => (d.session_id.clone(), String::new()),
         Some(server_message::Payload::UsageInfo(d)) => (d.session_id.clone(), String::new()),
         Some(server_message::Payload::UserMessage(d)) => (d.session_id.clone(), String::new()),
+        Some(server_message::Payload::ImageBlock(d)) => (d.session_id.clone(), d.agent_name.clone()),
+        Some(server_message::Payload::ImageError(d)) => (d.session_id.clone(), d.agent_name.clone()),
         None => (String::new(), String::new()),
     }
 }

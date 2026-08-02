@@ -201,6 +201,26 @@ message ThinkingBlock {
     string session_id = 3;
 }
 
+// LLM 输出的图片内容块。
+message ImageBlock {
+    // 图片本地文件路径（base64 来源有值，URL 来源为空）。
+    string path = 1;
+    // 图片 MIME 类型（URL 来源为空）。
+    string mime_type = 2;
+    // 远程 URL（空字符串表示无远程来源）。
+    string remote_url = 3;
+    string session_id = 4;
+    string agent_name = 5;
+}
+
+// 图片处理失败（base64 解码失败、文件写入失败等）。
+message ImageError {
+    // 失败原因。
+    string reason = 1;
+    string session_id = 2;
+    string agent_name = 3;
+}
+
 // 服务端 → 客户端消息（Chat RPC 的服务端流）。
 // oneof 设计，通过消息类型区分不同的事件。
 message ServerMessage {
@@ -215,6 +235,8 @@ message ServerMessage {
         ThinkingBlock thinking_block = 8; // LLM 推理过程
         UsageInfo usage_info = 9;         // LLM API token 用量统计
         UserMessage user_message = 10;    // 回放时发送的用户消息
+        ImageBlock image_block = 11;      // LLM 输出的图片
+        ImageError image_error = 12;      // 图片处理失败
     }
 }
 
