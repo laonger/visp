@@ -77,28 +77,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Debug: check what git knows about this tag
-          echo "=== git tag -l ==="
-          git tag -l "${{ github.ref_name }}"
+          # Fetch the tag object explicitly — actions/checkout may only fetch
+          # the commit the tag points to, not the annotated tag object itself.
+          git fetch origin "refs/tags/${{ github.ref_name }}:refs/tags/${{ github.ref_name }}" --force
           echo "=== git cat-file -t ==="
-          git cat-file -t "${{ github.ref_name }}" || true
-          echo "=== git for-each-ref %(contents) ==="
+          git cat-file -t "${{ github.ref_name }}"
+
+          # Read tag annotation
           git for-each-ref --format='%(contents)' "refs/tags/${{ github.ref_name }}" > /tmp/notes.md
-          cat /tmp/notes.md
-          echo "=== file size ==="
-          wc -c /tmp/notes.md
-          # Fallback: try git tag -n99
-          if [ ! -s /tmp/notes.md ]; then
-            echo "=== for-each-ref empty, trying git tag -n99 ==="
-            git tag -n99 "${{ github.ref_name }}" | sed 's/^[^[:space:]]*[[:space:]]*//' > /tmp/notes.md
-            cat /tmp/notes.md
-          fi
-          # Fallback: try git show (annotated tag only)
-          if [ ! -s /tmp/notes.md ]; then
-            echo "=== tag -n99 empty, trying git show ==="
-            git show -s --format=%B "${{ github.ref_name }}" > /tmp/notes.md 2>/dev/null || true
-            cat /tmp/notes.md
-          fi
+
           # Create release
           if [ -s /tmp/notes.md ]; then
             gh release create "${{ github.ref_name }}" artifacts/* --notes-file /tmp/notes.md
