@@ -75,15 +75,19 @@ jobs:
 
       - name: Write tag annotation to body file
         run: |
-          git for-each-ref --format='%(contents)' refs/tags/"${{ github.ref_name }}" > body.md
-          # 如果 tag annotation 为空，删除文件让 action-gh-release 走 generate_release_notes
+          # Ensure annotated tag object is fetched (actions/checkout may not fetch it)
+          git fetch --tags --force origin "${{ github.ref }}"
+          # Read tag annotation; fall back to tag -n99 if %(contents) is empty
+          git for-each-ref --format='%(contents)' "refs/tags/${{ github.ref_name }}" > body.md
           if [ ! -s body.md ]; then
-            rm -f body.md
+            git tag -n99 "${{ github.ref_name }}" | sed 's/^[^[:space:]]*[[:space:]]*//' > body.md
+          fi
+          if [ ! -s body.md ]; then
             echo "empty_body=true" >> "$GITHUB_ENV"
           fi
 
       - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
-          body_path: ${{ env.empty_body != 'true' && 'body.md' || '' }}
+          body_path: body.md
           generate_release_notes: ${{ env.empty_body == 'true' }}
