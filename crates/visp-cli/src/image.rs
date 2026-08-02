@@ -1,5 +1,12 @@
 #![allow(dead_code)]
 
+use std::collections::HashMap;
+use std::path::Path;
+
+use ratatui_image::picker::Picker;
+use ratatui_image::protocol::StatefulProtocol;
+use tokio::sync::mpsc;
+
 use crate::app::{ChatLine, LineType};
 
 /// Marker prefix for inline image references in text content.
@@ -103,8 +110,266 @@ fn make_image_line(path: String) -> ChatLine {
 }
 
 // ════════════════════════════════════════════════════════════════
-// @path 输入解析
+// ImageCache：图片缓存与加载
 // ════════════════════════════════════════════════════════════════
+
+/// An entry in the image cache, representing the loading state of an image.
+pub enum ImageEntry {
+    /// Image is ready: protocol holds the encoded state, pixel_size is the original dimensions.
+    Ready {
+        protocol: std::sync::Arc<tokio::sync::Mutex<StatefulProtocol>>,
+        pixel_size: (u32, u32),
+    },
+    /// Network image is being downloaded.
+    Loading,
+    /// Loading, downloading, or decoding failed.
+    Error(String),
+}
+
+/// Snapshot of an image entry's state for cache invalidation purposes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageState {
+    Ready,
+    Loading,
+    Error,
+}
+
+impl ImageEntry {
+    pub fn state(&self) -> ImageState {
+        match self {
+            ImageEntry::Ready { .. } => ImageState::Ready,
+            ImageEntry::Loading => ImageState::Loading,
+            ImageEntry::Error(_) => ImageState::Error,
+        }
+    }
+}
+
+/// Result of querying image height for layout calculation.
+#[derive(Debug, Clone, Copy)]
+pub enum ImageHeightInfo {
+    /// Actual computed height in terminal rows.
+    Ready(u16),
+    /// Loading or Error: use 1-row placeholder height.
+    Placeholder,
+}
+
+/// Image metrics for `MessageCache` height calculation.
+pub struct ImageMetrics<'a> {
+    pub font_size: (u16, u16),
+    pub image_cache: &'a ImageCache,
+}
+
+/// Cache for decoded images, keyed by file path or URL.
+pub struct ImageCache {
+    picker: Picker,
+    cache: std::sync::Arc<tokio::sync::Mutex<HashMap<String, ImageEntry>>>,
+    image_ready_tx: Option<mpsc::UnboundedSender<()>>,
+}
+
+impl ImageCache {
+    /// Create a new ImageCache. Tries to detect terminal capabilities, falls back to Halfblocks.
+    pub fn new() -> Self {
+        let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+        Self {
+            picker,
+            cache: std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            image_ready_tx: None,
+        }
+    }
+
+    /// Set the image_ready notification channel. Called during AppState initialization.
+    pub fn set_ready_tx(&mut self, tx: mpsc::UnboundedSender<()>) {
+        self.image_ready_tx = Some(tx);
+    }
+
+    /// Get the font size (character cell size in pixels) from the picker.
+    pub fn font_size(&self) -> (u16, u16) {
+        let fs = self.picker.font_size();
+        (fs.width, fs.height)
+    }
+
+    /// Get a reference to the picker (for rendering).
+    pub fn picker(&self) -> &Picker {
+        &self.picker
+    }
+
+    /// Load or retrieve a cached image entry by path/URL.
+    ///
+    /// For local files: synchronously reads and decodes.
+    /// For URLs: returns Loading on first call, spawns async download that updates the cache.
+    pub fn get_or_load(&self, path: &str) {
+        let mut cache = self.cache.blocking_lock();
+        if cache.contains_key(path) {
+            return;
+        }
+        if is_url(path) {
+            cache.insert(path.to_string(), ImageEntry::Loading);
+            drop(cache);
+
+            let url = path.to_string();
+            let tx = self.image_ready_tx.clone();
+            let cache = self.cache.clone();
+            let picker = self.picker.clone();
+            tokio::spawn(async move {
+                let result = download_and_decode(&url, &picker).await;
+                {
+                    let mut cache = cache.lock().await;
+                    cache.insert(url, result);
+                }
+                if let Some(tx) = tx {
+                    let _ = tx.send(());
+                }
+            });
+        } else {
+            let entry = load_local_image(path, &self.picker);
+            cache.insert(path.to_string(), entry);
+        }
+    }
+
+    /// Try to get a ready image entry's protocol for rendering. Returns None if not Ready.
+    pub fn try_get_protocol(
+        &self,
+        path: &str,
+    ) -> Option<std::sync::Arc<tokio::sync::Mutex<StatefulProtocol>>> {
+        let cache = self.cache.blocking_lock();
+        match cache.get(path)? {
+            ImageEntry::Ready { protocol, .. } => Some(protocol.clone()),
+            _ => None,
+        }
+    }
+
+    /// Query the height (in terminal rows) of an image at the given path.
+    /// Returns Placeholder for Loading/Error/not-found states.
+    pub fn query_height(&self, path: &str, max_cols: u16) -> ImageHeightInfo {
+        let cache = self.cache.blocking_lock();
+        match cache.get(path) {
+            Some(ImageEntry::Ready { pixel_size, .. }) => {
+                let font_size = self.font_size();
+                ImageHeightInfo::Ready(calc_image_height(
+                    pixel_size.0,
+                    pixel_size.1,
+                    max_cols,
+                    font_size,
+                ))
+            }
+            _ => ImageHeightInfo::Placeholder,
+        }
+    }
+
+    /// Check the current state of a cached image (for cache invalidation).
+    pub fn image_state(&self, path: &str) -> Option<ImageState> {
+        let cache = self.cache.blocking_lock();
+        cache.get(path).map(|e| e.state())
+    }
+
+    /// Get error message for an Error-state image (for rendering error text).
+    pub fn error_message(&self, path: &str) -> Option<String> {
+        let cache = self.cache.blocking_lock();
+        match cache.get(path)? {
+            ImageEntry::Error(msg) => Some(msg.clone()),
+            _ => None,
+        }
+    }
+
+    /// Check if a URL image is currently loading.
+    pub fn is_loading(&self, path: &str) -> bool {
+        let cache = self.cache.blocking_lock();
+        matches!(cache.get(path), Some(ImageEntry::Loading))
+    }
+}
+
+/// Calculate the height (in terminal rows) for an image given its pixel dimensions,
+/// available terminal columns, and font cell size.
+pub fn calc_image_height(
+    pixel_w: u32,
+    pixel_h: u32,
+    max_cols: u16,
+    font_size: (u16, u16),
+) -> u16 {
+    if pixel_w == 0 || pixel_h == 0 {
+        return 1;
+    }
+    let (font_w, font_h) = (font_size.0 as u32, font_size.1 as u32);
+    if font_w == 0 || font_h == 0 {
+        return 1;
+    }
+
+    // How many columns does the image need at original size?
+    let natural_cols = pixel_w.div_ceil(font_w);
+
+    // If the image is narrower than max_cols, don't upscale.
+    let effective_cols = natural_cols.min(max_cols as u32);
+
+    // Scale height proportionally.
+    let scaled_h_px = pixel_h * effective_cols * font_w / pixel_w;
+
+    // Convert to rows.
+    (scaled_h_px.div_ceil(font_h) as u16).max(1)
+}
+
+/// Load a local image file synchronously.
+fn load_local_image(path: &str, picker: &Picker) -> ImageEntry {
+    let path_obj = Path::new(path);
+    if !path_obj.exists() {
+        return ImageEntry::Error(format!("File not found: {}", path));
+    }
+    match image::ImageReader::open(path_obj) {
+        Ok(reader) => match reader.decode() {
+            Ok(img) => {
+                let pixel_size = (img.width(), img.height());
+                let protocol = picker.new_resize_protocol(img);
+                ImageEntry::Ready {
+                    protocol: std::sync::Arc::new(tokio::sync::Mutex::new(protocol)),
+                    pixel_size,
+                }
+            }
+            Err(e) => ImageEntry::Error(format!("Decode failed: {}", e)),
+        },
+        Err(e) => ImageEntry::Error(format!("Open failed: {}", e)),
+    }
+}
+
+/// Download a URL image asynchronously and decode it.
+async fn download_and_decode(url: &str, picker: &Picker) -> ImageEntry {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build();
+    let client = match client {
+        Ok(c) => c,
+        Err(e) => return ImageEntry::Error(format!("HTTP client error: {}", e)),
+    };
+
+    match client.get(url).send().await {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                return ImageEntry::Error(format!("HTTP {}", resp.status()));
+            }
+            match resp.bytes().await {
+                Ok(bytes) => match image::load_from_memory(&bytes) {
+                    Ok(img) => {
+                        let pixel_size = (img.width(), img.height());
+                        let protocol = picker.new_resize_protocol(img);
+                        ImageEntry::Ready {
+                            protocol: std::sync::Arc::new(tokio::sync::Mutex::new(protocol)),
+                            pixel_size,
+                        }
+                    }
+                    Err(e) => ImageEntry::Error(format!("Decode failed: {}", e)),
+                },
+                Err(e) => ImageEntry::Error(format!("Download failed: {}", e)),
+            }
+        }
+        Err(e) => {
+            if e.is_timeout() {
+                ImageEntry::Error("Download timeout".to_string())
+            } else {
+                ImageEntry::Error(format!("Download failed: {}", e))
+            }
+        }
+    }
+}
+
+
 
 /// Supported image file extensions for `@path` reference matching.
 const IMAGE_EXTENSIONS: &[&str] = &[
@@ -417,5 +682,107 @@ mod tests {
     fn parse_at_followed_by_space() {
         let result = parse_image_refs("hello @ world", "/tmp");
         assert_eq!(result, "hello @ world");
+    }
+
+    // ── ImageCache tests ────────────────────────────────────
+
+    /// Create a minimal valid 1x1 PNG image file for testing using the image crate.
+    fn make_test_png(path: &std::path::Path) {
+        let img = image::RgbaImage::from_raw(1, 1, vec![255, 0, 0, 255]).unwrap();
+        img.save(path).unwrap();
+    }
+
+    #[test]
+    fn image_cache_new_does_not_panic() {
+        // This may run in a non-TTY environment; should fall back to Halfblocks.
+        let _cache = ImageCache::new();
+    }
+
+    #[test]
+    fn image_cache_local_file_load_ready() {
+        let cache = ImageCache::new();
+        let img_path = std::env::temp_dir().join(format!(
+            "visp_test_cache_{}.png",
+            std::process::id()
+        ));
+        make_test_png(&img_path);
+
+        cache.get_or_load(img_path.to_str().unwrap());
+
+        let state = cache.image_state(img_path.to_str().unwrap());
+        assert_eq!(state, Some(ImageState::Ready));
+
+        let _ = std::fs::remove_file(&img_path);
+    }
+
+    #[test]
+    fn image_cache_file_not_found_error() {
+        let cache = ImageCache::new();
+        let path = "/nonexistent/path/to/image.png";
+
+        cache.get_or_load(path);
+
+        let state = cache.image_state(path);
+        assert_eq!(state, Some(ImageState::Error));
+        assert!(cache.error_message(path).unwrap().contains("File not found"));
+    }
+
+    #[test]
+    fn image_cache_query_height_ready() {
+        let cache = ImageCache::new();
+        let img_path = std::env::temp_dir().join(format!(
+            "visp_test_height_{}.png",
+            std::process::id()
+        ));
+        make_test_png(&img_path);
+
+        cache.get_or_load(img_path.to_str().unwrap());
+        let height_info = cache.query_height(img_path.to_str().unwrap(), 80);
+        match height_info {
+            ImageHeightInfo::Ready(h) => assert!(h >= 1),
+            ImageHeightInfo::Placeholder => panic!("Expected Ready, got Placeholder"),
+        }
+
+        let _ = std::fs::remove_file(&img_path);
+    }
+
+    #[test]
+    fn image_cache_query_height_error_placeholder() {
+        let cache = ImageCache::new();
+        let path = "/nonexistent/image.png";
+
+        cache.get_or_load(path);
+        let height_info = cache.query_height(path, 80);
+        assert!(matches!(height_info, ImageHeightInfo::Placeholder));
+    }
+
+    #[test]
+    fn calc_image_height_wide_image_scales() {
+        // 200x100 image, font_size (10, 20), max_cols 40
+        // natural_cols = 200/10 = 20 < 40, so effective_cols = 20
+        // scaled_h_px = 100 * 20 * 10 / 200 = 100
+        // rows = ceil(100 / 20) = 5
+        let h = calc_image_height(200, 100, 40, (10, 20));
+        assert_eq!(h, 5);
+    }
+
+    #[test]
+    fn calc_image_height_narrow_image_no_upscale() {
+        // 20x40 image, font_size (10, 20), max_cols 80
+        // natural_cols = 20/10 = 2 < 80, so effective_cols = 2
+        // scaled_h_px = 40 * 2 * 10 / 20 = 40
+        // rows = ceil(40 / 20) = 2
+        let h = calc_image_height(20, 40, 80, (10, 20));
+        assert_eq!(h, 2);
+    }
+
+    #[test]
+    fn calc_image_height_wider_than_terminal() {
+        // 800x100 image, font_size (10, 20), max_cols 40
+        // natural_cols = 800/10 = 80 > 40, so effective_cols = 40
+        // scaled_h_px = 100 * 40 * 10 / 800 = 50
+        // rows = ceil(50 / 20) = 3
+        let h = calc_image_height(800, 100, 40, (10, 20));
+        assert_eq!(h, 3);
     }
 }
