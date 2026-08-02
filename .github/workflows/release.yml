@@ -73,21 +73,18 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Write tag annotation to body file
+      - name: Create release with tag annotation as body
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # Ensure annotated tag object is fetched (actions/checkout may not fetch it)
-          git fetch --tags --force origin "${{ github.ref }}"
-          # Read tag annotation; fall back to tag -n99 if %(contents) is empty
-          git for-each-ref --format='%(contents)' "refs/tags/${{ github.ref_name }}" > body.md
-          if [ ! -s body.md ]; then
-            git tag -n99 "${{ github.ref_name }}" | sed 's/^[^[:space:]]*[[:space:]]*//' > body.md
+          # Read tag annotation into notes file
+          git for-each-ref --format='%(contents)' "refs/tags/${{ github.ref_name }}" > /tmp/notes.md
+          if [ ! -s /tmp/notes.md ]; then
+            git tag -n99 "${{ github.ref_name }}" | sed 's/^[^[:space:]]*[[:space:]]*//' > /tmp/notes.md
           fi
-          if [ ! -s body.md ]; then
-            echo "empty_body=true" >> "$GITHUB_ENV"
+          # Create release with --notes-file; --generate-notes fills in if file is empty
+          if [ -s /tmp/notes.md ]; then
+            gh release create "${{ github.ref_name }}" artifacts/* --notes-file /tmp/notes.md
+          else
+            gh release create "${{ github.ref_name }}" artifacts/* --generate-notes
           fi
-
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/*
-          body_path: body.md
-          generate_release_notes: ${{ env.empty_body == 'true' }}
