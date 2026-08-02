@@ -154,6 +154,34 @@ fn test_add_message_version_initial() {
 }
 
 #[test]
+fn test_add_message_splits_image_markers() {
+    let mut app = AppState::new("s".into(), "m".into(), "".into(), String::new());
+    // 包含 <image: path> 标记时拆分为多条 ChatLine
+    app.add_message(
+        LineType::User,
+        "look at this <image: /tmp/a.png> and <image: /tmp/b.png> cool".into(),
+    );
+    assert_eq!(app.messages().len(), 5);
+    assert_eq!(app.messages()[0].line_type, LineType::User);
+    assert_eq!(app.messages()[0].content, "look at this ");
+    assert!(matches!(
+        app.messages()[1].line_type,
+        LineType::Image { ref path, .. } if path == "/tmp/a.png"
+    ));
+    assert_eq!(app.messages()[2].line_type, LineType::User);
+    assert_eq!(app.messages()[2].content, " and ");
+    assert!(matches!(
+        app.messages()[3].line_type,
+        LineType::Image { ref path, .. } if path == "/tmp/b.png"
+    ));
+    assert_eq!(app.messages()[4].line_type, LineType::User);
+    assert_eq!(app.messages()[4].content, " cool");
+    // id 连续分配
+    assert_eq!(app.messages()[0].id, 0);
+    assert_eq!(app.messages()[4].id, 4);
+}
+
+#[test]
 fn test_streaming_text() {
     let mut app = AppState::new("s".into(), "m".into(), "".into(), String::new());
     app.append_streaming("Hello ");
@@ -2374,4 +2402,48 @@ fn test_button_hit_after_completion() {
     assert_eq!(idx, 1);
     assert_eq!(app.tab_bar.tabs.len(), 2);
     assert_eq!(app.tab_bar.hidden_tabs.len(), 0);
+}
+
+#[test]
+fn test_ensure_all_caches_image_state_ready() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    let img_path = std::env::temp_dir().join(format!(
+        "visp_test_appcache_{}.png",
+        std::process::id()
+    ));
+    let img = image::RgbaImage::from_raw(2, 2, vec![255, 0, 0, 255].repeat(4)).unwrap();
+    img.save(&img_path).unwrap();
+
+    // 用户输入包含图片标记 → add_message 拆分为 文本+图片+文本 三条 ChatLine
+    app.add_message(
+        LineType::User,
+        format!("see <image: {}> ok", img_path.display()),
+    );
+    assert_eq!(app.messages().len(), 3);
+    assert!(matches!(app.messages()[1].line_type, LineType::Image { .. }));
+
+    // 图片尚未加载：缓存已建立（占位/错误状态），且不 panic
+    let render_w = 80u16;
+    crate::ui::ensure_all_caches(&mut app, render_w);
+    assert_eq!(app.message_caches.len(), 3);
+
+    // 加载图片后再次 ensure：图片状态变化触发重建，缓存变为 Ready
+    app.image_cache.get_or_load(img_path.to_str().unwrap());
+    crate::ui::ensure_all_caches(&mut app, render_w);
+    let img_cache = app
+        .message_caches
+        .iter()
+        .find(|c| c.image_state.is_some())
+        .unwrap();
+    assert_eq!(
+        img_cache.image_state,
+        Some(crate::image::ImageState::Ready)
+    );
+
+    // 状态未变化时不会重复重建（matches 直接命中）
+    let lines_before = app.message_caches[1].lines.len();
+    crate::ui::ensure_all_caches(&mut app, render_w);
+    assert_eq!(app.message_caches[1].lines.len(), lines_before);
+
+    let _ = std::fs::remove_file(&img_path);
 }

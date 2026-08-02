@@ -8,7 +8,9 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap},
 };
 
-use crate::app::{AgentStatus, AppState, ConfirmState, MessageCache, TabEntry, pad_to_width};
+use crate::app::{
+    AgentStatus, AppState, ConfirmState, LineType, MessageCache, TabEntry, pad_to_width,
+};
 use crate::debug_log;
 
 /// 将数字格式化为千位分隔符形式，如 `1234567` → `1,234,567`
@@ -568,6 +570,10 @@ pub(crate) fn ensure_all_caches(app: &mut AppState, width: u16) {
     if width != app.cache_width {
         app.cache_width = width;
     }
+    let metrics = crate::image::ImageMetrics {
+        font_size: app.image_cache.font_size(),
+        image_cache: &app.image_cache,
+    };
     let mut cache_map: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
     for (i, cache) in app.message_caches.iter().enumerate() {
         cache_map.insert(cache.msg_id, i);
@@ -581,12 +587,20 @@ pub(crate) fn ensure_all_caches(app: &mut AppState, width: u16) {
             .map(|cid| app.expanded_tool_calls.contains(cid))
             .unwrap_or(false);
         if let Some(&idx) = cache_map.get(&msg.id) {
-            if !app.message_caches[idx].matches(msg, width, expanded) {
-                app.message_caches[idx] = MessageCache::from_message(msg, width, expanded, None);
+            // 图片状态变化（如网络图片下载完成）时也需要重建缓存
+            let image_state_changed = match &msg.line_type {
+                LineType::Image { path, .. } => {
+                    app.message_caches[idx].image_state != app.image_cache.image_state(path)
+                }
+                _ => false,
+            };
+            if !app.message_caches[idx].matches(msg, width, expanded) || image_state_changed {
+                app.message_caches[idx] =
+                    MessageCache::from_message(msg, width, expanded, Some(&metrics));
             }
         } else {
             app.message_caches
-                .push(MessageCache::from_message(msg, width, expanded, None));
+                .push(MessageCache::from_message(msg, width, expanded, Some(&metrics)));
         }
     }
     app.message_caches

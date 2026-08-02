@@ -1187,6 +1187,10 @@ pub struct AppState {
     pub tab_completion: Option<TabCompletionState>,
     /// 已展开的工具调用 call_id 集合（点击切换）
     pub expanded_tool_calls: std::collections::HashSet<String>,
+    /// 图片缓存（终端图片渲染）
+    pub image_cache: crate::image::ImageCache,
+    /// 网络图片下载完成通知 channel（主循环监听）
+    pub image_ready_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
 }
 
 /// Tab 补全循环状态
@@ -1205,6 +1209,7 @@ impl AppState {
         let mut textarea = Self::new_textarea();
         textarea.set_placeholder_text("Type your message...");
         let main_session_id = session_id.clone();
+        let (image_ready_tx, image_ready_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         Self {
             tab_bar: TabBar::new(main_session_id.clone()),
             main_session_id,
@@ -1249,6 +1254,12 @@ impl AppState {
             project_path,
             tab_completion: None,
             expanded_tool_calls: std::collections::HashSet::new(),
+            image_cache: {
+                let mut cache = crate::image::ImageCache::new();
+                cache.set_ready_tx(image_ready_tx);
+                cache
+            },
+            image_ready_rx,
         }
     }
 
@@ -1291,7 +1302,9 @@ impl AppState {
 
     /// 类型 A：永远写 default tab（tabs[0]）
     pub fn add_message(&mut self, line_type: LineType, content: String) {
-        self.tab_bar.tabs[0].push_chat_line(line_type, content, None);
+        // 包含 <image: ...> 标记时拆分为多条 ChatLine（文本 + 图片）
+        let lines = crate::image::split_image_markers(&content, line_type);
+        self.tab_bar.tabs[0].push_chat_lines(lines);
     }
 
     /// 类型 B：按 session_id 路由
@@ -1301,8 +1314,9 @@ impl AppState {
         line_type: LineType,
         content: String,
     ) {
-        self.tab_mut_by_session(session_id)
-            .push_chat_line(line_type, content, None);
+        // 包含 <image: ...> 标记时拆分为多条 ChatLine（文本 + 图片）
+        let lines = crate::image::split_image_markers(&content, line_type);
+        self.tab_mut_by_session(session_id).push_chat_lines(lines);
     }
 
     /// 类型 B：按 session_id 路由的 tool_line

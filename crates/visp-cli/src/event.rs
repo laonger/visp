@@ -170,6 +170,10 @@ pub async fn run(
                     app.needs_render = true;
                 }
             }
+            Some(()) = app.image_ready_rx.recv() => {
+                // 网络图片下载完成，重新渲染以显示图片
+                app.needs_render = true;
+            }
         }
         if app.should_quit {
             break;
@@ -658,12 +662,13 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                 } else {
                     // 新用户输入清零 L2（上一轮 request 的 token 统计）
                     app.current_request_usage = (0, 0, 0, 0);
-                    app.add_message(LineType::User, text.clone());
+                    let processed = crate::image::parse_image_refs(&text, &app.project_path);
+                    app.add_message(LineType::User, processed.clone());
                     app.input_history.push(text.clone());
                     app.history_index = None;
                     app.set_generating(true);
                     app.scroll_following = true;
-                    let rid = chat_handle.send_input(&text);
+                    let rid = chat_handle.send_input(&processed);
                     app.current_request_id = Some(rid);
                 }
                 return false;
