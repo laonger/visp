@@ -751,16 +751,33 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                 let remain = cache.line_count.saturating_sub(hidden_top);
                 let visible_lines = remain.min(visible_h);
                 if visible_lines > 0 {
-                    let start = hidden_top as usize;
-                    let end = (start + visible_lines as usize).min(cache.lines.len());
-                    render_block(
-                        f,
-                        area,
-                        style,
-                        &cache.lines[start..end],
-                        visible_lines,
-                        area.y + rel_y,
-                    );
+                    // Image messages: render via StatefulImage widget
+                    if let LineType::Image { ref path, ref alt_text } = msg.line_type {
+                        // Ensure image is loaded
+                        app.image_cache.get_or_load(path);
+                        render_image_block(
+                            f,
+                            area,
+                            &app.image_cache,
+                            path,
+                            alt_text,
+                            cache.line_count,
+                            visible_lines,
+                            area.y + rel_y,
+                            render_w,
+                        );
+                    } else {
+                        let start = hidden_top as usize;
+                        let end = (start + visible_lines as usize).min(cache.lines.len());
+                        render_block(
+                            f,
+                            area,
+                            style,
+                            &cache.lines[start..end],
+                            visible_lines,
+                            area.y + rel_y,
+                        );
+                    }
                 }
             }
             y += h;
@@ -794,6 +811,59 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                 render_block(f, area, bs, &text_lines, visible_lines, area.y + rel_y);
             }
         }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════
+// 图片块渲染
+// ════════════════════════════════════════════════════════════════
+
+/// Render an image block in the chat area.
+///
+/// - Ready: renders via `StatefulImage` widget with `Resize::Fit`
+/// - Loading: renders `[加载中: path]` placeholder text
+/// - Error: renders `[图片加载失败: path (reason)]` error text
+fn render_image_block(
+    f: &mut Frame,
+    area: Rect,
+    image_cache: &crate::image::ImageCache,
+    path: &str,
+    alt_text: &str,
+    line_count: u16,
+    visible_lines: u16,
+    y: u16,
+    render_w: u16,
+) {
+    // Try to get the protocol for rendering
+    if let Some(protocol_arc) = image_cache.try_get_protocol(path) {
+        // Ready: render StatefulImage widget
+        use ratatui_image::{Resize, StatefulImage};
+        let image_area = Rect::new(
+            area.x + 1, // margin_horizontal = 1
+            y,
+            render_w,
+            visible_lines.min(line_count),
+        );
+        if image_area.width > 0 && image_area.height > 0 {
+            // Lock the protocol and render
+            if let Ok(mut protocol) = protocol_arc.try_lock() {
+                let widget = StatefulImage::default().resize(Resize::Fit(None));
+                f.render_stateful_widget(widget, image_area, &mut *protocol);
+            }
+        }
+    } else if image_cache.is_loading(path) {
+        // Loading: show placeholder
+        let msg = format!("[加载中: {}]", alt_text);
+        let line = Line::styled(msg, Style::default().fg(Color::DarkGray));
+        let bs = theme::ASSISTANT_STYLE;
+        render_block(f, area, bs, &[line], visible_lines, y);
+    } else {
+        // Error: show error message
+        let reason = image_cache.error_message(path).unwrap_or_default();
+        let msg = format!("[图片加载失败: {} ({})]", alt_text, reason);
+        let line = Line::styled(msg, Style::default().fg(Color::Red));
+        let bs = theme::ASSISTANT_STYLE;
+        render_block(f, area, bs, &[line], visible_lines, y);
     }
 }
 
