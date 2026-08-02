@@ -208,12 +208,54 @@ fn test_message_cache_creation() {
         tool_error: false,
         sub_session_id: None,
     };
-    let cache = MessageCache::from_message(&msg, 80, false);
+    let cache = MessageCache::from_message(&msg, 80, false, None);
     assert_eq!(cache.msg_id, 0);
     assert_eq!(cache.msg_version, 0);
     assert_eq!(cache.width, 80);
     assert!(cache.line_count > 0);
     assert!(!cache.lines.is_empty());
+}
+
+#[test]
+fn test_streaming_display_text_truncates_incomplete_image_marker() {
+    let mut tab = TabEntry::new("sid", "agent");
+    tab.streaming_text = "hello\nsome text <image: /tmp/pic.png".into();
+    assert_eq!(tab.streaming_display_text(), "hello\nsome text ");
+}
+
+#[test]
+fn test_streaming_display_text_keeps_complete_marker() {
+    let mut tab = TabEntry::new("sid", "agent");
+    tab.streaming_text = "see <image: /tmp/pic.png> this".into();
+    assert_eq!(tab.streaming_display_text(), "see <image: /tmp/pic.png> this");
+}
+
+#[test]
+fn test_streaming_display_text_no_marker_unchanged() {
+    let mut tab = TabEntry::new("sid", "agent");
+    tab.streaming_text = "plain text only".into();
+    assert_eq!(tab.streaming_display_text(), "plain text only");
+}
+
+#[test]
+fn test_message_cache_image_line_without_metrics() {
+    let msg = ChatLine {
+        id: 0,
+        version: 0,
+        line_type: LineType::Image {
+            path: "/tmp/pic.png".into(),
+            alt_text: "pic".into(),
+        },
+        content: String::new(),
+        call_id: None,
+        tool_result: None,
+        tool_error: false,
+        sub_session_id: None,
+    };
+    let cache = MessageCache::from_message(&msg, 80, false, None);
+    assert_eq!(cache.line_count, 1);
+    assert!(cache.lines.is_empty());
+    assert_eq!(cache.image_state, None);
 }
 
 #[test]
@@ -228,7 +270,7 @@ fn test_message_cache_matches() {
         tool_error: false,
         sub_session_id: None,
     };
-    let cache = MessageCache::from_message(&msg, 80, false);
+    let cache = MessageCache::from_message(&msg, 80, false, None);
     assert!(cache.matches(&msg, 80, false));
     // 不同 version 不匹配
     let mut msg2 = msg.clone();
@@ -262,7 +304,7 @@ fn test_cache_user_message_has_top_bottom_padding() {
         tool_error: false,
         sub_session_id: None,
     };
-    let cache = MessageCache::from_message(&msg, 80, false);
+    let cache = MessageCache::from_message(&msg, 80, false, None);
     // User 消息背景由 bg_fill 处理，行级不带 padding
     assert!(cache.line_count >= 1);
 }
@@ -281,7 +323,7 @@ fn test_cache_tool_call_truncation() {
         tool_error: false,
         sub_session_id: None,
     };
-    let cache = MessageCache::from_message(&msg, 80, false);
+    let cache = MessageCache::from_message(&msg, 80, false, None);
     // With collapsible design: icon + name + formatted args (fits on one line)
     assert_eq!(cache.line_count, 1);
 }
@@ -292,7 +334,7 @@ fn test_clear_messages_also_clears_caches() {
     app.add_message(LineType::User, "hello".into());
     // 手动添加一个 cache 模拟渲染后的状态
     app.message_caches
-        .push(MessageCache::from_message(&app.messages()[0], 80, false));
+        .push(MessageCache::from_message(&app.messages()[0], 80, false, None));
     assert_eq!(app.message_caches.len(), 1);
     app.clear_messages();
     assert!(app.messages().is_empty());

@@ -582,11 +582,11 @@ pub(crate) fn ensure_all_caches(app: &mut AppState, width: u16) {
             .unwrap_or(false);
         if let Some(&idx) = cache_map.get(&msg.id) {
             if !app.message_caches[idx].matches(msg, width, expanded) {
-                app.message_caches[idx] = MessageCache::from_message(msg, width, expanded);
+                app.message_caches[idx] = MessageCache::from_message(msg, width, expanded, None);
             }
         } else {
             app.message_caches
-                .push(MessageCache::from_message(msg, width, expanded));
+                .push(MessageCache::from_message(msg, width, expanded, None));
         }
     }
     app.message_caches
@@ -648,10 +648,11 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
         })
         .sum::<u16>();
 
-    let stream_lines = if app.streaming_is_empty() {
+    let stream_text = app.active_tab().streaming_display_text();
+    let stream_lines = if stream_text.is_empty() {
         0
     } else {
-        theme::ASSISTANT_STYLE.total_height(app.streaming_lines_count() as u16)
+        theme::ASSISTANT_STYLE.total_height(stream_text.lines().count() as u16)
     };
 
     // task_prompt 的渲染高度（子 tab 第一行）
@@ -753,12 +754,8 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     }
 
     // 流式文本
-    if !app.streaming_is_empty() {
-        let lines: Vec<String> = app
-            .streaming_text()
-            .lines()
-            .map(|s| s.to_string())
-            .collect();
+    if !stream_text.is_empty() {
+        let lines: Vec<String> = stream_text.lines().map(|s| s.to_string()).collect();
         let line_count = lines.len() as u16;
         let h = theme::ASSISTANT_STYLE.total_height(line_count);
         if let Some((rel_y, visible_h)) = viewport_intersect(y, h, scroll_y, visible, area.bottom())

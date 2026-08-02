@@ -9,6 +9,7 @@ use ratatui::{
 use ratatui_textarea::WrapMode;
 use unicode_width::UnicodeWidthChar;
 
+use crate::image::{ImageHeightInfo, ImageMetrics, ImageState};
 use crate::theme;
 use visp_proto::visp::{ServerMessage, server_message};
 
@@ -309,6 +310,23 @@ impl TabEntry {
         let mut entry = Self::new(session_id, agent_name);
         entry.status = AgentStatus::ViewOnly;
         entry
+    }
+
+    /// Returns the streaming text with incomplete image markers truncated.
+    /// If there's an incomplete `<image: ...` marker at the end (no closing `>`),
+    /// the text is truncated to before the `<image:` prefix.
+    pub fn streaming_display_text(&self) -> String {
+        let text = &self.streaming_text;
+        // Search for the last `<image: ` occurrence
+        if let Some(pos) = text.rfind("<image: ") {
+            // Check if there's a closing `>` after this position
+            let after_marker = &text[pos..];
+            if !after_marker.contains('>') {
+                // Incomplete marker: truncate
+                return text[..pos].to_string();
+            }
+        }
+        text.clone()
     }
 
     pub fn push_chat_line(
@@ -831,10 +849,16 @@ pub struct MessageCache {
     pub expanded: bool,
     pub lines: Vec<Line<'static>>,
     pub line_count: u16,
+    pub image_state: Option<ImageState>, // None for non-image messages
 }
 
 impl MessageCache {
-    pub fn from_message(msg: &ChatLine, width: u16, expanded: bool) -> Self {
+    pub fn from_message(
+        msg: &ChatLine,
+        width: u16,
+        expanded: bool,
+        image_metrics: Option<&ImageMetrics>,
+    ) -> Self {
         // 背景色由 ui.rs 的 BlockStyle::bg_fill 统一处理
         let base_style = Style::default().fg(theme::fg_for(msg.line_type.clone()));
         let lines: Vec<Line<'static>> = match msg.line_type {
@@ -865,6 +889,32 @@ impl MessageCache {
                     })
                     .collect()
             }
+            LineType::Image { ref path, .. } => {
+                let (line_count, image_state) = match image_metrics {
+                    Some(metrics) => match metrics.image_cache.query_height(path, width) {
+                        ImageHeightInfo::Ready(h) => (h, Some(ImageState::Ready)),
+                        ImageHeightInfo::Placeholder => {
+                            // Check if it's Loading or Error
+                            let state = metrics.image_cache.image_state(path);
+                            match state {
+                                Some(ImageState::Loading) => (1, Some(ImageState::Loading)),
+                                _ => (1, Some(ImageState::Error)),
+                            }
+                        }
+                    },
+                    None => (1, None),
+                };
+                // For image lines, lines vec is empty (rendered separately by render_image_block)
+                return Self {
+                    msg_id: msg.id,
+                    msg_version: msg.version,
+                    width,
+                    expanded,
+                    lines: Vec::new(),
+                    line_count,
+                    image_state,
+                };
+            }
             LineType::ToolCall { .. } => {
                 let lines = crate::tool_ui::render_tool_call(msg, width, expanded);
                 let line_count = lines.len() as u16;
@@ -875,6 +925,7 @@ impl MessageCache {
                     expanded,
                     lines,
                     line_count,
+                    image_state: None,
                 };
             }
             LineType::AgentCall { .. } => {
@@ -887,6 +938,7 @@ impl MessageCache {
                     expanded,
                     lines,
                     line_count,
+                    image_state: None,
                 };
             }
             LineType::ToolResult { .. } => {
@@ -899,6 +951,7 @@ impl MessageCache {
                     expanded,
                     lines,
                     line_count,
+                    image_state: None,
                 };
             }
             LineType::ToolError { .. } => {
@@ -911,6 +964,7 @@ impl MessageCache {
                     expanded,
                     lines,
                     line_count,
+                    image_state: None,
                 };
             }
             _ => {
@@ -932,6 +986,7 @@ impl MessageCache {
                     expanded,
                     lines,
                     line_count,
+                    image_state: None,
                 };
             }
         };
@@ -944,6 +999,7 @@ impl MessageCache {
             expanded,
             lines,
             line_count,
+            image_state: None,
         }
     }
 

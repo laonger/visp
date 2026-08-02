@@ -816,7 +816,7 @@ mod tests {
             tool_error: false,
             sub_session_id: Some("sub-sess-123".into()),
         };
-        let cache = MessageCache::from_message(&msg, 60, false);
+        let cache = MessageCache::from_message(&msg, 60, false, None);
         let messages = vec![msg];
         let caches = vec![cache];
         // AGENT_CALL_STYLE: top_margin=1, margin_vertical=1 -> header at y+2
@@ -839,7 +839,7 @@ mod tests {
             tool_error: false,
             sub_session_id: Some("sub-sess-123".into()),
         };
-        let cache = MessageCache::from_message(&msg, 60, false);
+        let cache = MessageCache::from_message(&msg, 60, false, None);
         let messages = vec![msg];
         let caches = vec![cache];
         // Click on header row but left side (not the button)
@@ -862,7 +862,7 @@ mod tests {
             tool_error: false,
             sub_session_id: Some("sub-sess-123".into()),
         };
-        let cache = MessageCache::from_message(&msg, 60, false);
+        let cache = MessageCache::from_message(&msg, 60, false, None);
         let messages = vec![msg];
         let caches = vec![cache];
         // Click on row 3 (prompt line, not header which is at row 2)
@@ -887,7 +887,7 @@ mod tests {
             tool_error: false,
             sub_session_id: Some("sub-sess-123".into()),
         };
-        let cache = MessageCache::from_message(&msg, 60, false);
+        let cache = MessageCache::from_message(&msg, 60, false, None);
         let style = crate::theme::style_for(LineType::AgentCall {
             name: "explorer".into(),
         });
@@ -936,8 +936,8 @@ mod tests {
             tool_error: false,
             sub_session_id: Some("sub-sess-123".into()),
         };
-        let user_cache = MessageCache::from_message(&user_msg, 60, false);
-        let agent_cache = MessageCache::from_message(&agent_msg, 60, false);
+        let user_cache = MessageCache::from_message(&user_msg, 60, false, None);
+        let agent_cache = MessageCache::from_message(&agent_msg, 60, false, None);
         let messages = vec![user_msg, agent_msg];
         let caches = vec![user_cache, agent_cache];
 
