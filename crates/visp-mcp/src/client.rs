@@ -240,11 +240,22 @@ pub(crate) fn call_tool_result_to_text(result: &CallToolResult) -> String {
         match &content.raw {
             RawContent::Text(t) => texts.push(t.text.clone()),
             RawContent::Image(img) => {
-                texts.push(format!(
-                    "[Image: {} ({} bytes)]",
-                    img.mime_type,
-                    img.data.len()
-                ));
+                // Try to interpret image data as a UTF-8 file path
+                if let Ok(path_str) = std::str::from_utf8(img.data.as_bytes()) {
+                    let path = std::path::Path::new(path_str);
+                    let image_exts = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico"];
+                    if path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| image_exts.contains(&e.to_lowercase().as_str()))
+                        .unwrap_or(false)
+                        && path.exists()
+                    {
+                        texts.push(format!("<image: {}>", path.display()));
+                        continue;
+                    }
+                }
+                texts.push(format!("[Image: {} ({} bytes)]", img.mime_type, img.data.len()));
             }
             RawContent::Resource(_) => {
                 texts.push("[Resource]".into());
