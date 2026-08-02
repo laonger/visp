@@ -104,6 +104,84 @@ fn test_read_file_binary() {
 }
 
 #[test]
+fn test_read_file_image_png() {
+    let working_dir = std::env::temp_dir();
+    let file_path = working_dir.join("visp_test_image.png");
+    std::fs::write(&file_path, [0u8; 64]).unwrap();
+
+    let tool = ReadFile::default();
+    let result = tool.read_single_file("visp_test_image.png", &working_dir, None, None);
+
+    let expected = format!("<image: {}>", file_path.canonicalize().unwrap().display());
+    assert_eq!(result.unwrap(), expected);
+
+    let _ = std::fs::remove_file(&file_path);
+}
+
+#[test]
+fn test_read_file_image_jpg() {
+    let working_dir = std::env::temp_dir();
+    let file_path = working_dir.join("visp_test_image.jpg");
+    std::fs::write(&file_path, [0u8; 64]).unwrap();
+
+    let tool = ReadFile::default();
+    let result = tool.read_single_file("visp_test_image.jpg", &working_dir, None, None);
+
+    let expected = format!("<image: {}>", file_path.canonicalize().unwrap().display());
+    assert_eq!(result.unwrap(), expected);
+
+    let _ = std::fs::remove_file(&file_path);
+}
+
+#[test]
+fn test_read_file_image_uppercase_ext() {
+    let working_dir = std::env::temp_dir();
+    let file_path = working_dir.join("visp_test_image_upper.PNG");
+    std::fs::write(&file_path, [0u8; 64]).unwrap();
+
+    let tool = ReadFile::default();
+    let result = tool.read_single_file("visp_test_image_upper.PNG", &working_dir, None, None);
+
+    let expected = format!("<image: {}>", file_path.canonicalize().unwrap().display());
+    assert_eq!(result.unwrap(), expected);
+
+    let _ = std::fs::remove_file(&file_path);
+}
+
+#[test]
+fn test_read_file_txt_regression() {
+    let working_dir = std::env::temp_dir();
+    let file_path = working_dir.join("visp_test_image.txt");
+    std::fs::write(&file_path, "hello world").unwrap();
+
+    let tool = ReadFile::default();
+    let result = tool.read_single_file("visp_test_image.txt", &working_dir, None, None);
+    assert_eq!(result.unwrap(), "hello world");
+
+    let _ = std::fs::remove_file(&file_path);
+}
+
+#[test]
+fn test_read_file_nonexistent_image() {
+    let working_dir = std::env::temp_dir();
+    let file_path = working_dir.join("visp_test_nonexistent.png");
+    let _ = std::fs::remove_file(&file_path);
+
+    let tool = ReadFile::default();
+    let result = tool.read_single_file("visp_test_nonexistent.png", &working_dir, None, None);
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("Path resolution failed") || err.contains("Failed to read file metadata"),
+        "unexpected error: {}",
+        err
+    );
+
+    let _ = std::fs::remove_file(&file_path);
+}
+
+#[test]
 fn test_read_file_line_range_start_only() {
     let tmp = TempDir::new().unwrap();
     let file_path = tmp.path().join("ranges.txt");

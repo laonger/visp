@@ -331,10 +331,20 @@ impl TabEntry {
         });
     }
 
+    pub fn push_chat_lines(&mut self, lines: Vec<ChatLine>) {
+        for mut line in lines {
+            line.id = self.next_message_id;
+            line.version = 0;
+            self.next_message_id += 1;
+            self.messages.push(line);
+        }
+    }
+
     pub fn flush_streaming(&mut self) {
         if !self.streaming_text.is_empty() {
             let text = std::mem::take(&mut self.streaming_text);
-            self.push_chat_line(LineType::Assistant, text, None);
+            let lines = crate::image::split_image_markers(&text, LineType::Assistant);
+            self.push_chat_lines(lines);
         }
     }
 
@@ -464,16 +474,20 @@ impl TabEntry {
                         msg.tool_error = tr.is_error;
                         msg.version += 1;
                     } else {
-                        // Fallback: create separate ChatLine
-                        self.push_chat_line(
-                            if tr.is_error {
-                                LineType::ToolError { name: tool_name }
-                            } else {
-                                LineType::ToolResult { name: tool_name }
-                            },
-                            tr.content,
-                            Some(tr.call_id),
-                        );
+                        // Fallback: create separate ChatLines
+                        let line_type = if tr.is_error {
+                            LineType::ToolError { name: tool_name.clone() }
+                        } else {
+                            LineType::ToolResult { name: tool_name.clone() }
+                        };
+                        let lines =
+                            crate::image::split_image_markers(&tr.content, line_type);
+                        for mut line in lines {
+                            line.id = self.next_message_id;
+                            line.call_id = Some(tr.call_id.clone());
+                            self.next_message_id += 1;
+                            self.messages.push(line);
+                        }
                     }
                 }
                 Some(server_message::Payload::ThinkingBlock(tb)) => {
@@ -488,7 +502,8 @@ impl TabEntry {
                     // 回放时重放用户消息：先消费 pending_usage 为上一条 assistant 追加 token 统计
                     self.consume_pending_usage();
                     self.flush_streaming();
-                    self.push_chat_line(LineType::User, um.content, None);
+                    let lines = crate::image::split_image_markers(&um.content, LineType::User);
+                    self.push_chat_lines(lines);
                 }
                 Some(server_message::Payload::Error(err)) => {
                     self.flush_streaming();

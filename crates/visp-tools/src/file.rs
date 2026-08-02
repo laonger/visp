@@ -8,6 +8,8 @@ use visp_core::tool::{Tool, ToolContext, ToolResult};
 const MAX_FILE_SIZE: u64 = 1_048_576; // 1MB
 const BINARY_SCAN_BYTES: usize = 8000;
 
+const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico"];
+
 /// 读取文件
 pub struct ReadFile {
     max_file_size: u64,
@@ -42,6 +44,13 @@ impl ReadFile {
         end_line: Option<i64>,
     ) -> Result<String, String> {
         let path = validate_path(Path::new(path_str), working_dir)?;
+
+        // Image file detection: return marker instead of reading binary content
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if IMAGE_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
+                return Ok(format!("<image: {}>", path.display()));
+            }
+        }
 
         // 检查文件大小
         let metadata =
