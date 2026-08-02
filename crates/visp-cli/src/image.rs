@@ -102,6 +102,98 @@ fn make_image_line(path: String) -> ChatLine {
     }
 }
 
+// ════════════════════════════════════════════════════════════════
+// @path 输入解析
+// ════════════════════════════════════════════════════════════════
+
+/// Supported image file extensions for `@path` reference matching.
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico",
+];
+
+/// Check if a path has a supported image file extension.
+fn is_image_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| IMAGE_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// Check if a string starts with a URL scheme (http:// or https://).
+fn is_url(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://")
+}
+
+/// Parse `@path` or `@url` references in user input text and replace them with
+/// `<image: path-or-url>` markers.
+///
+/// Matching rules:
+/// - `@` must be at the start of a word (preceded by whitespace or start of string)
+/// - `@http://...` or `@https://...` -> URL image, directly matched
+/// - `@<other text>` -> resolve as file path relative to `project_path`; if file exists
+///   and has a supported image extension, replace with `<image: abs_path>`; otherwise
+///   leave `@` and the text as-is
+///
+/// Non-matching `@` sequences (e.g. `@mention`, `@nonexistent.txt`) are left as-is.
+pub fn parse_image_refs(text: &str, project_path: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut result = String::with_capacity(text.len());
+    let mut i = 0;
+    let project = std::path::Path::new(project_path);
+
+    while i < chars.len() {
+        // Check for `@` at word boundary (start of string or preceded by whitespace)
+        if chars[i] == '@'
+            && (i == 0 || chars[i - 1].is_whitespace())
+        {
+            // Collect the word after `@` (non-whitespace sequence)
+            let word_start = i + 1;
+            let mut word_end = word_start;
+            while word_end < chars.len() && !chars[word_end].is_whitespace() {
+                word_end += 1;
+            }
+            let word: String = chars[word_start..word_end].iter().collect();
+
+            if word.is_empty() {
+                // `@` followed by whitespace, keep as-is
+                result.push('@');
+                i += 1;
+                continue;
+            }
+
+            if is_url(&word) {
+                // URL image: directly replace
+                result.push_str(&format!("<image: {}>", word));
+                i = word_end;
+            } else {
+                // Try to resolve as local file path
+                let path = std::path::Path::new(&word);
+                let resolved = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    project.join(&word)
+                };
+
+                if resolved.exists() && is_image_file(&resolved) {
+                    // Match: replace with absolute path marker
+                    let abs = resolved.canonicalize().unwrap_or(resolved);
+                    result.push_str(&format!("<image: {}>", abs.display()));
+                } else {
+                    // No match: keep `@` and the word as-is
+                    result.push('@');
+                    result.push_str(&word);
+                }
+                i = word_end;
+            }
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +296,126 @@ mod tests {
             "cat.png"
         );
         assert_eq!(extract_alt_text("/abs/path/noext"), "noext");
+    }
+
+    // ── parse_image_refs tests ──────────────────────────────
+
+    use std::io::Write;
+
+    /// Create a temp image file for testing and return its absolute path.
+    fn make_temp_image(ext: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir();
+        let name = format!("visp_test_img_{}.{}", std::process::id(), ext);
+        let path = dir.join(name);
+        // Write minimal PNG header (or empty file for other exts - we only check existence + ext)
+        let mut f = std::fs::File::create(&path).unwrap();
+        if ext == "png" {
+            f.write_all(&[
+                0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+            ]).unwrap();
+        }
+        f.flush().unwrap();
+        path
+    }
+
+    #[test]
+    fn parse_absolute_path() {
+        let img = make_temp_image("png");
+        let input = format!("look at @{}", img.display());
+        let result = parse_image_refs(&input, "/tmp");
+        let canonical = img.canonicalize().unwrap();
+        assert!(result.contains(&format!("<image: {}>", canonical.display())));
+        assert!(!result.contains('@'));
+        let _ = std::fs::remove_file(&img);
+    }
+
+    #[test]
+    fn parse_relative_path_with_dot_slash() {
+        let dir = std::env::temp_dir();
+        let img_name = format!("visp_test_rel_{}.png", std::process::id());
+        let img_path = dir.join(&img_name);
+        std::fs::write(&img_path, b"fake").unwrap();
+
+        let input = format!("see @./{}", img_name);
+        let result = parse_image_refs(&input, dir.to_str().unwrap());
+
+        let canonical = img_path.canonicalize().unwrap();
+        assert!(result.contains(&format!("<image: {}>", canonical.display())));
+        let _ = std::fs::remove_file(&img_path);
+    }
+
+    #[test]
+    fn parse_relative_path_bare() {
+        let dir = std::env::temp_dir();
+        let img_name = format!("visp_test_bare_{}.png", std::process::id());
+        let img_path = dir.join(&img_name);
+        std::fs::write(&img_path, b"fake").unwrap();
+
+        let input = format!("see @{}", img_name);
+        let result = parse_image_refs(&input, dir.to_str().unwrap());
+
+        let canonical = img_path.canonicalize().unwrap();
+        assert!(result.contains(&format!("<image: {}>", canonical.display())));
+        let _ = std::fs::remove_file(&img_path);
+    }
+
+    #[test]
+    fn parse_nonexistent_file_kept_as_is() {
+        let result = parse_image_refs("check @nonexistent.png", "/tmp");
+        assert_eq!(result, "check @nonexistent.png");
+    }
+
+    #[test]
+    fn parse_mention_kept_as_is() {
+        let result = parse_image_refs("hello @mention", "/tmp");
+        assert_eq!(result, "hello @mention");
+    }
+
+    #[test]
+    fn parse_url() {
+        let result = parse_image_refs(
+            "see @https://example.com/img.png",
+            "/tmp",
+        );
+        assert_eq!(result, "see <image: https://example.com/img.png>");
+    }
+
+    #[test]
+    fn parse_email_kept_as_is() {
+        let result = parse_image_refs("contact user@email.com", "/tmp");
+        assert_eq!(result, "contact user@email.com");
+    }
+
+    #[test]
+    fn parse_multiple_refs() {
+        let dir = std::env::temp_dir();
+        let img1_name = format!("visp_test_multi1_{}.png", std::process::id());
+        let img2_name = format!("visp_test_multi2_{}.jpg", std::process::id());
+        let img1_path = dir.join(&img1_name);
+        let img2_path = dir.join(&img2_name);
+        std::fs::write(&img1_path, b"fake").unwrap();
+        std::fs::write(&img2_path, b"fake").unwrap();
+
+        let input = format!(
+            "first @{} second @https://x.com/y.png third @{}",
+            img1_name, img2_name
+        );
+        let result = parse_image_refs(&input, dir.to_str().unwrap());
+
+        let c1 = img1_path.canonicalize().unwrap();
+        let c2 = img2_path.canonicalize().unwrap();
+        assert!(result.contains(&format!("<image: {}>", c1.display())));
+        assert!(result.contains("<image: https://x.com/y.png>"));
+        assert!(result.contains(&format!("<image: {}>", c2.display())));
+        assert!(!result.contains('@'));
+
+        let _ = std::fs::remove_file(&img1_path);
+        let _ = std::fs::remove_file(&img2_path);
+    }
+
+    #[test]
+    fn parse_at_followed_by_space() {
+        let result = parse_image_refs("hello @ world", "/tmp");
+        assert_eq!(result, "hello @ world");
     }
 }
