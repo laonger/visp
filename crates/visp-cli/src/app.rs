@@ -1529,6 +1529,8 @@ impl AppState {
 
         if idx == active {
             self.tab_bar.tabs[idx].render_pending();
+            // 流式内容（thinking、text delta 等）增长时，确保视图自动跟随到底部
+            self.scroll_following = true;
         }
     }
 
