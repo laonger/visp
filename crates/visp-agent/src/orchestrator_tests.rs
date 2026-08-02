@@ -480,6 +480,126 @@ async fn test_subagent_inherits_parent_config_when_no_model_override() {
     drop(grpc_rx);
 }
 
+/// Bug 复现：agent 定义有 model override 时，用户通过 /model 切换模型后，
+/// start_main_agent 不应该用 agent 定义的 model 覆盖 session.config。
+#[tokio::test]
+async fn test_main_agent_respects_user_model_switch() {
+    let (_cancel_tx, cancel_rx) = mpsc::channel(16);
+    let (global_tx, global_rx) = mpsc::channel(256);
+    let (grpc_tx, grpc_rx) = mpsc::channel::<AgentEventFrame>(256);
+    let (_client_tx, client_rx) = mpsc::channel(64);
+
+    let store: Box<dyn visp_core::session::SessionStore> = Box::new(InMemorySessionStore::new());
+    let session_mgr = Arc::new(SessionManager::new(store));
+
+    // 创建 session，初始用 model-a
+    let initial_config = LlmConfig {
+        model: "model-a".to_string(),
+        model_key: Some("ProviderA/model-a".to_string()),
+        provider: Some("ProviderA".to_string()),
+        ..LlmConfig::default()
+    };
+    let session = session_mgr
+        .create(&PathBuf::from("/tmp"), initial_config)
+        .unwrap();
+    let session_id = session.id.clone();
+
+    // 注册有 model override 的 default agent
+    let mut agent_registry = AgentRegistry::new();
+    agent_registry
+        .register(AgentDefinition {
+            name: "default".to_string(),
+            description: String::new(),
+            mode: AgentMode::All,
+            model: Some("ProviderA/model-a".to_string()),
+            temperature: None,
+            steps: None,
+            permission: vec![],
+            allowed_sub_agents: Vec::new(),
+            system_prompt: String::new(),
+        })
+        .ok();
+    let agent_registry = Arc::new(agent_registry);
+
+    let tool_registry = Arc::new(ToolRegistry::new());
+    let rule_engine = Arc::new(RuleEngine::new(&PathBuf::from(".")).unwrap());
+    let agent_config = AgentConfig::default();
+    let context_trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(NoopTrimmer);
+
+    // 两个 provider：model-a 和 model-b
+    let provider: Arc<dyn LlmProvider> = Arc::new(visp_llm::mock::MockProvider::new(vec![]));
+    let mut providers = HashMap::new();
+    providers.insert("ProviderA/model-a".to_string(), provider.clone());
+    providers.insert("ProviderB/model-b".to_string(), provider);
+
+    let mut model_infos: HashMap<String, ModelInfo> = HashMap::new();
+    model_infos.insert(
+        "ProviderA/model-a".to_string(),
+        ModelInfo {
+            model: "model-a".to_string(),
+            provider: Some("ProviderA".to_string()),
+            temperature: None,
+            max_tokens: None,
+            max_context_tokens: None,
+        },
+    );
+    model_infos.insert(
+        "ProviderB/model-b".to_string(),
+        ModelInfo {
+            model: "model-b".to_string(),
+            provider: Some("ProviderB".to_string()),
+            temperature: None,
+            max_tokens: None,
+            max_context_tokens: None,
+        },
+    );
+
+    let mut orch = Orchestrator::new(
+        cancel_rx,
+        global_rx,
+        global_tx,
+        client_rx,
+        grpc_tx,
+        session_mgr,
+        agent_registry,
+        tool_registry,
+        rule_engine,
+        agent_config,
+        context_trimmer,
+        providers,
+        "ProviderA/model-a".to_string(),
+        model_infos,
+    );
+
+    // 模拟用户通过 /model 切换到 model-b
+    let switched_config = LlmConfig {
+        model: "model-b".to_string(),
+        model_key: Some("ProviderB/model-b".to_string()),
+        provider: Some("ProviderB".to_string()),
+        ..LlmConfig::default()
+    };
+    orch.session_mgr
+        .update_config(&session_id, switched_config)
+        .unwrap();
+
+    // 启动主 agent
+    orch.start_main_agent(&session_id, "hello").await;
+
+    // 验证 session.config 没有被 agent override 覆盖回 model-a
+    let session = orch.session_mgr.get(&session_id).unwrap();
+    assert_eq!(
+        session.config.model, "model-b",
+        "用户切换的 model-b 不应被 agent 定义覆盖回 model-a"
+    );
+    assert_eq!(
+        session.config.model_key,
+        Some("ProviderB/model-b".to_string()),
+        "用户切换的 model_key 不应被 agent 定义覆盖"
+    );
+
+    drop(grpc_rx);
+}
+
 #[tokio::test]
 async fn test_orchestrator_tracks_sub_agent_join_handles() {
     let (mut orch, _global_tx, _client_tx, _grpc_rx) = make_orchestrator();

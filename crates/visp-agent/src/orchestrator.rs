@@ -410,54 +410,9 @@ impl Orchestrator {
             started_at: std::time::Instant::now(),
         });
 
-        // Apply agent-level model/temperature overrides to the session config.
-        // This ensures that when an agent definition specifies a `model` key,
-        // the actual API model string is used rather than the session's default.
-        {
-            let mut sub_config = match self.session_mgr.get(session_id) {
-                Ok(s) => s.config.clone(),
-                Err(e) => {
-                    tracing::error!(session_id, error = %e, "failed to get session for config override");
-                    return;
-                }
-            };
-
-            if let Some(info) = self.resolve_model_info(Some(&agent_def)) {
-                sub_config.model = info.model.clone();
-                sub_config.model_key = agent_def.model.clone();
-                sub_config.provider = info.provider.clone();
-                if let Some(t) = info.temperature {
-                    sub_config.temperature = t;
-                }
-                if let Some(mt) = info.max_tokens {
-                    sub_config.max_tokens = mt;
-                }
-                if let Some(mct) = info.max_context_tokens {
-                    sub_config.max_context_tokens = mct;
-                }
-                tracing::debug!(
-                    session_id,
-                    agent = %agent_name,
-                    model = %sub_config.model,
-                    "applied agent model override"
-                );
-            }
-
-            if let Some(temp) = agent_def.temperature {
-                sub_config.temperature = temp as f64;
-            }
-
-            if let Err(e) = self.session_mgr.update_config(session_id, sub_config) {
-                tracing::warn!(
-                    session_id,
-                    error = %e,
-                    "failed to apply agent config overrides"
-                );
-            }
-        }
-
-        // Resolve provider
-        let provider = match self.resolve_provider(Some(&agent_def), session_id) {
+        // Resolve provider — session.config 是唯一真相源，
+        // 用户通过 /model 切换的模型不会被 agent 定义覆盖。
+        let provider = match self.resolve_provider(None, session_id) {
             Some(p) => p,
             None => {
                 tracing::error!(agent_name, "no provider available for main agent");
