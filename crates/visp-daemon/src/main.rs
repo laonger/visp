@@ -100,11 +100,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Load config
     //    The first positional arg (not starting with --) is the config file path.
     //    This skips flags like --http-addr and their values.
-    let config_path = std::env::args()
-        .skip(1)
-        .filter(|a| !a.starts_with("--"))
-        .next()
-        .map(std::path::PathBuf::from);
+    let config_path = {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let mut config_path = None;
+        let mut skip_next = false;
+        for arg in &args {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if arg.starts_with("--") {
+                // Skip the flag and its value
+                skip_next = true;
+                continue;
+            }
+            config_path = Some(std::path::PathBuf::from(arg));
+            break;
+        }
+        config_path
+    };
     let mut config: DaemonConfig =
         visp_config::load_config(config_path.as_deref()).map_err(|e| format!("config: {e}"))?;
 
