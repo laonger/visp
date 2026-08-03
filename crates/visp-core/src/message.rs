@@ -43,6 +43,17 @@ pub struct ToolCallRequest {
     pub arguments: String, // JSON string
 }
 
+/// 用户附带的图片数据（用于多模态 vision 请求）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ImageData {
+    /// 图片本地文件路径
+    pub path: String,
+    /// base64 编码的图片数据（不含 data: 前缀）
+    pub base64: String,
+    /// MIME 类型（如 "image/png"）
+    pub mime_type: String,
+}
+
 /// 对话中的一条消息
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Message {
@@ -93,6 +104,9 @@ pub struct Message {
     /// 创建时间（Unix 毫秒，用于 DB 持久化）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<i64>,
+    /// 用户附带的图片（多模态 vision 请求）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageData>,
 }
 
 impl Message {
@@ -116,6 +130,7 @@ impl Message {
             tool_result_is_error: None,
             tool_result_duration_ms: None,
             created_at: None,
+            images: Vec::new(),
         };
         msg.estimated_tokens = estimate_message_tokens(&msg);
         msg
@@ -141,6 +156,7 @@ impl Message {
             tool_result_is_error: None,
             tool_result_duration_ms: None,
             created_at: None,
+            images: Vec::new(),
         };
         msg.estimated_tokens = estimate_message_tokens(&msg);
         msg
@@ -177,6 +193,7 @@ impl Message {
             tool_result_is_error: None,
             tool_result_duration_ms: None,
             created_at: None,
+            images: Vec::new(),
         };
         msg.estimated_tokens = estimate_message_tokens(&msg);
         msg
@@ -211,6 +228,7 @@ impl Message {
             tool_result_is_error: None,
             tool_result_duration_ms: duration_ms,
             created_at: None,
+            images: Vec::new(),
         };
         msg.estimated_tokens = estimate_message_tokens(&msg);
         msg
@@ -236,6 +254,7 @@ impl Message {
             tool_result_is_error: None,
             tool_result_duration_ms: None,
             created_at: None,
+            images: Vec::new(),
         }
     }
 
@@ -259,6 +278,7 @@ impl Message {
             tool_result_is_error: None,
             tool_result_duration_ms: None,
             created_at: None,
+            images: Vec::new(),
         }
     }
 
@@ -282,6 +302,7 @@ impl Message {
             tool_result_is_error: None,
             tool_result_duration_ms: None,
             created_at: None,
+            images: Vec::new(),
         }
     }
 
@@ -305,8 +326,77 @@ impl Message {
             tool_result_is_error: None,
             tool_result_duration_ms: None,
             created_at: None,
+            images: Vec::new(),
         }
     }
+
+    /// 从文本中解析 `<image: path>` 标记，读取图片文件并 base64 编码。
+    /// 返回 (清理后的文本, 图片数据列表)。
+    /// URL 标记（`<image: | url>`）不处理，保留在文本中。
+    pub fn extract_images(text: &str) -> (String, Vec<ImageData>) {
+        let mut images = Vec::new();
+        let mut clean_text = String::new();
+        let mut search_from = 0;
+
+        while let Some(rel_start) = text[search_from..].find("<image: ") {
+            let marker_start = search_from + rel_start;
+            let path_start = marker_start + "<image: ".len();
+
+            if let Some(rel_end) = text[path_start..].find('>') {
+                let marker_end = path_start + rel_end;
+                let raw = text[path_start..marker_end].trim();
+
+                // Only process local path markers (no `|` separator)
+                if !raw.contains('|') && !raw.is_empty() {
+                    // Append text before marker
+                    clean_text.push_str(&text[search_from..marker_start]);
+
+                    // Read and encode image file
+                    if let Ok(file_bytes) = std::fs::read(raw) {
+                        let mime_type = guess_mime_type(raw);
+                        let base64 = base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            &file_bytes,
+                        );
+                        images.push(ImageData {
+                            path: raw.to_string(),
+                            base64,
+                            mime_type,
+                        });
+                    }
+                    // If file read fails, silently skip the marker
+                } else {
+                    // URL marker or empty - keep original text
+                    clean_text.push_str(&text[search_from..marker_end + 1]);
+                }
+
+                search_from = marker_end + 1;
+            } else {
+                break;
+            }
+        }
+
+        // Append remaining text
+        clean_text.push_str(&text[search_from..]);
+        (clean_text, images)
+    }
+}
+
+fn guess_mime_type(path: &str) -> String {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        _ => "image/png",
+    }
+    .to_string()
 }
 
 /// 估算文本的 token 数（基于 1 token ≈ 4 字符的近似值）
@@ -573,5 +663,47 @@ mod tests {
     #[test]
     fn test_estimate_tokens_longer() {
         assert_eq!(estimate_tokens("hello world"), 3); // ceil(11/4)=3
+    }
+
+    #[test]
+    fn test_extract_images_local_path() {
+        // 创建一个临时图片文件
+        let dir = tempfile::tempdir().unwrap();
+        let img_path = dir.path().join("test.png");
+        std::fs::write(&img_path, b"\x89PNG fake data").unwrap();
+        let path_str = img_path.to_str().unwrap();
+
+        let text = format!("看这张图 <image: {}> 好看吗", path_str);
+        let (clean, images) = Message::extract_images(&text);
+
+        // 标记被移除，文本保留
+        assert_eq!(clean, format!("看这张图  好看吗"));
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].path, path_str);
+        assert_eq!(images[0].mime_type, "image/png");
+        // base64 编码正确（不含 data: 前缀）
+        let expected = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"\x89PNG fake data",
+        );
+        assert_eq!(images[0].base64, expected);
+    }
+
+    #[test]
+    fn test_extract_images_url_marker_kept() {
+        let text = "看 <image: | https://example.com/a.png> 这个";
+        let (clean, images) = Message::extract_images(text);
+        // URL 标记保留在文本中
+        assert_eq!(clean, text);
+        assert!(images.is_empty());
+    }
+
+    #[test]
+    fn test_extract_images_missing_file_skipped() {
+        let text = "图 <image: /nonexistent/path.png> 没了";
+        let (clean, images) = Message::extract_images(text);
+        // 文件读取失败时静默跳过标记
+        assert_eq!(clean, "图  没了");
+        assert!(images.is_empty());
     }
 }

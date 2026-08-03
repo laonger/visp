@@ -170,6 +170,18 @@ fn build_anthropic_messages(messages: &[&Message]) -> Vec<serde_json::Value> {
             }));
         }
 
+        // image blocks (multimodal vision)
+        for img in &msg.images {
+            content_blocks.push(serde_json::json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img.mime_type,
+                    "data": img.base64,
+                }
+            }));
+        }
+
         // tool_use blocks（仅 assistant 消息有 tool_calls）
         if let Some(ref calls) = msg.tool_calls {
             for call in calls {
@@ -1407,6 +1419,28 @@ mod tests {
         assert_eq!(msgs_arr[0]["content"][0]["text"], "Hello");
         assert_eq!(msgs_arr[1]["role"], "assistant");
         assert_eq!(msgs_arr[1]["content"][0]["text"], "Hi there!");
+    }
+
+    #[test]
+    fn test_build_anthropic_messages_with_images() {
+        use visp_core::message::ImageData;
+        let mut msg = Message::user("这是什么？");
+        msg.images = vec![ImageData {
+            path: "/tmp/test.png".to_string(),
+            base64: "iVBORw0KGgo=".to_string(),
+            mime_type: "image/png".to_string(),
+        }];
+        let messages = build_anthropic_messages(&[&msg]);
+        let user_msg = &messages[0];
+        assert_eq!(user_msg["role"], "user");
+        let content = user_msg["content"].as_array().unwrap();
+        // Should have text block + image block
+        assert!(content.iter().any(|b| b["type"] == "text"));
+        assert!(content.iter().any(|b| b["type"] == "image"));
+        let img_block = content.iter().find(|b| b["type"] == "image").unwrap();
+        assert_eq!(img_block["source"]["type"], "base64");
+        assert_eq!(img_block["source"]["media_type"], "image/png");
+        assert_eq!(img_block["source"]["data"], "iVBORw0KGgo=");
     }
 
     #[test]

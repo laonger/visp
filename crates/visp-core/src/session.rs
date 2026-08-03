@@ -966,6 +966,7 @@ mod tests {
             tool_result_is_error: None,
             tool_result_duration_ms: None,
             created_at: None,
+            images: Vec::new(),
         };
         manager.append_message(&session.id, msg.clone()).unwrap();
 

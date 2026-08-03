@@ -153,10 +153,32 @@ pub fn build_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                 }));
             }
             Role::User => {
-                result.push(serde_json::json!({
-                    "role": "user",
-                    "content": msg.content,
-                }));
+                if msg.images.is_empty() {
+                    result.push(serde_json::json!({
+                        "role": "user",
+                        "content": msg.content,
+                    }));
+                } else {
+                    // Multimodal: text + images
+                    let mut content: Vec<serde_json::Value> = Vec::new();
+                    if !msg.content.is_empty() {
+                        content.push(serde_json::json!({
+                            "type": "text",
+                            "text": msg.content,
+                        }));
+                    }
+                    for img in &msg.images {
+                        let data_uri = format!("data:{};base64,{}", img.mime_type, img.base64);
+                        content.push(serde_json::json!({
+                            "type": "image_url",
+                            "image_url": { "url": data_uri },
+                        }));
+                    }
+                    result.push(serde_json::json!({
+                        "role": "user",
+                        "content": content,
+                    }));
+                }
             }
             Role::Assistant => {
                 let content: serde_json::Value =

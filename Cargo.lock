@@ -4660,6 +4660,7 @@ name = "visp-core"
 version = "0.4.5"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "futures",
  "serde",

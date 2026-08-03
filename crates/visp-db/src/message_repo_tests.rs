@@ -174,6 +174,7 @@ fn test_tool_calls_json_roundtrip() {
         tool_result_is_error: None,
         tool_result_duration_ms: None,
         created_at: None,
+        images: Vec::new(),
     };
 
     MessageRepo::insert(&conn, "ses-tcj-1", &msg).unwrap();
@@ -216,6 +217,7 @@ fn test_tool_calls_json_empty_calls() {
         tool_result_is_error: None,
         tool_result_duration_ms: None,
         created_at: None,
+        images: Vec::new(),
     };
 
     MessageRepo::insert(&conn, "ses-tcj-2", &msg).unwrap();

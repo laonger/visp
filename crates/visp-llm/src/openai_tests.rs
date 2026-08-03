@@ -52,6 +52,26 @@ fn test_build_messages_simple() {
 }
 
 #[test]
+fn test_build_openai_messages_with_images() {
+    use visp_core::message::ImageData;
+    let mut msg = Message::user("这是什么？");
+    msg.images = vec![ImageData {
+        path: "/tmp/test.png".to_string(),
+        base64: "iVBORw0KGgo=".to_string(),
+        mime_type: "image/png".to_string(),
+    }];
+    let messages = build_openai_messages(&[msg]);
+    let user_msg = &messages[0];
+    assert_eq!(user_msg["role"], "user");
+    let content = user_msg["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[0]["text"], "这是什么？");
+    assert_eq!(content[1]["type"], "image_url");
+    assert!(content[1]["image_url"]["url"].as_str().unwrap().starts_with("data:image/png;base64,"));
+}
+
+#[test]
 fn test_build_messages_with_tool_result() {
     let msgs = vec![
         Message::user("Read the file."),
@@ -97,6 +117,7 @@ fn test_build_messages_with_extra_blocks() {
             tool_result_is_error: None,
             tool_result_duration_ms: None,
             created_at: None,
+            images: Vec::new(),
         },
     ];
     let result = build_openai_messages(&msgs);
@@ -143,6 +164,7 @@ fn test_extra_blocks_does_not_overwrite_reserved_fields() {
             tool_result_is_error: None,
             tool_result_duration_ms: None,
             created_at: None,
+            images: Vec::new(),
         },
     ];
     let result = build_openai_messages(&msgs);

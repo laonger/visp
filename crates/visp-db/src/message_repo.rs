@@ -179,6 +179,7 @@ impl MessageRepo {
                     tool_result_duration_ms: tool_result_duration_ms.map(|v| v as u64),
                     tool_call_count: Some(tool_call_count as u32).filter(|&c| c > 0),
                     created_at,
+                    images: Vec::new(),
                 })
             })?
             .collect::<Result<Vec<_>>>()?;

@@ -823,6 +823,7 @@ async fn execute_tool_calls(
         tool_result_is_error: None,
         tool_result_duration_ms: None,
         created_at: None,
+        images: Vec::new(),
     };
     assistant_msg.estimated_tokens = estimate_message_tokens(&assistant_msg);
     ctx.history.push(assistant_msg.clone());

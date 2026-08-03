@@ -437,7 +437,9 @@ impl Orchestrator {
             }
         };
 
-        let msg = Message::user(user_message);
+        let (clean_text, images) = Message::extract_images(user_message);
+        let mut msg = Message::user(&clean_text);
+        msg.images = images;
 
         // Create forwarding task: agent_tx → grpc_tx with session context
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
