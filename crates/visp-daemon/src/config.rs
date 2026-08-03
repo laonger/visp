@@ -74,6 +74,12 @@ pub struct LlmModelConfig {
     pub max_context_tokens: Option<u32>,
     #[serde(default)]
     pub thinking_budget_tokens: Option<u32>,
+    /// 是否在请求中携带工具定义（false 时请求不带 tools）
+    #[serde(default)]
+    pub use_tool: Option<bool>,
+    /// 标记该模型为文生图模型（使用 /images/generations 端点而非 /chat/completions）
+    #[serde(default)]
+    pub image_generation: Option<bool>,
     #[serde(default)]
     #[allow(dead_code)]
     pub extra: std::collections::HashMap<String, String>,

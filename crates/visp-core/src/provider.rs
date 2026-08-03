@@ -55,6 +55,10 @@ pub struct LlmConfig {
     pub langfuse_capture_max_chars: usize,
     /// 是否脱敏敏感字段（api_key/token/secret/password 等）
     pub langfuse_redact_secrets: bool,
+    /// 是否在请求中携带工具定义（false 时请求不带 tools）
+    pub use_tool: bool,
+    /// 是否为文生图模型（true 时使用 /images/generations 端点）
+    pub image_generation: bool,
 }
 
 impl Default for LlmConfig {
@@ -81,6 +85,8 @@ impl Default for LlmConfig {
             langfuse_capture_output: false,
             langfuse_capture_max_chars: 20_000,
             langfuse_redact_secrets: true,
+            use_tool: true,
+            image_generation: false,
         }
     }
 }

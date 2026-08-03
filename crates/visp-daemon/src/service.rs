@@ -195,6 +195,8 @@ impl CoderDaemonService {
             langfuse_capture_output: agent_config.langfuse_capture_output,
             langfuse_capture_max_chars: agent_config.langfuse_capture_max_chars,
             langfuse_redact_secrets: agent_config.langfuse_redact_secrets,
+            use_tool: default_cfg.use_tool.unwrap_or(true),
+            image_generation: default_cfg.image_generation.unwrap_or(false),
         };
         let model_config_keys: Vec<String> = model_configs.iter().map(|mc| mc.key()).collect();
         Self {
@@ -699,6 +701,10 @@ impl CoderDaemon for CoderDaemonService {
                                 for (k, v) in &default_llm_config_extra {
                                     cfg.extra.entry(k.clone()).or_insert_with(|| v.clone());
                                 }
+                                // per-model use_tool override
+                                cfg.use_tool = mc.use_tool.unwrap_or(true);
+                                // per-model image_generation override
+                                cfg.image_generation = mc.image_generation.unwrap_or(false);
                                 cfg
                             } else {
                                 config

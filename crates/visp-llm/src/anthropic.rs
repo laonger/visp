@@ -57,7 +57,7 @@ pub fn build_anthropic_request(
         }]);
     }
 
-    if !anthropic_tools.is_empty() {
+    if config.use_tool && !anthropic_tools.is_empty() {
         // 给 tools 定义也加上 cache_control，缓存工具描述
         let mut tools_with_cache = anthropic_tools;
         if let Some(last) = tools_with_cache.last_mut()

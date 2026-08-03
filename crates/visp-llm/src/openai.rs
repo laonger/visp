@@ -28,8 +28,8 @@ pub fn build_openai_request(
         "stream_options": {"include_usage": true},
     });
 
-    // 添加工具定义
-    if !tools.is_empty() {
+    // 添加工具定义（use_tool = false 时不携带）
+    if config.use_tool && !tools.is_empty() {
         let openai_tools: Vec<serde_json::Value> = tools
             .iter()
             .map(|t| {
@@ -914,6 +914,105 @@ impl OpenAiProvider {
             client: build_client(),
         }
     }
+
+    /// 调用文生图 API（/images/generations），返回 ImageBlock 事件流。
+    ///
+    /// 从 messages 中提取最后一条 user 消息作为 prompt，
+    /// 发送非流式请求，将返回的图片 URL 包装为 ChatEvent::ImageBlock。
+    async fn image_generate(
+        &self,
+        messages: &[Message],
+        config: &LlmConfig,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError> {
+        use visp_core::message::Role;
+
+        // 1. 从 messages 提取最后一条 user 消息作为 prompt
+        let prompt: String = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::User)
+            .map(|m| m.content.clone())
+            .ok_or_else(|| LlmError::Api {
+                status: 400,
+                message: "No user message found for image generation prompt".to_string(),
+            })?;
+
+        // 2. 构建请求体
+        let mut body = serde_json::json!({
+            "model": config.model,
+            "prompt": prompt,
+            "response_format": "url",
+        });
+
+        // 3. 从 config.extra 透传可选参数
+        for key in &["size", "output_format", "watermark"] {
+            if let Some(val) = config.extra.get(*key) {
+                body[key] = serde_json::Value::String(val.clone());
+            }
+        }
+
+        // 4. 构建 URL
+        let base = self.api_url.trim_end_matches('/');
+        let url = if is_versioned_base_url(base) {
+            format!("{base}/images/generations")
+        } else {
+            format!("{base}/v1/images/generations")
+        };
+
+        // 5. 构建请求头
+        let headers = build_openai_headers(&self.api_key);
+
+        // 6. 发送请求
+        tracing::debug!(url = %url, model = %config.model, "image generation request");
+        let send_fut = self.client.post(&url).headers(headers).json(&body).send();
+        let response = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(LlmError::Cancelled),
+            resp = send_fut => resp.map_err(|e| LlmError::Network(e.to_string()))?,
+        };
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(LlmError::Api {
+                status: status.as_u16(),
+                message: format!("Image generation API error: {}", body_text),
+            });
+        }
+
+        // 7. 解析响应 JSON
+        let resp_json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| LlmError::Api {
+                status: 502,
+                message: format!("Failed to parse image generation response: {}", e),
+            })?;
+
+        let image_url = resp_json
+            .get("data")
+            .and_then(|d| d.get(0))
+            .and_then(|item| item.get("url"))
+            .and_then(|u| u.as_str())
+            .ok_or_else(|| LlmError::Api {
+                status: 502,
+                message: format!("No image URL in response: {}", resp_json),
+            })?
+            .to_string();
+
+        // 8. 构建事件流：ImageBlock + Done
+        let events = vec![
+            Ok(ChatEvent::ImageBlock {
+                path: String::new(),
+                mime_type: String::new(),
+                remote_url: Some(image_url),
+            }),
+            Ok(ChatEvent::Done),
+        ];
+
+        Ok(Box::pin(stream::iter(events)))
+    }
 }
 
 #[async_trait]
@@ -995,6 +1094,11 @@ impl LlmProvider for OpenAiProvider {
             {
                 span.record("langfuse.trace.metadata", json.as_str());
             }
+        }
+
+        // 文生图模型：走 /images/generations 端点
+        if config.image_generation {
+            return self.image_generate(messages, config, cancel).await;
         }
 
         let base = self.api_url.trim_end_matches('/');

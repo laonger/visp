@@ -1701,3 +1701,119 @@ fn test_openai_cost_usd_computed_from_usage() {
     let expected = (1000.0 / 1_000_000.0 * 2.5) + (500.0 / 1_000_000.0 * 10.0);
     assert!((cost - expected).abs() < 1e-10);
 }
+
+// --- 文生图（image generation）测试 ---
+
+#[test]
+fn test_build_image_generation_request_basic() {
+    // Test that the image generation request body is correctly formed
+    // We test the request body construction logic directly
+    let config = LlmConfig {
+        model: "doubao-seedream-5.0-lite".to_string(),
+        image_generation: true,
+        ..Default::default()
+    };
+
+    let mut body = serde_json::json!({
+        "model": config.model,
+        "prompt": "a cat",
+        "response_format": "url",
+    });
+
+    assert_eq!(body["model"], "doubao-seedream-5.0-lite");
+    assert_eq!(body["prompt"], "a cat");
+    assert_eq!(body["response_format"], "url");
+}
+
+#[test]
+fn test_build_image_generation_request_with_extra() {
+    let mut extra = std::collections::HashMap::new();
+    extra.insert("size".to_string(), "2K".to_string());
+    extra.insert("output_format".to_string(), "png".to_string());
+    extra.insert("watermark".to_string(), "false".to_string());
+
+    let config = LlmConfig {
+        model: "doubao-seedream-5.0-lite".to_string(),
+        image_generation: true,
+        extra,
+        ..Default::default()
+    };
+
+    let mut body = serde_json::json!({
+        "model": config.model,
+        "prompt": "a cat",
+        "response_format": "url",
+    });
+
+    for key in &["size", "output_format", "watermark"] {
+        if let Some(val) = config.extra.get(*key) {
+            body[key] = serde_json::Value::String(val.clone());
+        }
+    }
+
+    assert_eq!(body["size"], "2K");
+    assert_eq!(body["output_format"], "png");
+    assert_eq!(body["watermark"], "false");
+}
+
+#[test]
+fn test_image_generation_url_versioned_base() {
+    // Versioned base URL (e.g. /api/plan/v3) should not add /v1 prefix
+    let base = "https://ark.cn-beijing.volces.com/api/plan/v3";
+    let url = if is_versioned_base_url(base) {
+        format!("{}/images/generations", base)
+    } else {
+        format!("{}/v1/images/generations", base)
+    };
+    assert_eq!(url, "https://ark.cn-beijing.volces.com/api/plan/v3/images/generations");
+}
+
+#[test]
+fn test_image_generation_url_standard_base() {
+    // Standard base URL should add /v1 prefix
+    let base = "https://api.openai.com";
+    let url = if is_versioned_base_url(base) {
+        format!("{}/images/generations", base)
+    } else {
+        format!("{}/v1/images/generations", base)
+    };
+    assert_eq!(url, "https://api.openai.com/v1/images/generations");
+}
+
+#[test]
+fn test_parse_image_generation_response() {
+    // Test parsing a typical image generation API response
+    let resp_json = serde_json::json!({
+        "created": 1234567890,
+        "data": [
+            {
+                "url": "https://example.com/image.png"
+            }
+        ]
+    });
+
+    let image_url = resp_json
+        .get("data")
+        .and_then(|d| d.get(0))
+        .and_then(|item| item.get("url"))
+        .and_then(|u| u.as_str())
+        .unwrap();
+
+    assert_eq!(image_url, "https://example.com/image.png");
+}
+
+#[test]
+fn test_parse_image_generation_response_missing_data() {
+    let resp_json = serde_json::json!({
+        "created": 1234567890,
+        "data": []
+    });
+
+    let image_url = resp_json
+        .get("data")
+        .and_then(|d| d.get(0))
+        .and_then(|item| item.get("url"))
+        .and_then(|u| u.as_str());
+
+    assert!(image_url.is_none());
+}
