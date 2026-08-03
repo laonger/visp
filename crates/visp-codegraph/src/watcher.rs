@@ -15,6 +15,7 @@ use crate::index::{CodeGraphConfig, FileEvent, Indexer};
 /// file are merged so that only the final state is forwarded.
 pub struct Watcher {
     watcher: notify::RecommendedWatcher,
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl Watcher {
@@ -55,7 +56,7 @@ impl Watcher {
         watcher.watch(project_path, RecursiveMode::Recursive)?;
 
         let project = project_path.to_path_buf();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             loop {
                 // Wait for the first event in a batch
                 let first = match rx.recv().await {
@@ -91,12 +92,13 @@ impl Watcher {
             }
         });
 
-        Ok(Self { watcher })
+        Ok(Self { watcher, task })
     }
 
     /// Stop watching by dropping the underlying notify watcher.
     /// The background task will exit once the event channel is closed.
     pub fn stop(self) {
+        self.task.abort();
         drop(self.watcher);
     }
 }

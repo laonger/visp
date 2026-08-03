@@ -192,7 +192,10 @@ async fn setup_iteration(
     }
 
     // b. Limits check
-    if iteration >= cfg.hard_limit {
+    // Use `>` so that hard_limit=N allows exactly N iterations.
+    // (iteration starts at 1; with `>=`, hard_limit=1 would block before
+    //  any LLM call, breaking agents like vision/painter with steps=1.)
+    if iteration > cfg.hard_limit {
         tracing::warn!(
             target: "visp.agent.iteration_limit",
             session_id = %sid,
@@ -1214,7 +1217,8 @@ async fn execute_tool_calls(
     sorted_results.sort_by_key(|r| r.index);
 
     for tr in sorted_results {
-        let tool_msg = Message::tool_with_duration(tr.result.content, &tr.call_id, tr.duration_ms);
+        let tool_msg =
+            Message::tool_with_duration(tr.result.content.as_str(), &tr.call_id, tr.duration_ms);
         ctx.history.push(tool_msg.clone());
         if let Err(e) = sm.append_message(sid, tool_msg) {
             let _ = send_event(
@@ -1231,6 +1235,47 @@ async fn execute_tool_calls(
             .await;
             let _ = sm.finish_loop(sid, SessionStatus::Error);
             return true; // fatal
+        }
+
+        // Sub-agents (e.g. painter) may embed image references in their tool results
+        // as `<image: | {url}>` (remote URL) or `<image: {path}>` (local file) markers.
+        // Extract them and emit ImageBlock events so the main agent's CLI can display
+        // the produced images. The markers are kept in the tool message content so the
+        // LLM still sees them in its context.
+        if !tr.result.is_error {
+            let content = &tr.result.content;
+            let mut search_from = 0;
+            while let Some(rel_start) = content[search_from..].find("<image: ") {
+                let marker_start = search_from + rel_start;
+                let value_start = marker_start + "<image: ".len();
+                if let Some(rel_end) = content[value_start..].find('>') {
+                    let marker_end = value_start + rel_end;
+                    let raw = content[value_start..marker_end].trim();
+
+                    // Remote URL marker: `<image: | https://...>`
+                    let event = if let Some(rest) = raw.strip_prefix('|') {
+                        AgentEvent::ImageBlock {
+                            path: String::new(),
+                            mime_type: String::new(),
+                            remote_url: Some(rest.trim().to_string()),
+                        }
+                    } else if !raw.is_empty() {
+                        // Local file marker: `<image: /path/to/file.png>`
+                        AgentEvent::ImageBlock {
+                            path: raw.to_string(),
+                            mime_type: String::new(),
+                            remote_url: None,
+                        }
+                    } else {
+                        search_from = marker_end + 1;
+                        continue;
+                    };
+                    let _ = send_event(tx, sm, sid, &ctx.global_tx, &ctx.session_id, event).await;
+                    search_from = marker_end + 1;
+                } else {
+                    break;
+                }
+            }
         }
     }
 
@@ -3331,7 +3376,8 @@ mod tests {
             StdArc::new(Phase2MockTrimmer);
         let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
-        // Provider always returns a tool call, so we hit hard_limit=1 immediately
+        // Provider always returns a tool call; with hard_limit=1 the first
+        // iteration runs (1 > 1 = false), then iteration 2 hits the limit.
         let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![vec![
             ChatEvent::ToolCall {
                 id: "call_1".into(),
@@ -4599,6 +4645,240 @@ mod tests {
             final_session.status,
             crate::session::SessionStatus::Error,
             "session should end in Error after cancel"
+        );
+    }
+
+    /// A tool that returns an image marker (`<image: | url>` and `<image: path>`)
+    /// in its result, simulating a painter sub-agent output.
+    struct ImageMarkerTool;
+    #[async_trait::async_trait]
+    impl crate::tool::Tool for ImageMarkerTool {
+        fn name(&self) -> &str {
+            "image_tool"
+        }
+        fn description(&self) -> &str {
+            "returns image markers"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &crate::tool::ToolContext,
+        ) -> crate::tool::ToolResult {
+            crate::tool::ToolResult::success(
+                "painted\n<image: | https://example.com/img.png>\n<image: /tmp/local.png>",
+            )
+        }
+    }
+
+    /// A tool that returns an error message containing an image marker.
+    /// Image markers in error results must NOT produce ImageBlock events.
+    struct ErrorImageMarkerTool;
+    #[async_trait::async_trait]
+    impl crate::tool::Tool for ErrorImageMarkerTool {
+        fn name(&self) -> &str {
+            "error_image_tool"
+        }
+        fn description(&self) -> &str {
+            "returns image marker in an error result"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &crate::tool::ToolContext,
+        ) -> crate::tool::ToolResult {
+            crate::tool::ToolResult::error("failed\n<image: | https://example.com/broken.png>")
+        }
+    }
+
+    /// Provider: first call requests the tool, subsequent calls just return Done.
+    struct OneImageToolCallProvider {
+        call_count: AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl LlmProvider for OneImageToolCallProvider {
+        async fn chat_stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _config: &LlmConfig,
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>
+        {
+            let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if count == 0 {
+                let events = vec![
+                    Ok(ChatEvent::ToolCall {
+                        id: "call_img_1".into(),
+                        name: "image_tool".into(),
+                        arguments: "{}".into(),
+                    }),
+                    Ok(ChatEvent::Done),
+                ];
+                Ok(Box::pin(stream::iter(events)))
+            } else {
+                Ok(Box::pin(stream::iter(vec![Ok(ChatEvent::Done)])))
+            }
+        }
+    }
+
+    /// Provider: first call requests a tool that errors, subsequent calls return Done.
+    struct ErrorImageToolProvider {
+        call_count: AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl LlmProvider for ErrorImageToolProvider {
+        async fn chat_stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _config: &LlmConfig,
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>
+        {
+            let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if count == 0 {
+                let events = vec![
+                    Ok(ChatEvent::ToolCall {
+                        id: "call_err_img_1".into(),
+                        name: "error_image_tool".into(),
+                        arguments: "{}".into(),
+                    }),
+                    Ok(ChatEvent::Done),
+                ];
+                Ok(Box::pin(stream::iter(events)))
+            } else {
+                Ok(Box::pin(stream::iter(vec![Ok(ChatEvent::Done)])))
+            }
+        }
+    }
+
+    async fn run_image_marker_agent(
+        provider: StdArc<dyn LlmProvider>,
+        tool: StdArc<dyn crate::tool::Tool>,
+        tool_name: &str,
+    ) -> (StdArc<SessionManager>, String, mpsc::Receiver<AgentEvent>) {
+        use crate::session::InMemorySessionStore;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
+
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        registry.register(tool).unwrap();
+        let config = AgentConfig {
+            hard_limit: 10,
+            ..Default::default()
+        };
+        let (tx, rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            StdArc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user(format!("use {tool_name}")),
+            tx,
+        )
+        .await;
+        (session_mgr, sid, rx)
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn test_tool_result_image_markers_emit_image_block_events() {
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(OneImageToolCallProvider {
+            call_count: AtomicUsize::new(0),
+        });
+        let (session_mgr, sid, mut rx) =
+            run_image_marker_agent(provider, StdArc::new(ImageMarkerTool), "image_tool").await;
+
+        let mut events = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+
+        // Remote URL marker → ImageBlock with remote_url
+        let url_block = events.iter().find_map(|e| match e {
+            AgentEvent::ImageBlock { remote_url, .. } => remote_url.clone(),
+            _ => None,
+        });
+        assert_eq!(
+            url_block.as_deref(),
+            Some("https://example.com/img.png"),
+            "expected ImageBlock for remote URL marker"
+        );
+
+        // Local path marker → ImageBlock with path
+        let path_block = events.iter().find_map(|e| match e {
+            AgentEvent::ImageBlock {
+                path, remote_url, ..
+            } if remote_url.is_none() => Some(path.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            path_block.as_deref(),
+            Some("/tmp/local.png"),
+            "expected ImageBlock for local path marker"
+        );
+
+        // Markers must be preserved in the tool message content (LLM context)
+        let final_session = session_mgr.get(&sid).unwrap();
+        let tool_msg = final_session
+            .history
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("expected a tool message in history");
+        assert!(
+            tool_msg
+                .content
+                .contains("<image: | https://example.com/img.png>"),
+            "expected URL marker preserved in tool message, got: {}",
+            tool_msg.content
+        );
+        assert!(
+            tool_msg.content.contains("<image: /tmp/local.png>"),
+            "expected local marker preserved in tool message, got: {}",
+            tool_msg.content
+        );
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn test_tool_result_image_markers_skipped_on_error() {
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(ErrorImageToolProvider {
+            call_count: AtomicUsize::new(0),
+        });
+        let (_session_mgr, _sid, mut rx) = run_image_marker_agent(
+            provider,
+            StdArc::new(ErrorImageMarkerTool),
+            "error_image_tool",
+        )
+        .await;
+
+        let mut events = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ImageBlock { .. })),
+            "error results must not emit ImageBlock events"
         );
     }
 }

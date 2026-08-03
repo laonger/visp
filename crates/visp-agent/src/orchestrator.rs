@@ -361,11 +361,38 @@ impl Orchestrator {
             }
         };
 
-        let agent_def = match self.agent_registry.get(&agent_name) {
-            Some(a) => a.clone(),
-            None => {
-                tracing::error!(agent_name, "agent definition not found");
-                return;
+        // Extract images early to determine routing
+        let (clean_text, images) = Message::extract_images(user_message);
+        let has_images = !images.is_empty();
+
+        // If images are present, route to vision agent to avoid non-multimodal LLM errors
+        let agent_def = if has_images {
+            match self.agent_registry.get("vision") {
+                Some(vision_def) => {
+                    tracing::info!(session_id, "images detected, routing to vision agent");
+                    vision_def.clone()
+                }
+                None => {
+                    tracing::warn!(
+                        session_id,
+                        "images detected but vision agent not found, falling back to main agent"
+                    );
+                    match self.agent_registry.get(&agent_name) {
+                        Some(a) => a.clone(),
+                        None => {
+                            tracing::error!(agent_name, "agent definition not found");
+                            return;
+                        }
+                    }
+                }
+            }
+        } else {
+            match self.agent_registry.get(&agent_name) {
+                Some(a) => a.clone(),
+                None => {
+                    tracing::error!(agent_name, "agent definition not found");
+                    return;
+                }
             }
         };
 
@@ -382,18 +409,20 @@ impl Orchestrator {
             );
         }
 
-        // Append dynamic sub-agent delegation guidelines
-        let subagent_prompt = build_subagent_prompt(&self.agent_registry);
-        if !subagent_prompt.is_empty()
-            && let Err(e) = self
-                .session_mgr
-                .append_system_prompt_template(session_id, &subagent_prompt)
-        {
-            tracing::warn!(
-                session_id,
-                error = %e,
-                "failed to append subagent list to system prompt"
-            );
+        // Append dynamic sub-agent delegation guidelines (skip for vision agent)
+        if !has_images {
+            let subagent_prompt = build_subagent_prompt(&self.agent_registry);
+            if !subagent_prompt.is_empty()
+                && let Err(e) = self
+                    .session_mgr
+                    .append_system_prompt_template(session_id, &subagent_prompt)
+            {
+                tracing::warn!(
+                    session_id,
+                    error = %e,
+                    "failed to append subagent list to system prompt"
+                );
+            }
         }
 
         // Create inbox
@@ -403,16 +432,20 @@ impl Orchestrator {
         self.active_agents.register(ActiveAgent {
             session_id: session_id.to_string(),
             parent_session_id: None,
-            agent_name: agent_name.clone(),
+            agent_name: agent_def.name.clone(),
             cancel_token: Default::default(),
             inbox: inbox_tx,
             pending_call_id: None,
             started_at: std::time::Instant::now(),
         });
 
-        // Resolve provider — session.config 是唯一真相源，
-        // 用户通过 /model 切换的模型不会被 agent 定义覆盖。
-        let provider = match self.resolve_provider(None, session_id) {
+        // Resolve provider - when images are present, use the vision agent's
+        // model (multimodal) to avoid non-multimodal LLM errors.
+        // For normal requests, session.config is the single source of truth;
+        // user's /model switch won't be overridden by agent definition.
+        let provider = match self
+            .resolve_provider(if has_images { Some(&agent_def) } else { None }, session_id)
+        {
             Some(p) => p,
             None => {
                 tracing::error!(agent_name, "no provider available for main agent");
@@ -424,7 +457,7 @@ impl Orchestrator {
         let permissions = merge_permissions(&[], &[], &agent_def.permission);
 
         // Create loop context
-        let ctx = match self.session_mgr.start_loop(
+        let mut ctx = match self.session_mgr.start_loop(
             session_id,
             &self.context_trimmer,
             Some(self.global_tx.clone()),
@@ -437,7 +470,47 @@ impl Orchestrator {
             }
         };
 
-        let (clean_text, images) = Message::extract_images(user_message);
+        // When images are present, we route to the vision agent's provider
+        // (multimodal model).  However, ctx.config still holds the session's
+        // model (e.g. a text-only model).  The provider's chat_stream uses
+        // config.model to build the API request, so we must override ctx.config
+        // with the vision agent's model info to avoid sending images to a
+        // text-only model.
+        if has_images && let Some(info) = self.resolve_model_info(Some(&agent_def)) {
+            ctx.config.model = info.model.clone();
+            ctx.config.model_key = agent_def.model.clone();
+            ctx.config.provider = info.provider.clone();
+            if let Some(t) = info.temperature {
+                ctx.config.temperature = t;
+            }
+            if let Some(mt) = info.max_tokens {
+                ctx.config.max_tokens = mt;
+            }
+            if let Some(mct) = info.max_context_tokens {
+                ctx.config.max_context_tokens = mct;
+            }
+            if info.image_generation {
+                ctx.config.image_generation = true;
+            }
+            if let Some(use_tool) = info.use_tool {
+                ctx.config.use_tool = use_tool;
+            }
+            tracing::info!(
+                session_id,
+                model = %ctx.config.model,
+                "applied vision agent model override to loop context"
+            );
+        }
+
+        // Strip images from historical messages when the current turn has no
+        // images.  This prevents stale image data (from a previous vision-agent
+        // turn) being sent to a non-multimodal model on subsequent turns.
+        if !has_images {
+            for m in &mut ctx.history {
+                m.images.clear();
+            }
+        }
+
         let mut msg = Message::user(&clean_text);
         msg.images = images;
 
@@ -606,6 +679,12 @@ impl Orchestrator {
                 if let Some(mct) = info.max_context_tokens {
                     sub_config.max_context_tokens = mct;
                 }
+                if info.image_generation {
+                    sub_config.image_generation = true;
+                }
+                if let Some(use_tool) = info.use_tool {
+                    sub_config.use_tool = use_tool;
+                }
                 tracing::debug!(
                     sub_session_id,
                     agent = %subagent_type,
@@ -698,7 +777,20 @@ impl Orchestrator {
         } else {
             prompt
         };
-        let msg = Message::user(task_msg);
+        let mut msg = Message::user(task_msg);
+
+        // 10a. Forward images from the parent session's most recent user message
+        //      that contains images.  This ensures vision/painter sub-agents can
+        //      actually "see" the image the user provided, instead of receiving a
+        //      text-only prompt.
+        if let Ok(parent_messages) = self.session_mgr.get_messages(parent_session_id) {
+            for m in parent_messages.iter().rev() {
+                if !m.images.is_empty() {
+                    msg.images = m.images.clone();
+                    break;
+                }
+            }
+        }
 
         // Create forwarding task: agent_tx → grpc_tx with session context
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);

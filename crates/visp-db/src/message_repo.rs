@@ -53,10 +53,15 @@ impl MessageRepo {
             .provider_metadata
             .as_ref()
             .map(|v| serde_json::to_string(v).unwrap_or_default());
+        let images_json = if msg.images.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&msg.images).ok()
+        };
 
         conn.execute(
-            "INSERT INTO message (session_id, role, type, content, tool_call_id, tool_name, tool_arguments, tool_calls_json, tool_result_is_error, tool_result_duration_ms, tool_call_count, estimated_tokens, extra_blocks, provider_metadata, actual_tokens_input, actual_tokens_output, actual_cache_read, actual_cache_write, actual_cost, skip_context, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+            "INSERT INTO message (session_id, role, type, content, tool_call_id, tool_name, tool_arguments, tool_calls_json, tool_result_is_error, tool_result_duration_ms, tool_call_count, estimated_tokens, extra_blocks, provider_metadata, actual_tokens_input, actual_tokens_output, actual_cache_read, actual_cache_write, actual_cost, skip_context, images_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
             params![
                 session_id,
                 role_str,
@@ -78,6 +83,7 @@ impl MessageRepo {
                 msg.actual_cache_write,
                 msg.actual_cost,
                 msg.skip_context as i64,
+                images_json,
                 now,
             ],
         )?;
@@ -87,7 +93,7 @@ impl MessageRepo {
     /// Get all messages for a session, ordered by id (insertion order).
     pub fn get_by_session(conn: &Connection, session_id: &str) -> Result<Vec<Message>> {
         let mut stmt = conn.prepare(
-            "SELECT id, role, type, content, tool_call_id, tool_name, tool_arguments, tool_calls_json, tool_result_is_error, tool_result_duration_ms, tool_call_count, estimated_tokens, extra_blocks, provider_metadata, actual_tokens_input, actual_tokens_output, actual_cache_read, actual_cache_write, actual_cost, skip_context, created_at
+            "SELECT id, role, type, content, tool_call_id, tool_name, tool_arguments, tool_calls_json, tool_result_is_error, tool_result_duration_ms, tool_call_count, estimated_tokens, extra_blocks, provider_metadata, actual_tokens_input, actual_tokens_output, actual_cache_read, actual_cache_write, actual_cost, skip_context, images_json, created_at
              FROM message WHERE session_id = ?1 ORDER BY id ASC",
         )?;
 
@@ -113,7 +119,8 @@ impl MessageRepo {
                 let actual_cache_write: Option<u32> = row.get(17)?;
                 let actual_cost: Option<f64> = row.get(18)?;
                 let skip_context_int: i64 = row.get(19)?;
-                let created_at: Option<i64> = row.get(20)?;
+                let images_json_str: Option<String> = row.get(20)?;
+                let created_at: Option<i64> = row.get(21)?;
 
                 let role = match role_str.as_str() {
                     "user" => Role::User,
@@ -179,7 +186,10 @@ impl MessageRepo {
                     tool_result_duration_ms: tool_result_duration_ms.map(|v| v as u64),
                     tool_call_count: Some(tool_call_count as u32).filter(|&c| c > 0),
                     created_at,
-                    images: Vec::new(),
+                    images: images_json_str
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str(s).ok())
+                        .unwrap_or_default(),
                 })
             })?
             .collect::<Result<Vec<_>>>()?;

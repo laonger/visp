@@ -5,7 +5,7 @@ pub struct Migrator;
 
 impl Migrator {
     /// Current schema version (incremented on each migration).
-    pub const VERSION: i64 = 5;
+    pub const VERSION: i64 = 6;
 
     /// SQL to create the session table.
     const CREATE_SESSION: &'static str = r#"
@@ -50,6 +50,7 @@ impl Migrator {
             actual_cache_write    INTEGER,
             actual_cost           REAL,
             skip_context          INTEGER NOT NULL DEFAULT 0,
+            images_json           TEXT,
             created_at            INTEGER NOT NULL
         );
     "#;
@@ -150,6 +151,20 @@ impl Migrator {
                 if !has_column {
                     conn.execute_batch(&format!("ALTER TABLE session ADD COLUMN {col} {def};"))?;
                 }
+            }
+        }
+
+        // v5->v6: images_json (message table) - persist image data for multimodal requests
+        {
+            let has_column: bool = conn
+                .prepare(
+                    "SELECT COUNT(*) FROM pragma_table_info('message') WHERE name='images_json'",
+                )
+                .and_then(|mut s| s.query_row([], |row| row.get::<_, i64>(0)))
+                .map(|c| c > 0)
+                .unwrap_or(false);
+            if !has_column {
+                conn.execute_batch("ALTER TABLE message ADD COLUMN images_json TEXT;")?;
             }
         }
 

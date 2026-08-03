@@ -1269,15 +1269,21 @@ mod tests {
     #[tokio::test]
     async fn test_max_iterations() {
         let (tool, _executed) = mock_tool("finder", false);
-        // Always returns ToolCall
-        let provider: StdArc<dyn LlmProvider> = StdArc::new(TestProvider::new(vec![vec![
+        // Always returns ToolCall — provider must supply enough phases
+        // so the loop runs all hard_limit iterations and then triggers
+        // MaxIterations on the next one.
+        let tool_call_phase = vec![
             ChatEvent::ToolCall {
                 id: "call-1".into(),
                 name: "finder".into(),
                 arguments: "{}".into(),
             },
             ChatEvent::Done,
-        ]]));
+        ];
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(TestProvider::new(vec![
+            tool_call_phase.clone(),
+            tool_call_phase,
+        ]));
 
         let (events, _sm, _sid) = run_collect(
             provider,

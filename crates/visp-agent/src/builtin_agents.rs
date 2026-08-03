@@ -216,7 +216,7 @@ fn register_vision(registry: &mut AgentRegistry) {
         mode: AgentMode::Subagent,
         model: None, // 由 daemon.toml 的 llm.vision_model 覆盖
         temperature: Some(0.1),
-        steps: Some(1),
+        steps: Some(3),
         permission: vec![PermissionRule {
             permission: "read_file".into(),
             pattern: "*".into(),

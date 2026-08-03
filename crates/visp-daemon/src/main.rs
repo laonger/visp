@@ -383,6 +383,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             temperature: mc.temperature,
             max_tokens: mc.max_tokens,
             max_context_tokens: mc.max_context_tokens,
+            image_generation: mc.image_generation.unwrap_or(false),
+            use_tool: mc.use_tool,
         };
         model_infos.insert(mc.key(), info.clone());
         // Also register under model alias

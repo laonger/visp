@@ -358,3 +358,46 @@ fn test_skip_context_v2_default() {
         "v2 legacy data should default to false"
     );
 }
+
+#[test]
+fn test_images_roundtrip() {
+    let conn = setup();
+    insert_session(&conn, "ses-img-1");
+
+    let mut msg = Message::user("describe this image");
+    msg.images = vec![
+        visp_core::message::ImageData {
+            path: "/tmp/test.png".to_string(),
+            base64: "iVBORw0KGgo=".to_string(),
+            mime_type: "image/png".to_string(),
+        },
+        visp_core::message::ImageData {
+            path: "/tmp/test2.jpg".to_string(),
+            base64: "/9j/4AAQ".to_string(),
+            mime_type: "image/jpeg".to_string(),
+        },
+    ];
+    MessageRepo::insert(&conn, "ses-img-1", &msg).unwrap();
+
+    let loaded = MessageRepo::get_by_session(&conn, "ses-img-1").unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].images.len(), 2);
+    assert_eq!(loaded[0].images[0].path, "/tmp/test.png");
+    assert_eq!(loaded[0].images[0].base64, "iVBORw0KGgo=");
+    assert_eq!(loaded[0].images[0].mime_type, "image/png");
+    assert_eq!(loaded[0].images[1].path, "/tmp/test2.jpg");
+    assert_eq!(loaded[0].images[1].mime_type, "image/jpeg");
+}
+
+#[test]
+fn test_images_empty_default() {
+    let conn = setup();
+    insert_session(&conn, "ses-img-2");
+
+    let msg = Message::user("no images here");
+    MessageRepo::insert(&conn, "ses-img-2", &msg).unwrap();
+
+    let loaded = MessageRepo::get_by_session(&conn, "ses-img-2").unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert!(loaded[0].images.is_empty());
+}

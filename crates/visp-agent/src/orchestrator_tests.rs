@@ -301,6 +301,8 @@ async fn test_subagent_applies_agent_model_override() {
             temperature: Some(0.5),
             max_tokens: Some(8192),
             max_context_tokens: Some(64000),
+            image_generation: false,
+            use_tool: None,
         },
     );
 
@@ -541,6 +543,8 @@ async fn test_main_agent_respects_user_model_switch() {
             temperature: None,
             max_tokens: None,
             max_context_tokens: None,
+            image_generation: false,
+            use_tool: None,
         },
     );
     model_infos.insert(
@@ -551,6 +555,8 @@ async fn test_main_agent_respects_user_model_switch() {
             temperature: None,
             max_tokens: None,
             max_context_tokens: None,
+            image_generation: false,
+            use_tool: None,
         },
     );
 

@@ -257,6 +257,10 @@ pub struct ModelInfo {
     pub max_tokens: Option<u32>,
     /// 默认 max_context_tokens
     pub max_context_tokens: Option<u32>,
+    /// 是否为文生图模型（使用 /images/generations 端点）
+    pub image_generation: bool,
+    /// 是否在请求中携带工具定义
+    pub use_tool: Option<bool>,
 }
 
 /// LLM 流式响应中的事件

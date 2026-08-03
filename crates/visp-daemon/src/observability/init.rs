@@ -469,8 +469,10 @@ mod tests {
         writer: TestVecWriter,
         cfg: &ObservabilityConfig,
     ) -> tracing::subscriber::DefaultGuard {
-        let filter =
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.level));
+        // Always use cfg.level directly; RUST_LOG in the ambient environment
+        // (e.g. "info") would otherwise override the test's intended level
+        // and silently filter out events the test expects to see.
+        let filter = EnvFilter::new(&cfg.level);
 
         let parent_link = ParentLinkLayer::new();
         let metrics = MetricsLayer::new();

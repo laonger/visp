@@ -93,7 +93,7 @@ fn test_migrate_version() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
 }
 
 #[test]
@@ -156,7 +156,7 @@ fn test_migrate_v1_to_v2() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
 
     // Verify tool_calls_json column exists
     let has_column: bool = conn
@@ -256,7 +256,7 @@ fn test_migrate_v2_to_v3() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
 
     // Verify skip_context column exists
     let has_column: bool = conn
@@ -302,7 +302,7 @@ fn test_migrate_v3_to_v4() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
 
     // Verify new columns exist
     for col in &["agent_name", "parent_id", "permission_json"] {
