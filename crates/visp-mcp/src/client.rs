@@ -255,7 +255,11 @@ pub(crate) fn call_tool_result_to_text(result: &CallToolResult) -> String {
                         continue;
                     }
                 }
-                texts.push(format!("[Image: {} ({} bytes)]", img.mime_type, img.data.len()));
+                texts.push(format!(
+                    "[Image: {} ({} bytes)]",
+                    img.mime_type,
+                    img.data.len()
+                ));
             }
             RawContent::Resource(_) => {
                 texts.push("[Resource]".into());

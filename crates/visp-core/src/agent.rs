@@ -78,9 +78,7 @@ pub enum AgentEvent {
         remote_url: Option<String>,
     },
     /// 图片处理失败
-    ImageError {
-        reason: String,
-    },
+    ImageError { reason: String },
     /// 需要用户输入
     UserQuery {
         query_id: String,

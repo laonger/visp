@@ -1838,10 +1838,7 @@ mod tests {
         {
             assert!(path.is_empty(), "URL image should not be saved to disk");
             assert!(mime_type.is_empty());
-            assert_eq!(
-                remote_url.as_deref(),
-                Some("https://example.com/image.png")
-            );
+            assert_eq!(remote_url.as_deref(), Some("https://example.com/image.png"));
         } else {
             panic!("expected ImageBlock event");
         }

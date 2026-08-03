@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use ratatui_image::Resize;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::Protocol;
-use ratatui_image::Resize;
 use tokio::sync::mpsc;
 
 use crate::app::{ChatLine, LineType};
@@ -284,7 +284,10 @@ impl ImageCache {
                 // Re-create protocol if size changed or not yet encoded
                 if *rendered_size != target_size || protocol.is_none() {
                     let size = ratatui::layout::Size::new(target_size.0, target_size.1);
-                    match self.picker.new_protocol(image.clone(), size, Resize::Fit(None)) {
+                    match self
+                        .picker
+                        .new_protocol(image.clone(), size, Resize::Fit(None))
+                    {
                         Ok(proto) => {
                             *protocol = Some(std::sync::Arc::new(std::sync::Mutex::new(proto)));
                             *rendered_size = target_size;
@@ -422,11 +425,17 @@ async fn download_and_decode(url: &str, _picker: &Picker) -> ImageEntry {
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok())
                 .map(|ct| {
-                    if ct.contains("png") { "png" }
-                    else if ct.contains("jpeg") || ct.contains("jpg") { "jpg" }
-                    else if ct.contains("webp") { "webp" }
-                    else if ct.contains("gif") { "gif" }
-                    else { "png" }
+                    if ct.contains("png") {
+                        "png"
+                    } else if ct.contains("jpeg") || ct.contains("jpg") {
+                        "jpg"
+                    } else if ct.contains("webp") {
+                        "webp"
+                    } else if ct.contains("gif") {
+                        "gif"
+                    } else {
+                        "png"
+                    }
                 })
                 .unwrap_or("png");
             match resp.bytes().await {
@@ -475,12 +484,8 @@ fn write_url_cache(url: &str, bytes: &[u8], ext: &str) -> Option<String> {
     }
 }
 
-
-
 /// Supported image file extensions for `@path` reference matching.
-const IMAGE_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico",
-];
+const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico"];
 
 /// Check if a path has a supported image file extension.
 fn is_image_file(path: &std::path::Path) -> bool {
@@ -514,9 +519,7 @@ pub fn parse_image_refs(text: &str, project_path: &str) -> String {
 
     while i < chars.len() {
         // Check for `@` at word boundary (start of string or preceded by whitespace)
-        if chars[i] == '@'
-            && (i == 0 || chars[i - 1].is_whitespace())
-        {
+        if chars[i] == '@' && (i == 0 || chars[i - 1].is_whitespace()) {
             // Collect the word after `@` (non-whitespace sequence)
             let word_start = i + 1;
             let mut word_end = word_start;
@@ -704,10 +707,7 @@ mod tests {
 
     #[test]
     fn multiple_markers() {
-        let lines = split_image_markers(
-            "a<image: /x.png>b<image: /y.png>c",
-            LineType::User,
-        );
+        let lines = split_image_markers("a<image: /x.png>b<image: /y.png>c", LineType::User);
         assert_eq!(lines.len(), 5);
         assert_text_line(&lines[0], "a");
         assert_image_line(&lines[1], "/x.png", "x.png", None);
@@ -732,12 +732,14 @@ mod tests {
 
     #[test]
     fn url_only_marker() {
-        let lines = split_image_markers(
-            "<image: | https://example.com/img.png>",
-            LineType::User,
-        );
+        let lines = split_image_markers("<image: | https://example.com/img.png>", LineType::User);
         assert_eq!(lines.len(), 1);
-        assert_image_line(&lines[0], "", "img.png", Some("https://example.com/img.png"));
+        assert_image_line(
+            &lines[0],
+            "",
+            "img.png",
+            Some("https://example.com/img.png"),
+        );
     }
 
     #[test]
@@ -762,12 +764,15 @@ mod tests {
 
     #[test]
     fn path_and_url_marker() {
-        let lines = split_image_markers(
-            "<image: /local/path.png | https://url.png>",
-            LineType::User,
-        );
+        let lines =
+            split_image_markers("<image: /local/path.png | https://url.png>", LineType::User);
         assert_eq!(lines.len(), 1);
-        assert_image_line(&lines[0], "/local/path.png", "path.png", Some("https://url.png"));
+        assert_image_line(
+            &lines[0],
+            "/local/path.png",
+            "path.png",
+            Some("https://url.png"),
+        );
     }
 
     #[test]
@@ -793,9 +798,8 @@ mod tests {
         // Write minimal PNG header (or empty file for other exts - we only check existence + ext)
         let mut f = std::fs::File::create(&path).unwrap();
         if ext == "png" {
-            f.write_all(&[
-                0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
-            ]).unwrap();
+            f.write_all(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+                .unwrap();
         }
         f.flush().unwrap();
         path
@@ -856,10 +860,7 @@ mod tests {
 
     #[test]
     fn parse_url() {
-        let result = parse_image_refs(
-            "see @https://example.com/img.png",
-            "/tmp",
-        );
+        let result = parse_image_refs("see @https://example.com/img.png", "/tmp");
         assert_eq!(result, "see <image: https://example.com/img.png>");
     }
 
@@ -919,10 +920,8 @@ mod tests {
     #[test]
     fn image_cache_local_file_load_ready() {
         let cache = ImageCache::new();
-        let img_path = std::env::temp_dir().join(format!(
-            "visp_test_cache_{}.png",
-            std::process::id()
-        ));
+        let img_path =
+            std::env::temp_dir().join(format!("visp_test_cache_{}.png", std::process::id()));
         make_test_png(&img_path);
 
         cache.get_or_load(img_path.to_str().unwrap());
@@ -942,16 +941,19 @@ mod tests {
 
         let state = cache.image_state(path);
         assert_eq!(state, Some(ImageState::Error));
-        assert!(cache.error_message(path).unwrap().contains("File not found"));
+        assert!(
+            cache
+                .error_message(path)
+                .unwrap()
+                .contains("File not found")
+        );
     }
 
     #[test]
     fn image_cache_query_height_ready() {
         let cache = ImageCache::new();
-        let img_path = std::env::temp_dir().join(format!(
-            "visp_test_height_{}.png",
-            std::process::id()
-        ));
+        let img_path =
+            std::env::temp_dir().join(format!("visp_test_height_{}.png", std::process::id()));
         make_test_png(&img_path);
 
         cache.get_or_load(img_path.to_str().unwrap());

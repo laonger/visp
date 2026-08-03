@@ -602,8 +602,12 @@ pub(crate) fn ensure_all_caches(app: &mut AppState, width: u16) {
                     MessageCache::from_message(msg, width, expanded, Some(&metrics));
             }
         } else {
-            app.message_caches
-                .push(MessageCache::from_message(msg, width, expanded, Some(&metrics)));
+            app.message_caches.push(MessageCache::from_message(
+                msg,
+                width,
+                expanded,
+                Some(&metrics),
+            ));
         }
     }
     app.message_caches
@@ -863,19 +867,13 @@ fn render_image_block(
     if let Some(url) = remote_url.filter(|u| !u.is_empty()) {
         let display = format!("🔗 {}", url);
         for wrapped in crate::app::wrap_text(&display, render_w) {
-            addr_lines.push(Line::styled(
-                wrapped,
-                Style::default().fg(Color::DarkGray),
-            ));
+            addr_lines.push(Line::styled(wrapped, Style::default().fg(Color::DarkGray)));
         }
     }
     if !path.is_empty() {
         let display = format!("📁 {}", path);
         for wrapped in crate::app::wrap_text(&display, render_w) {
-            addr_lines.push(Line::styled(
-                wrapped,
-                Style::default().fg(Color::DarkGray),
-            ));
+            addr_lines.push(Line::styled(wrapped, Style::default().fg(Color::DarkGray)));
         }
     }
     let addr_count = addr_lines.len() as u16;
@@ -919,10 +917,7 @@ fn render_image_block(
         for (i, line) in addr_lines.iter().enumerate() {
             let addr_y = y + image_h + i as u16;
             if addr_y < area.bottom() {
-                f.render_widget(
-                    line.clone(),
-                    Rect::new(area.x + 1, addr_y, render_w, 1),
-                );
+                f.render_widget(line.clone(), Rect::new(area.x + 1, addr_y, render_w, 1));
             }
         }
     }

@@ -68,7 +68,12 @@ fn test_build_openai_messages_with_images() {
     assert_eq!(content[0]["type"], "text");
     assert_eq!(content[0]["text"], "这是什么？");
     assert_eq!(content[1]["type"], "image_url");
-    assert!(content[1]["image_url"]["url"].as_str().unwrap().starts_with("data:image/png;base64,"));
+    assert!(
+        content[1]["image_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,")
+    );
 }
 
 #[test]
@@ -554,7 +559,10 @@ async fn collect_events(chunks: Vec<String>) -> Vec<ChatEvent> {
 }
 
 /// 收集 ChatEvent 流到 Vec，可指定图片保存的 project_path
-async fn collect_events_with_project_path(chunks: Vec<String>, project_path: String) -> Vec<ChatEvent> {
+async fn collect_events_with_project_path(
+    chunks: Vec<String>,
+    project_path: String,
+) -> Vec<ChatEvent> {
     let byte_stream = futures::stream::iter(chunks.into_iter().map(|s| Ok(bytes::Bytes::from(s))));
     let span = tracing::Span::current();
     let event_stream = byte_stream_to_chat_events(
@@ -588,8 +596,7 @@ fn make_image_chunk(url: &str) -> serde_json::Value {
 
 /// 为图片测试创建唯一临时项目目录
 fn temp_project_dir(name: &str) -> std::path::PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("visp_openai_img_{name}_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("visp_openai_img_{name}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     dir
 }
@@ -601,7 +608,9 @@ async fn test_byte_stream_base64_image() {
     let tiny_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
     let sse = format!(
         "{}{}",
-        make_sse(&make_image_chunk(&format!("data:image/png;base64,{tiny_png}"))),
+        make_sse(&make_image_chunk(&format!(
+            "data:image/png;base64,{tiny_png}"
+        ))),
         sse_line("[DONE]"),
     );
     let project_dir = temp_project_dir("base64");
@@ -627,10 +636,7 @@ async fn test_byte_stream_base64_image() {
             assert_eq!(mime_type, "image/png");
             assert!(remote_url.is_none());
             let saved = std::path::Path::new(path);
-            assert!(
-                saved.is_file(),
-                "image file should exist on disk: {path}"
-            );
+            assert!(saved.is_file(), "image file should exist on disk: {path}");
             assert!(
                 path.contains(".visp/images/"),
                 "image should be saved under .visp/images, got {path}"
@@ -669,10 +675,7 @@ async fn test_byte_stream_url_image() {
         } => {
             assert!(path.is_empty(), "URL image should not be saved locally");
             assert!(mime_type.is_empty());
-            assert_eq!(
-                remote_url.as_deref(),
-                Some("https://example.com/image.png")
-            );
+            assert_eq!(remote_url.as_deref(), Some("https://example.com/image.png"));
         }
         other => panic!("expected ImageBlock, got {:?}", other),
     }
@@ -1787,7 +1790,10 @@ fn test_image_generation_url_versioned_base() {
     } else {
         format!("{}/v1/images/generations", base)
     };
-    assert_eq!(url, "https://ark.cn-beijing.volces.com/api/plan/v3/images/generations");
+    assert_eq!(
+        url,
+        "https://ark.cn-beijing.volces.com/api/plan/v3/images/generations"
+    );
 }
 
 #[test]

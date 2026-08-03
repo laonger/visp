@@ -71,8 +71,7 @@ pub fn save_base64_image(
     let filename = format!("{timestamp}_{index}.{}", mime_to_extension(mime_type));
     let path = dir.join(filename);
 
-    fs::write(&path, &bytes)
-        .map_err(|e| LlmError::Stream(format!("write image failed: {e}")))?;
+    fs::write(&path, &bytes).map_err(|e| LlmError::Stream(format!("write image failed: {e}")))?;
 
     Ok(path.to_string_lossy().into_owned())
 }
@@ -82,11 +81,11 @@ mod tests {
     use super::*;
 
     /// Minimal 1x1 PNG.
-    const TINY_PNG: &str =
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    const TINY_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("visp_image_util_{name}_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("visp_image_util_{name}_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
     }
@@ -94,7 +93,10 @@ mod tests {
     #[test]
     fn parse_data_uri_correct() {
         let parsed = parse_data_uri("data:image/png;base64,iVBOR=");
-        assert_eq!(parsed, Some(("image/png".to_string(), "iVBOR=".to_string())));
+        assert_eq!(
+            parsed,
+            Some(("image/png".to_string(), "iVBOR=".to_string()))
+        );
     }
 
     #[test]
@@ -108,7 +110,10 @@ mod tests {
         let parsed = parse_data_uri("data:;base64,aGVsbG8=");
         assert_eq!(
             parsed,
-            Some(("application/octet-stream".to_string(), "aGVsbG8=".to_string()))
+            Some((
+                "application/octet-stream".to_string(),
+                "aGVsbG8=".to_string()
+            ))
         );
     }
 

@@ -255,7 +255,10 @@ fn test_streaming_display_text_truncates_incomplete_image_marker() {
 fn test_streaming_display_text_keeps_complete_marker() {
     let mut tab = TabEntry::new("sid", "agent");
     tab.streaming_text = "see <image: /tmp/pic.png> this".into();
-    assert_eq!(tab.streaming_display_text(), "see <image: /tmp/pic.png> this");
+    assert_eq!(
+        tab.streaming_display_text(),
+        "see <image: /tmp/pic.png> this"
+    );
 }
 
 #[test]
@@ -363,8 +366,12 @@ fn test_clear_messages_also_clears_caches() {
     let mut app = AppState::new("s".into(), "m".into(), "".into(), String::new());
     app.add_message(LineType::User, "hello".into());
     // 手动添加一个 cache 模拟渲染后的状态
-    app.message_caches
-        .push(MessageCache::from_message(&app.messages()[0], 80, false, None));
+    app.message_caches.push(MessageCache::from_message(
+        &app.messages()[0],
+        80,
+        false,
+        None,
+    ));
     assert_eq!(app.message_caches.len(), 1);
     app.clear_messages();
     assert!(app.messages().is_empty());
@@ -922,7 +929,9 @@ fn test_render_pending_image_block_base64() {
     tab.render_pending();
     assert_eq!(tab.messages.len(), 1);
     match &tab.messages[0].line_type {
-        LineType::Image { path, remote_url, .. } => {
+        LineType::Image {
+            path, remote_url, ..
+        } => {
             assert_eq!(path, "/tmp/img.png");
             assert_eq!(*remote_url, None);
         }
@@ -933,11 +942,14 @@ fn test_render_pending_image_block_base64() {
 #[test]
 fn test_render_pending_image_block_url() {
     let mut tab = TabEntry::new("sid", "agent");
-    tab.frames.push(image_block_msg("", "https://example.com/img.png"));
+    tab.frames
+        .push(image_block_msg("", "https://example.com/img.png"));
     tab.render_pending();
     assert_eq!(tab.messages.len(), 1);
     match &tab.messages[0].line_type {
-        LineType::Image { path, remote_url, .. } => {
+        LineType::Image {
+            path, remote_url, ..
+        } => {
             // path is empty (URL-only image), remote_url carries the URL
             assert_eq!(path, "");
             assert_eq!(*remote_url, Some("https://example.com/img.png".to_string()));
@@ -2494,10 +2506,8 @@ fn test_button_hit_after_completion() {
 #[test]
 fn test_ensure_all_caches_image_state_ready() {
     let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
-    let img_path = std::env::temp_dir().join(format!(
-        "visp_test_appcache_{}.png",
-        std::process::id()
-    ));
+    let img_path =
+        std::env::temp_dir().join(format!("visp_test_appcache_{}.png", std::process::id()));
     let img = image::RgbaImage::from_raw(2, 2, vec![255, 0, 0, 255].repeat(4)).unwrap();
     img.save(&img_path).unwrap();
 
@@ -2507,7 +2517,10 @@ fn test_ensure_all_caches_image_state_ready() {
         format!("see <image: {}> ok", img_path.display()),
     );
     assert_eq!(app.messages().len(), 3);
-    assert!(matches!(app.messages()[1].line_type, LineType::Image { .. }));
+    assert!(matches!(
+        app.messages()[1].line_type,
+        LineType::Image { .. }
+    ));
 
     // 图片尚未加载：缓存已建立（占位/错误状态），且不 panic
     let render_w = 80u16;
@@ -2522,10 +2535,7 @@ fn test_ensure_all_caches_image_state_ready() {
         .iter()
         .find(|c| c.image_state.is_some())
         .unwrap();
-    assert_eq!(
-        img_cache.image_state,
-        Some(crate::image::ImageState::Ready)
-    );
+    assert_eq!(img_cache.image_state, Some(crate::image::ImageState::Ready));
 
     // 状态未变化时不会重复重建（matches 直接命中）
     let lines_before = app.message_caches[1].lines.len();

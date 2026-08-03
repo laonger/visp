@@ -233,10 +233,18 @@ pub enum LineType {
     User,
     Assistant,
     Thinking,
-    ToolCall { name: String },
-    ToolResult { name: String },
-    ToolError { name: String },
-    AgentCall { name: String },
+    ToolCall {
+        name: String,
+    },
+    ToolResult {
+        name: String,
+    },
+    ToolError {
+        name: String,
+    },
+    AgentCall {
+        name: String,
+    },
     Error,
     Status,
     Usage,
@@ -496,12 +504,15 @@ impl TabEntry {
                     } else {
                         // Fallback: create separate ChatLines
                         let line_type = if tr.is_error {
-                            LineType::ToolError { name: tool_name.clone() }
+                            LineType::ToolError {
+                                name: tool_name.clone(),
+                            }
                         } else {
-                            LineType::ToolResult { name: tool_name.clone() }
+                            LineType::ToolResult {
+                                name: tool_name.clone(),
+                            }
                         };
-                        let lines =
-                            crate::image::split_image_markers(&tr.content, line_type);
+                        let lines = crate::image::split_image_markers(&tr.content, line_type);
                         for mut line in lines {
                             line.id = self.next_message_id;
                             line.call_id = Some(tr.call_id.clone());
@@ -940,18 +951,21 @@ impl MessageCache {
                 };
                 let (mut line_count, image_state) = match image_metrics {
                     Some(metrics) if !cache_key.is_empty() => {
-                        match metrics.image_cache.query_height(cache_key, width, metrics.max_rows) {
-                        ImageHeightInfo::Ready(h) => (h, Some(ImageState::Ready)),
-                        ImageHeightInfo::Placeholder => {
-                            // Check if it's Loading or Error
-                            let state = metrics.image_cache.image_state(cache_key);
-                            match state {
-                                Some(ImageState::Loading) => (1, Some(ImageState::Loading)),
-                                _ => (1, Some(ImageState::Error)),
+                        match metrics
+                            .image_cache
+                            .query_height(cache_key, width, metrics.max_rows)
+                        {
+                            ImageHeightInfo::Ready(h) => (h, Some(ImageState::Ready)),
+                            ImageHeightInfo::Placeholder => {
+                                // Check if it's Loading or Error
+                                let state = metrics.image_cache.image_state(cache_key);
+                                match state {
+                                    Some(ImageState::Loading) => (1, Some(ImageState::Loading)),
+                                    _ => (1, Some(ImageState::Error)),
+                                }
                             }
                         }
-                        }
-                    },
+                    }
                     _ => (1, None),
                 };
                 // Add address line count (wrapped at `width`), matching render_image_block
@@ -1170,8 +1184,12 @@ fn extract_session_and_agent(msg: &ServerMessage) -> (String, String) {
         Some(server_message::Payload::ThinkingBlock(d)) => (d.session_id.clone(), String::new()),
         Some(server_message::Payload::UsageInfo(d)) => (d.session_id.clone(), String::new()),
         Some(server_message::Payload::UserMessage(d)) => (d.session_id.clone(), String::new()),
-        Some(server_message::Payload::ImageBlock(d)) => (d.session_id.clone(), d.agent_name.clone()),
-        Some(server_message::Payload::ImageError(d)) => (d.session_id.clone(), d.agent_name.clone()),
+        Some(server_message::Payload::ImageBlock(d)) => {
+            (d.session_id.clone(), d.agent_name.clone())
+        }
+        Some(server_message::Payload::ImageError(d)) => {
+            (d.session_id.clone(), d.agent_name.clone())
+        }
         None => (String::new(), String::new()),
     }
 }

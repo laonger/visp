@@ -431,13 +431,17 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<Vec<OpenAiStreamEvent>
     if let Some(reasoning) = delta.get("reasoning_content").and_then(|c| c.as_str())
         && !reasoning.is_empty()
     {
-        return Ok(vec![OpenAiStreamEvent::ReasoningDelta(reasoning.to_string())]);
+        return Ok(vec![OpenAiStreamEvent::ReasoningDelta(
+            reasoning.to_string(),
+        )]);
     }
     // 部分提供商使用 "reasoning" 字段
     if let Some(reasoning) = delta.get("reasoning").and_then(|c| c.as_str())
         && !reasoning.is_empty()
     {
-        return Ok(vec![OpenAiStreamEvent::ReasoningDelta(reasoning.to_string())]);
+        return Ok(vec![OpenAiStreamEvent::ReasoningDelta(
+            reasoning.to_string(),
+        )]);
     }
 
     // 检查 tool_calls delta
@@ -747,193 +751,206 @@ fn byte_stream_to_chat_events(
     let event_stream = stream::unfold(state, |mut state| {
         let span = state.span.clone();
         async move {
-        loop {
-            // [A0] 发射缓存的待处理事件（一条 SSE 行可能产生多个事件）
-            if let Some(event) = state.pending_events.pop_front() {
-                if let Some(chat_event) = handle_stream_event(&mut state, event) {
-                    return Some((Ok(chat_event), state));
-                }
-                continue;
-            }
-
-            // [A] 优先处理缓冲区中完整的 SSE 消息（一次一条）
-            if let Some(pos) = state.buf.find("\n\n") {
-                let raw = state.buf[..pos].to_string();
-                state.buf = state.buf[pos + 2..].to_string();
-
-                for line in raw.lines() {
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        // 从 chunk 顶层提取 model 字段
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(data)
-                            && let Some(m) = v.get("model").and_then(|m| m.as_str())
-                            && !m.is_empty()
-                        {
-                            state.model = m.to_string();
-                        }
-                        // 解析为事件列表；多个事件缓存到 pending_events 逐条发射
-                        match parse_openai_sse_data(data) {
-                            Ok(events) => {
-                                state.pending_events.extend(events);
-                            }
-                            Err(e) => {
-                                return Some((Err(e), state));
-                            }
-                        }
-                    } else if !line.trim().is_empty() {
-                        tracing::trace!(?line, "ignored non-data SSE line");
+            loop {
+                // [A0] 发射缓存的待处理事件（一条 SSE 行可能产生多个事件）
+                if let Some(event) = state.pending_events.pop_front() {
+                    if let Some(chat_event) = handle_stream_event(&mut state, event) {
+                        return Some((Ok(chat_event), state));
                     }
+                    continue;
                 }
 
-                // 继续处理下一条消息
-                continue;
-            }
+                // [A] 优先处理缓冲区中完整的 SSE 消息（一次一条）
+                if let Some(pos) = state.buf.find("\n\n") {
+                    let raw = state.buf[..pos].to_string();
+                    state.buf = state.buf[pos + 2..].to_string();
 
-            // [B] 发射待处理的工具调用
-            if let Some((id, name, args)) = state.pending_tool_calls.pop() {
-                emit_first_token(&mut state);
-                tracing::debug!(
-                    %name,
-                    args_len = args.len(),
-                    args_preview = %truncate_for_log(&args, 200),
-                    "emitting ToolCall"
-                );
-                return Some((
-                    Ok(ChatEvent::ToolCall {
-                        id,
-                        name,
-                        arguments: args,
-                    }),
-                    state,
-                ));
-            }
+                    for line in raw.lines() {
+                        if let Some(data) = line.strip_prefix("data: ") {
+                            // 从 chunk 顶层提取 model 字段
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(data)
+                                && let Some(m) = v.get("model").and_then(|m| m.as_str())
+                                && !m.is_empty()
+                            {
+                                state.model = m.to_string();
+                            }
+                            // 解析为事件列表；多个事件缓存到 pending_events 逐条发射
+                            match parse_openai_sse_data(data) {
+                                Ok(events) => {
+                                    state.pending_events.extend(events);
+                                }
+                                Err(e) => {
+                                    return Some((Err(e), state));
+                                }
+                            }
+                        } else if !line.trim().is_empty() {
+                            tracing::trace!(?line, "ignored non-data SSE line");
+                        }
+                    }
 
-            // [B'] 发射截断提示文本（finish_reason='length' 丢弃畸形 tool_call 且无文本时）
-            if let Some(hint) = state.pending_hint.take() {
-                emit_first_token(&mut state);
-                return Some((Ok(ChatEvent::TextDelta(hint)), state));
-            }
+                    // 继续处理下一条消息
+                    continue;
+                }
 
-            // [C] 处理流结束标记
-            if state.stream_ended {
-                if !state.usage_emitted {
-                    state.usage_emitted = true;
+                // [B] 发射待处理的工具调用
+                if let Some((id, name, args)) = state.pending_tool_calls.pop() {
+                    emit_first_token(&mut state);
+                    tracing::debug!(
+                        %name,
+                        args_len = args.len(),
+                        args_preview = %truncate_for_log(&args, 200),
+                        "emitting ToolCall"
+                    );
                     return Some((
-                        Ok(ChatEvent::UsageInfo {
-                            input_tokens: state.input_tokens,
-                            output_tokens: state.output_tokens,
-                            tool_calls: state.tool_call_count,
-                            cache_creation_input_tokens: state.cache_creation_input_tokens,
-                            cache_read_input_tokens: state.cache_read_input_tokens,
+                        Ok(ChatEvent::ToolCall {
+                            id,
+                            name,
+                            arguments: args,
                         }),
                         state,
                     ));
                 }
-                if !state.metadata_emitted {
-                    state.metadata_emitted = true;
-                    let latency = state.state_start_time.elapsed().as_millis() as u64;
-                    let finish_reasons = if state.finish_reason.is_empty() {
-                        vec![]
-                    } else {
-                        vec![state.finish_reason.clone()]
-                    };
 
-                    // 在 span 上 record usage / model / finish_reasons / cost
-                    // Cast u32 → i64: tracing-opentelemetry's Visit impl only handles
-                    // record_i64 (not record_u64), so u32/u64 values would fall through
-                    // to record_debug and be exported as String("100") instead of I64(100).
-                    state.span.record("gen_ai.usage.input_tokens", state.input_tokens as i64);
-                    state.span.record("gen_ai.usage.output_tokens", state.output_tokens as i64);
-                    // OpenAI 不写 cache 字段
-                    if state.finish_reason == "length" {
-                        state.span.record("visp.llm.token_limit_hit", true);
-                    }
-                    let finish_reasons_str =
-                        serde_json::to_string(&finish_reasons).unwrap_or_default();
-                    state.span.record("gen_ai.response.finish_reasons", &finish_reasons_str);
-                    // Fallback to request model if response didn't include one
-                    // (some OpenAI-compatible providers don't include "model" in SSE chunks)
-                    let effective_model = if state.model.is_empty() {
-                        &state.request_model
-                    } else {
-                        &state.model
-                    };
-                    state.span.record("gen_ai.response.model", effective_model);
-                    let cost = crate::cost::openai_cost_usd(effective_model, state.input_tokens, state.output_tokens);
-                    state.span.record("visp.llm.cost_usd", cost);
-
-                    // Langfuse generation capture: record output if enabled
-                    let raw_output_len = state.accumulated_output.len();
-                    if state.langfuse_capture_output && raw_output_len > 0 {
-                        let sanitized = crate::sanitize::format_langfuse_output(
-                            &state.accumulated_output,
-                            state.langfuse_capture_max_chars,
-                            state.langfuse_redact_secrets,
-                        );
-                        state.span.record("langfuse.observation.output", &sanitized);
-                    }
-
-                    return Some((
-                        Ok(ChatEvent::OutputMetadata(visp_core::ProviderMetadata {
-                            model: effective_model.clone(),
-                            finish_reasons,
-                            input_tokens: state.input_tokens,
-                            output_tokens: state.output_tokens,
-                            cache_read_input_tokens: if state.cache_read_input_tokens > 0 {
-                                Some(state.cache_read_input_tokens)
-                            } else {
-                                None
-                            },
-                            cache_creation_input_tokens: if state.cache_creation_input_tokens > 0 {
-                                Some(state.cache_creation_input_tokens)
-                            } else {
-                                None
-                            },
-                            latency_ms: latency,
-                        })),
-                        state,
-                    ));
+                // [B'] 发射截断提示文本（finish_reason='length' 丢弃畸形 tool_call 且无文本时）
+                if let Some(hint) = state.pending_hint.take() {
+                    emit_first_token(&mut state);
+                    return Some((Ok(ChatEvent::TextDelta(hint)), state));
                 }
-                if !state.done_emitted {
-                    state.done_emitted = true;
-                    tracing::info!(
-                        target: "gen_ai.client.completed",
-                        input_tokens = state.input_tokens,
-                        output_tokens = state.output_tokens,
-                        model = %state.model,
-                        "LLM request completed"
-                    );
-                    return Some((Ok(ChatEvent::Done), state));
-                }
-                return None;
-            }
 
-            // [D] 从底层流读取更多数据
-            match state.stream.next().await {
-                Some(Ok(chunk)) => {
-                    state.pending_bytes.extend_from_slice(&chunk);
-                    // 只解码完整的 UTF-8 部分，不完整的尾字节留到下一个 chunk
-                    let safe_end = match std::str::from_utf8(&state.pending_bytes) {
-                        Ok(_) => state.pending_bytes.len(),
-                        Err(e) => e.valid_up_to(),
-                    };
-                    if safe_end > 0 {
+                // [C] 处理流结束标记
+                if state.stream_ended {
+                    if !state.usage_emitted {
+                        state.usage_emitted = true;
+                        return Some((
+                            Ok(ChatEvent::UsageInfo {
+                                input_tokens: state.input_tokens,
+                                output_tokens: state.output_tokens,
+                                tool_calls: state.tool_call_count,
+                                cache_creation_input_tokens: state.cache_creation_input_tokens,
+                                cache_read_input_tokens: state.cache_read_input_tokens,
+                            }),
+                            state,
+                        ));
+                    }
+                    if !state.metadata_emitted {
+                        state.metadata_emitted = true;
+                        let latency = state.state_start_time.elapsed().as_millis() as u64;
+                        let finish_reasons = if state.finish_reason.is_empty() {
+                            vec![]
+                        } else {
+                            vec![state.finish_reason.clone()]
+                        };
+
+                        // 在 span 上 record usage / model / finish_reasons / cost
+                        // Cast u32 → i64: tracing-opentelemetry's Visit impl only handles
+                        // record_i64 (not record_u64), so u32/u64 values would fall through
+                        // to record_debug and be exported as String("100") instead of I64(100).
                         state
-                            .buf
-                            .push_str(&String::from_utf8_lossy(&state.pending_bytes[..safe_end]));
-                        state.pending_bytes = state.pending_bytes[safe_end..].to_vec();
+                            .span
+                            .record("gen_ai.usage.input_tokens", state.input_tokens as i64);
+                        state
+                            .span
+                            .record("gen_ai.usage.output_tokens", state.output_tokens as i64);
+                        // OpenAI 不写 cache 字段
+                        if state.finish_reason == "length" {
+                            state.span.record("visp.llm.token_limit_hit", true);
+                        }
+                        let finish_reasons_str =
+                            serde_json::to_string(&finish_reasons).unwrap_or_default();
+                        state
+                            .span
+                            .record("gen_ai.response.finish_reasons", &finish_reasons_str);
+                        // Fallback to request model if response didn't include one
+                        // (some OpenAI-compatible providers don't include "model" in SSE chunks)
+                        let effective_model = if state.model.is_empty() {
+                            &state.request_model
+                        } else {
+                            &state.model
+                        };
+                        state.span.record("gen_ai.response.model", effective_model);
+                        let cost = crate::cost::openai_cost_usd(
+                            effective_model,
+                            state.input_tokens,
+                            state.output_tokens,
+                        );
+                        state.span.record("visp.llm.cost_usd", cost);
+
+                        // Langfuse generation capture: record output if enabled
+                        let raw_output_len = state.accumulated_output.len();
+                        if state.langfuse_capture_output && raw_output_len > 0 {
+                            let sanitized = crate::sanitize::format_langfuse_output(
+                                &state.accumulated_output,
+                                state.langfuse_capture_max_chars,
+                                state.langfuse_redact_secrets,
+                            );
+                            state.span.record("langfuse.observation.output", &sanitized);
+                        }
+
+                        return Some((
+                            Ok(ChatEvent::OutputMetadata(visp_core::ProviderMetadata {
+                                model: effective_model.clone(),
+                                finish_reasons,
+                                input_tokens: state.input_tokens,
+                                output_tokens: state.output_tokens,
+                                cache_read_input_tokens: if state.cache_read_input_tokens > 0 {
+                                    Some(state.cache_read_input_tokens)
+                                } else {
+                                    None
+                                },
+                                cache_creation_input_tokens: if state.cache_creation_input_tokens
+                                    > 0
+                                {
+                                    Some(state.cache_creation_input_tokens)
+                                } else {
+                                    None
+                                },
+                                latency_ms: latency,
+                            })),
+                            state,
+                        ));
                     }
+                    if !state.done_emitted {
+                        state.done_emitted = true;
+                        tracing::info!(
+                            target: "gen_ai.client.completed",
+                            input_tokens = state.input_tokens,
+                            output_tokens = state.output_tokens,
+                            model = %state.model,
+                            "LLM request completed"
+                        );
+                        return Some((Ok(ChatEvent::Done), state));
+                    }
+                    return None;
                 }
-                Some(Err(e)) => {
-                    return Some((Err(LlmError::Network(e.to_string())), state));
-                }
-                None => {
-                    // 流自然结束
-                    state.stream_ended = true;
-                    flush_tool_acc(&mut state);
+
+                // [D] 从底层流读取更多数据
+                match state.stream.next().await {
+                    Some(Ok(chunk)) => {
+                        state.pending_bytes.extend_from_slice(&chunk);
+                        // 只解码完整的 UTF-8 部分，不完整的尾字节留到下一个 chunk
+                        let safe_end = match std::str::from_utf8(&state.pending_bytes) {
+                            Ok(_) => state.pending_bytes.len(),
+                            Err(e) => e.valid_up_to(),
+                        };
+                        if safe_end > 0 {
+                            state.buf.push_str(&String::from_utf8_lossy(
+                                &state.pending_bytes[..safe_end],
+                            ));
+                            state.pending_bytes = state.pending_bytes[safe_end..].to_vec();
+                        }
+                    }
+                    Some(Err(e)) => {
+                        return Some((Err(LlmError::Network(e.to_string())), state));
+                    }
+                    None => {
+                        // 流自然结束
+                        state.stream_ended = true;
+                        flush_tool_acc(&mut state);
+                    }
                 }
             }
         }
-        }.instrument(span)
+        .instrument(span)
     });
 
     Box::pin(event_stream)
@@ -1039,13 +1056,10 @@ impl OpenAiProvider {
         }
 
         // 7. 解析响应 JSON
-        let resp_json: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| LlmError::Api {
-                status: 502,
-                message: format!("Failed to parse image generation response: {}", e),
-            })?;
+        let resp_json: serde_json::Value = response.json().await.map_err(|e| LlmError::Api {
+            status: 502,
+            message: format!("Failed to parse image generation response: {}", e),
+        })?;
 
         let image_url = resp_json
             .get("data")
