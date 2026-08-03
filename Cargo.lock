@@ -4563,7 +4563,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "visp"
-version = "0.4.5"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "clap",
@@ -4574,7 +4574,7 @@ dependencies = [
 
 [[package]]
 name = "visp-agent"
-version = "0.4.5"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -4597,7 +4597,7 @@ dependencies = [
 
 [[package]]
 name = "visp-cli"
-version = "0.4.5"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "clap",
@@ -4623,7 +4623,7 @@ dependencies = [
 
 [[package]]
 name = "visp-codegraph"
-version = "0.4.5"
+version = "0.5.0"
 dependencies = [
  "notify",
  "rusqlite",
@@ -4642,14 +4642,14 @@ dependencies = [
 
 [[package]]
 name = "visp-command"
-version = "0.4.5"
+version = "0.5.0"
 dependencies = [
  "visp-core",
 ]
 
 [[package]]
 name = "visp-context"
-version = "0.4.5"
+version = "0.5.0"
 dependencies = [
  "tempfile",
  "visp-core",
@@ -4657,7 +4657,7 @@ dependencies = [
 
 [[package]]
 name = "visp-core"
-version = "0.4.5"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4678,7 +4678,7 @@ dependencies = [
 
 [[package]]
 name = "visp-daemon"
-version = "0.4.5"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "dashmap",
@@ -4727,7 +4727,7 @@ dependencies = [
 
 [[package]]
 name = "visp-llm"
-version = "0.4.5"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4746,7 +4746,7 @@ dependencies = [
 
 [[package]]
 name = "visp-mcp"
-version = "0.4.5"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",
@@ -4762,7 +4762,7 @@ dependencies = [
 
 [[package]]
 name = "visp-proto"
-version = "0.4.5"
+version = "0.5.0"
 dependencies = [
  "prost 0.13.5",
  "prost-types 0.13.5",
@@ -4772,7 +4772,7 @@ dependencies = [
 
 [[package]]
 name = "visp-tools"
-version = "0.4.5"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "html-to-markdown-rs",
