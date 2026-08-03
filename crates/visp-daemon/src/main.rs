@@ -409,7 +409,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Wire llm.image_generation_model / llm.vision_model to builtin agents
     if let Some(ref key) = config.llm.image_generation_model {
         builtin_overrides.push(visp_agent::agent_loader::BuiltinAgentOverride {
-            name: "image_generator".to_string(),
+            name: "painter".to_string(),
             model: Some(key.clone()),
             temperature: None,
             steps: None,

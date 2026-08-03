@@ -9,7 +9,7 @@ pub(crate) fn register_builtin_agents(registry: &mut AgentRegistry) {
     register_default(registry);
     register_explorer(registry);
     register_fixer(registry);
-    register_image_generator(registry);
+    register_painter(registry);
     register_vision(registry);
 }
 
@@ -183,9 +183,9 @@ fn register_fixer(registry: &mut AgentRegistry) {
     registry.register(fixer).ok();
 }
 
-fn register_image_generator(registry: &mut AgentRegistry) {
-    let image_generator = AgentDefinition {
-        name: "image_generator".to_string(),
+fn register_painter(registry: &mut AgentRegistry) {
+    let painter = AgentDefinition {
+        name: "painter".to_string(),
         description: "文生图专家。根据用户的文字描述生成图片。".to_string(),
         mode: AgentMode::Subagent,
         model: None, // 由 daemon.toml 的 llm.image_generation_model 覆盖
@@ -194,7 +194,7 @@ fn register_image_generator(registry: &mut AgentRegistry) {
         permission: Vec::new(),
         allowed_sub_agents: Vec::new(),
         system_prompt: concat!(
-            "你是 Image Generator -- 文生图专家。\n",
+            "你是 Painter -- 文生图专家。\n",
             "\n",
             "**角色**：根据用户的文字描述生成图片。\n",
             "\n",
@@ -206,7 +206,7 @@ fn register_image_generator(registry: &mut AgentRegistry) {
         )
         .to_string(),
     };
-    registry.register(image_generator).ok();
+    registry.register(painter).ok();
 }
 
 fn register_vision(registry: &mut AgentRegistry) {

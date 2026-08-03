@@ -139,7 +139,7 @@ fn test_load_agents_empty_directory() {
     assert!(registry.get("default").is_some());
     assert!(registry.get("explorer").is_some());
     assert!(registry.get("fixer").is_some());
-    assert!(registry.get("image_generator").is_some());
+    assert!(registry.get("painter").is_some());
     assert!(registry.get("vision").is_some());
     assert_eq!(registry.list().len(), 5);
 }
@@ -152,7 +152,7 @@ fn test_load_agents_no_directory() {
     assert!(registry.get("default").is_some());
     assert!(registry.get("explorer").is_some());
     assert!(registry.get("fixer").is_some());
-    assert!(registry.get("image_generator").is_some());
+    assert!(registry.get("painter").is_some());
     assert!(registry.get("vision").is_some());
     assert_eq!(registry.list().len(), 5);
 }
@@ -307,7 +307,7 @@ fn test_load_agents_override_unknown_agent_ignored() {
     assert!(registry.get("nonexistent").is_none());
     // Built-ins still present
     assert!(registry.get("default").is_some());
-    assert!(registry.get("image_generator").is_some());
+    assert!(registry.get("painter").is_some());
     assert!(registry.get("vision").is_some());
     assert_eq!(registry.list().len(), 5);
 }
