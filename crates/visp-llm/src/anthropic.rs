@@ -40,12 +40,44 @@ pub fn build_anthropic_request(
         })
         .collect();
 
-    // 4. 构建请求
+    // 4. 解析 thinking 配置并做合规处理（temperature=1.0，budget<max_tokens）
+    let thinking_budget = match config.extra.get("thinking_budget_tokens") {
+        Some(s) => match s.parse::<u32>() {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!("invalid thinking_budget_tokens value {:?}: {e}", s);
+                None
+            }
+        },
+        None => None,
+    };
+    let (temperature, thinking_field) = match thinking_budget {
+        Some(budget) if config.max_tokens > 0 => {
+            let clamped = if budget >= config.max_tokens {
+                tracing::warn!(
+                    budget,
+                    max_tokens = config.max_tokens,
+                    "thinking_budget_tokens >= max_tokens, clamping to max_tokens - 1"
+                );
+                config.max_tokens - 1
+            } else {
+                budget
+            };
+            (1.0_f64, Some(clamped))
+        }
+        Some(_) => {
+            tracing::warn!("thinking_budget_tokens set but max_tokens=0, skipping thinking");
+            (config.temperature, None)
+        }
+        None => (config.temperature, None),
+    };
+
+    // 5. 构建
     let mut request = serde_json::json!({
         "model": config.model,
         "messages": anthropic_messages,
         "max_tokens": config.max_tokens,
-        "temperature": config.temperature,
+        "temperature": temperature,
     });
 
     if !system_text.is_empty() {
@@ -71,19 +103,11 @@ pub fn build_anthropic_request(
         request["tools"] = serde_json::Value::Array(tools_with_cache);
     }
 
-    // 从 extra 配置读取 thinking_budget_tokens 启用 thinking 模式
-    if let Some(budget_str) = config.extra.get("thinking_budget_tokens") {
-        match budget_str.parse::<u32>() {
-            Ok(budget) => {
-                request["thinking"] = serde_json::json!({
-                    "type": "enabled",
-                    "budget_tokens": budget,
-                });
-            }
-            Err(e) => {
-                tracing::warn!("invalid thinking_budget_tokens value {:?}: {e}", budget_str);
-            }
-        }
+    if let Some(budget) = thinking_field {
+        request["thinking"] = serde_json::json!({
+            "type": "enabled",
+            "budget_tokens": budget,
+        });
     }
 
     // Anthropic API 流式请求
@@ -2743,5 +2767,85 @@ mod tests {
             "should find completed event; found: {:?}",
             evts,
         );
+    }
+
+    // --- build_anthropic_request thinking 合规测试 ---
+
+    fn make_anthropic_config(
+        temp: f64,
+        max_tokens: u32,
+        thinking_budget: Option<&str>,
+    ) -> LlmConfig {
+        let mut config = LlmConfig {
+            model: "glm-5.2".into(),
+            temperature: temp,
+            max_tokens,
+            ..Default::default()
+        };
+        if let Some(b) = thinking_budget {
+            config
+                .extra
+                .insert("thinking_budget_tokens".into(), b.into());
+        }
+        config
+    }
+
+    #[test]
+    fn test_anthropic_thinking_forces_temperature_one() {
+        let config = make_anthropic_config(0.7, 8000, Some("12800"));
+        let req = build_anthropic_request(&[Message::user("Hi")], &[], &config);
+        assert_eq!(req["temperature"].as_f64(), Some(1.0));
+    }
+
+    #[test]
+    fn test_anthropic_thinking_budget_clamped_when_exceeds_max_tokens() {
+        let config = make_anthropic_config(0.7, 8000, Some("12800"));
+        let req = build_anthropic_request(&[Message::user("Hi")], &[], &config);
+        assert_eq!(req["thinking"]["budget_tokens"].as_u64(), Some(7999));
+    }
+
+    #[test]
+    fn test_anthropic_thinking_budget_clamped_when_equals_max_tokens() {
+        let config = make_anthropic_config(0.7, 8000, Some("8000"));
+        let req = build_anthropic_request(&[Message::user("Hi")], &[], &config);
+        assert_eq!(req["thinking"]["budget_tokens"].as_u64(), Some(7999));
+    }
+
+    #[test]
+    fn test_anthropic_thinking_budget_kept_when_below_max_tokens() {
+        let config = make_anthropic_config(0.7, 8000, Some("4096"));
+        let req = build_anthropic_request(&[Message::user("Hi")], &[], &config);
+        assert_eq!(req["thinking"]["budget_tokens"].as_u64(), Some(4096));
+    }
+
+    #[test]
+    fn test_anthropic_no_thinking_keeps_temperature() {
+        let config = make_anthropic_config(0.7, 8000, None);
+        let req = build_anthropic_request(&[Message::user("Hi")], &[], &config);
+        assert_eq!(req["temperature"].as_f64(), Some(0.7));
+        assert!(req.get("thinking").is_none());
+    }
+
+    #[test]
+    fn test_anthropic_thinking_invalid_budget_skipped() {
+        let config = make_anthropic_config(0.7, 8000, Some("not-a-number"));
+        let req = build_anthropic_request(&[Message::user("Hi")], &[], &config);
+        assert!(req.get("thinking").is_none());
+        assert_eq!(req["temperature"].as_f64(), Some(0.7));
+    }
+
+    #[test]
+    fn test_anthropic_thinking_skipped_when_max_tokens_zero() {
+        let config = make_anthropic_config(0.7, 0, Some("12800"));
+        let req = build_anthropic_request(&[Message::user("Hi")], &[], &config);
+        assert!(req.get("thinking").is_none());
+        assert_eq!(req["temperature"].as_f64(), Some(0.7));
+    }
+
+    #[test]
+    fn test_anthropic_thinking_temperature_idempotent() {
+        let config = make_anthropic_config(1.0, 8000, Some("4096"));
+        let req = build_anthropic_request(&[Message::user("Hi")], &[], &config);
+        assert_eq!(req["temperature"].as_f64(), Some(1.0));
     }
 }
