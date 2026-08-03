@@ -878,6 +878,28 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                     return false;
                 }
 
+                // Double-click on image address lines to copy URL/path
+                let now = std::time::Instant::now();
+                let is_double_click = app
+                    .last_mouse_click
+                    .is_some_and(|t| now.duration_since(t).as_millis() < 400);
+                app.last_mouse_click = Some(now);
+
+                if is_double_click
+                    && let Some(text) = crate::image::image_address_hit_test(
+                        app.messages(),
+                        &app.message_caches,
+                        virtual_row,
+                        content_w,
+                    )
+                {
+                    crate::selection::osc52_copy(&text);
+                    app.last_copy_msg = Some(format!("已复制: {}", text));
+                    app.last_copy_time = Some(now);
+                    app.needs_render = true;
+                    return false;
+                }
+
                 // 没有点击在工具调用头部：记录起点（内容坐标），清除旧选择
                 let content_row = m.row + app.scroll_state.y;
                 app.text_selection.clear();

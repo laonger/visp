@@ -9,6 +9,7 @@ use ratatui_image::Resize;
 use tokio::sync::mpsc;
 
 use crate::app::{ChatLine, LineType};
+use crate::theme;
 
 /// Marker prefix for inline image references in text content.
 const IMAGE_MARKER: &str = "<image: ";
@@ -562,6 +563,67 @@ pub fn parse_image_refs(text: &str, project_path: &str) -> String {
     }
 
     result
+}
+
+// ════════════════════════════════════════════════════════════════
+// 图片地址行双击复制 hit-test
+// ════════════════════════════════════════════════════════════════
+
+/// Hit test for image block address lines (🔗 url / 📁 path).
+///
+/// Returns the URL/path text to copy if `virtual_row` falls on an address line
+/// of an image block. The address lines occupy the bottom `addr_count` rows of
+/// the block (matching `render_image_block` layout).
+pub(crate) fn image_address_hit_test(
+    messages: &[ChatLine],
+    caches: &[crate::app::MessageCache],
+    virtual_row: u16,
+    width: u16,
+) -> Option<String> {
+    use crate::app::wrap_text;
+    let mut y: u16 = 0;
+    for msg in messages {
+        let style = theme::style_for(msg.line_type.clone());
+        if let Some(cache) = caches.iter().find(|c| c.msg_id == msg.id) {
+            let h = style.total_height(cache.line_count);
+            if virtual_row >= y && virtual_row < y + h {
+                // Clicked on this message - check if it's an image
+                if let LineType::Image {
+                    ref path,
+                    ref remote_url,
+                    ..
+                } = msg.line_type
+                {
+                    // Compute address lines (wrapped) and the text each line maps to
+                    let mut addr_entries: Vec<String> = Vec::new();
+                    if let Some(url) = remote_url.as_ref().filter(|u| !u.is_empty()) {
+                        let display = format!("🔗 {}", url);
+                        for _wrapped_line in wrap_text(&display, width) {
+                            addr_entries.push(url.clone());
+                        }
+                    }
+                    if !path.is_empty() {
+                        let display = format!("📁 {}", path);
+                        for _ in wrap_text(&display, width) {
+                            addr_entries.push(path.clone());
+                        }
+                    }
+                    let addr_count = addr_entries.len() as u16;
+                    // Address lines are at the bottom: y + h - addr_count .. y + h
+                    if addr_count > 0 {
+                        let addr_start = y + h - addr_count;
+                        if virtual_row >= addr_start && virtual_row < y + h {
+                            let idx = (virtual_row - addr_start) as usize;
+                            return Some(addr_entries[idx].clone());
+                        }
+                    }
+                }
+                return None;
+            }
+            y += h;
+        }
+    }
+    None
 }
 
 #[cfg(test)]

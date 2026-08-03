@@ -926,8 +926,12 @@ impl MessageCache {
                     })
                     .collect()
             }
-            LineType::Image { ref path, .. } => {
-                let (line_count, image_state) = match image_metrics {
+            LineType::Image {
+                ref path,
+                ref remote_url,
+                ..
+            } => {
+                let (mut line_count, image_state) = match image_metrics {
                     Some(metrics) => match metrics.image_cache.query_height(path, width, metrics.max_rows) {
                         ImageHeightInfo::Ready(h) => (h, Some(ImageState::Ready)),
                         ImageHeightInfo::Placeholder => {
@@ -941,6 +945,13 @@ impl MessageCache {
                     },
                     None => (1, None),
                 };
+                // Add address line count (wrapped at `width`), matching render_image_block
+                if let Some(url) = remote_url.as_ref().filter(|u| !u.is_empty()) {
+                    line_count += wrap_text(&format!("🔗 {}", url), width).len() as u16;
+                }
+                if !path.is_empty() {
+                    line_count += wrap_text(&format!("📁 {}", path), width).len() as u16;
+                }
                 // For image lines, lines vec is empty (rendered separately by render_image_block)
                 return Self {
                     msg_id: msg.id,
@@ -1200,6 +1211,8 @@ pub struct AppState {
     pub pending_copy_text: Option<String>,
     /// last_copy_msg 的设置时间，用于自动清除提示
     pub last_copy_time: Option<std::time::Instant>,
+    /// 上一次鼠标左键按下的时间（用于双击检测）
+    pub last_mouse_click: Option<std::time::Instant>,
     /// 上一次渲染的 chat area 矩形（屏幕坐标，用于鼠标命中测试）
     pub chat_area_rect: (u16, u16, u16, u16),
     /// 用户输入了 /new 命令，主循环需要创建新 session
@@ -1280,6 +1293,7 @@ impl AppState {
             pending_copy: false,
             pending_copy_text: None,
             last_copy_time: None,
+            last_mouse_click: None,
             chat_area_rect: (0, 0, 0, 0),
             pending_new_session: false,
             pending_list_sessions: false,

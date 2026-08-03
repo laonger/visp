@@ -854,24 +854,21 @@ fn render_image_block(
     let mut addr_lines: Vec<Line<'static>> = Vec::new();
     if let Some(url) = remote_url.filter(|u| !u.is_empty()) {
         let display = format!("🔗 {}", url);
-        let truncated = if display.len() > render_w as usize {
-            format!("{}…", &display[..(render_w as usize).saturating_sub(1)])
-        } else {
-            display
-        };
-        addr_lines.push(Line::styled(
-            truncated,
-            Style::default().fg(Color::DarkGray),
-        ));
+        for wrapped in crate::app::wrap_text(&display, render_w) {
+            addr_lines.push(Line::styled(
+                wrapped,
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
     }
     if !path.is_empty() {
         let display = format!("📁 {}", path);
-        let truncated = if display.len() > render_w as usize {
-            format!("{}…", &display[..(render_w as usize).saturating_sub(1)])
-        } else {
-            display
-        };
-        addr_lines.push(Line::styled(truncated, Style::default().fg(Color::DarkGray)));
+        for wrapped in crate::app::wrap_text(&display, render_w) {
+            addr_lines.push(Line::styled(
+                wrapped,
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
     }
     let addr_count = addr_lines.len() as u16;
     let image_h = img_h.saturating_sub(addr_count);

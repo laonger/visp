@@ -282,7 +282,8 @@ fn test_message_cache_image_line_without_metrics() {
         sub_session_id: None,
     };
     let cache = MessageCache::from_message(&msg, 80, false, None);
-    assert_eq!(cache.line_count, 1);
+    // 1 for image + 1 for the 📁 path address line
+    assert_eq!(cache.line_count, 2);
     assert!(cache.lines.is_empty());
     assert_eq!(cache.image_state, None);
 }
