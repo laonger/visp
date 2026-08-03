@@ -1739,7 +1739,7 @@ fn test_build_image_generation_request_basic() {
         ..Default::default()
     };
 
-    let mut body = serde_json::json!({
+    let body = serde_json::json!({
         "model": config.model,
         "prompt": "a cat",
         "response_format": "url",
