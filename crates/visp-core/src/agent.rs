@@ -71,6 +71,16 @@ pub enum AgentEvent {
     },
     /// 完成
     Done,
+    /// LLM 输出的图片内容块
+    ImageBlock {
+        path: String,
+        mime_type: String,
+        remote_url: Option<String>,
+    },
+    /// 图片处理失败
+    ImageError {
+        reason: String,
+    },
     /// 需要用户输入
     UserQuery {
         query_id: String,

@@ -79,6 +79,7 @@ fn event_to_msg(event: &AgentEvent) -> Option<AgentMessage> {
             is_error: *is_error,
         }),
         AgentEvent::UserQuery { .. } => None, // oneshot not clonable
+        AgentEvent::ImageBlock { .. } | AgentEvent::ImageError { .. } => None,
         AgentEvent::Done => Some(AgentMessage::Done),
     }
 }
@@ -428,6 +429,40 @@ async fn collect_stream_events(
                         send_event(
                             tx, sm, sid, &ctx.global_tx, &ctx.session_id,
                             AgentEvent::TextDelta(delta),
+                        ).await.ok()?;
+                    }
+                    Some(Ok(ChatEvent::ImageBlock { path, mime_type, remote_url })) => {
+                        // Flush accumulated text before image
+                        if !text_buffer.is_empty() {
+                            let text = std::mem::take(&mut text_buffer);
+                            send_event(
+                                tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                                AgentEvent::TextDelta(text),
+                            ).await.ok()?;
+                        }
+                        // Send image event to CLI
+                        send_event(
+                            tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                            AgentEvent::ImageBlock {
+                                path: path.clone(),
+                                mime_type: mime_type.clone(),
+                                remote_url: remote_url.clone(),
+                            },
+                        ).await.ok()?;
+                        // Append marker to text_buffer for Message persistence
+                        match &remote_url {
+                            Some(url) => {
+                                text_buffer.push_str(&format!("<image: | {}>", url));
+                            }
+                            None => {
+                                text_buffer.push_str(&format!("<image: {}>", path));
+                            }
+                        }
+                    }
+                    Some(Ok(ChatEvent::ImageError { reason })) => {
+                        send_event(
+                            tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                            AgentEvent::ImageError { reason: reason.clone() },
                         ).await.ok()?;
                     }
                     Some(Ok(ChatEvent::ThinkingBlock(block))) => {
@@ -4566,3 +4601,4 @@ mod tests {
         );
     }
 }
+

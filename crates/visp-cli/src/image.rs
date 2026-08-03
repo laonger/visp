@@ -15,7 +15,11 @@ const IMAGE_MARKER: &str = "<image: ";
 
 /// Parse image markers from text content and split into multiple ChatLines.
 ///
-/// Markers format: `<image: /path/or/url>`
+/// Markers format: `<image: /path/or/url>`, optionally with a remote URL:
+///   - `<image: /local/path.png>`
+///   - `<image: | https://example.com/img.png>` (remote URL only)
+///   - `<image: /local/path.png | https://example.com/img.png>` (both)
+///
 /// Empty text segments (before first marker, between markers, after last marker) are skipped.
 ///
 /// Returns a Vec of ChatLine with id=0 (placeholder). Callers must assign unique ids.
@@ -40,9 +44,17 @@ pub fn split_image_markers(content: &str, base_line_type: LineType) -> Vec<ChatL
         }
 
         // Image marker.
-        let path = content[path_start..marker_end].trim();
-        if !path.is_empty() {
-            lines.push(make_image_line(path.to_string()));
+        // Marker content may be `path`, `| url`, or `path | url`.
+        let raw = content[path_start..marker_end].trim();
+        let (path, remote_url) = if let Some(idx) = raw.find('|') {
+            let p = raw[..idx].trim().to_string();
+            let u = raw[idx + 1..].trim().to_string();
+            (p, if u.is_empty() { None } else { Some(u) })
+        } else {
+            (raw.to_string(), None)
+        };
+        if !path.is_empty() || remote_url.is_some() {
+            lines.push(make_image_line(path, remote_url));
         }
 
         search_from = marker_end + 1;
@@ -91,18 +103,32 @@ fn make_text_line(content: String, line_type: &LineType) -> ChatLine {
     }
 }
 
-/// Build an Image ChatLine: content stores the path (for debugging),
-/// line_type carries the path and derived alt_text.
-fn make_image_line(path: String) -> ChatLine {
-    let alt_text = extract_alt_text(&path);
+/// Build an Image ChatLine: content stores the path (or URL when path is empty),
+/// line_type carries the path, derived alt_text and optional remote_url.
+fn make_image_line(path: String, remote_url: Option<String>) -> ChatLine {
+    let alt_text = if path.is_empty() {
+        if let Some(ref url) = remote_url {
+            extract_alt_text(url)
+        } else {
+            String::new()
+        }
+    } else {
+        extract_alt_text(&path)
+    };
+    let content = if path.is_empty() {
+        remote_url.clone().unwrap_or_default()
+    } else {
+        path.clone()
+    };
     ChatLine {
         id: 0,
         version: 0,
         line_type: LineType::Image {
-            path: path.clone(),
+            path,
             alt_text,
+            remote_url,
         },
-        content: path,
+        content,
         call_id: None,
         tool_result: None,
         tool_error: false,
@@ -126,6 +152,8 @@ pub enum ImageEntry {
         rendered_size: (u16, u16),
         /// Original pixel dimensions.
         pixel_size: (u32, u32),
+        /// Local cache file path (downloaded URL images) or source path (local images).
+        local_path: Option<String>,
     },
     /// Network image is being downloaded.
     Loading,
@@ -363,6 +391,7 @@ fn load_local_image(path: &str, _picker: &Picker) -> ImageEntry {
                     protocol: None,
                     rendered_size: (0, 0),
                     pixel_size,
+                    local_path: Some(path.to_string()),
                 }
             }
             Err(e) => ImageEntry::Error(format!("Decode failed: {}", e)),
@@ -386,15 +415,31 @@ async fn download_and_decode(url: &str, _picker: &Picker) -> ImageEntry {
             if !resp.status().is_success() {
                 return ImageEntry::Error(format!("HTTP {}", resp.status()));
             }
+            // Determine extension from content-type
+            let ext = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|ct| {
+                    if ct.contains("png") { "png" }
+                    else if ct.contains("jpeg") || ct.contains("jpg") { "jpg" }
+                    else if ct.contains("webp") { "webp" }
+                    else if ct.contains("gif") { "gif" }
+                    else { "png" }
+                })
+                .unwrap_or("png");
             match resp.bytes().await {
                 Ok(bytes) => match image::load_from_memory(&bytes) {
                     Ok(img) => {
                         let pixel_size = (img.width(), img.height());
+                        // Write cache file
+                        let local_path = write_url_cache(url, &bytes, ext);
                         ImageEntry::Ready {
                             image: img,
                             protocol: None,
                             rendered_size: (0, 0),
                             pixel_size,
+                            local_path,
                         }
                     }
                     Err(e) => ImageEntry::Error(format!("Decode failed: {}", e)),
@@ -409,6 +454,23 @@ async fn download_and_decode(url: &str, _picker: &Picker) -> ImageEntry {
                 ImageEntry::Error(format!("Download failed: {}", e))
             }
         }
+    }
+}
+
+/// Write downloaded image bytes to a cache file keyed by URL hash.
+/// Returns the cache file path on success, None on failure.
+fn write_url_cache(url: &str, bytes: &[u8], ext: &str) -> Option<String> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    url.hash(&mut hasher);
+    let hash = hasher.finish();
+    let cache_dir = std::env::temp_dir().join(".visp").join("images");
+    let _ = std::fs::create_dir_all(&cache_dir);
+    let cache_path = cache_dir.join(format!("{}.{}", hash, ext));
+    match std::fs::write(&cache_path, bytes) {
+        Ok(()) => Some(cache_path.to_string_lossy().into_owned()),
+        Err(_) => None,
     }
 }
 
@@ -518,15 +580,26 @@ mod tests {
         assert!(line.sub_session_id.is_none());
     }
 
-    fn assert_image_line(line: &ChatLine, expected_path: &str, expected_alt_text: &str) {
+    fn assert_image_line(
+        line: &ChatLine,
+        expected_path: &str,
+        expected_alt_text: &str,
+        expected_remote_url: Option<&str>,
+    ) {
         assert_eq!(
             line.line_type,
             LineType::Image {
                 path: expected_path.to_string(),
                 alt_text: expected_alt_text.to_string(),
+                remote_url: expected_remote_url.map(|s| s.to_string()),
             }
         );
-        assert_eq!(line.content, expected_path);
+        let expected_content = if expected_path.is_empty() {
+            expected_remote_url.unwrap_or("").to_string()
+        } else {
+            expected_path.to_string()
+        };
+        assert_eq!(line.content, expected_content);
         assert_eq!(line.id, 0);
         assert_eq!(line.version, 0);
         assert!(line.call_id.is_none());
@@ -547,7 +620,7 @@ mod tests {
         let lines = split_image_markers("look at <image: /tmp/a.png> here", LineType::User);
         assert_eq!(lines.len(), 3);
         assert_text_line(&lines[0], "look at ");
-        assert_image_line(&lines[1], "/tmp/a.png", "a.png");
+        assert_image_line(&lines[1], "/tmp/a.png", "a.png", None);
         assert_text_line(&lines[2], " here");
     }
 
@@ -555,7 +628,7 @@ mod tests {
     fn marker_at_text_start() {
         let lines = split_image_markers("<image: /tmp/a.png> rest", LineType::User);
         assert_eq!(lines.len(), 2);
-        assert_image_line(&lines[0], "/tmp/a.png", "a.png");
+        assert_image_line(&lines[0], "/tmp/a.png", "a.png", None);
         assert_text_line(&lines[1], " rest");
     }
 
@@ -564,7 +637,7 @@ mod tests {
         let lines = split_image_markers("before <image: /tmp/a.png>", LineType::User);
         assert_eq!(lines.len(), 2);
         assert_text_line(&lines[0], "before ");
-        assert_image_line(&lines[1], "/tmp/a.png", "a.png");
+        assert_image_line(&lines[1], "/tmp/a.png", "a.png", None);
     }
 
     #[test]
@@ -575,9 +648,9 @@ mod tests {
         );
         assert_eq!(lines.len(), 5);
         assert_text_line(&lines[0], "a");
-        assert_image_line(&lines[1], "/x.png", "x.png");
+        assert_image_line(&lines[1], "/x.png", "x.png", None);
         assert_text_line(&lines[2], "b");
-        assert_image_line(&lines[3], "/y.png", "y.png");
+        assert_image_line(&lines[3], "/y.png", "y.png", None);
         assert_text_line(&lines[4], "c");
     }
 
@@ -585,14 +658,54 @@ mod tests {
     fn only_one_marker_no_other_text() {
         let lines = split_image_markers("<image: /tmp/a.png>", LineType::User);
         assert_eq!(lines.len(), 1);
-        assert_image_line(&lines[0], "/tmp/a.png", "a.png");
+        assert_image_line(&lines[0], "/tmp/a.png", "a.png", None);
     }
 
     #[test]
     fn url_marker() {
         let lines = split_image_markers("<image: https://example.com/cat.png>", LineType::User);
         assert_eq!(lines.len(), 1);
-        assert_image_line(&lines[0], "https://example.com/cat.png", "cat.png");
+        assert_image_line(&lines[0], "https://example.com/cat.png", "cat.png", None);
+    }
+
+    #[test]
+    fn url_only_marker() {
+        let lines = split_image_markers(
+            "<image: | https://example.com/img.png>",
+            LineType::User,
+        );
+        assert_eq!(lines.len(), 1);
+        assert_image_line(&lines[0], "", "img.png", Some("https://example.com/img.png"));
+    }
+
+    #[test]
+    fn url_marker_backward_compatible() {
+        let lines = split_image_markers("<image: /local/path.png>", LineType::User);
+        assert_eq!(lines.len(), 1);
+        assert_image_line(&lines[0], "/local/path.png", "path.png", None);
+    }
+
+    #[test]
+    fn mixed_path_and_url_markers() {
+        let lines = split_image_markers(
+            "Hello <image: /local/img.png> World <image: | https://url.png>",
+            LineType::User,
+        );
+        assert_eq!(lines.len(), 4);
+        assert_text_line(&lines[0], "Hello ");
+        assert_image_line(&lines[1], "/local/img.png", "img.png", None);
+        assert_text_line(&lines[2], " World ");
+        assert_image_line(&lines[3], "", "url.png", Some("https://url.png"));
+    }
+
+    #[test]
+    fn path_and_url_marker() {
+        let lines = split_image_markers(
+            "<image: /local/path.png | https://url.png>",
+            LineType::User,
+        );
+        assert_eq!(lines.len(), 1);
+        assert_image_line(&lines[0], "/local/path.png", "path.png", Some("https://url.png"));
     }
 
     #[test]

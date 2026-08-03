@@ -7,6 +7,7 @@ use visp_core::error::LlmError;
 use visp_core::message::{Message, Role, ToolDefinition};
 use visp_core::provider::{ChatEvent, LlmConfig, LlmProvider};
 
+use crate::image_util;
 use crate::util::{build_client, parse_retry_after};
 
 /// 构建 Anthropic API 请求体
@@ -251,6 +252,12 @@ pub(crate) enum ParsedEvent {
         partial: String,
         signature: String,
     },
+    /// 图片内容块: (base64 数据, MIME 类型, 远程 URL)
+    ImageBlock {
+        data: Option<String>,
+        mime_type: String,
+        remote_url: Option<String>,
+    },
     /// token 用量信息及消息元数据
     Usage {
         input_tokens: u32,
@@ -413,6 +420,33 @@ pub(crate) fn parse_anthropic_event(event_name: &str, data: &str) -> Result<Pars
                         partial: "[REDACTED]".to_string(),
                         signature,
                     })
+                }
+                "image" => {
+                    let source = &v["content_block"]["source"];
+                    let source_type = source["type"].as_str().unwrap_or("");
+                    match source_type {
+                        "base64" => {
+                            let media_type = source["media_type"]
+                                .as_str()
+                                .unwrap_or("image/png")
+                                .to_string();
+                            let data = source["data"].as_str().unwrap_or("").to_string();
+                            Ok(ParsedEvent::ImageBlock {
+                                data: Some(data),
+                                mime_type: media_type,
+                                remote_url: None,
+                            })
+                        }
+                        "url" => {
+                            let url = source["url"].as_str().unwrap_or("").to_string();
+                            Ok(ParsedEvent::ImageBlock {
+                                data: None,
+                                mime_type: String::new(),
+                                remote_url: Some(url),
+                            })
+                        }
+                        _ => Ok(ParsedEvent::Skip),
+                    }
                 }
                 _ => Ok(ParsedEvent::Skip),
             }
@@ -591,11 +625,17 @@ impl LlmProvider for AnthropicProvider {
         let status = response.status();
         if status.is_success() {
             let byte_stream = response.bytes_stream();
+            let project_path = config
+                .extra
+                .get("project_path")
+                .cloned()
+                .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().into_owned());
             Ok(byte_stream_to_chat_events(
                 byte_stream,
                 start_time,
                 span,
                 config.model.clone(),
+                project_path,
                 config.langfuse_capture_output,
                 config.langfuse_capture_max_chars,
                 config.langfuse_redact_secrets,
@@ -647,6 +687,7 @@ fn byte_stream_to_chat_events(
     start_time: std::time::Instant,
     span: tracing::Span,
     request_model: String,
+    project_path: String,
     langfuse_capture_output: bool,
     langfuse_capture_max_chars: usize,
     langfuse_redact_secrets: bool,
@@ -679,6 +720,8 @@ fn byte_stream_to_chat_events(
         model: String,
         /// 请求时的模型名称（用于 response model 为空时的 fallback）
         request_model: String,
+        /// 项目根路径（用于保存 base64 图片）
+        project_path: String,
         /// 响应结束原因（从 message_delta 提取）
         stop_reason: String,
         /// 请求开始时刻（用于计算端到端 latency）
@@ -713,6 +756,7 @@ fn byte_stream_to_chat_events(
         cache_read_input_tokens: 0,
         model: String::new(),
         request_model,
+        project_path,
         stop_reason: String::new(),
         start_time,
         done_pending: false,
@@ -1008,6 +1052,53 @@ fn byte_stream_to_chat_events(
                                     };
                                     emit_first_token(&mut state);
                                     return Some((Ok(evt), state));
+                                }
+                            }
+                            Ok(ParsedEvent::ImageBlock {
+                                data,
+                                mime_type,
+                                remote_url,
+                            }) => {
+                                emit_first_token(&mut state);
+                                if let Some(base64_data) = data {
+                                    // base64 source: save to disk
+                                    match image_util::save_base64_image(
+                                        &base64_data,
+                                        &mime_type,
+                                        &state.project_path,
+                                    ) {
+                                        Ok(path) => {
+                                            return Some((
+                                                Ok(ChatEvent::ImageBlock {
+                                                    path,
+                                                    mime_type,
+                                                    remote_url: None,
+                                                }),
+                                                state,
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            return Some((
+                                                Ok(ChatEvent::ImageError {
+                                                    reason: e.to_string(),
+                                                }),
+                                                state,
+                                            ));
+                                        }
+                                    }
+                                } else if let Some(url) = remote_url {
+                                    // URL source: pass through, CLI will lazy-load
+                                    return Some((
+                                        Ok(ChatEvent::ImageBlock {
+                                            path: String::new(),
+                                            mime_type: String::new(),
+                                            remote_url: Some(url),
+                                        }),
+                                        state,
+                                    ));
+                                } else {
+                                    // Neither data nor URL - skip
+                                    continue;
                                 }
                             }
                             Ok(ParsedEvent::Skip) => continue,
@@ -1386,7 +1477,7 @@ mod tests {
     }
 
     /// 收集 ChatEvent 流到 Vec（使用 Instant::now 作为 start_time）
-    async fn collect_anthropic_events(chunks: Vec<String>) -> Vec<ChatEvent> {
+    async fn collect_anthropic_events(chunks: Vec<String>, project_path: &str) -> Vec<ChatEvent> {
         let byte_stream =
             futures::stream::iter(chunks.into_iter().map(|s| Ok(bytes::Bytes::from(s))));
         let start = std::time::Instant::now();
@@ -1396,6 +1487,7 @@ mod tests {
             start,
             span,
             "test-model".to_string(),
+            project_path.to_string(),
             false,
             20000,
             true,
@@ -1425,7 +1517,7 @@ mod tests {
             sse_line("message_delta", message_delta),
             sse_line("message_stop", message_stop),
         );
-        let events = collect_anthropic_events(vec![sse]).await;
+        let events = collect_anthropic_events(vec![sse], "/tmp").await;
 
         // 提取 OutputMetadata
         let metadata_events: Vec<&ChatEvent> = events
@@ -1490,7 +1582,7 @@ mod tests {
             sse_line("message_delta", message_delta),
             sse_line("message_stop", message_stop),
         );
-        let events = collect_anthropic_events(vec![sse]).await;
+        let events = collect_anthropic_events(vec![sse], "/tmp").await;
 
         // 提取 OutputMetadata
         let meta = events
@@ -1537,6 +1629,7 @@ mod tests {
             start,
             span,
             "test-model".to_string(),
+            "/tmp".to_string(),
             false,
             20000,
             true,
@@ -1564,10 +1657,177 @@ mod tests {
         );
     }
 
+    // --- 图片内容块测试 ---
+
+    /// 生成独立的临时项目目录（用于保存图片）
+    fn test_image_project_dir(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!(
+            "visp_anthropic_image_{name}_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn test_parse_image_base64() {
+        let data = r#"{"type":"content_block_start","index":1,"content_block":{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}}"#;
+        let result = parse_anthropic_event("content_block_start", data).unwrap();
+        match result {
+            ParsedEvent::ImageBlock {
+                data,
+                mime_type,
+                remote_url,
+            } => {
+                assert_eq!(data.as_deref(), Some("iVBORw0KGgo="));
+                assert_eq!(mime_type, "image/png");
+                assert!(remote_url.is_none());
+            }
+            _ => panic!("expected ImageBlock, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_parse_image_url() {
+        let data = r#"{"type":"content_block_start","index":1,"content_block":{"type":"image","source":{"type":"url","url":"https://example.com/image.png"}}}"#;
+        let result = parse_anthropic_event("content_block_start", data).unwrap();
+        match result {
+            ParsedEvent::ImageBlock {
+                data,
+                mime_type,
+                remote_url,
+            } => {
+                assert!(data.is_none());
+                assert!(mime_type.is_empty());
+                assert_eq!(remote_url.as_deref(), Some("https://example.com/image.png"));
+            }
+            _ => panic!("expected ImageBlock, got {:?}", result),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_byte_stream_base64_image() {
+        let project_path = test_image_project_dir("base64_image");
+        let message_start = r#"{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"test-model","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#;
+        let block_start = r#"{"type":"content_block_start","index":1,"content_block":{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="}}}"#;
+        let block_stop = r#"{"type":"content_block_stop","index":1}"#;
+        let message_stop = r#"{"type":"message_stop"}"#;
+
+        let sse = format!(
+            "{}{}{}{}",
+            sse_line("message_start", message_start),
+            sse_line("content_block_start", block_start),
+            sse_line("content_block_stop", block_stop),
+            sse_line("message_stop", message_stop),
+        );
+        let events = collect_anthropic_events(vec![sse], &project_path).await;
+
+        let image_events: Vec<&ChatEvent> = events
+            .iter()
+            .filter(|e| matches!(e, ChatEvent::ImageBlock { .. }))
+            .collect();
+        assert_eq!(image_events.len(), 1, "should have one ImageBlock event");
+        if let ChatEvent::ImageBlock {
+            path,
+            mime_type,
+            remote_url,
+        } = image_events[0]
+        {
+            assert!(!path.is_empty(), "base64 image should be saved to disk");
+            assert!(
+                path.contains(".visp/images/"),
+                "image should be saved under .visp/images/, got {path}"
+            );
+            assert_eq!(mime_type, "image/png");
+            assert!(remote_url.is_none());
+            // 文件确实写入磁盘
+            assert!(
+                std::path::Path::new(path).exists(),
+                "saved image file should exist"
+            );
+        } else {
+            panic!("expected ImageBlock event");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_byte_stream_url_image() {
+        let project_path = test_image_project_dir("url_image");
+        let message_start = r#"{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"test-model","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#;
+        let block_start = r#"{"type":"content_block_start","index":1,"content_block":{"type":"image","source":{"type":"url","url":"https://example.com/image.png"}}}"#;
+        let block_stop = r#"{"type":"content_block_stop","index":1}"#;
+        let message_stop = r#"{"type":"message_stop"}"#;
+
+        let sse = format!(
+            "{}{}{}{}",
+            sse_line("message_start", message_start),
+            sse_line("content_block_start", block_start),
+            sse_line("content_block_stop", block_stop),
+            sse_line("message_stop", message_stop),
+        );
+        let events = collect_anthropic_events(vec![sse], &project_path).await;
+
+        let image_events: Vec<&ChatEvent> = events
+            .iter()
+            .filter(|e| matches!(e, ChatEvent::ImageBlock { .. }))
+            .collect();
+        assert_eq!(image_events.len(), 1, "should have one ImageBlock event");
+        if let ChatEvent::ImageBlock {
+            path,
+            mime_type,
+            remote_url,
+        } = image_events[0]
+        {
+            assert!(path.is_empty(), "URL image should not be saved to disk");
+            assert!(mime_type.is_empty());
+            assert_eq!(
+                remote_url.as_deref(),
+                Some("https://example.com/image.png")
+            );
+        } else {
+            panic!("expected ImageBlock event");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_byte_stream_base64_error() {
+        let project_path = test_image_project_dir("base64_error");
+        let message_start = r#"{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"test-model","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}"#;
+        let block_start = r#"{"type":"content_block_start","index":1,"content_block":{"type":"image","source":{"type":"base64","media_type":"image/png","data":"!!!invalid-base64!!!"}}}"#;
+        let block_stop = r#"{"type":"content_block_stop","index":1}"#;
+        let message_stop = r#"{"type":"message_stop"}"#;
+
+        let sse = format!(
+            "{}{}{}{}",
+            sse_line("message_start", message_start),
+            sse_line("content_block_start", block_start),
+            sse_line("content_block_stop", block_stop),
+            sse_line("message_stop", message_stop),
+        );
+        let events = collect_anthropic_events(vec![sse], &project_path).await;
+
+        let error_events: Vec<&ChatEvent> = events
+            .iter()
+            .filter(|e| matches!(e, ChatEvent::ImageError { .. }))
+            .collect();
+        assert_eq!(error_events.len(), 1, "should have one ImageError event");
+        if let ChatEvent::ImageError { reason } = error_events[0] {
+            assert!(
+                reason.contains("base64"),
+                "error reason should mention base64, got {reason}"
+            );
+        } else {
+            panic!("expected ImageError event");
+        }
+    }
+
     // --- UTF-8 跨 chunk 边界测试 ---
 
     /// 收集 ChatEvent 流，接收字节 chunk（用于测试跨 chunk 的 UTF-8 切分）
-    async fn collect_anthropic_events_from_bytes(chunks: Vec<Vec<u8>>) -> Vec<ChatEvent> {
+    async fn collect_anthropic_events_from_bytes(
+        chunks: Vec<Vec<u8>>,
+        project_path: &str,
+    ) -> Vec<ChatEvent> {
         let byte_stream =
             futures::stream::iter(chunks.into_iter().map(|b| Ok(bytes::Bytes::from(b))));
         let start = std::time::Instant::now();
@@ -1577,6 +1837,7 @@ mod tests {
             start,
             span,
             "test-model".to_string(),
+            project_path.to_string(),
             false,
             20000,
             true,
@@ -1617,7 +1878,7 @@ mod tests {
         let chunk1 = full_bytes[..cut].to_vec();
         let chunk2 = full_bytes[cut..].to_vec();
 
-        let events = collect_anthropic_events_from_bytes(vec![chunk1, chunk2]).await;
+        let events = collect_anthropic_events_from_bytes(vec![chunk1, chunk2], "/tmp").await;
 
         let text: String = events
             .iter()
@@ -1666,7 +1927,7 @@ mod tests {
         let chunk1 = full_bytes[..cut].to_vec();
         let chunk2 = full_bytes[cut..].to_vec();
 
-        let events = collect_anthropic_events_from_bytes(vec![chunk1, chunk2]).await;
+        let events = collect_anthropic_events_from_bytes(vec![chunk1, chunk2], "/tmp").await;
         let text: String = events
             .iter()
             .filter_map(|e| match e {
@@ -1976,6 +2237,7 @@ mod tests {
             start,
             span,
             "test-model".to_string(),
+            "/tmp".to_string(),
             false,
             20000,
             true,
@@ -2068,6 +2330,7 @@ mod tests {
             start,
             span,
             "test-model".to_string(),
+            "/tmp".to_string(),
             false,
             20000,
             true,
@@ -2138,6 +2401,7 @@ mod tests {
             start,
             span,
             "test-model".to_string(),
+            "/tmp".to_string(),
             false,
             20000,
             true,
@@ -2198,6 +2462,7 @@ mod tests {
             start,
             span,
             "test-model".to_string(),
+            "/tmp".to_string(),
             false,
             20000,
             true,
@@ -2264,6 +2529,7 @@ mod tests {
             start,
             span,
             "test-model".to_string(),
+            "/tmp".to_string(),
             false,
             20000,
             true,
@@ -2303,6 +2569,7 @@ mod tests {
             start,
             span,
             "test-model".to_string(),
+            "/tmp".to_string(),
             false,
             20000,
             true,
@@ -2365,6 +2632,7 @@ mod tests {
             start,
             span,
             "test-model".to_string(),
+            "/tmp".to_string(),
             false,
             20000,
             true,
@@ -2423,6 +2691,7 @@ mod tests {
             start,
             span,
             "test-model".to_string(),
+            "/tmp".to_string(),
             false,
             20000,
             true,

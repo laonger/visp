@@ -7,6 +7,7 @@ use ratatui::{
     widgets::ListState,
 };
 use ratatui_textarea::WrapMode;
+use std::path::Path;
 use unicode_width::UnicodeWidthChar;
 
 use crate::image::{ImageHeightInfo, ImageMetrics, ImageState};
@@ -242,6 +243,7 @@ pub enum LineType {
     Image {
         path: String,
         alt_text: String,
+        remote_url: Option<String>,
     },
 }
 
@@ -541,6 +543,41 @@ impl TabEntry {
                     if self.status == AgentStatus::Running {
                         self.status = AgentStatus::Done;
                     }
+                }
+                Some(server_message::Payload::ImageBlock(ib)) => {
+                    self.flush_streaming();
+                    let remote_url = if ib.remote_url.is_empty() {
+                        None
+                    } else {
+                        Some(ib.remote_url.clone())
+                    };
+                    // If path is empty but remote_url exists, use remote_url as the cache key
+                    let path = if ib.path.is_empty() {
+                        ib.remote_url.clone()
+                    } else {
+                        ib.path.clone()
+                    };
+                    let alt_text = Path::new(&path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.clone());
+                    self.push_chat_line(
+                        LineType::Image {
+                            path,
+                            alt_text,
+                            remote_url,
+                        },
+                        String::new(),
+                        None,
+                    );
+                }
+                Some(server_message::Payload::ImageError(ie)) => {
+                    self.flush_streaming();
+                    self.push_chat_line(
+                        LineType::Error,
+                        format!("[图片加载失败: {}]", ie.reason),
+                        None,
+                    );
                 }
                 _ => {}
             }

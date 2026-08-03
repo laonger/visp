@@ -246,73 +246,80 @@ fn test_build_request_tool_choice_auto() {
 #[test]
 fn test_parse_text_delta() {
     let data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}"#;
-    let result = parse_openai_sse_data(data).unwrap();
-    match result {
+    let events = parse_openai_sse_data(data).unwrap();
+    assert_eq!(events.len(), 1, "expected exactly one event");
+    match &events[0] {
         OpenAiStreamEvent::TextDelta(t) => assert_eq!(t, "Hello"),
-        _ => panic!("expected TextDelta, got {:?}", result),
+        _ => panic!("expected TextDelta, got {:?}", events),
     }
 }
 
 #[test]
 fn test_parse_tool_call_start() {
     let data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"read_file","arguments":""}}]},"finish_reason":null}]}"#;
-    let result = parse_openai_sse_data(data).unwrap();
-    match result {
+    let events = parse_openai_sse_data(data).unwrap();
+    assert_eq!(events.len(), 1, "expected exactly one event");
+    match &events[0] {
         OpenAiStreamEvent::ToolCallStart { id, name, .. } => {
             assert_eq!(id, "call_abc");
             assert_eq!(name, "read_file");
         }
-        _ => panic!("expected ToolCallStart, got {:?}", result),
+        _ => panic!("expected ToolCallStart, got {:?}", events),
     }
 }
 
 #[test]
 fn test_parse_tool_call_delta() {
     let data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"te"}}]},"finish_reason":null}]}"#;
-    let result = parse_openai_sse_data(data).unwrap();
-    match result {
+    let events = parse_openai_sse_data(data).unwrap();
+    assert_eq!(events.len(), 1, "expected exactly one event");
+    match &events[0] {
         OpenAiStreamEvent::ToolCallDelta { arguments, .. } => {
             assert_eq!(arguments, "{\"path\":\"te");
         }
-        _ => panic!("expected ToolCallDelta, got {:?}", result),
+        _ => panic!("expected ToolCallDelta, got {:?}", events),
     }
 }
 
 #[test]
 fn test_parse_finish_stop() {
     let data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
-    let result = parse_openai_sse_data(data).unwrap();
-    match result {
+    let events = parse_openai_sse_data(data).unwrap();
+    assert_eq!(events.len(), 1, "expected exactly one event");
+    match &events[0] {
         OpenAiStreamEvent::Finish {
             reason: Some(r), ..
         } => assert_eq!(r, "stop"),
-        _ => panic!("expected Finish, got {:?}", result),
+        _ => panic!("expected Finish, got {:?}", events),
     }
 }
 
 #[test]
 fn test_parse_finish_tool_calls() {
     let data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#;
-    let result = parse_openai_sse_data(data).unwrap();
-    match result {
+    let events = parse_openai_sse_data(data).unwrap();
+    assert_eq!(events.len(), 1, "expected exactly one event");
+    match &events[0] {
         OpenAiStreamEvent::Finish {
             reason: Some(r), ..
         } => assert_eq!(r, "tool_calls"),
-        _ => panic!("expected Finish, got {:?}", result),
+        _ => panic!("expected Finish, got {:?}", events),
     }
 }
 
 #[test]
 fn test_parse_done_marker() {
-    let result = parse_openai_sse_data("[DONE]").unwrap();
-    assert!(matches!(result, OpenAiStreamEvent::StreamEnd));
+    let events = parse_openai_sse_data("[DONE]").unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(matches!(&events[0], OpenAiStreamEvent::StreamEnd));
 }
 
 #[test]
 fn test_parse_usage() {
     let data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}"#;
-    let result = parse_openai_sse_data(data).unwrap();
-    match result {
+    let events = parse_openai_sse_data(data).unwrap();
+    assert_eq!(events.len(), 1, "expected exactly one event");
+    match &events[0] {
         OpenAiStreamEvent::Usage {
             input_tokens,
             output_tokens,
@@ -320,12 +327,12 @@ fn test_parse_usage() {
             cache_read_input_tokens,
             ..
         } => {
-            assert_eq!(input_tokens, 10);
-            assert_eq!(output_tokens, 20);
-            assert_eq!(cache_creation_input_tokens, 0);
-            assert_eq!(cache_read_input_tokens, 0);
+            assert_eq!(*input_tokens, 10);
+            assert_eq!(*output_tokens, 20);
+            assert_eq!(*cache_creation_input_tokens, 0);
+            assert_eq!(*cache_read_input_tokens, 0);
         }
-        _ => panic!("expected Usage, got {:?}", result),
+        _ => panic!("expected Usage, got {:?}", events),
     }
 }
 
@@ -334,10 +341,11 @@ fn test_parse_null_usage_skipped() {
     // Some providers (e.g. Ark/volcengine) send "usage": null in every chunk
     // until the final usage-only chunk. null usage should NOT produce a Usage event.
     let data = r#"{"id":"1","choices":[{"delta":{"content":"hi"},"index":0}],"usage":null}"#;
-    let result = parse_openai_sse_data(data).unwrap();
-    match result {
+    let events = parse_openai_sse_data(data).unwrap();
+    assert_eq!(events.len(), 1, "expected exactly one event");
+    match &events[0] {
         OpenAiStreamEvent::TextDelta(text) => assert_eq!(text, "hi"),
-        _ => panic!("expected TextDelta, got {:?}", result),
+        _ => panic!("expected TextDelta, got {:?}", events),
     }
 }
 
@@ -345,20 +353,21 @@ fn test_parse_null_usage_skipped() {
 fn test_parse_usage_with_cache() {
     // OpenAI 标准格式：prompt_tokens_details.cached_tokens
     let data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"prompt_tokens_details":{"cached_tokens":40}}}"#;
-    let result = parse_openai_sse_data(data).unwrap();
-    match result {
+    let events = parse_openai_sse_data(data).unwrap();
+    assert_eq!(events.len(), 1, "expected exactly one event");
+    match &events[0] {
         OpenAiStreamEvent::Usage {
             input_tokens,
             output_tokens,
             cache_creation_input_tokens,
             cache_read_input_tokens,
         } => {
-            assert_eq!(input_tokens, 100);
-            assert_eq!(output_tokens, 50);
-            assert_eq!(cache_creation_input_tokens, 0);
-            assert_eq!(cache_read_input_tokens, 40);
+            assert_eq!(*input_tokens, 100);
+            assert_eq!(*output_tokens, 50);
+            assert_eq!(*cache_creation_input_tokens, 0);
+            assert_eq!(*cache_read_input_tokens, 40);
         }
-        _ => panic!("expected Usage, got {:?}", result),
+        _ => panic!("expected Usage, got {:?}", events),
     }
 }
 
@@ -380,10 +389,11 @@ fn test_parse_retry_after_missing() {
 #[test]
 fn test_parse_reasoning_content_delta() {
     let data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"Step 1: think"},"finish_reason":null}]}"#;
-    let result = parse_openai_sse_data(data).unwrap();
-    match result {
+    let events = parse_openai_sse_data(data).unwrap();
+    assert_eq!(events.len(), 1, "expected exactly one event");
+    match &events[0] {
         OpenAiStreamEvent::ReasoningDelta(t) => assert_eq!(t, "Step 1: think"),
-        _ => panic!("expected ReasoningDelta, got {:?}", result),
+        _ => panic!("expected ReasoningDelta, got {:?}", events),
     }
 }
 
@@ -391,10 +401,89 @@ fn test_parse_reasoning_content_delta() {
 fn test_parse_reasoning_field_delta() {
     // Some providers use "reasoning" instead of "reasoning_content"
     let data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning":"deep thinking..."},"finish_reason":null}]}"#;
-    let result = parse_openai_sse_data(data).unwrap();
-    match result {
+    let events = parse_openai_sse_data(data).unwrap();
+    assert_eq!(events.len(), 1, "expected exactly one event");
+    match &events[0] {
         OpenAiStreamEvent::ReasoningDelta(t) => assert_eq!(t, "deep thinking..."),
-        _ => panic!("expected ReasoningDelta, got {:?}", result),
+        _ => panic!("expected ReasoningDelta, got {:?}", events),
+    }
+}
+
+// --- 图片内容块解析测试 ---
+
+/// OpenAI 图片输出：delta.content 为数组，含 data URI 图片
+#[test]
+fn test_parse_image_base64() {
+    let data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]},"finish_reason":null}]}"#;
+    let events = parse_openai_sse_data(data).unwrap();
+    assert_eq!(events.len(), 1, "expected exactly one event");
+    match &events[0] {
+        OpenAiStreamEvent::ImageBlock {
+            data,
+            mime_type,
+            remote_url,
+        } => {
+            assert_eq!(data.as_deref(), Some("iVBORw0KGgo="));
+            assert_eq!(mime_type, "image/png");
+            assert!(remote_url.is_none());
+        }
+        _ => panic!("expected ImageBlock, got {:?}", events),
+    }
+}
+
+/// OpenAI 图片输出：delta.content 为数组，含远程 URL 图片
+#[test]
+fn test_parse_image_url() {
+    let data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":[{"type":"image_url","image_url":{"url":"https://example.com/image.png"}}]},"finish_reason":null}]}"#;
+    let events = parse_openai_sse_data(data).unwrap();
+    assert_eq!(events.len(), 1, "expected exactly one event");
+    match &events[0] {
+        OpenAiStreamEvent::ImageBlock {
+            data,
+            mime_type,
+            remote_url,
+        } => {
+            assert!(data.is_none());
+            assert!(mime_type.is_empty());
+            assert_eq!(remote_url.as_deref(), Some("https://example.com/image.png"));
+        }
+        _ => panic!("expected ImageBlock, got {:?}", events),
+    }
+}
+
+/// OpenAI 图片输出：content 数组同时包含文本和图片 -> 返回 TextDelta + ImageBlock
+#[test]
+fn test_parse_mixed_content() {
+    let data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":[{"type":"text","text":"Here is an image:"},{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]},"finish_reason":null}]}"#;
+    let events = parse_openai_sse_data(data).unwrap();
+    assert_eq!(events.len(), 2, "expected TextDelta + ImageBlock");
+    match &events[0] {
+        OpenAiStreamEvent::TextDelta(t) => assert_eq!(t, "Here is an image:"),
+        other => panic!("expected TextDelta first, got {:?}", other),
+    }
+    match &events[1] {
+        OpenAiStreamEvent::ImageBlock {
+            data,
+            mime_type,
+            remote_url,
+        } => {
+            assert_eq!(data.as_deref(), Some("iVBORw0KGgo="));
+            assert_eq!(mime_type, "image/png");
+            assert!(remote_url.is_none());
+        }
+        other => panic!("expected ImageBlock second, got {:?}", other),
+    }
+}
+
+/// 向后兼容：delta.content 为字符串时仍返回单个 TextDelta
+#[test]
+fn test_parse_string_content_backward_compat() {
+    let data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"plain text"},"finish_reason":null}]}"#;
+    let events = parse_openai_sse_data(data).unwrap();
+    assert_eq!(events.len(), 1, "expected exactly one event");
+    match &events[0] {
+        OpenAiStreamEvent::TextDelta(t) => assert_eq!(t, "plain text"),
+        _ => panic!("expected TextDelta, got {:?}", events),
     }
 }
 
@@ -438,6 +527,12 @@ fn make_stop_chunk(finish_reason: &str) -> serde_json::Value {
 
 /// 收集 ChatEvent 流到 Vec
 async fn collect_events(chunks: Vec<String>) -> Vec<ChatEvent> {
+    collect_events_with_project_path(chunks, std::env::temp_dir().to_string_lossy().into_owned())
+        .await
+}
+
+/// 收集 ChatEvent 流到 Vec，可指定图片保存的 project_path
+async fn collect_events_with_project_path(chunks: Vec<String>, project_path: String) -> Vec<ChatEvent> {
     let byte_stream = futures::stream::iter(chunks.into_iter().map(|s| Ok(bytes::Bytes::from(s))));
     let span = tracing::Span::current();
     let event_stream = byte_stream_to_chat_events(
@@ -445,6 +540,7 @@ async fn collect_events(chunks: Vec<String>) -> Vec<ChatEvent> {
         std::time::Instant::now(),
         span,
         "test-model".to_string(),
+        project_path,
         false,
         20000,
         true,
@@ -453,6 +549,148 @@ async fn collect_events(chunks: Vec<String>) -> Vec<ChatEvent> {
         .filter_map(|e| futures::future::ready(e.ok()))
         .collect()
         .await
+}
+
+/// OpenAI chunk 带图片 content 数组
+fn make_image_chunk(url: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": "chatcmpl",
+        "object": "chat.completion.chunk",
+        "choices": [{
+            "index": 0,
+            "delta": { "content": [{"type": "image_url", "image_url": {"url": url}}] },
+            "finish_reason": null
+        }]
+    })
+}
+
+/// 为图片测试创建唯一临时项目目录
+fn temp_project_dir(name: &str) -> std::path::PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("visp_openai_img_{name}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+/// 端到端：base64 图片保存到磁盘并发射 ImageBlock
+#[tokio::test]
+async fn test_byte_stream_base64_image() {
+    // 1x1 PNG
+    let tiny_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    let sse = format!(
+        "{}{}",
+        make_sse(&make_image_chunk(&format!("data:image/png;base64,{tiny_png}"))),
+        sse_line("[DONE]"),
+    );
+    let project_dir = temp_project_dir("base64");
+    let project_path = project_dir.to_string_lossy().into_owned();
+
+    let events = collect_events_with_project_path(vec![sse], project_path.clone()).await;
+
+    assert_eq!(
+        events.len(),
+        4,
+        "expect ImageBlock + UsageInfo + OutputMetadata + Done"
+    );
+    match &events[0] {
+        ChatEvent::ImageBlock {
+            path,
+            mime_type,
+            remote_url,
+        } => {
+            assert!(
+                !path.is_empty(),
+                "base64 image should be saved to a local file"
+            );
+            assert_eq!(mime_type, "image/png");
+            assert!(remote_url.is_none());
+            let saved = std::path::Path::new(path);
+            assert!(
+                saved.is_file(),
+                "image file should exist on disk: {path}"
+            );
+            assert!(
+                path.contains(".visp/images/"),
+                "image should be saved under .visp/images, got {path}"
+            );
+        }
+        other => panic!("expected ImageBlock, got {:?}", other),
+    }
+    assert!(matches!(&events[1], ChatEvent::UsageInfo { .. }));
+    assert!(matches!(&events[2], ChatEvent::OutputMetadata(_)));
+    assert!(matches!(&events[3], ChatEvent::Done));
+
+    // 清理临时目录
+    let _ = std::fs::remove_dir_all(&project_dir);
+}
+
+/// 端到端：远程 URL 图片不下载，直接透传 ImageBlock
+#[tokio::test]
+async fn test_byte_stream_url_image() {
+    let sse = format!(
+        "{}{}",
+        make_sse(&make_image_chunk("https://example.com/image.png")),
+        sse_line("[DONE]"),
+    );
+    let events = collect_events(vec![sse]).await;
+
+    assert_eq!(
+        events.len(),
+        4,
+        "expect ImageBlock + UsageInfo + OutputMetadata + Done"
+    );
+    match &events[0] {
+        ChatEvent::ImageBlock {
+            path,
+            mime_type,
+            remote_url,
+        } => {
+            assert!(path.is_empty(), "URL image should not be saved locally");
+            assert!(mime_type.is_empty());
+            assert_eq!(
+                remote_url.as_deref(),
+                Some("https://example.com/image.png")
+            );
+        }
+        other => panic!("expected ImageBlock, got {:?}", other),
+    }
+    assert!(matches!(&events[1], ChatEvent::UsageInfo { .. }));
+    assert!(matches!(&events[2], ChatEvent::OutputMetadata(_)));
+    assert!(matches!(&events[3], ChatEvent::Done));
+}
+
+/// 端到端：非法 base64 图片 -> ImageError
+#[tokio::test]
+async fn test_byte_stream_base64_decode_error() {
+    let sse = format!(
+        "{}{}",
+        make_sse(&make_image_chunk("data:image/png;base64,@@@invalid@@@")),
+        sse_line("[DONE]"),
+    );
+    let project_dir = temp_project_dir("decode_err");
+    let project_path = project_dir.to_string_lossy().into_owned();
+
+    let events = collect_events_with_project_path(vec![sse], project_path).await;
+
+    let _ = std::fs::remove_dir_all(&project_dir);
+
+    assert_eq!(
+        events.len(),
+        4,
+        "expect ImageError + UsageInfo + OutputMetadata + Done"
+    );
+    match &events[0] {
+        ChatEvent::ImageError { reason } => {
+            assert!(
+                reason.contains("base64"),
+                "expected base64 decode error, got: {reason}"
+            );
+        }
+        other => panic!("expected ImageError, got {:?}", other),
+    }
+    assert!(matches!(&events[1], ChatEvent::UsageInfo { .. }));
+    assert!(matches!(&events[2], ChatEvent::OutputMetadata(_)));
+    assert!(matches!(&events[3], ChatEvent::Done));
 }
 
 #[tokio::test]
@@ -729,6 +967,7 @@ async fn collect_events_from_bytes(chunks: Vec<Vec<u8>>) -> Vec<ChatEvent> {
         std::time::Instant::now(),
         span,
         "test-model".to_string(),
+        std::env::temp_dir().to_string_lossy().into_owned(),
         false,
         20000,
         true,
@@ -1132,6 +1371,7 @@ async fn test_gen_ai_usage_fields_recorded_on_completion_openai() {
         start,
         span,
         "test-model".to_string(),
+        std::env::temp_dir().to_string_lossy().into_owned(),
         false,
         20000,
         true,
@@ -1219,6 +1459,7 @@ async fn test_openai_client_first_token_event() {
         start,
         span,
         "test-model".to_string(),
+        std::env::temp_dir().to_string_lossy().into_owned(),
         false,
         20000,
         true,
@@ -1258,6 +1499,7 @@ async fn test_openai_client_completed_event() {
         start,
         span,
         "test-model".to_string(),
+        std::env::temp_dir().to_string_lossy().into_owned(),
         false,
         20000,
         true,
@@ -1336,6 +1578,7 @@ async fn test_openai_finish_reason_length_stays_length() {
         start,
         span,
         "test-model".to_string(),
+        std::env::temp_dir().to_string_lossy().into_owned(),
         false,
         20000,
         true,
@@ -1383,6 +1626,7 @@ async fn test_openai_finish_reason_stop_stays_stop() {
         start,
         span,
         "test-model".to_string(),
+        std::env::temp_dir().to_string_lossy().into_owned(),
         false,
         20000,
         true,
@@ -1426,6 +1670,7 @@ async fn test_openai_no_cache_fields() {
         start,
         span,
         "test-model".to_string(),
+        std::env::temp_dir().to_string_lossy().into_owned(),
         false,
         20000,
         true,

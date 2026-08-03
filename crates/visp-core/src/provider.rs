@@ -277,6 +277,20 @@ pub enum ChatEvent {
     /// LLM 响应完成时携带的 ProviderMetadata
     /// 由 provider 在响应全部接收完毕后发射，位于 UsageInfo 之后、Done 之前
     OutputMetadata(crate::ProviderMetadata),
+    /// LLM 输出的图片内容块
+    ImageBlock {
+        /// 图片本地文件路径（base64 来源有值，URL 来源为空字符串）
+        path: String,
+        /// 图片 MIME 类型（URL 来源为空字符串）
+        mime_type: String,
+        /// 远程 URL（URL 来源有值，base64 来源为 None）
+        remote_url: Option<String>,
+    },
+    /// 图片处理失败（base64 解码失败、文件写入失败等）
+    ImageError {
+        /// 失败原因
+        reason: String,
+    },
     /// 流结束
     Done,
 }

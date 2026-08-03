@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use futures::stream::{self, Stream, StreamExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
 use tracing::Instrument;
 use tracing::field;
@@ -8,6 +8,7 @@ use visp_core::error::LlmError;
 use visp_core::message::{Message, Role, ToolDefinition};
 use visp_core::provider::{ChatEvent, LlmConfig, LlmProvider};
 
+use crate::image_util;
 use crate::util::{build_client, parse_retry_after};
 
 /// 构建 OpenAI API 请求体
@@ -230,6 +231,15 @@ pub(crate) enum OpenAiStreamEvent {
     TextDelta(String),
     /// 推理/思考内容增量（部分 OpenAI 兼容模型如 DeepSeek 支持）
     ReasoningDelta(String),
+    /// 图片内容块（来自 LLM 输出的 image_url）
+    ImageBlock {
+        /// base64 数据（不含 `data:` 前缀），远程 URL 时为 None
+        data: Option<String>,
+        /// MIME 类型（远程 URL 时为空字符串）
+        mime_type: String,
+        /// 远程 URL（base64 时为 None）
+        remote_url: Option<String>,
+    },
     /// 工具调用开始（包含 id 和 name）
     ToolCallStart {
         index: usize,
@@ -260,18 +270,21 @@ pub(crate) enum OpenAiStreamEvent {
 
 /// 解析单行 OpenAI SSE data（不含 `data: ` 前缀）
 ///
+/// 返回事件列表：常规情况下单元素；`delta.content` 为数组时（OpenAI
+/// 图片输出格式）可能返回多个事件（文本 + 图片）。
+///
 /// OpenAI SSE 格式：
 /// ```text
 /// data: {"id":"...","object":"chat.completion.chunk","choices":[{"delta":{"content":"Hello"},"index":0}]}
 /// data: {"id":"...","object":"chat.completion.chunk","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":""}}]},"index":0}]}
 /// data: [DONE]
 /// ```
-pub(crate) fn parse_openai_sse_data(data: &str) -> Result<OpenAiStreamEvent, LlmError> {
+pub(crate) fn parse_openai_sse_data(data: &str) -> Result<Vec<OpenAiStreamEvent>, LlmError> {
     if data == "[DONE]" {
-        return Ok(OpenAiStreamEvent::StreamEnd);
+        return Ok(vec![OpenAiStreamEvent::StreamEnd]);
     }
     if data.trim().is_empty() {
-        return Ok(OpenAiStreamEvent::Skip);
+        return Ok(vec![OpenAiStreamEvent::Skip]);
     }
 
     let v: serde_json::Value = serde_json::from_str(data)
@@ -302,19 +315,19 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<OpenAiStreamEvent, Llm
             cache_read
         };
         if input_tokens > 0 || output_tokens > 0 {
-            return Ok(OpenAiStreamEvent::Usage {
+            return Ok(vec![OpenAiStreamEvent::Usage {
                 input_tokens,
                 output_tokens,
                 cache_creation_input_tokens: cache_creation,
                 cache_read_input_tokens: cache_read,
-            });
+            }]);
         }
     }
 
     // 解析 choices
     let choices = match v.get("choices").and_then(|c| c.as_array()) {
         Some(arr) if !arr.is_empty() => arr,
-        _ => return Ok(OpenAiStreamEvent::Skip),
+        _ => return Ok(vec![OpenAiStreamEvent::Skip]),
     };
 
     let choice = &choices[0];
@@ -322,24 +335,73 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<OpenAiStreamEvent, Llm
     let finish_reason = choice["finish_reason"].as_str().map(|s| s.to_string());
     let index = choice["index"].as_u64().unwrap_or(0) as usize;
 
-    // 检查文本 delta
-    if let Some(content) = delta.get("content").and_then(|c| c.as_str())
-        && !content.is_empty()
-    {
-        return Ok(OpenAiStreamEvent::TextDelta(content.to_string()));
+    // 检查文本/图片 delta（content 可以是字符串或数组）
+    if let Some(content) = delta.get("content") {
+        // 字符串形式（常规流式文本）
+        if let Some(text) = content.as_str()
+            && !text.is_empty()
+        {
+            return Ok(vec![OpenAiStreamEvent::TextDelta(text.to_string())]);
+        }
+
+        // 数组形式（OpenAI 图片输出：text + image_url 块）
+        if let Some(items) = content.as_array() {
+            let mut image_events: Vec<OpenAiStreamEvent> = Vec::new();
+            let mut text_parts: Vec<String> = Vec::new();
+            for item in items {
+                match item.get("type").and_then(|t| t.as_str()) {
+                    Some("text") => {
+                        if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
+                            text_parts.push(t.to_string());
+                        }
+                    }
+                    Some("image_url") => {
+                        let url = item
+                            .get("image_url")
+                            .and_then(|u| u.get("url"))
+                            .and_then(|u| u.as_str())
+                            .unwrap_or("");
+                        if url.starts_with("data:") {
+                            // data URI：提取 mime + base64，由调用方保存到磁盘
+                            if let Some((mime, base64_data)) = image_util::parse_data_uri(url) {
+                                image_events.push(OpenAiStreamEvent::ImageBlock {
+                                    data: Some(base64_data),
+                                    mime_type: mime,
+                                    remote_url: None,
+                                });
+                            }
+                        } else if url.starts_with("http://") || url.starts_with("https://") {
+                            // 远程 URL：不下载，透传给上层
+                            image_events.push(OpenAiStreamEvent::ImageBlock {
+                                data: None,
+                                mime_type: String::new(),
+                                remote_url: Some(url.to_string()),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if !text_parts.is_empty() {
+                image_events.insert(0, OpenAiStreamEvent::TextDelta(text_parts.join("")));
+            }
+            if !image_events.is_empty() {
+                return Ok(image_events);
+            }
+        }
     }
 
     // 检查 reasoning_content（DeepSeek 等模型发送推理内容）
     if let Some(reasoning) = delta.get("reasoning_content").and_then(|c| c.as_str())
         && !reasoning.is_empty()
     {
-        return Ok(OpenAiStreamEvent::ReasoningDelta(reasoning.to_string()));
+        return Ok(vec![OpenAiStreamEvent::ReasoningDelta(reasoning.to_string())]);
     }
     // 部分提供商使用 "reasoning" 字段
     if let Some(reasoning) = delta.get("reasoning").and_then(|c| c.as_str())
         && !reasoning.is_empty()
     {
-        return Ok(OpenAiStreamEvent::ReasoningDelta(reasoning.to_string()));
+        return Ok(vec![OpenAiStreamEvent::ReasoningDelta(reasoning.to_string())]);
     }
 
     // 检查 tool_calls delta
@@ -354,34 +416,34 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<OpenAiStreamEvent, Llm
             {
                 let name = func["name"].as_str().unwrap_or("").to_string();
                 // arguments 在首个 delta 中总是空的，后续通过 ToolCallDelta 累积
-                return Ok(OpenAiStreamEvent::ToolCallStart {
+                return Ok(vec![OpenAiStreamEvent::ToolCallStart {
                     index: tc_index,
                     id: id.to_string(),
                     name,
-                });
+                }]);
             }
 
             // 参数增量
             if let Some(arguments) = func.get("arguments").and_then(|a| a.as_str())
                 && !arguments.is_empty()
             {
-                return Ok(OpenAiStreamEvent::ToolCallDelta {
+                return Ok(vec![OpenAiStreamEvent::ToolCallDelta {
                     index: tc_index,
                     arguments: arguments.to_string(),
-                });
+                }]);
             }
         }
     }
 
     // 检查 finish_reason
     if let Some(reason) = finish_reason {
-        return Ok(OpenAiStreamEvent::Finish {
+        return Ok(vec![OpenAiStreamEvent::Finish {
             index,
             reason: Some(reason),
-        });
+        }]);
     }
 
-    Ok(OpenAiStreamEvent::Skip)
+    Ok(vec![OpenAiStreamEvent::Skip])
 }
 
 /// 按字符边界安全截取，最多取 `max_chars` 个字符。
@@ -407,6 +469,7 @@ fn byte_stream_to_chat_events(
     start_time: std::time::Instant,
     span: tracing::Span,
     request_model: String,
+    project_path: String,
     langfuse_capture_output: bool,
     langfuse_capture_max_chars: usize,
     langfuse_redact_secrets: bool,
@@ -420,6 +483,10 @@ fn byte_stream_to_chat_events(
         tool_acc: HashMap<usize, (String, String, String)>,
         /// 待发射的工具调用列表: (id, name, arguments)
         pending_tool_calls: Vec<(String, String, String)>,
+        /// 同一条 SSE 行产生的多个事件缓存（逐条发射）
+        pending_events: VecDeque<OpenAiStreamEvent>,
+        /// 图片保存目录（base64 图片落盘的项目路径）
+        project_path: String,
         /// 已完成的工具调用数量（用于 UsageInfo）
         tool_call_count: u32,
         /// 累积的推理/思考内容（来自 reasoning_content / reasoning 字段）
@@ -477,12 +544,133 @@ fn byte_stream_to_chat_events(
         }
     }
 
+    /// 处理单个 OpenAiStreamEvent，返回需要发射的 ChatEvent（仅更新内部状态则返回 None）
+    fn handle_stream_event(state: &mut StreamState, event: OpenAiStreamEvent) -> Option<ChatEvent> {
+        match event {
+            OpenAiStreamEvent::TextDelta(text) => {
+                if state.langfuse_capture_output {
+                    state.accumulated_output.push_str(&text);
+                }
+                emit_first_token(state);
+                Some(ChatEvent::TextDelta(text))
+            }
+            OpenAiStreamEvent::ReasoningDelta(text) => {
+                state.reasoning_text.push_str(&text);
+                // 立即发射 ThinkingBlock 实现流式显示（不等待 text delta）
+                let block = serde_json::json!({
+                    "type": "thinking",
+                    "thinking": state.reasoning_text.clone(),
+                });
+                emit_first_token(state);
+                Some(ChatEvent::ThinkingBlock(block))
+            }
+            OpenAiStreamEvent::ImageBlock {
+                data,
+                mime_type,
+                remote_url,
+            } => {
+                emit_first_token(state);
+                if let Some(data) = data {
+                    // base64 图片：保存到磁盘，失败时发射 ImageError
+                    match image_util::save_base64_image(&data, &mime_type, &state.project_path) {
+                        Ok(path) => Some(ChatEvent::ImageBlock {
+                            path,
+                            mime_type,
+                            remote_url: None,
+                        }),
+                        Err(e) => Some(ChatEvent::ImageError {
+                            reason: e.to_string(),
+                        }),
+                    }
+                } else {
+                    // 远程 URL 图片：不下载，直接透传
+                    remote_url.map(|remote_url| ChatEvent::ImageBlock {
+                        path: String::new(),
+                        mime_type: String::new(),
+                        remote_url: Some(remote_url),
+                    })
+                }
+            }
+            OpenAiStreamEvent::ToolCallStart { index, id, name } => {
+                tracing::debug!(index, %id, %name, "ToolCallStart");
+                state.tool_acc.insert(index, (id, name, String::new()));
+                None
+            }
+            OpenAiStreamEvent::ToolCallDelta { index, arguments } => {
+                if let Some(entry) = state.tool_acc.get_mut(&index) {
+                    entry.2.push_str(&arguments);
+                } else {
+                    tracing::warn!(
+                        index,
+                        delta_len = arguments.len(),
+                        "ToolCallDelta for unknown tool index (ToolCallStart not received?)"
+                    );
+                }
+                None
+            }
+            OpenAiStreamEvent::Finish { reason, .. } => {
+                if let Some(ref r) = reason {
+                    state.finish_reason = r.clone();
+                    if r == "content_filter" {
+                        tracing::warn!("OpenAI response blocked by content filter");
+                    }
+                    if r == "length" && !state.tool_acc.is_empty() {
+                        tracing::warn!(
+                            tool_count = state.tool_acc.len(),
+                            "finish_reason='length' — tool call arguments likely truncated (max_output_tokens exceeded)"
+                        );
+                    }
+                }
+                if !state.tool_acc.is_empty() {
+                    state.tool_call_count = state.tool_acc.len() as u32;
+                    let calls: Vec<(String, String, String)> = state
+                        .tool_acc
+                        .drain()
+                        .map(|(_, (id, name, args))| (id, name, args))
+                        .collect();
+                    state.pending_tool_calls = calls.into_iter().rev().collect();
+                }
+                // 收到 finish_reason 即标记流结束，无需等待底层流关闭
+                state.stream_ended = true;
+                None
+            }
+            OpenAiStreamEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+            } => {
+                if input_tokens > 0 {
+                    state.input_tokens = input_tokens;
+                }
+                if output_tokens > 0 {
+                    state.output_tokens = output_tokens;
+                }
+                if cache_creation_input_tokens > 0 {
+                    state.cache_creation_input_tokens = cache_creation_input_tokens;
+                }
+                if cache_read_input_tokens > 0 {
+                    state.cache_read_input_tokens = cache_read_input_tokens;
+                }
+                None
+            }
+            OpenAiStreamEvent::Skip => None,
+            OpenAiStreamEvent::StreamEnd => {
+                state.stream_ended = true;
+                flush_tool_acc(state);
+                None
+            }
+        }
+    }
+
     let state = StreamState {
         stream: Box::pin(byte_stream),
         buf: String::new(),
         pending_bytes: Vec::new(),
         tool_acc: HashMap::new(),
         pending_tool_calls: Vec::new(),
+        pending_events: VecDeque::new(),
+        project_path,
         tool_call_count: 0,
         reasoning_text: String::new(),
         input_tokens: 0,
@@ -509,6 +697,14 @@ fn byte_stream_to_chat_events(
         let span = state.span.clone();
         async move {
         loop {
+            // [A0] 发射缓存的待处理事件（一条 SSE 行可能产生多个事件）
+            if let Some(event) = state.pending_events.pop_front() {
+                if let Some(chat_event) = handle_stream_event(&mut state, event) {
+                    return Some((Ok(chat_event), state));
+                }
+                continue;
+            }
+
             // [A] 优先处理缓冲区中完整的 SSE 消息（一次一条）
             if let Some(pos) = state.buf.find("\n\n") {
                 let raw = state.buf[..pos].to_string();
@@ -523,87 +719,10 @@ fn byte_stream_to_chat_events(
                         {
                             state.model = m.to_string();
                         }
+                        // 解析为事件列表；多个事件缓存到 pending_events 逐条发射
                         match parse_openai_sse_data(data) {
-                            Ok(OpenAiStreamEvent::TextDelta(text)) => {
-                                if state.langfuse_capture_output {
-                                    state.accumulated_output.push_str(&text);
-                                }
-                                emit_first_token(&mut state);
-                                return Some((Ok(ChatEvent::TextDelta(text)), state));
-                            }
-                            Ok(OpenAiStreamEvent::ReasoningDelta(text)) => {
-                                state.reasoning_text.push_str(&text);
-                                // 立即发射 ThinkingBlock 实现流式显示（不等待 text delta）
-                                let block = serde_json::json!({
-                                    "type": "thinking",
-                                    "thinking": state.reasoning_text.clone(),
-                                });
-                                emit_first_token(&mut state);
-                                return Some((Ok(ChatEvent::ThinkingBlock(block)), state));
-                            }
-                            Ok(OpenAiStreamEvent::ToolCallStart { index, id, name }) => {
-                                tracing::debug!(index, %id, %name, "ToolCallStart");
-                                state.tool_acc.insert(index, (id, name, String::new()));
-                            }
-                            Ok(OpenAiStreamEvent::ToolCallDelta { index, arguments }) => {
-                                if let Some(entry) = state.tool_acc.get_mut(&index) {
-                                    entry.2.push_str(&arguments);
-                                } else {
-                                    tracing::warn!(
-                                        index,
-                                        delta_len = arguments.len(),
-                                        "ToolCallDelta for unknown tool index (ToolCallStart not received?)"
-                                    );
-                                }
-                            }
-                            Ok(OpenAiStreamEvent::Finish { reason, .. }) => {
-                                if let Some(ref r) = reason {
-                                    state.finish_reason = r.clone();
-                                    if r == "content_filter" {
-                                        tracing::warn!("OpenAI response blocked by content filter");
-                                    }
-                                    if r == "length" && !state.tool_acc.is_empty() {
-                                        tracing::warn!(
-                                            tool_count = state.tool_acc.len(),
-                                            "finish_reason='length' — tool call arguments likely truncated (max_output_tokens exceeded)"
-                                        );
-                                    }
-                                }
-                                if !state.tool_acc.is_empty() {
-                                    state.tool_call_count = state.tool_acc.len() as u32;
-                                    let calls: Vec<(String, String, String)> = state
-                                        .tool_acc
-                                        .drain()
-                                        .map(|(_, (id, name, args))| (id, name, args))
-                                        .collect();
-                                    state.pending_tool_calls = calls.into_iter().rev().collect();
-                                }
-                                // 收到 finish_reason 即标记流结束，无需等待底层流关闭
-                                state.stream_ended = true;
-                            }
-                            Ok(OpenAiStreamEvent::Usage {
-                                input_tokens,
-                                output_tokens,
-                                cache_creation_input_tokens,
-                                cache_read_input_tokens,
-                            }) => {
-                                if input_tokens > 0 {
-                                    state.input_tokens = input_tokens;
-                                }
-                                if output_tokens > 0 {
-                                    state.output_tokens = output_tokens;
-                                }
-                                if cache_creation_input_tokens > 0 {
-                                    state.cache_creation_input_tokens = cache_creation_input_tokens;
-                                }
-                                if cache_read_input_tokens > 0 {
-                                    state.cache_read_input_tokens = cache_read_input_tokens;
-                                }
-                            }
-                            Ok(OpenAiStreamEvent::Skip) => {}
-                            Ok(OpenAiStreamEvent::StreamEnd) => {
-                                state.stream_ended = true;
-                                flush_tool_acc(&mut state);
+                            Ok(events) => {
+                                state.pending_events.extend(events);
                             }
                             Err(e) => {
                                 return Some((Err(e), state));
@@ -926,11 +1045,18 @@ impl LlmProvider for OpenAiProvider {
         let status = response.status();
         if status.is_success() {
             let byte_stream = response.bytes_stream();
+            // 图片保存目录：优先取 config.extra 的 project_path，缺省用系统临时目录
+            let project_path = config
+                .extra
+                .get("project_path")
+                .cloned()
+                .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().into_owned());
             Ok(byte_stream_to_chat_events(
                 byte_stream,
                 start_time,
                 span,
                 config.model.clone(),
+                project_path,
                 config.langfuse_capture_output,
                 config.langfuse_capture_max_chars,
                 config.langfuse_redact_secrets,

@@ -755,7 +755,13 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                 let visible_lines = remain.min(visible_h);
                 if visible_lines > 0 {
                     // Image messages: render via StatefulImage widget
-                    if let LineType::Image { ref path, ref alt_text } = msg.line_type {
+                    if let LineType::Image {
+                        ref path,
+                        ref alt_text,
+                        ref remote_url,
+                        ..
+                    } = msg.line_type
+                    {
                         // Ensure image is loaded
                         app.image_cache.get_or_load(path);
                         render_image_block(
@@ -764,6 +770,7 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                             &app.image_cache,
                             path,
                             alt_text,
+                            remote_url.as_deref(),
                             cache.line_count,
                             visible_lines,
                             area.y + rel_y,
@@ -826,27 +833,56 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
 /// - Ready: renders via stateless `Image` widget with fixed size (no mouse zoom)
 /// - Loading: renders `[加载中: path]` placeholder text
 /// - Error: renders `[图片加载失败: path (reason)]` error text
+///
+/// Address lines (🔗 url / 📁 path) are rendered below the image when available.
+#[allow(clippy::too_many_arguments)]
 fn render_image_block(
     f: &mut Frame,
     area: Rect,
     image_cache: &crate::image::ImageCache,
     path: &str,
     alt_text: &str,
+    remote_url: Option<&str>,
     line_count: u16,
     visible_lines: u16,
     y: u16,
     render_w: u16,
 ) {
     let img_h = visible_lines.min(line_count);
-    let target_size = (render_w, img_h);
 
-    if let Some(protocol_arc) = image_cache.try_get_protocol(path, target_size) {
+    // Address lines to show below the image (or placeholder)
+    let mut addr_lines: Vec<Line<'static>> = Vec::new();
+    if let Some(url) = remote_url.filter(|u| !u.is_empty()) {
+        let display = format!("🔗 {}", url);
+        let truncated = if display.len() > render_w as usize {
+            format!("{}…", &display[..(render_w as usize).saturating_sub(1)])
+        } else {
+            display
+        };
+        addr_lines.push(Line::styled(
+            truncated,
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    if !path.is_empty() {
+        let display = format!("📁 {}", path);
+        let truncated = if display.len() > render_w as usize {
+            format!("{}…", &display[..(render_w as usize).saturating_sub(1)])
+        } else {
+            display
+        };
+        addr_lines.push(Line::styled(truncated, Style::default().fg(Color::DarkGray)));
+    }
+    let addr_count = addr_lines.len() as u16;
+    let image_h = img_h.saturating_sub(addr_count);
+
+    if let Some(protocol_arc) = image_cache.try_get_protocol(path, (render_w, image_h)) {
         // Ready: render stateless Image widget (fixed size, no mouse interaction)
         let image_area = Rect::new(
             area.x + 1, // margin_horizontal = 1
             y,
             render_w,
-            img_h,
+            image_h,
         );
         if image_area.width > 0 && image_area.height > 0 {
             if let Ok(protocol) = protocol_arc.lock() {
@@ -859,14 +895,27 @@ fn render_image_block(
         let msg = format!("[加载中: {}]", alt_text);
         let line = Line::styled(msg, Style::default().fg(Color::DarkGray));
         let bs = theme::ASSISTANT_STYLE;
-        render_block(f, area, bs, &[line], visible_lines, y);
+        render_block(f, area, bs, &[line], image_h.max(1), y);
     } else {
         // Error: show error message
         let reason = image_cache.error_message(path).unwrap_or_default();
         let msg = format!("[图片加载失败: {} ({})]", alt_text, reason);
         let line = Line::styled(msg, Style::default().fg(Color::Red));
         let bs = theme::ASSISTANT_STYLE;
-        render_block(f, area, bs, &[line], visible_lines, y);
+        render_block(f, area, bs, &[line], image_h.max(1), y);
+    }
+
+    // Render address lines below the image
+    if !addr_lines.is_empty() {
+        for (i, line) in addr_lines.iter().enumerate() {
+            let addr_y = y + image_h + i as u16;
+            if addr_y < area.bottom() {
+                f.render_widget(
+                    line.clone(),
+                    Rect::new(area.x + 1, addr_y, render_w, 1),
+                );
+            }
+        }
     }
 }
 

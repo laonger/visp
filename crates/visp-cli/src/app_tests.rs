@@ -273,6 +273,7 @@ fn test_message_cache_image_line_without_metrics() {
         line_type: LineType::Image {
             path: "/tmp/pic.png".into(),
             alt_text: "pic".into(),
+            remote_url: None,
         },
         content: String::new(),
         call_id: None,
@@ -885,6 +886,91 @@ fn test_render_pending_done_clears_generating() {
     tab.render_pending();
     assert!(!tab.generating);
     assert_eq!(tab.status, AgentStatus::Done);
+}
+
+fn image_block_msg(path: &str, remote_url: &str) -> visp_proto::visp::ServerMessage {
+    visp_proto::visp::ServerMessage {
+        payload: Some(visp_proto::visp::server_message::Payload::ImageBlock(
+            visp_proto::visp::ImageBlock {
+                path: path.into(),
+                mime_type: "image/png".into(),
+                remote_url: remote_url.into(),
+                session_id: String::new(),
+                agent_name: String::new(),
+            },
+        )),
+    }
+}
+
+fn image_error_msg(reason: &str) -> visp_proto::visp::ServerMessage {
+    visp_proto::visp::ServerMessage {
+        payload: Some(visp_proto::visp::server_message::Payload::ImageError(
+            visp_proto::visp::ImageError {
+                reason: reason.into(),
+                session_id: String::new(),
+                agent_name: String::new(),
+            },
+        )),
+    }
+}
+
+#[test]
+fn test_render_pending_image_block_base64() {
+    let mut tab = TabEntry::new("sid", "agent");
+    tab.frames.push(image_block_msg("/tmp/img.png", ""));
+    tab.render_pending();
+    assert_eq!(tab.messages.len(), 1);
+    match &tab.messages[0].line_type {
+        LineType::Image { path, remote_url, .. } => {
+            assert_eq!(path, "/tmp/img.png");
+            assert_eq!(*remote_url, None);
+        }
+        other => panic!("expected Image, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_render_pending_image_block_url() {
+    let mut tab = TabEntry::new("sid", "agent");
+    tab.frames.push(image_block_msg("", "https://example.com/img.png"));
+    tab.render_pending();
+    assert_eq!(tab.messages.len(), 1);
+    match &tab.messages[0].line_type {
+        LineType::Image { path, remote_url, .. } => {
+            // path is empty -> uses remote_url as cache key
+            assert_eq!(path, "https://example.com/img.png");
+            assert_eq!(*remote_url, Some("https://example.com/img.png".to_string()));
+        }
+        other => panic!("expected Image, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_render_pending_image_error() {
+    let mut tab = TabEntry::new("sid", "agent");
+    tab.frames.push(image_error_msg("decode failed"));
+    tab.render_pending();
+    assert_eq!(tab.messages.len(), 1);
+    assert_eq!(tab.messages[0].line_type, LineType::Error);
+    assert!(tab.messages[0].content.contains("decode failed"));
+}
+
+#[test]
+fn test_render_pending_text_then_image_then_text() {
+    let mut tab = TabEntry::new("sid", "agent");
+    tab.frames.push(td("hello "));
+    tab.frames.push(image_block_msg("/tmp/img.png", ""));
+    tab.frames.push(td(" world"));
+    // Done flushes trailing streaming text into a message
+    tab.frames.push(done_msg());
+    tab.render_pending();
+    // 3 messages: text, image, text
+    assert_eq!(tab.messages.len(), 3);
+    assert_eq!(tab.messages[0].line_type, LineType::Assistant);
+    assert_eq!(tab.messages[0].content, "hello ");
+    assert!(matches!(tab.messages[1].line_type, LineType::Image { .. }));
+    assert_eq!(tab.messages[2].line_type, LineType::Assistant);
+    assert_eq!(tab.messages[2].content, " world");
 }
 
 // ════════════════════════════════════════════════════════════

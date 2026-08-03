@@ -362,6 +362,10 @@ impl CoderDaemon for CoderDaemonService {
         if config.max_context_tokens == LlmConfig::default().max_context_tokens {
             config.max_context_tokens = self.default_llm_config.max_context_tokens;
         }
+        // Inject project_path into config.extra so providers can save base64 images
+        config
+            .extra
+            .insert("project_path".into(), req.project_path.clone());
         let session = self
             .session_mgr
             .create(Path::new(&req.project_path), config)
@@ -656,7 +660,7 @@ impl CoderDaemon for CoderDaemonService {
                             .unwrap_or_default();
 
                         // 如果传了 model_key，查找对应的 model 配置并更新 model 名
-                        let final_config = if let Some(ref model_key) = config.model_key {
+                        let mut final_config = if let Some(ref model_key) = config.model_key {
                             if let Some(mc) = model_configs.iter().find(|mc| mc.key() == *model_key)
                             {
                                 let mut cfg = LlmConfig {
@@ -702,6 +706,15 @@ impl CoderDaemon for CoderDaemonService {
                         } else {
                             config
                         };
+
+                        // Inject project_path from the existing session so providers
+                        // can continue to save base64 images after a config update.
+                        if let Ok(existing) = session_mgr.get(session_id) {
+                            final_config.extra.insert(
+                                "project_path".into(),
+                                existing.project_path.to_string_lossy().into_owned(),
+                            );
+                        }
 
                         match session_mgr.update_config(session_id, final_config) {
                             Ok(()) => {
@@ -1488,6 +1501,30 @@ fn agent_event_to_server_message(
                 session_id: sid,
                 agent_name: aname,
             })),
+        },
+        AgentEvent::ImageBlock {
+            path,
+            mime_type,
+            remote_url,
+        } => proto::ServerMessage {
+            payload: Some(proto::server_message::Payload::ImageBlock(
+                proto::ImageBlock {
+                    path,
+                    mime_type,
+                    remote_url: remote_url.unwrap_or_default(),
+                    session_id: sid,
+                    agent_name: aname,
+                },
+            )),
+        },
+        AgentEvent::ImageError { reason } => proto::ServerMessage {
+            payload: Some(proto::server_message::Payload::ImageError(
+                proto::ImageError {
+                    reason,
+                    session_id: sid,
+                    agent_name: aname,
+                },
+            )),
         },
         AgentEvent::Done => proto::ServerMessage {
             payload: Some(proto::server_message::Payload::Done(proto::Done {
