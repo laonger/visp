@@ -762,13 +762,21 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                         ..
                     } = msg.line_type
                     {
-                        // Ensure image is loaded
-                        app.image_cache.get_or_load(path);
+                        // Ensure image is loaded: use path as cache key,
+                        // or fall back to remote_url when path is empty
+                        let cache_key = if path.is_empty() {
+                            remote_url.as_deref().unwrap_or("")
+                        } else {
+                            path.as_str()
+                        };
+                        if !cache_key.is_empty() {
+                            app.image_cache.get_or_load(cache_key);
+                        }
                         render_image_block(
                             f,
                             area,
                             &app.image_cache,
-                            path,
+                            cache_key,
                             alt_text,
                             remote_url.as_deref(),
                             cache.line_count,

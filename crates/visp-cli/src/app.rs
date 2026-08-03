@@ -551,16 +551,17 @@ impl TabEntry {
                     } else {
                         Some(ib.remote_url.clone())
                     };
-                    // If path is empty but remote_url exists, use remote_url as the cache key
-                    let path = if ib.path.is_empty() {
+                    let path = ib.path.clone();
+                    // Cache key: use path if non-empty, otherwise use remote_url
+                    let cache_key = if path.is_empty() {
                         ib.remote_url.clone()
                     } else {
-                        ib.path.clone()
+                        path.clone()
                     };
-                    let alt_text = Path::new(&path)
+                    let alt_text = Path::new(&cache_key)
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| path.clone());
+                        .unwrap_or_else(|| cache_key.clone());
                     self.push_chat_line(
                         LineType::Image {
                             path,
@@ -931,19 +932,27 @@ impl MessageCache {
                 ref remote_url,
                 ..
             } => {
+                // Cache key: use path if non-empty, otherwise use remote_url
+                let cache_key = if path.is_empty() {
+                    remote_url.as_deref().unwrap_or("")
+                } else {
+                    path.as_str()
+                };
                 let (mut line_count, image_state) = match image_metrics {
-                    Some(metrics) => match metrics.image_cache.query_height(path, width, metrics.max_rows) {
+                    Some(metrics) if !cache_key.is_empty() => {
+                        match metrics.image_cache.query_height(cache_key, width, metrics.max_rows) {
                         ImageHeightInfo::Ready(h) => (h, Some(ImageState::Ready)),
                         ImageHeightInfo::Placeholder => {
                             // Check if it's Loading or Error
-                            let state = metrics.image_cache.image_state(path);
+                            let state = metrics.image_cache.image_state(cache_key);
                             match state {
                                 Some(ImageState::Loading) => (1, Some(ImageState::Loading)),
                                 _ => (1, Some(ImageState::Error)),
                             }
                         }
+                        }
                     },
-                    None => (1, None),
+                    _ => (1, None),
                 };
                 // Add address line count (wrapped at `width`), matching render_image_block
                 if let Some(url) = remote_url.as_ref().filter(|u| !u.is_empty()) {

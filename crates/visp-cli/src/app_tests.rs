@@ -938,8 +938,8 @@ fn test_render_pending_image_block_url() {
     assert_eq!(tab.messages.len(), 1);
     match &tab.messages[0].line_type {
         LineType::Image { path, remote_url, .. } => {
-            // path is empty -> uses remote_url as cache key
-            assert_eq!(path, "https://example.com/img.png");
+            // path is empty (URL-only image), remote_url carries the URL
+            assert_eq!(path, "");
             assert_eq!(*remote_url, Some("https://example.com/img.png".to_string()));
         }
         other => panic!("expected Image, got {:?}", other),
