@@ -543,17 +543,32 @@ fn byte_stream_to_chat_events(
         langfuse_redact_secrets: bool,
         /// 累积的输出文本（用于 langfuse.observation.output）
         accumulated_output: String,
+        /// 本轮是否已发射过 TextDelta（用于判断截断时是否需补提示文本）
+        had_text_output: bool,
+        /// 待发射的截断提示文本（finish_reason='length' 丢弃畸形 tool_call 且无文本时设置）
+        pending_hint: Option<String>,
     }
 
-    /// 将累积的工具调用（tool_acc）转移到 pending_tool_calls
+    /// 检查 tool_call arguments 是否为合法 JSON（空字符串视为合法）
+    fn is_valid_json_args(s: &str) -> bool {
+        if s.is_empty() {
+            return true;
+        }
+        serde_json::from_str::<serde_json::Value>(s).is_ok()
+    }
+
+    /// 将累积的工具调用（tool_acc）转移到 pending_tool_calls。
+    /// finish_reason='length' 截断的 tool_call arguments 可能是不完整 JSON，
+    /// 转移时校验合法性，丢弃畸形的，避免污染会话历史导致后续请求 400。
     fn flush_tool_acc(state: &mut StreamState) {
         if !state.tool_acc.is_empty() {
-            state.tool_call_count = state.tool_acc.len() as u32;
             let calls: Vec<(String, String, String)> = state
                 .tool_acc
                 .drain()
+                .filter(|(_, (_, _, args))| is_valid_json_args(args))
                 .map(|(_, (id, name, args))| (id, name, args))
                 .collect();
+            state.tool_call_count = calls.len() as u32;
             state.pending_tool_calls = calls.into_iter().rev().collect();
         }
     }
@@ -573,6 +588,7 @@ fn byte_stream_to_chat_events(
                 if state.langfuse_capture_output {
                     state.accumulated_output.push_str(&text);
                 }
+                state.had_text_output = true;
                 emit_first_token(state);
                 Some(ChatEvent::TextDelta(text))
             }
@@ -643,14 +659,19 @@ fn byte_stream_to_chat_events(
                         );
                     }
                 }
-                if !state.tool_acc.is_empty() {
-                    state.tool_call_count = state.tool_acc.len() as u32;
-                    let calls: Vec<(String, String, String)> = state
-                        .tool_acc
-                        .drain()
-                        .map(|(_, (id, name, args))| (id, name, args))
-                        .collect();
-                    state.pending_tool_calls = calls.into_iter().rev().collect();
+                // 转移 tool_acc（校验丢弃畸形 arguments）
+                let had_tool_acc = !state.tool_acc.is_empty();
+                flush_tool_acc(state);
+                // finish_reason='length' 且丢弃后无 tool_call 且本轮无文本：
+                // 补一条提示文本，保证 assistant 消息非空且语义可追踪
+                if state.finish_reason == "length"
+                    && had_tool_acc
+                    && state.pending_tool_calls.is_empty()
+                    && !state.had_text_output
+                {
+                    state.pending_hint = Some(
+                        "[tool call truncated due to max_tokens limit, please retry]".to_string(),
+                    );
                 }
                 // 收到 finish_reason 即标记流结束，无需等待底层流关闭
                 state.stream_ended = true;
@@ -713,6 +734,8 @@ fn byte_stream_to_chat_events(
         langfuse_capture_max_chars,
         langfuse_redact_secrets,
         accumulated_output: String::new(),
+        had_text_output: false,
+        pending_hint: None,
     };
 
     let event_stream = stream::unfold(state, |mut state| {
@@ -776,6 +799,12 @@ fn byte_stream_to_chat_events(
                     }),
                     state,
                 ));
+            }
+
+            // [B'] 发射截断提示文本（finish_reason='length' 丢弃畸形 tool_call 且无文本时）
+            if let Some(hint) = state.pending_hint.take() {
+                emit_first_token(&mut state);
+                return Some((Ok(ChatEvent::TextDelta(hint)), state));
             }
 
             // [C] 处理流结束标记

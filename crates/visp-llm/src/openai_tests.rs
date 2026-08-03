@@ -1839,3 +1839,185 @@ fn test_parse_image_generation_response_missing_data() {
 
     assert!(image_url.is_none());
 }
+
+// --- finish_reason='length' 截断 tool_call 处理 ---
+
+/// 构建 tool_call start 的 SSE chunk
+fn make_tool_start_chunk(index: usize, id: &str, name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": "chatcmpl",
+        "object": "chat.completion.chunk",
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "tool_calls": [{
+                    "index": index,
+                    "id": id,
+                    "type": "function",
+                    "function": { "name": name, "arguments": "" }
+                }]
+            },
+            "finish_reason": null
+        }]
+    })
+}
+
+/// 构建 tool_call arguments delta 的 SSE chunk
+fn make_tool_delta_chunk(index: usize, arguments: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": "chatcmpl",
+        "object": "chat.completion.chunk",
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "tool_calls": [{
+                    "index": index,
+                    "function": { "arguments": arguments }
+                }]
+            },
+            "finish_reason": null
+        }]
+    })
+}
+
+#[tokio::test]
+async fn test_length_truncated_tool_call_dropped_no_text() {
+    // finish_reason='length' + 畸形 arguments + 无文本 -> 提示文本，无 ToolCall
+    let sse = format!(
+        "{}{}{}{}",
+        make_sse(&make_tool_start_chunk(0, "call_1", "read_file")),
+        make_sse(&make_tool_delta_chunk(0, "{\"path\":\"te")),
+        make_sse(&make_stop_chunk("length")),
+        sse_line("[DONE]"),
+    );
+    let events = collect_events(vec![sse]).await;
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ChatEvent::ToolCall { .. })),
+        "truncated tool call should be dropped, events: {:?}",
+        events
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ChatEvent::TextDelta(t) if t.contains("truncated"))),
+        "should emit truncation hint text, events: {:?}",
+        events
+    );
+}
+
+#[tokio::test]
+async fn test_length_truncated_with_text_keeps_text_no_hint() {
+    // finish_reason='length' + 畸形 + 有文本 -> 文本保留，无 ToolCall，无提示
+    let sse = format!(
+        "{}{}{}{}{}",
+        make_sse(&make_text_chunk("Hello")),
+        make_sse(&make_tool_start_chunk(0, "call_1", "read_file")),
+        make_sse(&make_tool_delta_chunk(0, "{\"path\":\"te")),
+        make_sse(&make_stop_chunk("length")),
+        sse_line("[DONE]"),
+    );
+    let events = collect_events(vec![sse]).await;
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ChatEvent::ToolCall { .. })),
+        "truncated tool call should be dropped"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ChatEvent::TextDelta(t) if t == "Hello")),
+        "original text should be kept"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ChatEvent::TextDelta(t) if t.contains("truncated"))),
+        "should NOT emit hint when text already exists"
+    );
+}
+
+#[tokio::test]
+async fn test_length_valid_tool_call_kept() {
+    // finish_reason='length' + 合法 arguments -> 正常发射 ToolCall（不误丢）
+    let sse = format!(
+        "{}{}{}{}",
+        make_sse(&make_tool_start_chunk(0, "call_1", "read_file")),
+        make_sse(&make_tool_delta_chunk(0, "{\"path\":\"test.txt\"}")),
+        make_sse(&make_stop_chunk("length")),
+        sse_line("[DONE]"),
+    );
+    let events = collect_events(vec![sse]).await;
+
+    let tool_calls: Vec<_> = events
+        .iter()
+        .filter_map(|e| {
+            if let ChatEvent::ToolCall {
+                name, arguments, ..
+            } = e
+            {
+                Some((name.clone(), arguments.clone()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(tool_calls.len(), 1, "valid tool call should be kept");
+    assert_eq!(tool_calls[0].0, "read_file");
+    assert!(tool_calls[0].1.contains("test.txt"));
+}
+
+#[tokio::test]
+async fn test_stop_tool_call_normal() {
+    // finish_reason='stop' + 合法 -> 正常发射（回归）
+    let sse = format!(
+        "{}{}{}{}",
+        make_sse(&make_tool_start_chunk(0, "call_1", "read_file")),
+        make_sse(&make_tool_delta_chunk(0, "{\"path\":\"test.txt\"}")),
+        make_sse(&make_stop_chunk("stop")),
+        sse_line("[DONE]"),
+    );
+    let events = collect_events(vec![sse]).await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ChatEvent::ToolCall { name, .. } if name == "read_file")),
+        "stop + valid tool call should emit ToolCall"
+    );
+}
+
+#[tokio::test]
+async fn test_length_partial_truncation_multi_tool() {
+    // length + 多 tool（index 0 合法，index 1 畸形）-> 只发射合法的
+    let sse = format!(
+        "{}{}{}{}{}{}",
+        make_sse(&make_tool_start_chunk(0, "call_1", "read_file")),
+        make_sse(&make_tool_delta_chunk(0, "{\"path\":\"a.txt\"}")),
+        make_sse(&make_tool_start_chunk(1, "call_2", "write_file")),
+        make_sse(&make_tool_delta_chunk(1, "{\"path\":\"b")),
+        make_sse(&make_stop_chunk("length")),
+        sse_line("[DONE]"),
+    );
+    let events = collect_events(vec![sse]).await;
+
+    let tool_calls: Vec<_> = events
+        .iter()
+        .filter_map(|e| {
+            if let ChatEvent::ToolCall { id, .. } = e {
+                Some(id.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(tool_calls.len(), 1, "only valid tool call should be kept");
+    assert_eq!(
+        tool_calls[0], "call_1",
+        "the valid one (call_1) should remain"
+    );
+}
