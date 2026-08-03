@@ -46,10 +46,10 @@ impl ReadFile {
         let path = validate_path(Path::new(path_str), working_dir)?;
 
         // Image file detection: return marker instead of reading binary content
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            if IMAGE_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
-                return Ok(format!("<image: {}>", path.display()));
-            }
+        if let Some(ext) = path.extension().and_then(|e| e.to_str())
+            && IMAGE_EXTENSIONS.contains(&ext.to_lowercase().as_str())
+        {
+            return Ok(format!("<image: {}>", path.display()));
         }
 
         // 检查文件大小

@@ -1932,6 +1932,8 @@ mod tests {
             max_tokens: Some(16384),
             max_context_tokens: Some(200000),
             thinking_budget_tokens: Some(2048),
+            use_tool: None,
+            image_generation: None,
             extra: HashMap::new(),
         };
         let default_llm_config = LlmConfig {
@@ -2004,6 +2006,8 @@ mod tests {
             max_tokens: Some(16384),
             max_context_tokens: None,
             thinking_budget_tokens: None,
+            use_tool: None,
+            image_generation: None,
             extra: HashMap::new(),
         };
         let (cancel_tx, _cancel_rx) = mpsc::channel(16);

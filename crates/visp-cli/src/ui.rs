@@ -891,11 +891,12 @@ fn render_image_block(
                 render_w,
                 image_h,
             );
-            if image_area.width > 0 && image_area.height > 0 {
-                if let Ok(protocol) = protocol_arc.lock() {
-                    use ratatui_image::Image;
-                    f.render_widget(Image::new(&*protocol), image_area);
-                }
+            if image_area.width > 0
+                && image_area.height > 0
+                && let Ok(protocol) = protocol_arc.lock()
+            {
+                use ratatui_image::Image;
+                f.render_widget(Image::new(&protocol), image_area);
             }
         } else if image_cache.is_loading(path) {
             // Loading: show placeholder

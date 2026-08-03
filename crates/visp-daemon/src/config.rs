@@ -1939,6 +1939,8 @@ soft_limit = 50
                 max_tokens: None,
                 max_context_tokens: None,
                 thinking_budget_tokens: None,
+                use_tool: None,
+                image_generation: None,
                 extra: Default::default(),
             },
             LlmModelConfig {
@@ -1952,6 +1954,8 @@ soft_limit = 50
                 max_tokens: None,
                 max_context_tokens: None,
                 thinking_budget_tokens: None,
+                use_tool: None,
+                image_generation: None,
                 extra: Default::default(),
             },
         ]

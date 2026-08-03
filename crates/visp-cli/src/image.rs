@@ -84,7 +84,7 @@ fn extract_alt_text(path: &str) -> String {
         None => path,
     };
     without_query
-        .rsplit(|c| c == '/' || c == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or("")
         .to_string()
