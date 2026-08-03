@@ -98,8 +98,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     visp_config::init_config().map_err(|e| format!("init config: {e}"))?;
 
     // 1. Load config
-    let config_path = std::env::args().nth(1).map(std::path::PathBuf::from);
-    let config: DaemonConfig =
+    //    The first positional arg (not starting with --) is the config file path.
+    //    This skips flags like --http-addr and their values.
+    let config_path = std::env::args()
+        .skip(1)
+        .filter(|a| !a.starts_with("--"))
+        .next()
+        .map(std::path::PathBuf::from);
+    let mut config: DaemonConfig =
         visp_config::load_config(config_path.as_deref()).map_err(|e| format!("config: {e}"))?;
 
     // 2. Init observability (tracing subscriber stack)
