@@ -11,6 +11,15 @@ use visp_core::provider::{ChatEvent, LlmConfig, LlmProvider};
 use crate::image_util;
 use crate::util::{build_client, parse_retry_after};
 
+/// 检查 tool_call arguments 是否为合法 JSON（空字符串视为合法）。
+/// 用于识别 max_tokens 截断导致的不完整 JSON，避免畸形 tool_call 污染会话历史。
+fn is_valid_json_args(s: &str) -> bool {
+    if s.is_empty() {
+        return true;
+    }
+    serde_json::from_str::<serde_json::Value>(s).is_ok()
+}
+
 /// 构建 OpenAI API 请求体
 pub fn build_openai_request(
     messages: &[Message],
@@ -198,12 +207,17 @@ pub fn build_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                     let tool_calls: Vec<serde_json::Value> = calls
                         .iter()
                         .map(|tc| {
+                            let args = if is_valid_json_args(&tc.arguments) {
+                                tc.arguments.clone()
+                            } else {
+                                "{}".to_string()
+                            };
                             serde_json::json!({
                                 "id": tc.id,
                                 "type": "function",
                                 "function": {
                                     "name": tc.name,
-                                    "arguments": tc.arguments,
+                                    "arguments": args,
                                 }
                             })
                         })
@@ -547,14 +561,6 @@ fn byte_stream_to_chat_events(
         had_text_output: bool,
         /// 待发射的截断提示文本（finish_reason='length' 丢弃畸形 tool_call 且无文本时设置）
         pending_hint: Option<String>,
-    }
-
-    /// 检查 tool_call arguments 是否为合法 JSON（空字符串视为合法）
-    fn is_valid_json_args(s: &str) -> bool {
-        if s.is_empty() {
-            return true;
-        }
-        serde_json::from_str::<serde_json::Value>(s).is_ok()
     }
 
     /// 将累积的工具调用（tool_acc）转移到 pending_tool_calls。

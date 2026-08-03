@@ -2021,3 +2021,69 @@ async fn test_length_partial_truncation_multi_tool() {
         "the valid one (call_1) should remain"
     );
 }
+
+// --- build_openai_messages 防御兜底：畸形 arguments 校验 ---
+
+#[test]
+fn test_build_messages_valid_arguments_kept() {
+    let msgs = vec![Message::tool_call(vec![ToolCallRequest {
+        id: "call_1".into(),
+        name: "read_file".into(),
+        arguments: r#"{"path":"test.txt"}"#.into(),
+    }])];
+    let result = build_openai_messages(&msgs);
+    assert_eq!(
+        result[0]["tool_calls"][0]["function"]["arguments"],
+        r#"{"path":"test.txt"}"#
+    );
+}
+
+#[test]
+fn test_build_messages_malformed_arguments_sanitized() {
+    let msgs = vec![Message::tool_call(vec![ToolCallRequest {
+        id: "call_1".into(),
+        name: "read_file".into(),
+        arguments: r#"{"path":"te"#.into(),
+    }])];
+    let result = build_openai_messages(&msgs);
+    assert_eq!(
+        result[0]["tool_calls"][0]["function"]["arguments"], "{}",
+        "malformed arguments should be replaced with empty json object"
+    );
+}
+
+#[test]
+fn test_build_messages_mixed_arguments() {
+    let msgs = vec![Message::tool_call(vec![
+        ToolCallRequest {
+            id: "call_1".into(),
+            name: "read_file".into(),
+            arguments: r#"{"path":"a.txt"}"#.into(),
+        },
+        ToolCallRequest {
+            id: "call_2".into(),
+            name: "write_file".into(),
+            arguments: r#"{"path":"b"#.into(),
+        },
+    ])];
+    let result = build_openai_messages(&msgs);
+    assert_eq!(
+        result[0]["tool_calls"][0]["function"]["arguments"],
+        r#"{"path":"a.txt"}"#
+    );
+    assert_eq!(result[0]["tool_calls"][1]["function"]["arguments"], "{}");
+}
+
+#[test]
+fn test_build_messages_empty_arguments_kept() {
+    let msgs = vec![Message::tool_call(vec![ToolCallRequest {
+        id: "call_1".into(),
+        name: "read_file".into(),
+        arguments: "".into(),
+    }])];
+    let result = build_openai_messages(&msgs);
+    assert_eq!(
+        result[0]["tool_calls"][0]["function"]["arguments"], "",
+        "empty arguments should be kept as-is (valid)"
+    );
+}
