@@ -394,7 +394,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 8.6. Load agent definitions
-    let builtin_overrides: Vec<visp_agent::agent_loader::BuiltinAgentOverride> = config
+    let mut builtin_overrides: Vec<visp_agent::agent_loader::BuiltinAgentOverride> = config
         .agent
         .builtin
         .iter()
@@ -405,6 +405,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             steps: c.steps,
         })
         .collect();
+
+    // Wire llm.image_generation_model / llm.vision_model to builtin agents
+    if let Some(ref key) = config.llm.image_generation_model {
+        builtin_overrides.push(visp_agent::agent_loader::BuiltinAgentOverride {
+            name: "image_generator".to_string(),
+            model: Some(key.clone()),
+            temperature: None,
+            steps: None,
+        });
+    }
+    if let Some(ref key) = config.llm.vision_model {
+        builtin_overrides.push(visp_agent::agent_loader::BuiltinAgentOverride {
+            name: "vision".to_string(),
+            model: Some(key.clone()),
+            temperature: None,
+            steps: None,
+        });
+    }
 
     // Agent directories: global config dir (lower priority) → project dir (higher priority)
     let mut agent_dirs: Vec<std::path::PathBuf> = Vec::new();

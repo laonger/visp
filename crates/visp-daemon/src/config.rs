@@ -48,6 +48,12 @@ pub struct LlmSection {
     /// 默认模型 key（格式 {provider}.{name}），缺省时使用 models 第一个
     #[serde(default)]
     pub default: Option<String>,
+    /// 默认文生图模型 key（格式 {provider}/{name}）
+    #[serde(default)]
+    pub image_generation_model: Option<String>,
+    /// 默认识图模型 key（格式 {provider}/{name}）
+    #[serde(default)]
+    pub vision_model: Option<String>,
 }
 
 /// 单个 LLM 模型配置
@@ -197,6 +203,12 @@ fn merge_llm_sections(global: &mut LlmSection, project: &LlmSection) {
     }
     if project.default.is_some() {
         global.default = project.default.clone();
+    }
+    if project.image_generation_model.is_some() {
+        global.image_generation_model = project.image_generation_model.clone();
+    }
+    if project.vision_model.is_some() {
+        global.vision_model = project.vision_model.clone();
     }
     // extra: merge map, project entries 优先
     for (k, v) in &project.extra {
@@ -611,6 +623,8 @@ fn default_config() -> DaemonConfig {
             extra: HashMap::new(),
             models: Vec::new(),
             default: None,
+            image_generation_model: None,
+            vision_model: None,
         },
         tools: default_tools_section(),
         agent: default_agent_section(),
@@ -1967,6 +1981,8 @@ soft_limit = 50
             extra: std::collections::HashMap::new(),
             models: vec![],
             default: None,
+            image_generation_model: None,
+            vision_model: None,
         }
     }
 

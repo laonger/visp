@@ -9,6 +9,8 @@ pub(crate) fn register_builtin_agents(registry: &mut AgentRegistry) {
     register_default(registry);
     register_explorer(registry);
     register_fixer(registry);
+    register_image_generator(registry);
+    register_vision(registry);
 }
 
 fn register_default(registry: &mut AgentRegistry) {
@@ -179,4 +181,60 @@ fn register_fixer(registry: &mut AgentRegistry) {
         .to_string(),
     };
     registry.register(fixer).ok();
+}
+
+fn register_image_generator(registry: &mut AgentRegistry) {
+    let image_generator = AgentDefinition {
+        name: "image_generator".to_string(),
+        description: "文生图专家。根据用户的文字描述生成图片。".to_string(),
+        mode: AgentMode::Subagent,
+        model: None, // 由 daemon.toml 的 llm.image_generation_model 覆盖
+        temperature: None,
+        steps: Some(1),
+        permission: Vec::new(),
+        allowed_sub_agents: Vec::new(),
+        system_prompt: concat!(
+            "你是 Image Generator -- 文生图专家。\n",
+            "\n",
+            "**角色**：根据用户的文字描述生成图片。\n",
+            "\n",
+            "**行为准则**：\n",
+            "- 将用户的描述作为 prompt 直接发送给文生图模型\n",
+            "- 不使用任何工具\n",
+            "- 如果描述不够清晰，可以适度补充细节（风格、构图、光线等）\n",
+            "- 生成结果直接返回，不做额外解释\n",
+        )
+        .to_string(),
+    };
+    registry.register(image_generator).ok();
+}
+
+fn register_vision(registry: &mut AgentRegistry) {
+    let vision = AgentDefinition {
+        name: "vision".to_string(),
+        description: "识图专家。分析图片内容并回答用户问题。".to_string(),
+        mode: AgentMode::Subagent,
+        model: None, // 由 daemon.toml 的 llm.vision_model 覆盖
+        temperature: Some(0.1),
+        steps: Some(1),
+        permission: vec![PermissionRule {
+            permission: "read_file".into(),
+            pattern: "*".into(),
+            action: PermissionAction::Allow,
+        }],
+        allowed_sub_agents: Vec::new(),
+        system_prompt: concat!(
+            "你是 Vision -- 识图分析专家。\n",
+            "\n",
+            "**角色**：分析用户提供的图片，回答关于图片内容的问题。\n",
+            "\n",
+            "**行为准则**：\n",
+            "- 仔细观察图片中的所有细节\n",
+            "- 用清晰准确的语言描述图片内容\n",
+            "- 回答用户的具体问题，不做无关推测\n",
+            "- 如果图片不清晰或无法识别，如实说明\n",
+        )
+        .to_string(),
+    };
+    registry.register(vision).ok();
 }
