@@ -876,33 +876,36 @@ fn render_image_block(
     let addr_count = addr_lines.len() as u16;
     let image_h = img_h.saturating_sub(addr_count);
 
-    if let Some(protocol_arc) = image_cache.try_get_protocol(path, (render_w, image_h)) {
-        // Ready: render stateless Image widget (fixed size, no mouse interaction)
-        let image_area = Rect::new(
-            area.x + 1, // margin_horizontal = 1
-            y,
-            render_w,
-            image_h,
-        );
-        if image_area.width > 0 && image_area.height > 0 {
-            if let Ok(protocol) = protocol_arc.lock() {
-                use ratatui_image::Image;
-                f.render_widget(Image::new(&*protocol), image_area);
+    // Render image only if there's positive height left after address lines
+    if image_h > 0 {
+        if let Some(protocol_arc) = image_cache.try_get_protocol(path, (render_w, image_h)) {
+            // Ready: render stateless Image widget (fixed size, no mouse interaction)
+            let image_area = Rect::new(
+                area.x + 1, // margin_horizontal = 1
+                y,
+                render_w,
+                image_h,
+            );
+            if image_area.width > 0 && image_area.height > 0 {
+                if let Ok(protocol) = protocol_arc.lock() {
+                    use ratatui_image::Image;
+                    f.render_widget(Image::new(&*protocol), image_area);
+                }
             }
+        } else if image_cache.is_loading(path) {
+            // Loading: show placeholder
+            let msg = format!("[加载中: {}]", alt_text);
+            let line = Line::styled(msg, Style::default().fg(Color::DarkGray));
+            let bs = theme::ASSISTANT_STYLE;
+            render_block(f, area, bs, &[line], image_h, y);
+        } else {
+            // Error: show error message
+            let reason = image_cache.error_message(path).unwrap_or_default();
+            let msg = format!("[图片加载失败: {} ({})]", alt_text, reason);
+            let line = Line::styled(msg, Style::default().fg(Color::Red));
+            let bs = theme::ASSISTANT_STYLE;
+            render_block(f, area, bs, &[line], image_h, y);
         }
-    } else if image_cache.is_loading(path) {
-        // Loading: show placeholder
-        let msg = format!("[加载中: {}]", alt_text);
-        let line = Line::styled(msg, Style::default().fg(Color::DarkGray));
-        let bs = theme::ASSISTANT_STYLE;
-        render_block(f, area, bs, &[line], image_h.max(1), y);
-    } else {
-        // Error: show error message
-        let reason = image_cache.error_message(path).unwrap_or_default();
-        let msg = format!("[图片加载失败: {} ({})]", alt_text, reason);
-        let line = Line::styled(msg, Style::default().fg(Color::Red));
-        let bs = theme::ASSISTANT_STYLE;
-        render_block(f, area, bs, &[line], image_h.max(1), y);
     }
 
     // Render address lines below the image
