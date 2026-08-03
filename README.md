@@ -114,6 +114,44 @@ tree-sitter 解析 + SQLite 索引，支持符号搜索、调用者/被调用者
 ### gRPC 通信
 `CoderDaemon` 服务基于 tonic，提供 Chat（双向流）、会话管理、文件读取、符号查询、健康检查等 RPC。详见 [visp-proto](crates/visp-proto/README.md)。
 
+### 图片输入（Vision 识图）
+
+在 CLI 中使用 `@path` 引用本地图片，图片会以多模态格式发送给支持 vision 的 LLM 模型（如 GPT-4o、Claude 3.5 Sonnet、豆包视觉模型等）：
+
+```
+@screenshot.png 这张图里是什么？
+```
+
+- 图片文件自动读取并 base64 编码，以 OpenAI `image_url` 或 Anthropic `image` source 格式发送
+- 支持的格式：PNG、JPEG、GIF、WebP、BMP
+- 支持同时引用多张图片：`@a.png @b.png 对比这两张图`
+- 图片在 CLI 中通过 ratatui-image 原生渲染，双击地址行可复制路径
+
+### 图片生成（文生图）
+
+配置文生图模型后，直接用自然语言描述需求即可生成图片：
+
+```toml
+[[llm.models]]
+name = "doubao-seedream"
+protocol = "openai"
+model = "doubao-seedream-5.0-lite"
+api_key = "ark-xxx"
+base_url = "https://ark.cn-beijing.volces.com/api/plan/v3"
+image_generation = true
+use_tool = false
+
+[llm.models.extra]
+size = "2K"
+output_format = "png"
+watermark = "false"
+```
+
+- `image_generation = true` 标记该模型为文生图模型，请求自动路由到 `/images/generations` 端点
+- `use_tool = false` 关闭工具定义（文生图模型不支持 tools）
+- `[llm.models.extra]` 中的参数（`size`、`output_format`、`watermark` 等）透传到 API 请求
+- 生成的图片 URL 自动下载并在 CLI 中渲染，双击 🔗 地址行可复制 URL
+
 ### MCP 支持（动态工具扩展）
 
 visp 支持 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)，可连接外部 MCP 服务器，将其提供的工具动态集成到 Tool Registry 中，与内置工具一视同仁。
@@ -315,6 +353,7 @@ cargo build --release
 | `Esc` | 取消/拒绝审批 / 清除文本选择 |
 | `↑` / `↓` / `Enter` / `Esc` / `q` | Session/Model 选择器导航 |
 | 鼠标拖拽 | 选中文本并自动复制到剪贴板 |
+| 鼠标双击图片地址行 | 复制 URL 或文件路径到剪贴板 |
 | 鼠标滚轮 | 滚动对话区域 |
 
 ### TUI 内命令
