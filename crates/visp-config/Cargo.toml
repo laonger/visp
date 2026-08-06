@@ -11,3 +11,7 @@ tracing.workspace = true
 chrono.workspace = true
 async-trait.workspace = true
 visp-proto = { path = "../visp-proto" }
+
+[dev-dependencies]
+tempfile = "3"
+serial_test = "3"

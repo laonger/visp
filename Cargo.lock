@@ -4659,6 +4659,8 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "serial_test",
+ "tempfile",
  "toml",
  "tracing",
  "visp-proto",
