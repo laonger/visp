@@ -15,6 +15,7 @@ visp-context = { path = "../visp-context" }
 visp-db = { path = "../visp-db" }
 visp-mcp = { path = "../visp-mcp" }
 visp-agent = { path = "../visp-agent" }
+visp-config = { path = "../visp-config" }
 serde.workspace = true
 serde_json.workspace = true
 tonic.workspace = true

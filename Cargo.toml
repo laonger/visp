@@ -5,6 +5,7 @@ members = [
     "crates/visp-cli",
     "crates/visp-codegraph",
     "crates/visp-command",
+    "crates/visp-config",
     "crates/visp-context",
     "crates/visp-core",
     "crates/visp-daemon",

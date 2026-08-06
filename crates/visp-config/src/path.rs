@@ -1,0 +1,294 @@
+use std::path::{Path, PathBuf};
+
+/// 返回用户的 home 目录路径
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var("HOME").ok().map(PathBuf::from)
+}
+
+/// 返回当前工作目录
+pub fn project_dir() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// 返回 `{project}/.visp` 目录
+pub fn visp_dir(project: &Path) -> PathBuf {
+    project.join(".visp")
+}
+
+/// 返回 `~/.config/visp`（配置目录）
+pub fn global_config_dir() -> Option<PathBuf> {
+    home_dir().map(|h| h.join(".config").join("visp"))
+}
+
+/// 返回 `~/.visp`（数据目录，如 logs）
+pub fn global_data_dir() -> Option<PathBuf> {
+    home_dir().map(|h| h.join(".visp"))
+}
+
+/// 返回 `{project}/.visp/daemon.toml`
+pub fn daemon_toml_project(project: &Path) -> PathBuf {
+    visp_dir(project).join("daemon.toml")
+}
+
+/// 返回 `~/.config/visp/daemon.toml`
+pub fn daemon_toml_global() -> Option<PathBuf> {
+    global_config_dir().map(|d| d.join("daemon.toml"))
+}
+
+/// 返回 `{project}/.visp/rules`
+pub fn rules_dir_project(project: &Path) -> PathBuf {
+    visp_dir(project).join("rules")
+}
+
+/// 返回 `~/.config/visp/rules`
+pub fn rules_dir_global() -> Option<PathBuf> {
+    global_config_dir().map(|d| d.join("rules"))
+}
+
+/// 返回 `{project}/.visp/skills`
+pub fn skills_dir_project(project: &Path) -> PathBuf {
+    visp_dir(project).join("skills")
+}
+
+/// 返回 `~/.config/visp/skills`
+pub fn skills_dir_global() -> Option<PathBuf> {
+    global_config_dir().map(|d| d.join("skills"))
+}
+
+/// 返回 `{project}/.visp/agents`
+pub fn agents_dir_project(project: &Path) -> PathBuf {
+    visp_dir(project).join("agents")
+}
+
+/// 返回 `~/.config/visp/agents`
+pub fn agents_dir_global() -> Option<PathBuf> {
+    global_config_dir().map(|d| d.join("agents"))
+}
+
+/// 返回 `{project}/.visp/webfetch.toml`
+pub fn webfetch_toml_project(project: &Path) -> PathBuf {
+    visp_dir(project).join("webfetch.toml")
+}
+
+/// 返回 `{project}/.visp/system-prompt.md`
+pub fn system_prompt_project(project: &Path) -> PathBuf {
+    visp_dir(project).join("system-prompt.md")
+}
+
+/// 返回 `~/.config/visp/system-prompt.md`
+pub fn system_prompt_global() -> Option<PathBuf> {
+    global_config_dir().map(|d| d.join("system-prompt.md"))
+}
+
+/// 返回 `~/.config/visp/AGENTS.md`
+pub fn global_agents_md() -> Option<PathBuf> {
+    global_config_dir().map(|d| d.join("AGENTS.md"))
+}
+
+/// 返回 `{project}/.visp/codegraph.db`
+pub fn codegraph_db(project: &Path) -> PathBuf {
+    visp_dir(project).join("codegraph.db")
+}
+
+/// 返回 `~/.visp/logs`（运行时日志目录）
+pub fn log_dir() -> Option<PathBuf> {
+    global_data_dir().map(|d| d.join("logs"))
+}
+
+/// 返回 `{temp_dir}/.visp/images`（图片缓存目录）
+pub fn image_cache_dir() -> PathBuf {
+    std::env::temp_dir().join(".visp").join("images")
+}
+
+/// 展开 `~/` 为 `$HOME/`，否则原样返回。
+///
+/// 若 `path` 以 `~/` 开头但 HOME 未设置，返回 `PathBuf::from(path)`（不展开）。
+pub fn expand_home(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        home_dir()
+            .map(|home| home.join(rest))
+            .unwrap_or_else(|| PathBuf::from(path))
+    } else {
+        PathBuf::from(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn set_home(val: Option<&str>) {
+        match val {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    fn test_project_dir() {
+        let dir = project_dir();
+        assert!(dir.is_absolute() || dir == PathBuf::from("."));
+    }
+
+    #[test]
+    fn test_visp_dir() {
+        let project = Path::new("/my/project");
+        assert_eq!(visp_dir(project), PathBuf::from("/my/project/.visp"));
+    }
+
+    #[test]
+    fn test_global_config_dir() {
+        set_home(Some("/home/user"));
+        assert_eq!(
+            global_config_dir(),
+            Some(PathBuf::from("/home/user/.config/visp"))
+        );
+    }
+
+    #[test]
+    fn test_global_config_dir_no_home() {
+        set_home(None);
+        assert_eq!(global_config_dir(), None);
+    }
+
+    #[test]
+    fn test_global_data_dir() {
+        set_home(Some("/home/user"));
+        assert_eq!(global_data_dir(), Some(PathBuf::from("/home/user/.visp")));
+    }
+
+    #[test]
+    fn test_daemon_toml_paths() {
+        let project = Path::new("/proj");
+        assert_eq!(
+            daemon_toml_project(project),
+            PathBuf::from("/proj/.visp/daemon.toml")
+        );
+        set_home(Some("/home/user"));
+        assert_eq!(
+            daemon_toml_global(),
+            Some(PathBuf::from("/home/user/.config/visp/daemon.toml"))
+        );
+    }
+
+    #[test]
+    fn test_rules_dir_paths() {
+        let project = Path::new("/proj");
+        assert_eq!(
+            rules_dir_project(project),
+            PathBuf::from("/proj/.visp/rules")
+        );
+        set_home(Some("/home/user"));
+        assert_eq!(
+            rules_dir_global(),
+            Some(PathBuf::from("/home/user/.config/visp/rules"))
+        );
+    }
+
+    #[test]
+    fn test_skills_dir_paths() {
+        let project = Path::new("/proj");
+        assert_eq!(
+            skills_dir_project(project),
+            PathBuf::from("/proj/.visp/skills")
+        );
+        set_home(Some("/home/user"));
+        assert_eq!(
+            skills_dir_global(),
+            Some(PathBuf::from("/home/user/.config/visp/skills"))
+        );
+    }
+
+    #[test]
+    fn test_agents_dir_paths() {
+        let project = Path::new("/proj");
+        assert_eq!(
+            agents_dir_project(project),
+            PathBuf::from("/proj/.visp/agents")
+        );
+        set_home(Some("/home/user"));
+        assert_eq!(
+            agents_dir_global(),
+            Some(PathBuf::from("/home/user/.config/visp/agents"))
+        );
+    }
+
+    #[test]
+    fn test_webfetch_toml_project() {
+        let project = Path::new("/proj");
+        assert_eq!(
+            webfetch_toml_project(project),
+            PathBuf::from("/proj/.visp/webfetch.toml")
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_paths() {
+        let project = Path::new("/proj");
+        assert_eq!(
+            system_prompt_project(project),
+            PathBuf::from("/proj/.visp/system-prompt.md")
+        );
+        set_home(Some("/home/user"));
+        assert_eq!(
+            system_prompt_global(),
+            Some(PathBuf::from("/home/user/.config/visp/system-prompt.md"))
+        );
+    }
+
+    #[test]
+    fn test_global_agents_md() {
+        set_home(Some("/home/user"));
+        assert_eq!(
+            global_agents_md(),
+            Some(PathBuf::from("/home/user/.config/visp/AGENTS.md"))
+        );
+    }
+
+    #[test]
+    fn test_codegraph_db() {
+        let project = Path::new("/proj");
+        assert_eq!(
+            codegraph_db(project),
+            PathBuf::from("/proj/.visp/codegraph.db")
+        );
+    }
+
+    #[test]
+    fn test_log_dir() {
+        set_home(Some("/home/user"));
+        assert_eq!(log_dir(), Some(PathBuf::from("/home/user/.visp/logs")));
+    }
+
+    #[test]
+    fn test_image_cache_dir() {
+        let dir = image_cache_dir();
+        assert!(dir.starts_with(std::env::temp_dir()));
+        assert!(dir.ends_with(".visp/images"));
+    }
+
+    #[test]
+    fn test_expand_home_with_tilde() {
+        set_home(Some("/home/user"));
+        assert_eq!(expand_home("~/foo"), PathBuf::from("/home/user/foo"));
+    }
+
+    #[test]
+    fn test_expand_home_without_tilde() {
+        assert_eq!(expand_home("/abs/path"), PathBuf::from("/abs/path"));
+        assert_eq!(expand_home("relative/path"), PathBuf::from("relative/path"));
+    }
+
+    #[test]
+    fn test_expand_home_no_home() {
+        set_home(None);
+        // When HOME is not set, return the path as-is
+        assert_eq!(expand_home("~/foo"), PathBuf::from("~/foo"));
+    }
+
+    #[test]
+    fn test_home_dir() {
+        set_home(Some("/home/user"));
+        assert_eq!(home_dir(), Some(PathBuf::from("/home/user")));
+    }
+}

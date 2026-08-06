@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 visp-core = { path = "../visp-core" }
 visp-codegraph = { path = "../visp-codegraph" }
+visp-config = { path = "../visp-config" }
 tokio.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true

@@ -15,6 +15,7 @@ futures.workspace = true
 tokio.workspace = true
 tokio-util = "0.7"
 tracing.workspace = true
+visp-config = { path = "../visp-config" }
 
 [dev-dependencies]
 tempfile = "3"

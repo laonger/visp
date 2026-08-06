@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 visp-core = { path = "../visp-core" }
+visp-config = { path = "../visp-config" }
 reqwest.workspace = true
 bytes.workspace = true
 serde.workspace = true

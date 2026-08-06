@@ -9,3 +9,4 @@ chrono.workspace = true
 tokio.workspace = true
 tonic.workspace = true
 visp-proto = { path = "../visp-proto" }
+visp-config = { path = "../visp-config" }

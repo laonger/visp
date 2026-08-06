@@ -4563,18 +4563,19 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "visp"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "chrono",
  "clap",
  "tokio",
  "tonic 0.13.1",
+ "visp-config",
  "visp-proto",
 ]
 
 [[package]]
 name = "visp-agent"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -4590,6 +4591,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
+ "visp-config",
  "visp-core",
  "visp-llm",
  "visp-tools",
@@ -4597,7 +4599,7 @@ dependencies = [
 
 [[package]]
 name = "visp-cli"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "chrono",
  "clap",
@@ -4618,12 +4620,13 @@ dependencies = [
  "tonic 0.13.1",
  "unicode-width 0.2.0",
  "visp-command",
+ "visp-config",
  "visp-proto",
 ]
 
 [[package]]
 name = "visp-codegraph"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "notify",
  "rusqlite",
@@ -4642,14 +4645,28 @@ dependencies = [
 
 [[package]]
 name = "visp-command"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
+ "visp-config",
  "visp-core",
 ]
 
 [[package]]
+name = "visp-config"
+version = "0.5.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "toml",
+ "tracing",
+ "visp-proto",
+]
+
+[[package]]
 name = "visp-context"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "tempfile",
  "visp-core",
@@ -4657,7 +4674,7 @@ dependencies = [
 
 [[package]]
 name = "visp-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4673,12 +4690,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "visp-config",
  "visp-llm",
 ]
 
 [[package]]
 name = "visp-daemon"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "dashmap",
@@ -4705,6 +4723,7 @@ dependencies = [
  "visp-agent",
  "visp-codegraph",
  "visp-command",
+ "visp-config",
  "visp-context",
  "visp-core",
  "visp-db",
@@ -4722,12 +4741,13 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "visp-config",
  "visp-core",
 ]
 
 [[package]]
 name = "visp-llm"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4741,12 +4761,13 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "visp-config",
  "visp-core",
 ]
 
 [[package]]
 name = "visp-mcp"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",
@@ -4757,12 +4778,13 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "visp-config",
  "visp-core",
 ]
 
 [[package]]
 name = "visp-proto"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "prost 0.13.5",
  "prost-types 0.13.5",
@@ -4772,7 +4794,7 @@ dependencies = [
 
 [[package]]
 name = "visp-tools"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "html-to-markdown-rs",
@@ -4784,6 +4806,7 @@ dependencies = [
  "tokio-stream",
  "toml",
  "visp-codegraph",
+ "visp-config",
  "visp-core",
 ]
 
