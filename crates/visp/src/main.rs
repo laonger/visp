@@ -88,13 +88,20 @@ async fn main() {
 
     match health_ok {
         Ok(true) => eprintln!("[visp] Daemon is ready."),
-        Ok(false) => {
-            eprintln!("[visp] Daemon health check failed.");
-            kill_daemon(&mut daemon).await;
-            std::process::exit(1);
-        }
-        Err(_) => {
-            eprintln!("[visp] Daemon did not become ready within 15s.");
+        Ok(false) | Err(_) => {
+            // Daemon failed to start. Check if it wrote a startup error message.
+            if let Some(err_file) = visp_config::path::startup_error_file()
+                && let Ok(msg) = std::fs::read_to_string(&err_file)
+                && !msg.is_empty()
+            {
+                // Print in red
+                eprintln!("\x1b[31m{msg}\x1b[0m");
+                let _ = std::fs::remove_file(&err_file);
+            } else if health_ok.is_err() {
+                eprintln!("[visp] Daemon did not become ready within 15s.");
+            } else {
+                eprintln!("[visp] Daemon health check failed.");
+            }
             kill_daemon(&mut daemon).await;
             std::process::exit(1);
         }

@@ -111,6 +111,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Build model configs
     let model_configs = config.llm.effective_models();
+    if model_configs.is_empty() {
+        // Regenerate config with a placeholder model so the user has a template to edit
+        let mut template_config = config;
+        template_config.llm.models = vec![LlmModelConfig {
+            name: "claude-sonnet-4-20250514".into(),
+            protocol: "anthropic".into(),
+            provider: Some("Anthropic".into()),
+            model: "claude-sonnet-4-20250514".into(),
+            api_key: Some("YOUR_API_KEY".into()),
+            base_url: None,
+            temperature: None,
+            max_tokens: None,
+            max_context_tokens: None,
+            thinking_budget_tokens: None,
+            use_tool: None,
+            image_generation: None,
+            extra: HashMap::new(),
+        }];
+        template_config.llm.default = Some("Anthropic/claude-sonnet-4-20250514".into());
+        let config_path = visp_config::path::daemon_toml_global()
+            .ok_or_else(|| "HOME not set".to_string())
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        let content = toml::to_string_pretty(&template_config)
+            .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+        let tmp = config_path.with_extension("toml.visp-tmp");
+        std::fs::write(&tmp, &content)
+            .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+        std::fs::rename(&tmp, &config_path)
+            .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+
+        // Write error message to startup-error file for the launcher to display,
+        // then exit. stdout/stderr are redirected to a log file by the launcher.
+        let msg = format!(
+            "No LLM models configured.\n\
+             A template config has been written to:\n  {}\n\
+             Please edit it with your API key, then restart visp.",
+            config_path.display()
+        );
+        if let Some(err_file) = visp_config::path::startup_error_file() {
+            let _ = std::fs::write(&err_file, &msg);
+        }
+        std::process::exit(1);
+    }
     let model_keys: Vec<String> = model_configs.iter().map(|mc| mc.key()).collect();
     let default_protocol = model_configs
         .first()

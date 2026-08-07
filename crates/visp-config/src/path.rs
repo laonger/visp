@@ -113,6 +113,11 @@ pub fn expand_home(path: &str) -> PathBuf {
     }
 }
 
+/// 返回 `~/.config/visp/.startup-error`（daemon 启动失败时写入，launcher 读取后删除）
+pub fn startup_error_file() -> Option<PathBuf> {
+    global_config_dir().map(|d| d.join(".startup-error"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
