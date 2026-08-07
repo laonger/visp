@@ -877,6 +877,124 @@ fn default_config() -> DaemonConfig {
     }
 }
 
+// ============ Runtime config utilities ============
+
+/// Convert proto LlmConfig to core LlmConfig.
+/// Maps 6 proto fields, rest use LlmConfig::default().
+pub fn proto_to_llm_config(proto: &visp_proto::visp::LlmConfig) -> LlmConfig {
+    let mut config = LlmConfig::default();
+    if let Some(model) = &proto.model {
+        config.model = model.clone();
+    }
+    if let Some(model_key) = &proto.model_key {
+        config.model_key = Some(model_key.clone());
+    }
+    if let Some(temperature) = proto.temperature {
+        config.temperature = temperature;
+    }
+    if let Some(max_tokens) = proto.max_tokens {
+        config.max_tokens = max_tokens;
+    }
+    if let Some(max_context_tokens) = proto.max_context_tokens {
+        config.max_context_tokens = max_context_tokens;
+    }
+    config.extra = proto.extra.clone();
+    config
+}
+
+/// Convert core LlmConfig to proto LlmConfig.
+/// Maps 6 fields, drops 17 runtime-only fields.
+pub fn llm_config_to_proto(config: &LlmConfig) -> visp_proto::visp::LlmConfig {
+    visp_proto::visp::LlmConfig {
+        model: Some(config.model.clone()),
+        model_key: config.model_key.clone(),
+        temperature: Some(config.temperature),
+        max_tokens: Some(config.max_tokens),
+        max_context_tokens: Some(config.max_context_tokens),
+        extra: config.extra.clone(),
+    }
+}
+
+/// Construct ModelInfo from LlmModelConfig.
+pub fn model_config_to_info(mc: &LlmModelConfig) -> ModelInfo {
+    ModelInfo {
+        model: mc.model.clone(),
+        provider: mc.provider.clone(),
+        temperature: mc.temperature,
+        max_tokens: mc.max_tokens,
+        max_context_tokens: mc.max_context_tokens,
+        image_generation: mc.image_generation.unwrap_or(false),
+        use_tool: mc.use_tool,
+    }
+}
+
+/// Resolve a model_key to its LlmModelConfig from DaemonConfig.llm.models.
+pub fn resolve_model(model_key: &str, daemon_config: &DaemonConfig) -> Option<LlmModelConfig> {
+    daemon_config
+        .llm
+        .models
+        .iter()
+        .find(|mc| mc.matches_key(model_key))
+        .cloned()
+}
+
+/// Resolve the effective model_key using 4-tier cascade:
+/// 1. agent_model (if Some and exists in providers)
+/// 2. session_config.model_key (if Some and exists in providers)
+/// 3. session_config.model (if exists as direct key - backward compat)
+/// 4. daemon_config's default provider key
+///
+/// Note: This function checks against daemon_config.llm.models to see if a key exists.
+/// The orchestrator will then use the returned key to look up the actual provider instance.
+pub fn resolve_model_key(
+    agent_model: Option<&str>,
+    session_config: &LlmConfig,
+    daemon_config: &DaemonConfig,
+) -> String {
+    let exists = |key: &str| daemon_config.llm.models.iter().any(|mc| mc.matches_key(key));
+
+    if let Some(key) = agent_model
+        && exists(key)
+    {
+        return key.to_string();
+    }
+    if let Some(key) = &session_config.model_key
+        && exists(key)
+    {
+        return key.clone();
+    }
+    if exists(&session_config.model) {
+        return session_config.model.clone();
+    }
+    daemon_config.llm.resolve_default_key(&daemon_config.llm.models)
+}
+
+/// Apply model config overrides to an LlmConfig in-place.
+/// Sets model, provider, temperature, max_tokens, max_context_tokens,
+/// image_generation, use_tool from the LlmModelConfig.
+/// Optional fields are only applied when set (Some).
+pub fn apply_model_override(config: &mut LlmConfig, model_cfg: &LlmModelConfig) {
+    config.model = model_cfg.model.clone();
+    if let Some(provider) = &model_cfg.provider {
+        config.provider = Some(provider.clone());
+    }
+    if let Some(temperature) = model_cfg.temperature {
+        config.temperature = temperature;
+    }
+    if let Some(max_tokens) = model_cfg.max_tokens {
+        config.max_tokens = max_tokens;
+    }
+    if let Some(max_context_tokens) = model_cfg.max_context_tokens {
+        config.max_context_tokens = max_context_tokens;
+    }
+    if let Some(image_generation) = model_cfg.image_generation {
+        config.image_generation = image_generation;
+    }
+    if let Some(use_tool) = model_cfg.use_tool {
+        config.use_tool = use_tool;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2689,5 +2807,322 @@ mod tests_llmconfig {
         assert!(!config.langfuse_capture_output);
         assert_eq!(config.langfuse_capture_max_chars, 20000);
         assert!(config.langfuse_redact_secrets);
+    }
+}
+
+#[cfg(test)]
+mod tests_runtime_config {
+    use super::*;
+
+    fn mc(name: &str, provider: &str, model: &str) -> LlmModelConfig {
+        LlmModelConfig {
+            name: name.into(),
+            protocol: "openai".into(),
+            provider: Some(provider.into()),
+            model: model.into(),
+            api_key: None,
+            base_url: None,
+            temperature: None,
+            max_tokens: None,
+            max_context_tokens: None,
+            thinking_budget_tokens: None,
+            use_tool: None,
+            image_generation: None,
+            extra: Default::default(),
+        }
+    }
+
+    fn daemon_with(models: Vec<LlmModelConfig>, default: Option<&str>) -> DaemonConfig {
+        let mut cfg = default_config();
+        cfg.llm.models = models;
+        cfg.llm.default = default.map(str::to_string);
+        cfg
+    }
+
+    #[test]
+    fn test_proto_to_llm_config_full() {
+        let mut extra = HashMap::new();
+        extra.insert("thinking_budget_tokens".into(), "2048".into());
+        let proto = visp_proto::visp::LlmConfig {
+            model: Some("deepseek-v4-flash".into()),
+            model_key: Some("Opencode/DeepSeek v4 Flash".into()),
+            temperature: Some(0.2),
+            max_tokens: Some(8192),
+            max_context_tokens: Some(64_000),
+            extra: extra.clone(),
+        };
+        let config = proto_to_llm_config(&proto);
+        assert_eq!(config.model, "deepseek-v4-flash");
+        assert_eq!(config.model_key.as_deref(), Some("Opencode/DeepSeek v4 Flash"));
+        assert_eq!(config.temperature, 0.2);
+        assert_eq!(config.max_tokens, 8192);
+        assert_eq!(config.max_context_tokens, 64_000);
+        assert_eq!(config.extra, extra);
+    }
+
+    #[test]
+    fn test_proto_to_llm_config_empty() {
+        let config = proto_to_llm_config(&visp_proto::visp::LlmConfig::default());
+        assert_eq!(config, LlmConfig::default());
+    }
+
+    #[test]
+    fn test_proto_to_llm_config_partial() {
+        let proto = visp_proto::visp::LlmConfig {
+            model: Some("claude-3-7-sonnet-20250219".into()),
+            ..Default::default()
+        };
+        let config = proto_to_llm_config(&proto);
+        let default = LlmConfig::default();
+        assert_eq!(config.model, "claude-3-7-sonnet-20250219");
+        assert_eq!(config.model_key, None);
+        assert_eq!(config.temperature, default.temperature);
+        assert_eq!(config.max_tokens, default.max_tokens);
+        assert_eq!(config.max_context_tokens, default.max_context_tokens);
+        assert!(config.extra.is_empty());
+    }
+
+    #[test]
+    fn test_llm_config_to_proto() {
+        let mut extra = HashMap::new();
+        extra.insert("top_p".into(), "0.9".into());
+        let config = LlmConfig {
+            model: "gpt-4o-mini".into(),
+            model_key: Some("OpenAI/gpt-4o-mini".into()),
+            provider: Some("OpenAI".into()),
+            temperature: 0.1,
+            max_tokens: 2048,
+            max_context_tokens: 32_000,
+            extra: extra.clone(),
+            langfuse_enabled: true,
+            langfuse_session_id: Some("sess_abc".into()),
+            langfuse_trace_name: Some("visp.agent.run".into()),
+            use_tool: false,
+            image_generation: true,
+            ..Default::default()
+        };
+        let proto = llm_config_to_proto(&config);
+        // 6 fields mapped
+        assert_eq!(proto.model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(proto.model_key.as_deref(), Some("OpenAI/gpt-4o-mini"));
+        assert_eq!(proto.temperature, Some(0.1));
+        assert_eq!(proto.max_tokens, Some(2048));
+        assert_eq!(proto.max_context_tokens, Some(32_000));
+        assert_eq!(proto.extra, extra);
+        // 17 runtime-only fields dropped: proto 仅含上述 6 个字段，
+        // langfuse/use_tool/image_generation 等不会泄漏到 proto。
+        assert_eq!(proto.model, Some("gpt-4o-mini".into()));
+    }
+
+    #[test]
+    fn test_model_config_to_info() {
+        let mc = LlmModelConfig {
+            name: "ModelA".into(),
+            protocol: "anthropic".into(),
+            provider: Some("ProviderA".into()),
+            model: "model-a-api".into(),
+            api_key: Some("sk-xxx".into()),
+            base_url: Some("http://localhost:11434".into()),
+            temperature: Some(0.3),
+            max_tokens: Some(4096),
+            max_context_tokens: Some(100_000),
+            thinking_budget_tokens: Some(2048),
+            use_tool: Some(false),
+            image_generation: Some(true),
+            extra: Default::default(),
+        };
+        let info = model_config_to_info(&mc);
+        assert_eq!(info.model, "model-a-api");
+        assert_eq!(info.provider.as_deref(), Some("ProviderA"));
+        assert_eq!(info.temperature, Some(0.3));
+        assert_eq!(info.max_tokens, Some(4096));
+        assert_eq!(info.max_context_tokens, Some(100_000));
+        assert!(info.image_generation);
+        assert_eq!(info.use_tool, Some(false));
+    }
+
+    #[test]
+    fn test_model_config_to_info_minimal() {
+        let mc = LlmModelConfig {
+            name: "ModelA".into(),
+            protocol: "openai".into(),
+            provider: None,
+            model: "model-a-api".into(),
+            api_key: None,
+            base_url: None,
+            temperature: None,
+            max_tokens: None,
+            max_context_tokens: None,
+            thinking_budget_tokens: None,
+            use_tool: None,
+            image_generation: None,
+            extra: Default::default(),
+        };
+        let info = model_config_to_info(&mc);
+        assert_eq!(info.model, "model-a-api");
+        assert_eq!(info.provider, None);
+        assert_eq!(info.temperature, None);
+        assert_eq!(info.max_tokens, None);
+        assert_eq!(info.max_context_tokens, None);
+        assert!(!info.image_generation);
+        assert_eq!(info.use_tool, None);
+    }
+
+    #[test]
+    fn test_resolve_model_found() {
+        let cfg = daemon_with(vec![mc("ModelA", "ProviderA", "model-a-api")], None);
+        let resolved = resolve_model("ProviderA/ModelA", &cfg).unwrap();
+        assert_eq!(resolved.name, "ModelA");
+        assert_eq!(resolved.model, "model-a-api");
+        // model_alias 格式 {provider}/{model} 也能匹配
+        let resolved_alias = resolve_model("ProviderA/model-a-api", &cfg).unwrap();
+        assert_eq!(resolved_alias.name, "ModelA");
+    }
+
+    #[test]
+    fn test_resolve_model_not_found() {
+        let cfg = daemon_with(vec![mc("ModelA", "ProviderA", "model-a-api")], None);
+        assert!(resolve_model("ProviderA/Missing", &cfg).is_none());
+        assert!(resolve_model("ProviderB/ModelA", &cfg).is_none());
+    }
+
+    #[test]
+    fn test_resolve_model_key_agent() {
+        let cfg = daemon_with(
+            vec![
+                mc("ModelA", "ProviderA", "model-a-api"),
+                mc("ModelB", "ProviderB", "model-b-api"),
+            ],
+            Some("ProviderA/ModelA"),
+        );
+        let session = LlmConfig {
+            model_key: Some("ProviderB/ModelB".into()),
+            ..Default::default()
+        };
+        // agent_model 优先级最高，即使 session 指定了别的 key
+        assert_eq!(
+            resolve_model_key(Some("ProviderA/ModelA"), &session, &cfg),
+            "ProviderA/ModelA"
+        );
+    }
+
+    #[test]
+    fn test_resolve_model_key_session() {
+        let cfg = daemon_with(
+            vec![
+                mc("ModelA", "ProviderA", "model-a-api"),
+                mc("ModelB", "ProviderB", "model-b-api"),
+            ],
+            Some("ProviderA/ModelA"),
+        );
+        let session = LlmConfig {
+            model_key: Some("ProviderB/ModelB".into()),
+            ..Default::default()
+        };
+        // agent_model 缺失时回退到 session.model_key
+        assert_eq!(resolve_model_key(None, &session, &cfg), "ProviderB/ModelB");
+    }
+
+    #[test]
+    fn test_resolve_model_key_session_model() {
+        let cfg = daemon_with(vec![mc("ModelA", "ProviderA", "model-a-api")], Some("ProviderA/ModelA"));
+        // 旧配置：session.model 直接就是 {provider}/{model} key
+        let session = LlmConfig {
+            model: "ProviderA/model-a-api".into(),
+            model_key: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_model_key(None, &session, &cfg),
+            "ProviderA/model-a-api"
+        );
+    }
+
+    #[test]
+    fn test_resolve_model_key_default() {
+        let cfg = daemon_with(
+            vec![
+                mc("ModelA", "ProviderA", "model-a-api"),
+                mc("ModelB", "ProviderB", "model-b-api"),
+            ],
+            Some("ProviderA/ModelA"),
+        );
+        let session = LlmConfig {
+            model: "nonexistent".into(),
+            model_key: Some("ProviderX/Missing".into()),
+            ..Default::default()
+        };
+        // 全部失败时回退到 llm.default
+        assert_eq!(
+            resolve_model_key(Some("ProviderY/Ghost"), &session, &cfg),
+            "ProviderA/ModelA"
+        );
+    }
+
+    #[test]
+    fn test_apply_model_override_full() {
+        let mc = LlmModelConfig {
+            name: "ModelA".into(),
+            protocol: "anthropic".into(),
+            provider: Some("ProviderA".into()),
+            model: "model-a-api".into(),
+            api_key: None,
+            base_url: None,
+            temperature: Some(0.1),
+            max_tokens: Some(2048),
+            max_context_tokens: Some(50_000),
+            thinking_budget_tokens: None,
+            use_tool: Some(false),
+            image_generation: Some(true),
+            extra: Default::default(),
+        };
+        let mut config = LlmConfig::default();
+        apply_model_override(&mut config, &mc);
+        assert_eq!(config.model, "model-a-api");
+        assert_eq!(config.provider.as_deref(), Some("ProviderA"));
+        assert_eq!(config.temperature, 0.1);
+        assert_eq!(config.max_tokens, 2048);
+        assert_eq!(config.max_context_tokens, 50_000);
+        assert!(config.image_generation);
+        assert!(!config.use_tool);
+    }
+
+    #[test]
+    fn test_apply_model_override_partial() {
+        let mc = LlmModelConfig {
+            name: "ModelA".into(),
+            protocol: "anthropic".into(),
+            provider: None,
+            model: "model-a-api".into(),
+            api_key: None,
+            base_url: None,
+            temperature: Some(0.5),
+            max_tokens: None,
+            max_context_tokens: None,
+            thinking_budget_tokens: None,
+            use_tool: None,
+            image_generation: None,
+            extra: Default::default(),
+        };
+        let mut config = LlmConfig {
+            model: "old-model".into(),
+            provider: Some("OldProvider".into()),
+            temperature: 0.9,
+            max_tokens: 999,
+            max_context_tokens: 111_000,
+            use_tool: false,
+            image_generation: true,
+            ..Default::default()
+        };
+        apply_model_override(&mut config, &mc);
+        // model 非 Option，总是覆盖
+        assert_eq!(config.model, "model-a-api");
+        // 其余字段仅当 Some 时覆盖
+        assert_eq!(config.provider.as_deref(), Some("OldProvider"));
+        assert_eq!(config.temperature, 0.5);
+        assert_eq!(config.max_tokens, 999);
+        assert_eq!(config.max_context_tokens, 111_000);
+        assert!(config.image_generation);
+        assert!(!config.use_tool);
     }
 }

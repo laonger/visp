@@ -4,9 +4,10 @@ use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
 use tracing::Instrument;
 use tracing::field;
+use visp_config::LlmConfig;
 use visp_core::error::LlmError;
 use visp_core::message::{Message, Role, ToolDefinition};
-use visp_core::provider::{ChatEvent, LlmConfig, LlmProvider};
+use visp_core::provider::{ChatEvent, LlmProvider};
 
 use crate::image_util;
 use crate::util::{build_client, parse_retry_after};

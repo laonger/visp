@@ -1,9 +1,10 @@
 use async_trait::async_trait;
 use futures::stream::{self};
 use std::pin::Pin;
+use visp_config::LlmConfig;
 use visp_core::error::LlmError;
 use visp_core::message::{Message, ToolDefinition};
-use visp_core::provider::{ChatEvent, LlmConfig, LlmProvider};
+use visp_core::provider::{ChatEvent, LlmProvider};
 
 /// Mock provider，用于测试
 pub struct MockProvider {

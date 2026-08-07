@@ -116,6 +116,7 @@ pub fn expand_home(path: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     fn set_home(val: Option<&str>) {
         match val {
@@ -127,7 +128,7 @@ mod tests {
     #[test]
     fn test_project_dir() {
         let dir = project_dir();
-        assert!(dir.is_absolute() || dir == PathBuf::from("."));
+        assert!(dir.is_absolute() || dir == *".");
     }
 
     #[test]
@@ -137,6 +138,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_global_config_dir() {
         set_home(Some("/home/user"));
         assert_eq!(
@@ -146,18 +148,21 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_global_config_dir_no_home() {
         set_home(None);
         assert_eq!(global_config_dir(), None);
     }
 
     #[test]
+    #[serial]
     fn test_global_data_dir() {
         set_home(Some("/home/user"));
         assert_eq!(global_data_dir(), Some(PathBuf::from("/home/user/.visp")));
     }
 
     #[test]
+    #[serial]
     fn test_daemon_toml_paths() {
         let project = Path::new("/proj");
         assert_eq!(
@@ -172,6 +177,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_rules_dir_paths() {
         let project = Path::new("/proj");
         assert_eq!(
@@ -186,6 +192,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_skills_dir_paths() {
         let project = Path::new("/proj");
         assert_eq!(
@@ -200,6 +207,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_agents_dir_paths() {
         let project = Path::new("/proj");
         assert_eq!(
@@ -223,6 +231,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_system_prompt_paths() {
         let project = Path::new("/proj");
         assert_eq!(
@@ -237,6 +246,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_global_agents_md() {
         set_home(Some("/home/user"));
         assert_eq!(
@@ -255,6 +265,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_log_dir() {
         set_home(Some("/home/user"));
         assert_eq!(log_dir(), Some(PathBuf::from("/home/user/.visp/logs")));
@@ -268,6 +279,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_expand_home_with_tilde() {
         set_home(Some("/home/user"));
         assert_eq!(expand_home("~/foo"), PathBuf::from("/home/user/foo"));
@@ -280,6 +292,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_expand_home_no_home() {
         set_home(None);
         // When HOME is not set, return the path as-is
@@ -287,6 +300,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_home_dir() {
         set_home(Some("/home/user"));
         assert_eq!(home_dir(), Some(PathBuf::from("/home/user")));

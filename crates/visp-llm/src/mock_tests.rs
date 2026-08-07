@@ -14,7 +14,7 @@ async fn test_mock_returns_preset_events() {
         .chat_stream(
             &[],
             &[],
-            &visp_core::provider::LlmConfig::default(),
+            &visp_config::LlmConfig::default(),
             &cancel,
         )
         .await
@@ -39,7 +39,7 @@ async fn test_mock_empty_queue() {
         .chat_stream(
             &[],
             &[],
-            &visp_core::provider::LlmConfig::default(),
+            &visp_config::LlmConfig::default(),
             &cancel,
         )
         .await
@@ -94,7 +94,7 @@ async fn test_chat_stream_cancel_returns_cancelled_within_50ms() {
             .chat_stream(
                 &[],
                 &[],
-                &visp_core::provider::LlmConfig::default(),
+                &visp_config::LlmConfig::default(),
                 &cancel_clone,
             )
             .await
