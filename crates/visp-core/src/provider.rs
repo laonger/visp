@@ -1,99 +1,16 @@
 use async_trait::async_trait;
 use futures::stream::Stream;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::pin::Pin;
 
 use crate::error::LlmError;
 use crate::message::{Message, ToolDefinition};
 
-/// LLM 配置参数
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LlmConfig {
-    /// API model key（发送到 LLM API 的 model 字段，如 "deepseek-v4-flash"）
-    pub model: String,
-    /// Provider lookup key（格式 "{provider}/{name}"，如 "Opencode/DeepSeek v4 Flash"）。
-    /// 用于从 providers HashMap 中查找正确的 provider 实例。
-    /// None 时回退到 default_provider_key。
-    pub model_key: Option<String>,
-    /// Provider 名称（来自 daemon.toml [[llm.models]] provider 字段，缺省时为 protocol）。
-    /// 用于 trace span 和 metrics summary 中记录 gen_ai.provider.name。
-    pub provider: Option<String>,
-    /// 温度（0.0-2.0）
-    pub temperature: f64,
-    /// 最大 token 数
-    pub max_tokens: u32,
-    /// 最大上下文 token 数（默认 128_000）
-    pub max_context_tokens: u32,
-    /// 扩展参数（provider 特定参数）
-    pub extra: HashMap<String, String>,
-    /// Langfuse 总开关（控制 gen_ai.client.operation span 上 trace 级字段记录）
-    pub langfuse_enabled: bool,
-    /// Langfuse session.id（若不设置则不记录）
-    pub langfuse_session_id: Option<String>,
-    /// Langfuse trace.name（若不设置则不记录）
-    pub langfuse_trace_name: Option<String>,
-    /// Langfuse user.id 字段值（None = 不设置）
-    pub langfuse_user_id: Option<String>,
-    /// Langfuse tags 字段值（JSON 字符串，None = 不设置）
-    pub langfuse_tags: Option<String>,
-    /// Langfuse environment 字段
-    pub langfuse_environment: Option<String>,
-    /// Langfuse release 字段
-    pub langfuse_release: Option<String>,
-    /// Langfuse version 字段
-    pub langfuse_version: Option<String>,
-    /// Langfuse public 开关（None = 不设置）
-    pub langfuse_public: Option<bool>,
-    /// Langfuse metadata（值均为字符串，记录到 span 时序列化为紧凑 JSON）
-    pub langfuse_metadata: Option<HashMap<String, String>>,
-    /// 是否在 Langfuse OTEL span 中记录 LLM generation input
-    pub langfuse_capture_input: bool,
-    /// 是否在 Langfuse OTEL span 中记录 LLM generation output
-    pub langfuse_capture_output: bool,
-    /// Langfuse capture 最大字符数（超出截断）
-    pub langfuse_capture_max_chars: usize,
-    /// 是否脱敏敏感字段（api_key/token/secret/password 等）
-    pub langfuse_redact_secrets: bool,
-    /// 是否在请求中携带工具定义（false 时请求不带 tools）
-    pub use_tool: bool,
-    /// 是否为文生图模型（true 时使用 /images/generations 端点）
-    pub image_generation: bool,
-}
-
-impl Default for LlmConfig {
-    fn default() -> Self {
-        Self {
-            model: "claude-3-7-sonnet-20250219".to_string(),
-            model_key: None,
-            provider: None,
-            temperature: 0.7,
-            max_tokens: 4096,
-            max_context_tokens: 128_000,
-            extra: HashMap::new(),
-            langfuse_enabled: false,
-            langfuse_session_id: None,
-            langfuse_trace_name: None,
-            langfuse_user_id: None,
-            langfuse_tags: None,
-            langfuse_environment: None,
-            langfuse_release: None,
-            langfuse_version: None,
-            langfuse_public: None,
-            langfuse_metadata: None,
-            langfuse_capture_input: false,
-            langfuse_capture_output: false,
-            langfuse_capture_max_chars: 20_000,
-            langfuse_redact_secrets: true,
-            use_tool: true,
-            image_generation: false,
-        }
-    }
-}
+pub use visp_config::{LlmConfig, ModelInfo};
 
 #[cfg(test)]
 mod tests_llmconfig {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_llmconfig_default() {
@@ -238,29 +155,6 @@ mod tests_llmconfig {
         assert_eq!(config.langfuse_capture_max_chars, 20000);
         assert!(config.langfuse_redact_secrets);
     }
-}
-
-/// 模型元信息，用于 agent 级别的模型覆盖。
-///
-/// 当 agent 定义中指定了 `model` key（如 `"Opencode/deepseek-v4-flash"`）时，
-/// orchestrator 通过此结构解析出实际的 API model 字符串、provider 名称等，
-/// 覆盖从父会话继承的 `LlmConfig`。
-#[derive(Debug, Clone)]
-pub struct ModelInfo {
-    /// 发送到 LLM API 的 model 字段（如 "deepseek-v4-flash"）
-    pub model: String,
-    /// Provider 名称（来自 daemon.toml [[llm.models]] provider 字段）
-    pub provider: Option<String>,
-    /// 默认温度
-    pub temperature: Option<f64>,
-    /// 默认 max_tokens
-    pub max_tokens: Option<u32>,
-    /// 默认 max_context_tokens
-    pub max_context_tokens: Option<u32>,
-    /// 是否为文生图模型（使用 /images/generations 端点）
-    pub image_generation: bool,
-    /// 是否在请求中携带工具定义
-    pub use_tool: Option<bool>,
 }
 
 /// LLM 流式响应中的事件
