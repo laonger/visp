@@ -94,6 +94,9 @@ fn create_llm_provider(config: &LlmModelConfig) -> Result<Arc<dyn LlmProvider>, 
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 0. Initialize global config if not exists
+    visp_config::init_config().map_err(|e| format!("init config: {e}"))?;
+
     // 1. Load config
     let config_path = std::env::args().nth(1).map(std::path::PathBuf::from);
     let config: DaemonConfig =

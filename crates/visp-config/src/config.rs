@@ -842,6 +842,49 @@ fn load_from_file(path: &Path) -> Result<DaemonConfig, String> {
     toml::from_str(&content).map_err(|e| format!("parse config: {}", e))
 }
 
+/// Initialize the global visp config directory tree and default config file.
+///
+/// If `~/.config/visp/daemon.toml` does not exist:
+/// 1. Create `~/.config/visp/` directory
+/// 2. Create `agents/`, `rules/`, `skills/` subdirectories
+/// 3. Write default config to `~/.config/visp/daemon.toml`
+///
+/// If the config file already exists, this is a no-op.
+/// Returns `Err` if `HOME` is not set.
+pub fn init_config() -> Result<(), String> {
+    let config_dir = path::global_config_dir()
+        .ok_or_else(|| "HOME not set, cannot determine global config dir".to_string())?;
+    let config_path = config_dir.join("daemon.toml");
+    if config_path.exists() {
+        return Ok(());
+    }
+
+    // Create directory tree
+    std::fs::create_dir_all(&config_dir)
+        .map_err(|e| format!("Failed to create config directory: {e}"))?;
+
+    for sub in ["agents", "rules", "skills"] {
+        std::fs::create_dir_all(config_dir.join(sub))
+            .map_err(|e| format!("Failed to create {sub} directory: {e}"))?;
+    }
+
+    // Write default config
+    let config = default_config();
+    let content =
+        toml::to_string_pretty(&config).map_err(|e| format!("Failed to serialize config: {e}"))?;
+
+    let tmp = config_path.with_extension("toml.visp-tmp");
+    std::fs::write(&tmp, &content).map_err(|e| format!("Failed to write temp file: {e}"))?;
+    std::fs::rename(&tmp, &config_path).map_err(|e| format!("Failed to rename temp file: {e}"))?;
+
+    tracing::info!(
+        path = %config_path.display(),
+        "created default global config"
+    );
+
+    Ok(())
+}
+
 /// 将配置原子写入 `{project}/.visp/daemon.toml`。
 ///
 /// 全量序列化传入的 `DaemonConfig`，不做脱敏。
@@ -1302,6 +1345,66 @@ mod tests {
     use serial_test::serial;
     use std::io::Write;
     use std::path::PathBuf;
+
+    #[test]
+    #[serial]
+    fn test_init_config_creates_dir_tree_and_default_config() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Save and override HOME
+        let original_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+
+        init_config().unwrap();
+
+        let config_dir = tmp.path().join(".config").join("visp");
+
+        // daemon.toml exists
+        let config_path = config_dir.join("daemon.toml");
+        assert!(config_path.exists(), "daemon.toml should exist");
+
+        // Subdirectories exist
+        for sub in ["agents", "rules", "skills"] {
+            assert!(
+                config_dir.join(sub).is_dir(),
+                "{sub} directory should exist"
+            );
+        }
+
+        // Config is valid and matches default
+        let loaded: DaemonConfig = toml::from_str(&std::fs::read_to_string(&config_path).unwrap())
+            .expect("written config should parse");
+        assert_eq!(loaded.llm.default, default_config().llm.default);
+
+        // Restore HOME
+        match original_home {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_init_config_is_noop_when_config_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let original_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+
+        init_config().unwrap();
+        let config_path = tmp.path().join(".config").join("visp").join("daemon.toml");
+        let original = std::fs::read_to_string(&config_path).unwrap();
+
+        // Call again: should be a no-op, content unchanged
+        init_config().unwrap();
+        let after = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(original, after);
+
+        match original_home {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
 
     #[test]
     fn test_merge_llm_sections_project_overrides_global_api_key_and_base_url() {
