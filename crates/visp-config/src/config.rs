@@ -4,14 +4,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 /// MCP 配置（daemon.toml 中的 [mcp] section）
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct McpConfig {
     #[serde(default)]
     pub servers: Vec<McpServerConfig>,
 }
 
 /// 单个 MCP 服务器配置
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// 唯一标识名
     pub name: String,
@@ -37,7 +37,7 @@ fn default_tool_timeout() -> u64 {
 }
 
 /// MCP 传输方式
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum McpTransport {
     /// 子进程方式：daemon 启动并管理
@@ -105,7 +105,7 @@ fn default_call_endpoint() -> String {
     "/call".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {
     #[serde(default = "default_daemon_section")]
     pub daemon: DaemonSection,
@@ -142,7 +142,7 @@ impl Default for DaemonConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonSection {
     #[serde(default = "default_listen_addr")]
     pub listen_addr: String,
@@ -151,7 +151,7 @@ pub struct DaemonSection {
     pub log_level: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LlmSection {
     /// Claude thinking 模式预算 token 数（如 2048）
     #[serde(default)]
@@ -174,7 +174,7 @@ pub struct LlmSection {
 }
 
 /// 单个 LLM 模型配置
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmModelConfig {
     /// 模型显示名（在 /model 列表中展示）
     pub name: String,
@@ -482,7 +482,7 @@ fn merge_agent_builtins(global: &mut Vec<BuiltinAgentConfig>, project: &[Builtin
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsSection {
     #[allow(dead_code)]
     #[serde(default = "default_bash_timeout")]
@@ -492,7 +492,7 @@ pub struct ToolsSection {
     pub file_max_size_bytes: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSection {
     #[serde(default = "default_soft_limit", alias = "max_iterations")]
     pub soft_limit: u32,
@@ -522,7 +522,7 @@ pub struct AgentSection {
 /// model = "Opencode/deepseek-v4-flash"
 /// temperature = 0.1
 /// ```
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuiltinAgentConfig {
     /// 内置 agent 名称，如 "explorer"、"fixer"
     pub name: String,
@@ -537,7 +537,7 @@ pub struct BuiltinAgentConfig {
     pub steps: Option<u32>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StorageSection {
     #[serde(default = "default_storage_driver")]
     pub driver: String,
