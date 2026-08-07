@@ -79,6 +79,10 @@ fn build_subagent_prompt(registry: &AgentRegistry) -> String {
     for def in subs {
         prompt.push_str(&format!("  - `{}` — {}\n", def.name, def.description));
     }
+    prompt.push_str(
+        "\nPrefer `explorer` for codebase search and `fixer` for code changes. \
+         Delegate implementation tasks to `fixer` whenever the change is non-trivial.\n",
+    );
     prompt
 }
 

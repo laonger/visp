@@ -124,7 +124,7 @@ fn register_explorer(registry: &mut AgentRegistry) {
 fn register_fixer(registry: &mut AgentRegistry) {
     let fixer = AgentDefinition {
         name: "fixer".to_string(),
-        description: "快速实现专家。接收完整上下文和任务规格，高效执行代码变更。"
+        description: "快速实现专家。Prefer this for all non-trivial code implementation tasks."
             .to_string(),
         mode: AgentMode::Subagent,
         model: None,
