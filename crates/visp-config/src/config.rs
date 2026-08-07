@@ -842,6 +842,34 @@ fn load_from_file(path: &Path) -> Result<DaemonConfig, String> {
     toml::from_str(&content).map_err(|e| format!("parse config: {}", e))
 }
 
+/// 将配置原子写入 `{project}/.visp/daemon.toml`。
+///
+/// 全量序列化传入的 `DaemonConfig`，不做脱敏。
+/// 写入策略：先写临时文件 `{target}.visp-tmp`，再 rename 到目标路径，
+/// 保证写入过程中即使崩溃也不会产生损坏的配置文件。
+pub fn save_config(config: &DaemonConfig, project: &Path) -> Result<(), String> {
+    let target = path::daemon_toml_project(project);
+
+    // 确保 .visp/ 目录存在
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create .visp directory: {e}"))?;
+    }
+
+    // 序列化为 TOML
+    let content = toml::to_string_pretty(config)
+        .map_err(|e| format!("Failed to serialize config: {e}"))?;
+
+    // 原子写入：先写临时文件，再 rename
+    let tmp = target.with_extension("toml.visp-tmp");
+    std::fs::write(&tmp, &content)
+        .map_err(|e| format!("Failed to write temp file: {e}"))?;
+    std::fs::rename(&tmp, &target)
+        .map_err(|e| format!("Failed to rename temp file: {e}"))?;
+
+    Ok(())
+}
+
 fn default_daemon_section() -> DaemonSection {
     DaemonSection {
         listen_addr: default_listen_addr(),
@@ -2925,6 +2953,130 @@ soft_limit = 50
         };
         // 使用 {provider}/{model} 格式也能匹配
         assert_eq!(section.resolve_default_key(&models), "ProviderB/ModelB");
+    }
+
+    // ── save_config tests ────────────────────────────────────
+
+    fn make_test_config() -> DaemonConfig {
+        let toml_str = r#"
+[daemon]
+listen_addr = "[::1]:50051"
+
+[llm]
+default = "Anthropic/Sonnet"
+[[llm.models]]
+name = "Sonnet"
+protocol = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key = "sk-test-key"
+base_url = "https://api.anthropic.com"
+
+[agent]
+soft_limit = 30
+"#;
+        toml::from_str(toml_str).unwrap()
+    }
+
+    #[test]
+    fn test_save_config_creates_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = make_test_config();
+        save_config(&config, dir.path()).unwrap();
+
+        let target = dir.path().join(".visp/daemon.toml");
+        assert!(target.exists(), "daemon.toml should exist");
+
+        let content = std::fs::read_to_string(&target).unwrap();
+        assert!(content.contains("[daemon]"));
+        assert!(content.contains("[llm]"));
+        assert!(content.contains("claude-sonnet-4-20250514"));
+    }
+
+    #[test]
+    fn test_save_config_creates_dir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // .visp/ 不存在
+        assert!(!dir.path().join(".visp").exists());
+
+        let config = make_test_config();
+        save_config(&config, dir.path()).unwrap();
+
+        assert!(dir.path().join(".visp/daemon.toml").exists());
+    }
+
+    #[test]
+    fn test_save_config_overwrites() {
+        let dir = tempfile::TempDir::new().unwrap();
+
+        // 先写入旧内容
+        let config1 = make_test_config();
+        save_config(&config1, dir.path()).unwrap();
+
+        // 修改后再次写入
+        let mut config2 = make_test_config();
+        config2.daemon.listen_addr = "[::1]:99999".into();
+        save_config(&config2, dir.path()).unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join(".visp/daemon.toml")).unwrap();
+        assert!(content.contains("99999"));
+        assert!(!content.contains("50051"));
+    }
+
+    #[test]
+    fn test_save_config_preserves_api_key() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = make_test_config();
+        save_config(&config, dir.path()).unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join(".visp/daemon.toml")).unwrap();
+        assert!(content.contains("sk-test-key"), "api_key should be preserved");
+    }
+
+    #[test]
+    fn test_save_config_roundtrip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = make_test_config();
+        save_config(&config, dir.path()).unwrap();
+
+        let target = dir.path().join(".visp/daemon.toml");
+        let loaded = load_from_file(&target).unwrap();
+
+        assert_eq!(loaded.daemon.listen_addr, config.daemon.listen_addr);
+        assert_eq!(loaded.llm.default, config.llm.default);
+        assert_eq!(loaded.llm.models.len(), 1);
+        assert_eq!(loaded.llm.models[0].model, "claude-sonnet-4-20250514");
+        assert_eq!(loaded.llm.models[0].api_key.as_deref(), Some("sk-test-key"));
+        assert_eq!(loaded.agent.soft_limit, 30);
+    }
+
+    #[test]
+    fn test_save_config_no_temp_residue() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = make_test_config();
+        save_config(&config, dir.path()).unwrap();
+
+        // 不应残留临时文件
+        let visp_dir = dir.path().join(".visp");
+        let entries: Vec<_> = std::fs::read_dir(&visp_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !entries.iter().any(|n| n.ends_with(".visp-tmp")),
+            "temp file residue found: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn test_save_config_toml_parseable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = make_test_config();
+        save_config(&config, dir.path()).unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join(".visp/daemon.toml")).unwrap();
+        // 可被 toml::from_str 正常解析
+        let parsed: DaemonConfig = toml::from_str(&content).unwrap();
+        assert_eq!(parsed.llm.models.len(), 1);
     }
 }
 
