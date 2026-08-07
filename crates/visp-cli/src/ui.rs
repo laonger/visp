@@ -299,11 +299,24 @@ fn calc_input_height(textarea: &ratatui_textarea::TextArea<'static>, width_appro
     total.clamp(3, 10)
 }
 
-/// 计算确认栏所需高度：1 行消息 + 每个选项行（含折行）。
-/// 选项前缀 `[A] ` 占 4 列显示宽度。顶部 border 占 1 行。
+/// 计算确认栏所需高度：消息行（含折行）+ 每个选项行（含折行）。
+/// 消息前缀 "❓ " 占约 2 列显示宽度。选项前缀 `[A] ` 占 4 列显示宽度。顶部 border 占 1 行。
 fn calc_confirm_height(confirm: &ConfirmState, width_approx: u16) -> u16 {
-    let content_width = if width_approx > 4 {
-        width_approx as usize - 4 // 减去 "[A] " 前缀
+    let msg_prefix_width: usize = 2; // "❓ "
+    let opt_prefix_width: usize = 4; // "[A] "
+
+    // 消息行折行计算
+    let msg_content_width = if (width_approx as usize) > msg_prefix_width {
+        width_approx as usize - msg_prefix_width
+    } else {
+        1
+    };
+    let msg_w = UnicodeWidthStr::width(confirm.message.as_str()) as u16;
+    let msg_lines = std::cmp::max(1, msg_w.div_ceil(msg_content_width.max(1) as u16));
+
+    // 选项行折行计算
+    let opt_content_width = if (width_approx as usize) > opt_prefix_width {
+        width_approx as usize - opt_prefix_width
     } else {
         1
     };
@@ -312,10 +325,10 @@ fn calc_confirm_height(confirm: &ConfirmState, width_approx: u16) -> u16 {
     } else {
         confirm.options.clone()
     };
-    let mut total: u16 = 1; // 消息行
+    let mut total: u16 = msg_lines; // 消息行（可能多行）
     for opt in &options {
         let w = UnicodeWidthStr::width(opt.as_str()) as u16;
-        total += std::cmp::max(1, w.div_ceil(content_width.max(1) as u16));
+        total += std::cmp::max(1, w.div_ceil(opt_content_width.max(1) as u16));
     }
     if !confirm.options.is_empty() {
         total += 1; // Other 选项行
