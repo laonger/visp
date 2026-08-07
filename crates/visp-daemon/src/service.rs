@@ -247,10 +247,8 @@ impl CoderDaemon for CoderDaemonService {
     ) -> Result<Response<proto::Session>, Status> {
         let req = request.into_inner();
         // 从客户端配置开始，用 daemon 默认值合并未设置的字段（visp_config）
-        let mut config = visp_config::merge_session_config(
-            req.config.as_ref(),
-            &self.daemon_config,
-        );
+        let mut config =
+            visp_config::merge_session_config(req.config.as_ref(), &self.daemon_config);
         // merge_session_config 不处理 langfuse 与哨兵值回填，这里用 daemon 默认值补齐
         config.langfuse_enabled = self.default_llm_config.langfuse_enabled;
         config.langfuse_session_id = None;

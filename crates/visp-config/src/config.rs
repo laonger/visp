@@ -857,15 +857,13 @@ pub fn save_config(config: &DaemonConfig, project: &Path) -> Result<(), String> 
     }
 
     // 序列化为 TOML
-    let content = toml::to_string_pretty(config)
-        .map_err(|e| format!("Failed to serialize config: {e}"))?;
+    let content =
+        toml::to_string_pretty(config).map_err(|e| format!("Failed to serialize config: {e}"))?;
 
     // 原子写入：先写临时文件，再 rename
     let tmp = target.with_extension("toml.visp-tmp");
-    std::fs::write(&tmp, &content)
-        .map_err(|e| format!("Failed to write temp file: {e}"))?;
-    std::fs::rename(&tmp, &target)
-        .map_err(|e| format!("Failed to rename temp file: {e}"))?;
+    std::fs::write(&tmp, &content).map_err(|e| format!("Failed to write temp file: {e}"))?;
+    std::fs::rename(&tmp, &target).map_err(|e| format!("Failed to rename temp file: {e}"))?;
 
     Ok(())
 }
@@ -994,7 +992,13 @@ pub fn resolve_model_key(
     session_config: &LlmConfig,
     daemon_config: &DaemonConfig,
 ) -> String {
-    let exists = |key: &str| daemon_config.llm.models.iter().any(|mc| mc.matches_key(key));
+    let exists = |key: &str| {
+        daemon_config
+            .llm
+            .models
+            .iter()
+            .any(|mc| mc.matches_key(key))
+    };
 
     if let Some(key) = agent_model
         && exists(key)
@@ -1009,7 +1013,9 @@ pub fn resolve_model_key(
     if exists(&session_config.model) {
         return session_config.model.clone();
     }
-    daemon_config.llm.resolve_default_key(&daemon_config.llm.models)
+    daemon_config
+        .llm
+        .resolve_default_key(&daemon_config.llm.models)
 }
 
 /// Apply model config overrides to an LlmConfig in-place.
@@ -1795,8 +1801,12 @@ file_max_size_bytes = 256000
         // 设置 HOME 指向临时目录
         let original_home = std::env::var("HOME").ok();
         // 清理环境变量覆盖项，避免外部环境（如 CI）干扰测试结果
-        const OVERRIDE_VARS: [&str; 4] =
-            ["VISP_LISTEN_ADDR", "RUST_LOG", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"];
+        const OVERRIDE_VARS: [&str; 4] = [
+            "VISP_LISTEN_ADDR",
+            "RUST_LOG",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+        ];
         let original_overrides: Vec<(String, Option<String>)> = OVERRIDE_VARS
             .iter()
             .map(|k| (k.to_string(), std::env::var(k).ok()))
@@ -1852,8 +1862,12 @@ file_max_size_bytes = 256000
 
         let original_home = std::env::var("HOME").ok();
         // 记录并清理全部环境变量覆盖项，再设置本次测试的 env vars
-        const OVERRIDE_VARS: [&str; 4] =
-            ["VISP_LISTEN_ADDR", "RUST_LOG", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"];
+        const OVERRIDE_VARS: [&str; 4] = [
+            "VISP_LISTEN_ADDR",
+            "RUST_LOG",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+        ];
         let originals: Vec<(String, Option<String>)> = OVERRIDE_VARS
             .iter()
             .map(|k| (k.to_string(), std::env::var(k).ok()))
@@ -1901,8 +1915,9 @@ listen_addr = "[::1]:50051"
 
 [agent]
 "#;
-        let config = run_load_config_with_env(global_toml, &[("VISP_LISTEN_ADDR", Some("0.0.0.0:9999"))])
-            .unwrap();
+        let config =
+            run_load_config_with_env(global_toml, &[("VISP_LISTEN_ADDR", Some("0.0.0.0:9999"))])
+                .unwrap();
         assert_eq!(config.daemon.listen_addr, "0.0.0.0:9999");
     }
 
@@ -1919,8 +1934,7 @@ listen_addr = "[::1]:50051"
 
 [agent]
 "#;
-        let config =
-            run_load_config_with_env(global_toml, &[("RUST_LOG", Some("debug"))]).unwrap();
+        let config = run_load_config_with_env(global_toml, &[("RUST_LOG", Some("debug"))]).unwrap();
         assert_eq!(config.observability.level, "debug");
     }
 
@@ -1946,8 +1960,9 @@ model = "claude-sonnet-4-20250514"
 
 [agent]
 "#;
-        let config = run_load_config_with_env(global_toml, &[("OPENAI_API_KEY", Some("sk-openai-123"))])
-            .unwrap();
+        let config =
+            run_load_config_with_env(global_toml, &[("OPENAI_API_KEY", Some("sk-openai-123"))])
+                .unwrap();
         assert_eq!(
             config.llm.models[0].api_key.as_deref(),
             Some("sk-openai-123")
@@ -1978,12 +1993,10 @@ model = "gpt-4o"
 
 [agent]
 "#;
-        let config = run_load_config_with_env(global_toml, &[("ANTHROPIC_API_KEY", Some("sk-ant-123"))])
-            .unwrap();
-        assert_eq!(
-            config.llm.models[0].api_key.as_deref(),
-            Some("sk-ant-123")
-        );
+        let config =
+            run_load_config_with_env(global_toml, &[("ANTHROPIC_API_KEY", Some("sk-ant-123"))])
+                .unwrap();
+        assert_eq!(config.llm.models[0].api_key.as_deref(), Some("sk-ant-123"));
         // openai 模型不应被 anthropic key 回填
         assert_eq!(config.llm.models[1].api_key, None);
     }
@@ -2007,8 +2020,8 @@ model = "deepseek-v3"
 
 [agent]
 "#;
-        let config = run_load_config_with_env(global_toml, &[("OPENAI_API_KEY", Some("sk-env"))])
-            .unwrap();
+        let config =
+            run_load_config_with_env(global_toml, &[("OPENAI_API_KEY", Some("sk-env"))]).unwrap();
         assert_eq!(config.llm.models[0].api_key.as_deref(), Some("sk-env"));
     }
 
@@ -2031,8 +2044,8 @@ api_key = "configured-key"
 
 [agent]
 "#;
-        let config = run_load_config_with_env(global_toml, &[("OPENAI_API_KEY", Some("env-key"))])
-            .unwrap();
+        let config =
+            run_load_config_with_env(global_toml, &[("OPENAI_API_KEY", Some("env-key"))]).unwrap();
         assert_eq!(
             config.llm.models[0].api_key.as_deref(),
             Some("configured-key")
@@ -3029,7 +3042,10 @@ soft_limit = 30
         save_config(&config, dir.path()).unwrap();
 
         let content = std::fs::read_to_string(dir.path().join(".visp/daemon.toml")).unwrap();
-        assert!(content.contains("sk-test-key"), "api_key should be preserved");
+        assert!(
+            content.contains("sk-test-key"),
+            "api_key should be preserved"
+        );
     }
 
     #[test]
@@ -3272,7 +3288,10 @@ mod tests_runtime_config {
         };
         let config = proto_to_llm_config(&proto);
         assert_eq!(config.model, "deepseek-v4-flash");
-        assert_eq!(config.model_key.as_deref(), Some("Opencode/DeepSeek v4 Flash"));
+        assert_eq!(
+            config.model_key.as_deref(),
+            Some("Opencode/DeepSeek v4 Flash")
+        );
         assert_eq!(config.temperature, 0.2);
         assert_eq!(config.max_tokens, 8192);
         assert_eq!(config.max_context_tokens, 64_000);
@@ -3444,7 +3463,10 @@ mod tests_runtime_config {
 
     #[test]
     fn test_resolve_model_key_session_model() {
-        let cfg = daemon_with(vec![mc("ModelA", "ProviderA", "model-a-api")], Some("ProviderA/ModelA"));
+        let cfg = daemon_with(
+            vec![mc("ModelA", "ProviderA", "model-a-api")],
+            Some("ProviderA/ModelA"),
+        );
         // 旧配置：session.model 直接就是 {provider}/{model} key
         let session = LlmConfig {
             model: "ProviderA/model-a-api".into(),
@@ -3604,7 +3626,10 @@ mod tests_merge_build {
         assert_eq!(config.provider.as_deref(), Some("ProviderDef"));
         // extra 来自 daemon 默认（含默认模型的 thinking_budget_tokens）
         assert_eq!(
-            config.extra.get("thinking_budget_tokens").map(String::as_str),
+            config
+                .extra
+                .get("thinking_budget_tokens")
+                .map(String::as_str),
             Some("1024")
         );
         // 温度/长度哨兵字段不被 daemon 默认覆盖（与 service.rs 行为一致）
@@ -3625,7 +3650,15 @@ mod tests_merge_build {
                     Some(100_000),
                     Some(2048),
                 ),
-                mc("Default", "ProviderDef", "model-default", None, None, None, None),
+                mc(
+                    "Default",
+                    "ProviderDef",
+                    "model-default",
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
             ],
             Some("ProviderDef/Default"),
         );
@@ -3642,7 +3675,10 @@ mod tests_merge_build {
         assert_eq!(config.max_tokens, 8192);
         assert_eq!(config.max_context_tokens, 100_000);
         assert_eq!(
-            config.extra.get("thinking_budget_tokens").map(String::as_str),
+            config
+                .extra
+                .get("thinking_budget_tokens")
+                .map(String::as_str),
             Some("2048")
         );
     }
@@ -3703,15 +3739,7 @@ mod tests_merge_build {
     #[test]
     fn test_merge_sentinel_temperature() {
         let daemon = daemon_with(
-            vec![mc(
-                "A",
-                "ProviderA",
-                "model-a",
-                Some(0.1),
-                None,
-                None,
-                None,
-            )],
+            vec![mc("A", "ProviderA", "model-a", Some(0.1), None, None, None)],
             Some("ProviderA/A"),
         );
         let proto = visp_proto::visp::LlmConfig {
@@ -3757,18 +3785,31 @@ mod tests_merge_build {
     #[test]
     fn test_merge_extra_thinking_budget() {
         let daemon = daemon_with(
-            vec![mc("A", "ProviderA", "model-a", None, None, None, Some(4096))],
+            vec![mc(
+                "A",
+                "ProviderA",
+                "model-a",
+                None,
+                None,
+                None,
+                Some(4096),
+            )],
             Some("ProviderA/A"),
         );
         let proto = visp_proto::visp::LlmConfig {
             model_key: Some("ProviderA/A".into()),
-            extra: [("seed".to_string(), "42".to_string())].into_iter().collect(),
+            extra: [("seed".to_string(), "42".to_string())]
+                .into_iter()
+                .collect(),
             ..Default::default()
         };
         let config = merge_session_config(Some(&proto), &daemon);
         // thinking_budget_tokens 注入 extra，客户端自定义 extra 保留
         assert_eq!(
-            config.extra.get("thinking_budget_tokens").map(String::as_str),
+            config
+                .extra
+                .get("thinking_budget_tokens")
+                .map(String::as_str),
             Some("4096")
         );
         assert_eq!(config.extra.get("seed").map(String::as_str), Some("42"));
@@ -3822,7 +3863,10 @@ mod tests_merge_build {
         assert_eq!(config.max_tokens, 9000);
         assert_eq!(config.max_context_tokens, 200_000);
         assert_eq!(
-            config.extra.get("thinking_budget_tokens").map(String::as_str),
+            config
+                .extra
+                .get("thinking_budget_tokens")
+                .map(String::as_str),
             Some("2048")
         );
         assert!(config.langfuse_enabled);
@@ -3967,7 +4011,10 @@ mod tests_apply_config_update {
         assert_eq!(config.max_tokens, 8192);
         assert_eq!(config.max_context_tokens, 100_000);
         assert_eq!(
-            config.extra.get("thinking_budget_tokens").map(String::as_str),
+            config
+                .extra
+                .get("thinking_budget_tokens")
+                .map(String::as_str),
             Some("2048")
         );
         // 其余字段从 current 保留

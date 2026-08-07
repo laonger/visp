@@ -11,12 +11,7 @@ async fn test_mock_returns_preset_events() {
     let provider = MockProvider::new(events.clone());
     let cancel = tokio_util::sync::CancellationToken::new();
     let mut stream = provider
-        .chat_stream(
-            &[],
-            &[],
-            &visp_config::LlmConfig::default(),
-            &cancel,
-        )
+        .chat_stream(&[], &[], &visp_config::LlmConfig::default(), &cancel)
         .await
         .unwrap();
 
@@ -36,12 +31,7 @@ async fn test_mock_empty_queue() {
     let provider = MockProvider::new(vec![]);
     let cancel = tokio_util::sync::CancellationToken::new();
     let mut stream = provider
-        .chat_stream(
-            &[],
-            &[],
-            &visp_config::LlmConfig::default(),
-            &cancel,
-        )
+        .chat_stream(&[], &[], &visp_config::LlmConfig::default(), &cancel)
         .await
         .unwrap();
 
@@ -91,12 +81,7 @@ async fn test_chat_stream_cancel_returns_cancelled_within_50ms() {
     let started = Instant::now();
     let handle = tokio::spawn(async move {
         provider_clone
-            .chat_stream(
-                &[],
-                &[],
-                &visp_config::LlmConfig::default(),
-                &cancel_clone,
-            )
+            .chat_stream(&[], &[], &visp_config::LlmConfig::default(), &cancel_clone)
             .await
     });
 

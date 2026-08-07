@@ -15,4 +15,6 @@ pub use config::{
 pub use path::home_dir;
 pub use prompt::DEFAULT_SYSTEM_PROMPT;
 pub use rules::{RuleEngine, RuleFile, RuleSet};
-pub use skills::{builtin_skills, find_builtin_skill, load_skills, strip_frontmatter, BuiltinSkill};
+pub use skills::{
+    BuiltinSkill, builtin_skills, find_builtin_skill, load_skills, strip_frontmatter,
+};
