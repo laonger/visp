@@ -995,6 +995,258 @@ pub fn apply_model_override(config: &mut LlmConfig, model_cfg: &LlmModelConfig) 
     }
 }
 
+// ============ Session LLM config merge utilities ============
+
+/// 解析 daemon 默认模型配置（llm.default 指定的模型，缺省时回退到 models 第一个）。
+fn daemon_default_model(daemon_config: &DaemonConfig) -> Option<LlmModelConfig> {
+    let key = daemon_config
+        .llm
+        .resolve_default_key(&daemon_config.llm.models);
+    daemon_config
+        .llm
+        .models
+        .iter()
+        .find(|mc| mc.key() == key)
+        .cloned()
+}
+
+/// 计算 daemon 默认 extra（[llm.extra] + 全局 thinking_budget_tokens + 默认模型的 thinking_budget_tokens）。
+fn daemon_default_extra(daemon_config: &DaemonConfig) -> HashMap<String, String> {
+    let mut extra = daemon_config.llm.extra.clone();
+    if let Some(budget) = daemon_config.llm.thinking_budget_tokens {
+        extra.insert("thinking_budget_tokens".into(), budget.to_string());
+    }
+    if let Some(mc) = daemon_default_model(daemon_config)
+        && let Some(budget) = mc.thinking_budget_tokens
+    {
+        extra.insert("thinking_budget_tokens".into(), budget.to_string());
+    }
+    extra
+}
+
+/// Merge client-provided proto LlmConfig with daemon defaults to produce the final session LlmConfig.
+///
+/// Priority: client config > model_key resolution > daemon defaults
+///
+/// 1. Convert client proto LlmConfig to core LlmConfig (via proto_to_llm_config)
+/// 2. If extra is empty, fill from daemon default model's extra
+/// 3. If model_key is set, resolve from daemon_config.llm.models:
+///    - Set model, provider from matched LlmModelConfig
+///    - Only fill max_tokens, max_context_tokens, temperature if client didn't set them
+///      (detect "unset" by comparing to LlmConfig::default() values, use f64::EPSILON for temperature)
+///    - Inject thinking_budget_tokens into extra if present
+/// 4. If model is still the default, fill from daemon default model config
+/// 5. If model_key is still None, set from daemon default
+/// 6. If provider is still None, set from daemon default
+pub fn merge_session_config(
+    client_config: Option<&visp_proto::visp::LlmConfig>,
+    daemon_config: &DaemonConfig,
+) -> LlmConfig {
+    // 1. 客户端 proto → core LlmConfig
+    let mut config = client_config.map(proto_to_llm_config).unwrap_or_default();
+
+    // 2. extra 为空时用 daemon 默认 extra 填充
+    if config.extra.is_empty() {
+        config.extra = daemon_default_extra(daemon_config);
+    }
+
+    // 3. model_key 解析：匹配 daemon.toml 中的模型配置
+    if let Some(model_key) = &config.model_key
+        && let Some(mc) = daemon_config
+            .llm
+            .models
+            .iter()
+            .find(|mc| mc.matches_key(model_key))
+    {
+        config.model = mc.model.clone();
+        config.provider = Some(mc.provider.clone().unwrap_or_else(|| mc.protocol.clone()));
+        // 仅在客户端未显式设置时填充（与 LlmConfig::default() 哨兵值比较）
+        if config.max_tokens == LlmConfig::default().max_tokens
+            && let Some(mt) = mc.max_tokens
+        {
+            config.max_tokens = mt;
+        }
+        if config.max_context_tokens == LlmConfig::default().max_context_tokens
+            && let Some(mct) = mc.max_context_tokens
+        {
+            config.max_context_tokens = mct;
+        }
+        if (config.temperature - LlmConfig::default().temperature).abs() < f64::EPSILON
+            && let Some(t) = mc.temperature
+        {
+            config.temperature = t;
+        }
+        // per-model thinking_budget_tokens 注入 extra
+        if let Some(budget) = mc.thinking_budget_tokens {
+            config
+                .extra
+                .insert("thinking_budget_tokens".into(), budget.to_string());
+        }
+    }
+
+    // 4-6. model 仍为默认值时，用 daemon 默认模型填充 model/model_key/provider
+    if config.model == LlmConfig::default().model
+        && let Some(mc) = daemon_default_model(daemon_config)
+    {
+        config.model = mc.model.clone();
+        if config.model_key.is_none() {
+            config.model_key = Some(mc.key());
+        }
+        if config.provider.is_none() {
+            config.provider = Some(mc.provider.clone().unwrap_or_else(|| mc.protocol.clone()));
+        }
+    }
+    config
+}
+
+/// Build a complete LlmConfig from a LlmModelConfig, optionally with langfuse settings.
+///
+/// `langfuse_cfg` provides langfuse-related fields (enabled, session_id, trace_name, etc.)
+/// These fields are not in LlmModelConfig but come from ObservabilityConfig.langfuse_*.
+/// Pass None to use disabled defaults for all langfuse fields.
+pub fn build_llm_config_from_model(
+    model_cfg: &LlmModelConfig,
+    langfuse_cfg: Option<&ObservabilityConfig>,
+) -> LlmConfig {
+    let mut extra = HashMap::new();
+    if let Some(budget) = model_cfg.thinking_budget_tokens {
+        extra.insert("thinking_budget_tokens".into(), budget.to_string());
+    }
+
+    let mut config = LlmConfig {
+        model: model_cfg.model.clone(),
+        model_key: Some(model_cfg.key()),
+        provider: Some(
+            model_cfg
+                .provider
+                .clone()
+                .unwrap_or_else(|| model_cfg.protocol.clone()),
+        ),
+        temperature: model_cfg.temperature.unwrap_or(0.7),
+        max_tokens: model_cfg.max_tokens.unwrap_or(4096),
+        max_context_tokens: model_cfg.max_context_tokens.unwrap_or(128_000),
+        extra,
+        ..LlmConfig::default()
+    };
+
+    if let Some(obs) = langfuse_cfg {
+        let langfuse = &obs.langfuse;
+        config.langfuse_enabled = langfuse.enabled;
+        config.langfuse_user_id = langfuse.user_id.clone();
+        config.langfuse_tags = if langfuse.tags.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&langfuse.tags).unwrap_or_default())
+        };
+        config.langfuse_environment = langfuse.environment.clone();
+        config.langfuse_release = langfuse.release.clone();
+        config.langfuse_version = langfuse.version.clone();
+        config.langfuse_public = langfuse.public;
+        config.langfuse_metadata = langfuse.metadata.as_ref().map(|meta| {
+            meta.iter()
+                .map(|(k, v)| {
+                    let val = match v {
+                        toml::Value::String(s) => s.clone(),
+                        toml::Value::Integer(i) => i.to_string(),
+                        toml::Value::Float(f) => f.to_string(),
+                        toml::Value::Boolean(b) => b.to_string(),
+                        _ => serde_json::to_string(v).unwrap_or_default(),
+                    };
+                    (k.clone(), val)
+                })
+                .collect()
+        });
+        config.langfuse_capture_input = langfuse.capture.input;
+        config.langfuse_capture_output = langfuse.capture.output;
+        config.langfuse_capture_max_chars = langfuse.capture.max_chars;
+        config.langfuse_redact_secrets = langfuse.capture.redact_secrets;
+        // session_id / trace_name 为 per-session 字段，此处保持 None
+    }
+
+    config
+}
+
+/// Apply a config update (from /model, /temp commands) to the current session config.
+///
+/// Takes the current LlmConfig, a proto LlmConfig update, and daemon config.
+/// Returns the updated LlmConfig.
+///
+/// Logic:
+/// 1. Convert proto update to core LlmConfig fields (only the 6 proto fields)
+/// 2. If update has model_key, resolve from daemon_config.llm.models:
+///    - Set model, provider from matched LlmModelConfig
+///    - Fill max_tokens, max_context_tokens, temperature using sentinel detection
+///    - Inject thinking_budget_tokens into extra if present
+/// 3. If update doesn't have model_key but has model, just update the model string
+/// 4. If update has temperature (not default), update it
+/// 5. If update has max_tokens (not default), update it
+/// 6. Preserve all other fields from current config (langfuse, use_tool, etc.)
+pub fn apply_config_update(
+    current: &LlmConfig,
+    update: &visp_proto::visp::LlmConfig,
+    daemon_config: &DaemonConfig,
+) -> LlmConfig {
+    // 1. 从 current 出发，应用 proto 的 6 个字段
+    let mut config = current.clone();
+
+    // 2. model_key 优先：匹配 daemon.toml 中 [[llm.models]] 的配置
+    if let Some(model_key) = &update.model_key {
+        config.model_key = Some(model_key.clone());
+        if let Some(mc) = daemon_config
+            .llm
+            .models
+            .iter()
+            .find(|mc| mc.matches_key(model_key))
+        {
+            config.model = mc.model.clone();
+            config.provider = Some(mc.provider.clone().unwrap_or_else(|| mc.protocol.clone()));
+            // 哨兵值检测：仅当 current 未设置非默认值时用模型配置填充
+            if config.max_tokens == LlmConfig::default().max_tokens
+                && let Some(mt) = mc.max_tokens
+            {
+                config.max_tokens = mt;
+            }
+            if config.max_context_tokens == LlmConfig::default().max_context_tokens
+                && let Some(mct) = mc.max_context_tokens
+            {
+                config.max_context_tokens = mct;
+            }
+            if (config.temperature - LlmConfig::default().temperature).abs() < f64::EPSILON
+                && let Some(t) = mc.temperature
+            {
+                config.temperature = t;
+            }
+            // per-model thinking_budget_tokens 注入 extra
+            if let Some(budget) = mc.thinking_budget_tokens {
+                config
+                    .extra
+                    .insert("thinking_budget_tokens".into(), budget.to_string());
+            }
+        }
+    } else if let Some(model) = &update.model {
+        // 3. 未传 model_key 但传了 model → 仅更新 model 字符串
+        config.model = model.clone();
+    }
+
+    // 4-5. 显式设置的 temperature / max_tokens / max_context_tokens 覆盖
+    if let Some(temperature) = update.temperature {
+        config.temperature = temperature;
+    }
+    if let Some(max_tokens) = update.max_tokens {
+        config.max_tokens = max_tokens;
+    }
+    if let Some(max_context_tokens) = update.max_context_tokens {
+        config.max_context_tokens = max_context_tokens;
+    }
+    // extra：仅当 update 携带非空 extra 时替换，否则保留 current
+    if !update.extra.is_empty() {
+        config.extra = update.extra.clone();
+    }
+
+    // 6. 其余字段（langfuse、use_tool 等）从 current 保留
+    config
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3124,5 +3376,549 @@ mod tests_runtime_config {
         assert_eq!(config.max_context_tokens, 111_000);
         assert!(config.image_generation);
         assert!(!config.use_tool);
+    }
+}
+
+#[cfg(test)]
+mod tests_merge_build {
+    use super::*;
+
+    fn mc(
+        name: &str,
+        provider: &str,
+        model: &str,
+        temperature: Option<f64>,
+        max_tokens: Option<u32>,
+        max_context_tokens: Option<u32>,
+        thinking_budget_tokens: Option<u32>,
+    ) -> LlmModelConfig {
+        LlmModelConfig {
+            name: name.into(),
+            protocol: "openai".into(),
+            provider: Some(provider.into()),
+            model: model.into(),
+            api_key: None,
+            base_url: None,
+            temperature,
+            max_tokens,
+            max_context_tokens,
+            thinking_budget_tokens,
+            use_tool: None,
+            image_generation: None,
+            extra: Default::default(),
+        }
+    }
+
+    fn daemon_with(models: Vec<LlmModelConfig>, default: Option<&str>) -> DaemonConfig {
+        let mut cfg = default_config();
+        cfg.llm.models = models;
+        cfg.llm.default = default.map(str::to_string);
+        cfg
+    }
+
+    #[test]
+    fn test_merge_no_client_config() {
+        let daemon = daemon_with(
+            vec![mc(
+                "Default",
+                "ProviderDef",
+                "model-default",
+                Some(0.1),
+                Some(2048),
+                Some(64_000),
+                Some(1024),
+            )],
+            Some("ProviderDef/Default"),
+        );
+        let config = merge_session_config(None, &daemon);
+        // model/model_key/provider 来自 daemon 默认模型
+        assert_eq!(config.model, "model-default");
+        assert_eq!(config.model_key.as_deref(), Some("ProviderDef/Default"));
+        assert_eq!(config.provider.as_deref(), Some("ProviderDef"));
+        // extra 来自 daemon 默认（含默认模型的 thinking_budget_tokens）
+        assert_eq!(
+            config.extra.get("thinking_budget_tokens").map(String::as_str),
+            Some("1024")
+        );
+        // 温度/长度哨兵字段不被 daemon 默认覆盖（与 service.rs 行为一致）
+        assert_eq!(config.temperature, LlmConfig::default().temperature);
+        assert_eq!(config.max_tokens, LlmConfig::default().max_tokens);
+    }
+
+    #[test]
+    fn test_merge_with_model_key() {
+        let daemon = daemon_with(
+            vec![
+                mc(
+                    "A",
+                    "ProviderA",
+                    "model-a",
+                    Some(0.2),
+                    Some(8192),
+                    Some(100_000),
+                    Some(2048),
+                ),
+                mc("Default", "ProviderDef", "model-default", None, None, None, None),
+            ],
+            Some("ProviderDef/Default"),
+        );
+        let proto = visp_proto::visp::LlmConfig {
+            model_key: Some("ProviderA/A".into()),
+            ..Default::default()
+        };
+        let config = merge_session_config(Some(&proto), &daemon);
+        assert_eq!(config.model, "model-a");
+        assert_eq!(config.model_key.as_deref(), Some("ProviderA/A"));
+        assert_eq!(config.provider.as_deref(), Some("ProviderA"));
+        // 哨兵值检测：客户端未设置 → 用 model 配置填充
+        assert_eq!(config.temperature, 0.2);
+        assert_eq!(config.max_tokens, 8192);
+        assert_eq!(config.max_context_tokens, 100_000);
+        assert_eq!(
+            config.extra.get("thinking_budget_tokens").map(String::as_str),
+            Some("2048")
+        );
+    }
+
+    #[test]
+    fn test_merge_model_key_not_found() {
+        let daemon = daemon_with(
+            vec![mc(
+                "Default",
+                "ProviderDef",
+                "model-default",
+                Some(0.5),
+                Some(3000),
+                Some(90_000),
+                Some(500),
+            )],
+            Some("ProviderDef/Default"),
+        );
+        let proto = visp_proto::visp::LlmConfig {
+            model_key: Some("NoSuch/Model".into()),
+            ..Default::default()
+        };
+        let config = merge_session_config(Some(&proto), &daemon);
+        // model_key 未匹配 → model/provider 回退 daemon 默认
+        assert_eq!(config.model, "model-default");
+        assert_eq!(config.model_key.as_deref(), Some("NoSuch/Model"));
+        assert_eq!(config.provider.as_deref(), Some("ProviderDef"));
+        // 未走 model_key 解析分支，温度保持默认
+        assert_eq!(config.temperature, 0.7);
+    }
+
+    #[test]
+    fn test_merge_client_overrides_model() {
+        let daemon = daemon_with(
+            vec![mc(
+                "Default",
+                "ProviderDef",
+                "model-default",
+                Some(0.5),
+                Some(3000),
+                Some(90_000),
+                None,
+            )],
+            Some("ProviderDef/Default"),
+        );
+        let proto = visp_proto::visp::LlmConfig {
+            model: Some("custom-model".into()),
+            ..Default::default()
+        };
+        let config = merge_session_config(Some(&proto), &daemon);
+        // 客户端显式设置了 model → 不使用 daemon 默认（model_key/provider 保持 None）
+        assert_eq!(config.model, "custom-model");
+        assert_eq!(config.model_key, None);
+        assert_eq!(config.provider, None);
+        assert_eq!(config.temperature, 0.7);
+    }
+
+    #[test]
+    fn test_merge_sentinel_temperature() {
+        let daemon = daemon_with(
+            vec![mc(
+                "A",
+                "ProviderA",
+                "model-a",
+                Some(0.1),
+                None,
+                None,
+                None,
+            )],
+            Some("ProviderA/A"),
+        );
+        let proto = visp_proto::visp::LlmConfig {
+            model_key: Some("ProviderA/A".into()),
+            // 客户端显式设置了 max_tokens，temperature 未设置
+            max_tokens: Some(1234),
+            ..Default::default()
+        };
+        let config = merge_session_config(Some(&proto), &daemon);
+        // temperature 是默认哨兵值 → 从 model 配置填充
+        assert_eq!(config.temperature, 0.1);
+        // 客户端显式设置的 max_tokens 不被覆盖
+        assert_eq!(config.max_tokens, 1234);
+    }
+
+    #[test]
+    fn test_merge_sentinel_max_tokens() {
+        let daemon = daemon_with(
+            vec![mc(
+                "A",
+                "ProviderA",
+                "model-a",
+                None,
+                Some(7777),
+                None,
+                None,
+            )],
+            Some("ProviderA/A"),
+        );
+        let proto = visp_proto::visp::LlmConfig {
+            model_key: Some("ProviderA/A".into()),
+            // 客户端显式设置了 temperature，max_tokens 未设置
+            temperature: Some(0.9),
+            ..Default::default()
+        };
+        let config = merge_session_config(Some(&proto), &daemon);
+        // max_tokens 是默认哨兵值 → 从 model 配置填充
+        assert_eq!(config.max_tokens, 7777);
+        // 客户端显式设置的 temperature 不被覆盖
+        assert_eq!(config.temperature, 0.9);
+    }
+
+    #[test]
+    fn test_merge_extra_thinking_budget() {
+        let daemon = daemon_with(
+            vec![mc("A", "ProviderA", "model-a", None, None, None, Some(4096))],
+            Some("ProviderA/A"),
+        );
+        let proto = visp_proto::visp::LlmConfig {
+            model_key: Some("ProviderA/A".into()),
+            extra: [("seed".to_string(), "42".to_string())].into_iter().collect(),
+            ..Default::default()
+        };
+        let config = merge_session_config(Some(&proto), &daemon);
+        // thinking_budget_tokens 注入 extra，客户端自定义 extra 保留
+        assert_eq!(
+            config.extra.get("thinking_budget_tokens").map(String::as_str),
+            Some("4096")
+        );
+        assert_eq!(config.extra.get("seed").map(String::as_str), Some("42"));
+    }
+
+    #[test]
+    fn test_build_llm_config_from_model_full() {
+        let model_cfg = LlmModelConfig {
+            name: "Full".into(),
+            protocol: "anthropic".into(),
+            provider: Some("Anthropic".into()),
+            model: "claude-full-api".into(),
+            api_key: None,
+            base_url: None,
+            temperature: Some(0.3),
+            max_tokens: Some(9000),
+            max_context_tokens: Some(200_000),
+            thinking_budget_tokens: Some(2048),
+            use_tool: None,
+            image_generation: None,
+            extra: Default::default(),
+        };
+        let obs = ObservabilityConfig {
+            langfuse: LangfuseConfig {
+                enabled: true,
+                user_id: Some("user-1".into()),
+                tags: vec!["tag1".into(), "tag2".into()],
+                environment: Some("prod".into()),
+                release: Some("1.0.0".into()),
+                version: Some("v1".into()),
+                public: Some(true),
+                metadata: Some(
+                    [("k".to_string(), toml::Value::String("v".into()))]
+                        .into_iter()
+                        .collect(),
+                ),
+                capture: LangfuseCaptureConfig {
+                    input: true,
+                    output: false,
+                    max_chars: 5000,
+                    redact_secrets: false,
+                },
+            },
+            ..Default::default()
+        };
+        let config = build_llm_config_from_model(&model_cfg, Some(&obs));
+        assert_eq!(config.model, "claude-full-api");
+        assert_eq!(config.model_key.as_deref(), Some("Anthropic/Full"));
+        assert_eq!(config.provider.as_deref(), Some("Anthropic"));
+        assert_eq!(config.temperature, 0.3);
+        assert_eq!(config.max_tokens, 9000);
+        assert_eq!(config.max_context_tokens, 200_000);
+        assert_eq!(
+            config.extra.get("thinking_budget_tokens").map(String::as_str),
+            Some("2048")
+        );
+        assert!(config.langfuse_enabled);
+        assert_eq!(config.langfuse_user_id.as_deref(), Some("user-1"));
+        assert_eq!(config.langfuse_tags.as_deref(), Some(r#"["tag1","tag2"]"#));
+        assert_eq!(config.langfuse_environment.as_deref(), Some("prod"));
+        assert_eq!(config.langfuse_release.as_deref(), Some("1.0.0"));
+        assert_eq!(config.langfuse_version.as_deref(), Some("v1"));
+        assert_eq!(config.langfuse_public, Some(true));
+        assert_eq!(
+            config
+                .langfuse_metadata
+                .as_ref()
+                .and_then(|m| m.get("k"))
+                .map(String::as_str),
+            Some("v")
+        );
+        assert!(config.langfuse_capture_input);
+        assert!(!config.langfuse_capture_output);
+        assert_eq!(config.langfuse_capture_max_chars, 5000);
+        assert!(!config.langfuse_redact_secrets);
+        // per-session 字段保持 None
+        assert_eq!(config.langfuse_session_id, None);
+        assert_eq!(config.langfuse_trace_name, None);
+    }
+
+    #[test]
+    fn test_build_llm_config_from_model_no_langfuse() {
+        let model_cfg = LlmModelConfig {
+            name: "NoLangfuse".into(),
+            protocol: "openai".into(),
+            provider: None,
+            model: "plain-model".into(),
+            api_key: None,
+            base_url: None,
+            temperature: None,
+            max_tokens: None,
+            max_context_tokens: None,
+            thinking_budget_tokens: None,
+            use_tool: None,
+            image_generation: None,
+            extra: Default::default(),
+        };
+        let config = build_llm_config_from_model(&model_cfg, None);
+        assert_eq!(config.model, "plain-model");
+        // provider 缺省时回退 protocol
+        assert_eq!(config.provider.as_deref(), Some("openai"));
+        assert_eq!(config.model_key.as_deref(), Some("openai/NoLangfuse"));
+        // 未提供数值时使用 LlmConfig 默认值
+        assert_eq!(config.temperature, 0.7);
+        assert_eq!(config.max_tokens, 4096);
+        assert_eq!(config.max_context_tokens, 128_000);
+        assert!(config.extra.is_empty());
+        // langfuse 全部为禁用默认值
+        assert!(!config.langfuse_enabled);
+        assert_eq!(config.langfuse_user_id, None);
+        assert_eq!(config.langfuse_tags, None);
+        assert_eq!(config.langfuse_metadata, None);
+        assert_eq!(config.langfuse_public, None);
+        assert!(!config.langfuse_capture_input);
+        assert!(!config.langfuse_capture_output);
+        assert_eq!(config.langfuse_capture_max_chars, 20_000);
+        assert!(config.langfuse_redact_secrets);
+    }
+}
+
+#[cfg(test)]
+mod tests_apply_config_update {
+    use super::*;
+
+    fn mc(
+        name: &str,
+        provider: &str,
+        model: &str,
+        temperature: Option<f64>,
+        max_tokens: Option<u32>,
+        max_context_tokens: Option<u32>,
+        thinking_budget_tokens: Option<u32>,
+    ) -> LlmModelConfig {
+        LlmModelConfig {
+            name: name.into(),
+            protocol: "openai".into(),
+            provider: Some(provider.into()),
+            model: model.into(),
+            api_key: None,
+            base_url: None,
+            temperature,
+            max_tokens,
+            max_context_tokens,
+            thinking_budget_tokens,
+            use_tool: None,
+            image_generation: None,
+            extra: Default::default(),
+        }
+    }
+
+    fn daemon_with(models: Vec<LlmModelConfig>) -> DaemonConfig {
+        let mut cfg = default_config();
+        cfg.llm.models = models;
+        cfg
+    }
+
+    #[test]
+    fn test_apply_config_update_model_key() {
+        let daemon = daemon_with(vec![mc(
+            "A",
+            "ProviderA",
+            "model-a",
+            Some(0.2),
+            Some(8192),
+            Some(100_000),
+            Some(2048),
+        )]);
+        // current：model_key/provider 与默认不同，temperature/max_tokens 等为默认哨兵值
+        let current = LlmConfig {
+            model: "old-model".into(),
+            model_key: Some("Old/Model".into()),
+            provider: Some("OldProvider".into()),
+            temperature: LlmConfig::default().temperature,
+            max_tokens: LlmConfig::default().max_tokens,
+            max_context_tokens: LlmConfig::default().max_context_tokens,
+            langfuse_enabled: true,
+            langfuse_session_id: Some("sess-1".into()),
+            use_tool: false,
+            image_generation: true,
+            ..LlmConfig::default()
+        };
+
+        let update = visp_proto::visp::LlmConfig {
+            model_key: Some("ProviderA/A".into()),
+            ..Default::default()
+        };
+
+        let config = apply_config_update(&current, &update, &daemon);
+
+        // model/model_key/provider 来自匹配的 daemon 模型
+        assert_eq!(config.model, "model-a");
+        assert_eq!(config.model_key.as_deref(), Some("ProviderA/A"));
+        assert_eq!(config.provider.as_deref(), Some("ProviderA"));
+        // 哨兵值检测：current 未设置非默认值 → 用模型配置填充
+        assert_eq!(config.temperature, 0.2);
+        assert_eq!(config.max_tokens, 8192);
+        assert_eq!(config.max_context_tokens, 100_000);
+        assert_eq!(
+            config.extra.get("thinking_budget_tokens").map(String::as_str),
+            Some("2048")
+        );
+        // 其余字段从 current 保留
+        assert!(config.langfuse_enabled);
+        assert_eq!(config.langfuse_session_id.as_deref(), Some("sess-1"));
+        assert!(!config.use_tool);
+        assert!(config.image_generation);
+    }
+
+    #[test]
+    fn test_apply_config_update_temperature() {
+        let daemon = daemon_with(vec![]);
+        let current = LlmConfig {
+            model: "keep-model".into(),
+            model_key: Some("Keep/Model".into()),
+            provider: Some("KeepProvider".into()),
+            temperature: 0.5,
+            max_tokens: 2048,
+            max_context_tokens: 32_000,
+            langfuse_enabled: true,
+            langfuse_session_id: Some("sess-2".into()),
+            use_tool: false,
+            ..LlmConfig::default()
+        };
+
+        let update = visp_proto::visp::LlmConfig {
+            temperature: Some(1.3),
+            ..Default::default()
+        };
+
+        let config = apply_config_update(&current, &update, &daemon);
+
+        assert_eq!(config.temperature, 1.3);
+        // 其余字段保留
+        assert_eq!(config.model, "keep-model");
+        assert_eq!(config.model_key.as_deref(), Some("Keep/Model"));
+        assert_eq!(config.provider.as_deref(), Some("KeepProvider"));
+        assert_eq!(config.max_tokens, 2048);
+        assert_eq!(config.max_context_tokens, 32_000);
+        assert!(config.langfuse_enabled);
+        assert_eq!(config.langfuse_session_id.as_deref(), Some("sess-2"));
+        assert!(!config.use_tool);
+    }
+
+    #[test]
+    fn test_apply_config_update_model_key_not_found() {
+        let daemon = daemon_with(vec![mc(
+            "A",
+            "ProviderA",
+            "model-a",
+            Some(0.2),
+            Some(8192),
+            Some(100_000),
+            Some(2048),
+        )]);
+        let current = LlmConfig {
+            model: "orig-model".into(),
+            model_key: Some("Orig/Model".into()),
+            provider: Some("OrigProvider".into()),
+            temperature: 0.4,
+            max_tokens: 1500,
+            max_context_tokens: 40_000,
+            langfuse_enabled: true,
+            use_tool: false,
+            ..LlmConfig::default()
+        };
+
+        let update = visp_proto::visp::LlmConfig {
+            model_key: Some("NoSuch/Model".into()),
+            ..Default::default()
+        };
+
+        let config = apply_config_update(&current, &update, &daemon);
+
+        // 未匹配 → 保留原配置（model/provider/temperature 等不变）
+        assert_eq!(config.model, "orig-model");
+        assert_eq!(config.model_key.as_deref(), Some("NoSuch/Model"));
+        assert_eq!(config.provider.as_deref(), Some("OrigProvider"));
+        assert_eq!(config.temperature, 0.4);
+        assert_eq!(config.max_tokens, 1500);
+        assert_eq!(config.max_context_tokens, 40_000);
+        assert!(config.langfuse_enabled);
+        assert!(!config.use_tool);
+    }
+
+    #[test]
+    fn test_apply_config_update_partial() {
+        let daemon = daemon_with(vec![]);
+        let current = LlmConfig {
+            model: "base-model".into(),
+            model_key: Some("Base/Model".into()),
+            provider: Some("BaseProvider".into()),
+            temperature: 0.7,
+            max_tokens: 4096,
+            max_context_tokens: 128_000,
+            langfuse_enabled: true,
+            langfuse_user_id: Some("user-1".into()),
+            ..LlmConfig::default()
+        };
+
+        let update = visp_proto::visp::LlmConfig {
+            model: Some("new-model".into()),
+            temperature: Some(1.1),
+            max_tokens: Some(6000),
+            ..Default::default()
+        };
+
+        let config = apply_config_update(&current, &update, &daemon);
+
+        // 仅更新 update 中显式设置的字段
+        assert_eq!(config.model, "new-model");
+        assert_eq!(config.temperature, 1.1);
+        assert_eq!(config.max_tokens, 6000);
+        // 其余字段从 current 保留
+        assert_eq!(config.model_key.as_deref(), Some("Base/Model"));
+        assert_eq!(config.provider.as_deref(), Some("BaseProvider"));
+        assert_eq!(config.max_context_tokens, 128_000);
+        assert!(config.langfuse_enabled);
+        assert_eq!(config.langfuse_user_id.as_deref(), Some("user-1"));
     }
 }
