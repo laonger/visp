@@ -25,11 +25,13 @@ use visp_core::agent_registry::AgentRegistry;
 use visp_core::context::ContextTrimmer;
 use visp_core::error::{AgentErrorCode, SessionError};
 use visp_core::message::Message;
-use visp_core::provider::{LlmProvider, ModelInfo};
+use visp_core::provider::LlmProvider;
 use visp_core::rules::RuleEngine;
 use visp_core::session::{SessionManager, SessionStatus, SubSessionParams};
 use visp_core::tool::ToolType;
 use visp_core::tool_registry::ToolRegistry;
+
+use visp_config::DaemonConfig;
 
 use crate::active_agent::{ActiveAgent, ActiveAgentRegistry};
 
@@ -140,9 +142,8 @@ pub struct Orchestrator {
     agent_config: AgentConfig,
     context_trimmer: Arc<dyn ContextTrimmer + Send + Sync>,
     providers: HashMap<String, Arc<dyn LlmProvider>>,
-    default_provider_key: String,
-    /// 模型元信息表（key 同 providers），用于 agent 级别模型覆盖时解析 API model 字符串
-    model_infos: HashMap<String, ModelInfo>,
+    /// Daemon 配置（llm.models 等），用于解析 agent 模型 key → LlmModelConfig
+    daemon_config: Arc<DaemonConfig>,
 }
 
 impl Orchestrator {
@@ -159,9 +160,8 @@ impl Orchestrator {
         rule_engine: Arc<RuleEngine>,
         agent_config: AgentConfig,
         context_trimmer: Arc<dyn ContextTrimmer + Send + Sync>,
+        daemon_config: Arc<DaemonConfig>,
         providers: HashMap<String, Arc<dyn LlmProvider>>,
-        default_provider_key: String,
-        model_infos: HashMap<String, ModelInfo>,
     ) -> Self {
         Self {
             cancel_rx,
@@ -179,9 +179,8 @@ impl Orchestrator {
             rule_engine,
             agent_config,
             context_trimmer,
+            daemon_config,
             providers,
-            default_provider_key,
-            model_infos,
         }
     }
 
@@ -476,25 +475,12 @@ impl Orchestrator {
         // config.model to build the API request, so we must override ctx.config
         // with the vision agent's model info to avoid sending images to a
         // text-only model.
-        if has_images && let Some(info) = self.resolve_model_info(Some(&agent_def)) {
-            ctx.config.model = info.model.clone();
-            ctx.config.model_key = agent_def.model.clone();
-            ctx.config.provider = info.provider.clone();
-            if let Some(t) = info.temperature {
-                ctx.config.temperature = t;
-            }
-            if let Some(mt) = info.max_tokens {
-                ctx.config.max_tokens = mt;
-            }
-            if let Some(mct) = info.max_context_tokens {
-                ctx.config.max_context_tokens = mct;
-            }
-            if info.image_generation {
-                ctx.config.image_generation = true;
-            }
-            if let Some(use_tool) = info.use_tool {
-                ctx.config.use_tool = use_tool;
-            }
+        if has_images
+            && let Some(model_key) = agent_def.model.as_deref()
+            && let Some(model_cfg) = visp_config::resolve_model(model_key, &self.daemon_config)
+        {
+            visp_config::apply_model_override(&mut ctx.config, &model_cfg);
+            ctx.config.model_key = Some(model_key.to_string());
             tracing::info!(
                 session_id,
                 model = %ctx.config.model,
@@ -665,26 +651,11 @@ impl Orchestrator {
             let mut sub_config = sub_session.config.clone();
 
             // Resolve model info from agent_def.model key
-            if let Some(info) = self.resolve_model_info(Some(&agent_def)) {
-                sub_config.model = info.model.clone();
-                sub_config.model_key = agent_def.model.clone();
-                sub_config.provider = info.provider.clone();
-                // Apply model-level defaults if the parent config didn't set them explicitly
-                if let Some(t) = info.temperature {
-                    sub_config.temperature = t;
-                }
-                if let Some(mt) = info.max_tokens {
-                    sub_config.max_tokens = mt;
-                }
-                if let Some(mct) = info.max_context_tokens {
-                    sub_config.max_context_tokens = mct;
-                }
-                if info.image_generation {
-                    sub_config.image_generation = true;
-                }
-                if let Some(use_tool) = info.use_tool {
-                    sub_config.use_tool = use_tool;
-                }
+            if let Some(model_key) = agent_def.model.as_deref()
+                && let Some(model_cfg) = visp_config::resolve_model(model_key, &self.daemon_config)
+            {
+                visp_config::apply_model_override(&mut sub_config, &model_cfg);
+                sub_config.model_key = Some(model_key.to_string());
                 tracing::debug!(
                     sub_session_id,
                     agent = %subagent_type,
@@ -1157,43 +1128,21 @@ impl Orchestrator {
         }
     }
 
-    /// 解析 provider：agent.model → session.model → default
-    fn resolve_model_info(&self, agent: Option<&AgentDefinition>) -> Option<&ModelInfo> {
-        let agent = agent?;
-        let model_key = agent.model.as_ref()?;
-        self.model_infos.get(model_key)
-    }
-
     pub fn resolve_provider(
         &self,
         agent: Option<&AgentDefinition>,
         session_id: &str,
     ) -> Option<Arc<dyn LlmProvider>> {
-        // Try agent's model key first
-        if let Some(agent) = agent
-            && let Some(ref model_key) = agent.model
-            && let Some(provider) = self.providers.get(model_key)
-        {
-            return Some(provider.clone());
-        }
-
-        // Try session's model_key (format "{provider}/{name}")
-        if let Ok(session) = self.session_mgr.get(session_id)
-            && let Some(ref model_key) = session.config.model_key
-            && let Some(provider) = self.providers.get(model_key)
-        {
-            return Some(provider.clone());
-        }
-
-        // Try session's model name as direct key (backward compat for legacy configs)
-        if let Ok(session) = self.session_mgr.get(session_id)
-            && let Some(provider) = self.providers.get(&session.config.model)
-        {
-            return Some(provider.clone());
-        }
-
-        // Fall back to default provider key
-        self.providers.get(&self.default_provider_key).cloned()
+        // 4-tier cascade (agent.model → session.model_key → session.model → default)
+        // is handled by visp_config::resolve_model_key against daemon_config.llm.models.
+        let agent_model = agent.and_then(|a| a.model.as_deref());
+        let session_config = self
+            .session_mgr
+            .get(session_id)
+            .map(|s| s.config)
+            .unwrap_or_default();
+        let key = visp_config::resolve_model_key(agent_model, &session_config, &self.daemon_config);
+        self.providers.get(&key).cloned()
     }
 }
 

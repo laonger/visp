@@ -127,6 +127,21 @@ pub struct DaemonConfig {
     pub observability: ObservabilityConfig,
 }
 
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        DaemonConfig {
+            daemon: default_daemon_section(),
+            llm: LlmSection::default(),
+            tools: default_tools_section(),
+            agent: default_agent_section(),
+            tool: HashMap::new(),
+            mcp: McpConfig::default(),
+            storage: StorageSection::default(),
+            observability: ObservabilityConfig::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct DaemonSection {
     #[serde(default = "default_listen_addr")]

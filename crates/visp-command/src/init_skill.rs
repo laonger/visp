@@ -23,16 +23,14 @@ pub fn validate_name(name: &str) -> Result<(), String> {
 
 /// Compute the file path for a skill definition.
 pub fn file_path(project_path: &Path, name: &str) -> PathBuf {
-    project_path
-        .join(".visp")
-        .join("skills")
+    visp_config::path::skills_dir_project(project_path)
         .join(name)
         .join("SKILL.md")
 }
 
 /// Compute the parent directory for a skill (needs to be created before writing).
 pub fn parent_dir(project_path: &Path, name: &str) -> PathBuf {
-    project_path.join(".visp").join("skills").join(name)
+    visp_config::path::skills_dir_project(project_path).join(name)
 }
 
 /// Generate a well-documented skill template Markdown file with YAML frontmatter.

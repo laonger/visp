@@ -23,10 +23,7 @@ pub fn validate_name(name: &str) -> Result<(), String> {
 
 /// Compute the file path for an agent definition.
 pub fn file_path(project_path: &Path, name: &str) -> PathBuf {
-    project_path
-        .join(".visp")
-        .join("agents")
-        .join(format!("{name}.md"))
+    visp_config::path::agents_dir_project(project_path).join(format!("{name}.md"))
 }
 
 /// Generate a well-documented agent template Markdown file with YAML frontmatter.

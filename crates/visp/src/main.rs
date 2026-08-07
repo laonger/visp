@@ -38,7 +38,7 @@ async fn main() {
     let cli_bin = resolve_bin("visp-cli");
 
     // 1. Create log directory
-    let log_dir = get_log_dir();
+    let log_dir = visp_config::path::log_dir().unwrap_or_else(|| PathBuf::from("."));
     tokio::fs::create_dir_all(&log_dir)
         .await
         .unwrap_or_else(|e| {
@@ -164,11 +164,6 @@ async fn main() {
     }
 
     std::process::exit(exit_code);
-}
-
-fn get_log_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".visp").join("logs")
 }
 
 /// 查找二进制路径：优先同目录（cargo run 场景），其次 PATH。

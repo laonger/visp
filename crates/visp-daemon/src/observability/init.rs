@@ -12,7 +12,7 @@ use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
-use crate::config::ObservabilityConfig;
+use visp_config::ObservabilityConfig;
 use crate::observability::metrics_layer::MetricsLayer;
 use crate::observability::otlp;
 use crate::observability::parent_link::ParentLinkLayer;
@@ -74,13 +74,7 @@ pub fn init_observability(cfg: &ObservabilityConfig) -> ObservabilityGuard {
     let fmt_writer: Box<dyn Fn() -> Box<dyn std::io::Write + Send> + Send + Sync>;
     if let Some(ref path) = cfg.log_file {
         // Expand ~/ to $HOME for the log directory path
-        let expanded = if let Some(rest) = path.strip_prefix("~/") {
-            visp_core::session::home_dir()
-                .map(|home| home.join(rest))
-                .unwrap_or_else(|| std::path::PathBuf::from(path))
-        } else {
-            std::path::PathBuf::from(path)
-        };
+        let expanded = visp_config::path::expand_home(path);
         // Ensure the directory exists
         let _ = std::fs::create_dir_all(&expanded);
         let appender = tracing_appender::rolling::daily(&expanded, "visp-daemon.log");

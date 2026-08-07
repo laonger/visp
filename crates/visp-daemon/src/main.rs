@@ -60,13 +60,9 @@ fn register_agent_tools(
 fn create_llm_provider(config: &LlmModelConfig) -> Result<Arc<dyn LlmProvider>, String> {
     match config.protocol.as_str() {
         "openai" => {
-            let api_key = config
-                .api_key
-                .clone()
-                .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-                .ok_or_else(|| {
-                    "OPENAI_API_KEY not set (configure api_key or set env)".to_string()
-                })?;
+            let api_key = config.api_key.clone().ok_or_else(|| {
+                "OPENAI_API_KEY not set (configure api_key or set env)".to_string()
+            })?;
             if let Some(ref base_url) = config.base_url {
                 Ok(Arc::new(visp_llm::openai::OpenAiProvider::with_base_url(
                     api_key,
@@ -77,13 +73,9 @@ fn create_llm_provider(config: &LlmModelConfig) -> Result<Arc<dyn LlmProvider>, 
             }
         }
         _ => {
-            let api_key = config
-                .api_key
-                .clone()
-                .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-                .ok_or_else(|| {
-                    "ANTHROPIC_API_KEY not set (configure api_key or set env)".to_string()
-                })?;
+            let api_key = config.api_key.clone().ok_or_else(|| {
+                "ANTHROPIC_API_KEY not set (configure api_key or set env)".to_string()
+            })?;
             if let Some(ref base_url) = config.base_url {
                 Ok(Arc::new(
                     visp_llm::anthropic::AnthropicProvider::with_base_url(
@@ -104,15 +96,8 @@ fn create_llm_provider(config: &LlmModelConfig) -> Result<Arc<dyn LlmProvider>, 
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Load config
     let config_path = std::env::args().nth(1).map(std::path::PathBuf::from);
-    let mut config: DaemonConfig =
-        config::load_config(config_path.as_deref()).map_err(|e| format!("config: {e}"))?;
-
-    // Allow the launcher to override the listen address via env var.
-    if let Ok(addr) = std::env::var("VISP_LISTEN_ADDR")
-        && !addr.is_empty()
-    {
-        config.daemon.listen_addr = addr;
-    }
+    let config: DaemonConfig =
+        visp_config::load_config(config_path.as_deref()).map_err(|e| format!("config: {e}"))?;
 
     // 2. Init observability (tracing subscriber stack)
     //    Guard lives for the lifetime of main; on drop it unwinds the subscriber.
@@ -354,7 +339,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 8.5. Create provider HashMap
     let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
-    let default_model_key = config.llm.resolve_default_key(&model_configs);
     for mc in &model_configs {
         match create_llm_provider(mc) {
             Ok(provider) => {
@@ -371,27 +355,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => {
                 tracing::warn!(model_key = %mc.key(), error = %e, "failed to create provider");
             }
-        }
-    }
-
-    // 8.5b. Build model_infos map (keyed same as providers) for agent-level model overrides
-    let mut model_infos: HashMap<String, visp_core::provider::ModelInfo> = HashMap::new();
-    for mc in &model_configs {
-        let info = visp_core::provider::ModelInfo {
-            model: mc.model.clone(),
-            provider: mc.provider.clone().or(Some(mc.protocol.clone())),
-            temperature: mc.temperature,
-            max_tokens: mc.max_tokens,
-            max_context_tokens: mc.max_context_tokens,
-            image_generation: mc.image_generation.unwrap_or(false),
-            use_tool: mc.use_tool,
-        };
-        model_infos.insert(mc.key(), info.clone());
-        // Also register under model alias
-        let provider_name = mc.provider.as_deref().unwrap_or(&mc.protocol);
-        let model_alias = format!("{provider_name}/{}", mc.model);
-        if model_alias != mc.key() {
-            model_infos.insert(model_alias, info);
         }
     }
 
@@ -428,16 +391,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Agent directories: global config dir (lower priority) → project dir (higher priority)
     let mut agent_dirs: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(home) = std::env::var("HOME") {
-        let global_agents_dir = std::path::Path::new(&home)
-            .join(".config")
-            .join("visp")
-            .join("agents");
-        if global_agents_dir.exists() {
-            agent_dirs.push(global_agents_dir);
-        }
+    if let Some(global_agents_dir) = visp_config::path::agents_dir_global()
+        && global_agents_dir.exists()
+    {
+        agent_dirs.push(global_agents_dir);
     }
-    let project_agents_dir = cwd.join(".visp/agents");
+    let project_agents_dir = visp_config::path::agents_dir_project(&cwd);
     if project_agents_dir.exists() {
         agent_dirs.push(project_agents_dir);
     }
@@ -471,9 +430,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rule_engine.clone(),
         agent_config.clone(),
         context_trimmer.clone(),
+        Arc::new(config.clone()),
         providers,
-        default_model_key,
-        model_infos,
     );
     tokio::spawn(async move {
         orchestrator.run().await;
@@ -487,7 +445,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rule_engine,
         session_mgr,
         agent_config,
-        config.llm,
+        Arc::new(config.clone()),
         context_trimmer,
         mcp_manager,
         available_models,

@@ -92,7 +92,7 @@ impl Tool for CodeGraphSearch {
             .and_then(|v| v.as_i64())
             .unwrap_or(20) as usize;
 
-        let db_path = context.working_dir.join(".visp").join("codegraph.db");
+        let db_path = visp_config::path::codegraph_db(&context.working_dir);
         if !db_path.exists() {
             return ToolResult::error(
                 "CodeGraph not initialized (run `visp init` in the project root).",
@@ -176,7 +176,7 @@ impl Tool for CodeGraphGetDetails {
             None => return ToolResult::error("Missing required parameter: name"),
         };
 
-        let db_path = context.working_dir.join(".visp").join("codegraph.db");
+        let db_path = visp_config::path::codegraph_db(&context.working_dir);
         if !db_path.exists() {
             return ToolResult::error(
                 "CodeGraph not initialized (run `visp init` in the project root).",
@@ -279,7 +279,7 @@ impl Tool for CodeGraphContext {
             .and_then(|v| v.as_i64())
             .unwrap_or(20) as usize;
 
-        let db_path = context.working_dir.join(".visp").join("codegraph.db");
+        let db_path = visp_config::path::codegraph_db(&context.working_dir);
         if !db_path.exists() {
             return ToolResult::error(
                 "CodeGraph not initialized (run `visp init` in the project root).",
@@ -484,7 +484,7 @@ impl Tool for CodeGraphTrace {
             None => return ToolResult::error("Missing required parameter: to"),
         };
 
-        let db_path = context.working_dir.join(".visp").join("codegraph.db");
+        let db_path = visp_config::path::codegraph_db(&context.working_dir);
         if !db_path.exists() {
             return ToolResult::error(
                 "CodeGraph not initialized (run `visp init` in the project root).",
@@ -563,7 +563,7 @@ impl Tool for CodeGraphImpact {
         };
         let depth = arguments.get("depth").and_then(|v| v.as_i64()).unwrap_or(1) as usize;
 
-        let db_path = context.working_dir.join(".visp").join("codegraph.db");
+        let db_path = visp_config::path::codegraph_db(&context.working_dir);
         if !db_path.exists() {
             return ToolResult::error(
                 "CodeGraph not initialized (run `visp init` in the project root).",

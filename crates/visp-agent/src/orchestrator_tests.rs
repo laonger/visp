@@ -5,6 +5,19 @@ use tokio_util::sync::CancellationToken;
 use visp_core::context::{ContextTrimmer, NoopTrimmer};
 use visp_core::session::InMemorySessionStore;
 
+/// 构造带指定模型的 daemon 配置（供 agent 模型覆盖 / provider 解析使用）
+fn daemon_config_with_models(
+    models: Vec<visp_config::LlmModelConfig>,
+) -> Arc<visp_config::DaemonConfig> {
+    Arc::new(visp_config::DaemonConfig {
+        llm: visp_config::LlmSection {
+            models,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+}
+
 fn make_orchestrator() -> (
     Orchestrator,
     mpsc::Sender<Envelope>,
@@ -39,8 +52,7 @@ fn make_orchestrator() -> (
         rule_engine,
         agent_config,
         context_trimmer,
-        HashMap::new(),
-        "default".to_string(),
+        Arc::new(visp_config::DaemonConfig::default()),
         HashMap::new(),
     );
 
@@ -291,20 +303,22 @@ async fn test_subagent_applies_agent_model_override() {
     let mut providers = HashMap::new();
     providers.insert("Opencode/deepseek-v4-flash".to_string(), provider);
 
-    // Build model_infos with the matching model
-    let mut model_infos: HashMap<String, ModelInfo> = HashMap::new();
-    model_infos.insert(
-        "Opencode/deepseek-v4-flash".to_string(),
-        ModelInfo {
-            model: "deepseek-v4-flash".to_string(),
-            provider: Some("Opencode".to_string()),
-            temperature: Some(0.5),
-            max_tokens: Some(8192),
-            max_context_tokens: Some(64000),
-            image_generation: false,
-            use_tool: None,
-        },
-    );
+    // Build daemon config with the matching model
+    let daemon_config = daemon_config_with_models(vec![visp_config::LlmModelConfig {
+        name: "deepseek-v4-flash".to_string(),
+        protocol: "openai".to_string(),
+        provider: Some("Opencode".to_string()),
+        model: "deepseek-v4-flash".to_string(),
+        api_key: None,
+        base_url: None,
+        temperature: Some(0.5),
+        max_tokens: Some(8192),
+        max_context_tokens: Some(64000),
+        thinking_budget_tokens: None,
+        use_tool: None,
+        image_generation: None,
+        extra: HashMap::new(),
+    }]);
 
     let mut orch = Orchestrator::new(
         cancel_rx,
@@ -318,9 +332,8 @@ async fn test_subagent_applies_agent_model_override() {
         rule_engine,
         agent_config,
         context_trimmer,
+        daemon_config,
         providers,
-        "default".to_string(),
-        model_infos,
     );
 
     // Spawn the sub-agent
@@ -443,9 +456,8 @@ async fn test_subagent_inherits_parent_config_when_no_model_override() {
         rule_engine,
         agent_config,
         context_trimmer,
+        Arc::new(visp_config::DaemonConfig::default()),
         providers,
-        "default".to_string(),
-        HashMap::new(), // empty model_infos
     );
 
     let envelope = Envelope {
@@ -534,31 +546,39 @@ async fn test_main_agent_respects_user_model_switch() {
     providers.insert("ProviderA/model-a".to_string(), provider.clone());
     providers.insert("ProviderB/model-b".to_string(), provider);
 
-    let mut model_infos: HashMap<String, ModelInfo> = HashMap::new();
-    model_infos.insert(
-        "ProviderA/model-a".to_string(),
-        ModelInfo {
-            model: "model-a".to_string(),
+    // Build daemon config with both models (agent def 与用户切换的目标模型)
+    let daemon_config = daemon_config_with_models(vec![
+        visp_config::LlmModelConfig {
+            name: "model-a".to_string(),
+            protocol: "openai".to_string(),
             provider: Some("ProviderA".to_string()),
+            model: "model-a".to_string(),
+            api_key: None,
+            base_url: None,
             temperature: None,
             max_tokens: None,
             max_context_tokens: None,
-            image_generation: false,
+            thinking_budget_tokens: None,
             use_tool: None,
+            image_generation: None,
+            extra: HashMap::new(),
         },
-    );
-    model_infos.insert(
-        "ProviderB/model-b".to_string(),
-        ModelInfo {
-            model: "model-b".to_string(),
+        visp_config::LlmModelConfig {
+            name: "model-b".to_string(),
+            protocol: "openai".to_string(),
             provider: Some("ProviderB".to_string()),
+            model: "model-b".to_string(),
+            api_key: None,
+            base_url: None,
             temperature: None,
             max_tokens: None,
             max_context_tokens: None,
-            image_generation: false,
+            thinking_budget_tokens: None,
             use_tool: None,
+            image_generation: None,
+            extra: HashMap::new(),
         },
-    );
+    ]);
 
     let mut orch = Orchestrator::new(
         cancel_rx,
@@ -572,9 +592,8 @@ async fn test_main_agent_respects_user_model_switch() {
         rule_engine,
         agent_config,
         context_trimmer,
+        daemon_config,
         providers,
-        "ProviderA/model-a".to_string(),
-        model_infos,
     );
 
     // 模拟用户通过 /model 切换到 model-b
@@ -977,9 +996,8 @@ fn make_orchestrator_for_spawn_with_config(
         rule_engine,
         agent_config,
         context_trimmer,
+        Arc::new(visp_config::DaemonConfig::default()),
         providers,
-        "default".to_string(),
-        HashMap::new(),
     );
 
     (orch, global_tx, grpc_rx, parent_id)

@@ -52,7 +52,7 @@ impl WebFetch {
 
     /// 加载项目级白名单配置 .visp/webfetch.toml
     async fn load_project_config(project_dir: &Path) -> Vec<String> {
-        let config_path = project_dir.join(".visp").join("webfetch.toml");
+        let config_path = visp_config::path::webfetch_toml_project(project_dir);
         let content = match tokio::fs::read_to_string(&config_path).await {
             Ok(c) => c,
             Err(_) => return Vec::new(),

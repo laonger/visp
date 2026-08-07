@@ -475,7 +475,7 @@ fn write_url_cache(url: &str, bytes: &[u8], ext: &str) -> Option<String> {
     let mut hasher = DefaultHasher::new();
     url.hash(&mut hasher);
     let hash = hasher.finish();
-    let cache_dir = std::env::temp_dir().join(".visp").join("images");
+    let cache_dir = visp_config::path::image_cache_dir();
     let _ = std::fs::create_dir_all(&cache_dir);
     let cache_path = cache_dir.join(format!("{}.{}", hash, ext));
     match std::fs::write(&cache_path, bytes) {

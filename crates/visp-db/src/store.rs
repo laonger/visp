@@ -16,13 +16,7 @@ pub struct SqliteSessionStore {
 impl SqliteSessionStore {
     /// Open (or create) a SQLite database at the given path, run migrations.
     pub fn open(path: &str) -> Result<Self, SessionError> {
-        let expanded = if let Some(rest) = path.strip_prefix("~/") {
-            let home = visp_core::session::home_dir()
-                .ok_or_else(|| SessionError::Other("HOME not set".into()))?;
-            home.join(rest)
-        } else {
-            std::path::PathBuf::from(path)
-        };
+        let expanded = visp_config::path::expand_home(path);
 
         // Ensure parent directory exists
         if let Some(parent) = expanded.parent() {

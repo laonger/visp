@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use serde_json::json;
-use std::path::PathBuf;
 
 use visp_core::tool::{Tool, ToolContext, ToolResult};
 
@@ -84,10 +83,7 @@ impl Tool for SkillTool {
         }
 
         // 2. Try project filesystem (.visp/skills/<name>/SKILL.md)
-        let project_skill = context
-            .working_dir
-            .join(".visp")
-            .join("skills")
+        let project_skill = visp_config::path::skills_dir_project(&context.working_dir)
             .join(&name)
             .join("SKILL.md");
         if let Ok(content) = tokio::fs::read_to_string(&project_skill).await {
@@ -96,17 +92,12 @@ impl Tool for SkillTool {
         }
 
         // 3. Try global filesystem (~/.config/visp/skills/<name>/SKILL.md)
-        if let Ok(home) = std::env::var("HOME") {
-            let global_skill = PathBuf::from(home)
-                .join(".config")
-                .join("visp")
-                .join("skills")
-                .join(&name)
-                .join("SKILL.md");
-            if let Ok(content) = tokio::fs::read_to_string(&global_skill).await {
-                let body = visp_core::session::strip_frontmatter(&content);
-                return ToolResult::success(format_skill_output(&name, body));
-            }
+        if let Some(global_skill) =
+            visp_config::path::skills_dir_global().map(|dir| dir.join(&name).join("SKILL.md"))
+            && let Ok(content) = tokio::fs::read_to_string(&global_skill).await
+        {
+            let body = visp_core::session::strip_frontmatter(&content);
+            return ToolResult::success(format_skill_output(&name, body));
         }
 
         ToolResult::error(format!("Skill '{}' not found", name))

@@ -23,8 +23,8 @@ use visp_core::{
 use visp_mcp::manager::McpManager;
 use visp_proto::visp::{self as proto, coder_daemon_server::CoderDaemon};
 
+use crate::config::DaemonConfig;
 use crate::config::LlmModelConfig;
-use crate::config::LlmSection;
 
 type ResponseStream =
     Pin<Box<dyn futures::Stream<Item = Result<proto::ServerMessage, tonic::Status>> + Send>>;
@@ -33,13 +33,9 @@ type CodeGraphMap = Arc<RwLock<HashMap<String, Arc<CodeGraph>>>>;
 fn create_llm_provider(config: &LlmModelConfig) -> Result<Arc<dyn LlmProvider>, String> {
     match config.protocol.as_str() {
         "openai" => {
-            let api_key = config
-                .api_key
-                .clone()
-                .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-                .ok_or_else(|| {
-                    "OPENAI_API_KEY not set (configure api_key or set env)".to_string()
-                })?;
+            let api_key = config.api_key.clone().ok_or_else(|| {
+                "OPENAI_API_KEY not set (configure api_key or set env)".to_string()
+            })?;
             if let Some(ref base_url) = config.base_url {
                 Ok(Arc::new(visp_llm::openai::OpenAiProvider::with_base_url(
                     api_key,
@@ -50,13 +46,9 @@ fn create_llm_provider(config: &LlmModelConfig) -> Result<Arc<dyn LlmProvider>, 
             }
         }
         _ => {
-            let api_key = config
-                .api_key
-                .clone()
-                .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-                .ok_or_else(|| {
-                    "ANTHROPIC_API_KEY not set (configure api_key or set env)".to_string()
-                })?;
+            let api_key = config.api_key.clone().ok_or_else(|| {
+                "ANTHROPIC_API_KEY not set (configure api_key or set env)".to_string()
+            })?;
             if let Some(ref base_url) = config.base_url {
                 Ok(Arc::new(
                     visp_llm::anthropic::AnthropicProvider::with_base_url(
@@ -87,6 +79,8 @@ pub struct CoderDaemonService {
     codegraphs: CodeGraphMap,
     /// 默认 LLM 配置（来自 daemon.toml），create_session 时与客户端配置合并
     default_llm_config: LlmConfig,
+    /// 完整 daemon 配置（visp_config 运行时函数使用）
+    daemon_config: Arc<DaemonConfig>,
     /// 上下文裁剪器
     #[allow(dead_code)]
     context_trimmer: Arc<dyn ContextTrimmer + Send + Sync>,
@@ -117,7 +111,7 @@ impl CoderDaemonService {
         #[allow(dead_code)] rule_engine: Arc<RuleEngine>,
         session_mgr: Arc<SessionManager>,
         #[allow(dead_code)] agent_config: AgentConfig,
-        llm_section: LlmSection,
+        daemon_config: Arc<DaemonConfig>,
         #[allow(dead_code)] context_trimmer: Arc<dyn ContextTrimmer + Send + Sync>,
         mcp_manager: Arc<McpManager>,
         available_models: Vec<String>,
@@ -125,16 +119,8 @@ impl CoderDaemonService {
         orchestrator_grpc_rx: mpsc::Receiver<visp_core::agent::AgentEventFrame>,
         client_tx: mpsc::Sender<visp_agent::orchestrator::ClientMessage>,
     ) -> Self {
-        let mut extra = std::collections::HashMap::new();
-        if let Some(budget) = llm_section.thinking_budget_tokens {
-            extra.insert("thinking_budget_tokens".into(), budget.to_string());
-        }
-        // 合并 [llm.extra] 中的自定义参数
-        for (k, v) in llm_section.extra.iter() {
-            extra.insert(k.clone(), v.clone());
-        }
         // 查找默认模型（匹配 {provider}/{name} 或 {provider}/{model} 格式）
-        let default_idx = if let Some(ref default_key) = llm_section.default {
+        let default_idx = if let Some(ref default_key) = daemon_config.llm.default {
             match model_configs
                 .iter()
                 .position(|mc| mc.matches_key(default_key))
@@ -160,44 +146,32 @@ impl CoderDaemonService {
             0
         };
         let default_cfg = &model_configs[default_idx];
-        // per-model thinking_budget_tokens 覆盖全局 fallback
-        if let Some(budget) = default_cfg.thinking_budget_tokens {
-            extra.insert("thinking_budget_tokens".into(), budget.to_string());
-        }
 
         let initial_provider =
             create_llm_provider(default_cfg).expect("failed to create initial LLM provider");
 
-        let default_llm_config = LlmConfig {
-            model: default_cfg.model.clone(),
-            model_key: Some(default_cfg.key()),
-            provider: Some(
-                default_cfg
-                    .provider
-                    .clone()
-                    .unwrap_or_else(|| default_cfg.protocol.clone()),
-            ),
-            temperature: default_cfg.temperature.unwrap_or(0.7),
-            max_tokens: default_cfg.max_tokens.unwrap_or(4096),
-            max_context_tokens: default_cfg.max_context_tokens.unwrap_or(128_000),
-            extra,
-            langfuse_enabled: agent_config.langfuse_enabled,
-            langfuse_session_id: None, // set per-session
-            langfuse_trace_name: None, // set per-session
-            langfuse_user_id: agent_config.langfuse_user_id.clone(),
-            langfuse_tags: agent_config.langfuse_tags.clone(),
-            langfuse_environment: agent_config.langfuse_environment.clone(),
-            langfuse_release: agent_config.langfuse_release.clone(),
-            langfuse_version: agent_config.langfuse_version.clone(),
-            langfuse_public: agent_config.langfuse_public,
-            langfuse_metadata: agent_config.langfuse_metadata.clone(),
-            langfuse_capture_input: agent_config.langfuse_capture_input,
-            langfuse_capture_output: agent_config.langfuse_capture_output,
-            langfuse_capture_max_chars: agent_config.langfuse_capture_max_chars,
-            langfuse_redact_secrets: agent_config.langfuse_redact_secrets,
-            use_tool: default_cfg.use_tool.unwrap_or(true),
-            image_generation: default_cfg.image_generation.unwrap_or(false),
-        };
+        // 使用 visp_config 构建默认 LLM 配置（含 per-model thinking_budget_tokens 与 langfuse）
+        let mut default_llm_config = visp_config::build_llm_config_from_model(
+            default_cfg,
+            Some(&daemon_config.observability),
+        );
+        // 合并 [llm.extra] 自定义参数与全局 thinking_budget_tokens
+        // （per-model 值已在 build_llm_config_from_model 中注入，优先级最高）
+        for (k, v) in &daemon_config.llm.extra {
+            default_llm_config
+                .extra
+                .entry(k.clone())
+                .or_insert_with(|| v.clone());
+        }
+        if let Some(budget) = daemon_config.llm.thinking_budget_tokens {
+            default_llm_config
+                .extra
+                .entry("thinking_budget_tokens".into())
+                .or_insert_with(|| budget.to_string());
+        }
+        // per-model use_tool / image_generation 覆盖
+        default_llm_config.use_tool = default_cfg.use_tool.unwrap_or(true);
+        default_llm_config.image_generation = default_cfg.image_generation.unwrap_or(false);
         let model_config_keys: Vec<String> = model_configs.iter().map(|mc| mc.key()).collect();
         Self {
             provider: Arc::new(StdRwLock::new(initial_provider)),
@@ -208,6 +182,7 @@ impl CoderDaemonService {
             start_time: Instant::now(),
             codegraphs: Arc::new(RwLock::new(HashMap::new())),
             default_llm_config,
+            daemon_config,
             context_trimmer,
             mcp_manager,
             available_models,
@@ -271,98 +246,34 @@ impl CoderDaemon for CoderDaemonService {
         request: Request<proto::CreateSessionRequest>,
     ) -> Result<Response<proto::Session>, Status> {
         let req = request.into_inner();
-        // 从客户端配置开始，然后用 daemon 默认值覆盖未设置的字段
-        let mut config = req.config.as_ref().map(map_llm_config).unwrap_or_default();
-        if config.extra.is_empty() {
-            config.extra = self.default_llm_config.extra.clone();
-        }
-        // 如果客户端传了 model_key，用其查找对应的 model 配置
-        if let Some(ref model_key) = config.model_key
-            && let Some(mc) = self.model_configs.iter().find(|mc| mc.key() == *model_key)
-        {
-            config.model = mc.model.clone();
-            config.provider = Some(mc.provider.clone().unwrap_or_else(|| mc.protocol.clone()));
-            // 用该模型配置填充客户端未显式设置的字段
-            if config.max_tokens == LlmConfig::default().max_tokens
-                && let Some(mt) = mc.max_tokens
-            {
-                config.max_tokens = mt;
-            }
-            if config.max_context_tokens == LlmConfig::default().max_context_tokens
-                && let Some(mct) = mc.max_context_tokens
-            {
-                config.max_context_tokens = mct;
-            }
-            if (config.temperature - LlmConfig::default().temperature).abs() < f64::EPSILON
-                && let Some(t) = mc.temperature
-            {
-                config.temperature = t;
-            }
-            // per-model thinking_budget_tokens
-            if let Some(budget) = mc.thinking_budget_tokens {
-                config
-                    .extra
-                    .insert("thinking_budget_tokens".into(), budget.to_string());
-            }
-        }
-        // 客户端未传的字段用 daemon 默认值
-        if config.model == LlmConfig::default().model {
-            config.model = self.default_llm_config.model.clone();
-            if config.model_key.is_none() {
-                config.model_key = self.default_llm_config.model_key.clone();
-            }
-            if config.provider.is_none() {
-                config.provider = self.default_llm_config.provider.clone();
-            }
-        }
-        // 应用 daemon 默认的 Langfuse 配置（客户端不会传递这些字段）
+        // 从客户端配置开始，用 daemon 默认值合并未设置的字段（visp_config）
+        let mut config = visp_config::merge_session_config(
+            req.config.as_ref(),
+            &self.daemon_config,
+        );
+        // merge_session_config 不处理 langfuse 与哨兵值回填，这里用 daemon 默认值补齐
         config.langfuse_enabled = self.default_llm_config.langfuse_enabled;
-        config
-            .langfuse_session_id
-            .clone_from(&self.default_llm_config.langfuse_session_id);
-        config
-            .langfuse_trace_name
-            .clone_from(&self.default_llm_config.langfuse_trace_name);
-        config
-            .langfuse_user_id
-            .clone_from(&self.default_llm_config.langfuse_user_id);
-        config
-            .langfuse_tags
-            .clone_from(&self.default_llm_config.langfuse_tags);
-        config
-            .langfuse_environment
-            .clone_from(&self.default_llm_config.langfuse_environment);
-        config
-            .langfuse_release
-            .clone_from(&self.default_llm_config.langfuse_release);
-        config
-            .langfuse_version
-            .clone_from(&self.default_llm_config.langfuse_version);
+        config.langfuse_session_id = None;
+        config.langfuse_trace_name = None;
+        config.langfuse_user_id = self.default_llm_config.langfuse_user_id.clone();
+        config.langfuse_tags = self.default_llm_config.langfuse_tags.clone();
+        config.langfuse_environment = self.default_llm_config.langfuse_environment.clone();
+        config.langfuse_release = self.default_llm_config.langfuse_release.clone();
+        config.langfuse_version = self.default_llm_config.langfuse_version.clone();
         config.langfuse_public = self.default_llm_config.langfuse_public;
-        config
-            .langfuse_metadata
-            .clone_from(&self.default_llm_config.langfuse_metadata);
+        config.langfuse_metadata = self.default_llm_config.langfuse_metadata.clone();
         config.langfuse_capture_input = self.default_llm_config.langfuse_capture_input;
         config.langfuse_capture_output = self.default_llm_config.langfuse_capture_output;
         config.langfuse_capture_max_chars = self.default_llm_config.langfuse_capture_max_chars;
         config.langfuse_redact_secrets = self.default_llm_config.langfuse_redact_secrets;
-
-        // 解析模型名：支持 key 格式 ("Anthropic/Claude Sonnet") 和直接 API model key
-        if let Some(mc) = self
-            .model_configs
-            .iter()
-            .find(|mc| mc.key() == config.model)
-        {
-            config.model = mc.model.clone();
-        }
-        if (config.temperature - LlmConfig::default().temperature).abs() < f64::EPSILON {
-            config.temperature = self.default_llm_config.temperature;
-        }
         if config.max_tokens == LlmConfig::default().max_tokens {
             config.max_tokens = self.default_llm_config.max_tokens;
         }
         if config.max_context_tokens == LlmConfig::default().max_context_tokens {
             config.max_context_tokens = self.default_llm_config.max_context_tokens;
+        }
+        if (config.temperature - LlmConfig::default().temperature).abs() < f64::EPSILON {
+            config.temperature = self.default_llm_config.temperature;
         }
         // Inject project_path into config.extra so providers can save base64 images
         config
@@ -473,8 +384,7 @@ impl CoderDaemon for CoderDaemonService {
         let client_tx = self.client_tx.clone();
         let response_tx = tx.clone();
         let session_mgr = self.session_mgr.clone();
-        let model_configs = self.model_configs.clone();
-        let default_llm_config_extra = self.default_llm_config.extra.clone();
+        let daemon_config = self.daemon_config.clone();
 
         // Shared pending user queries: maps query_id → respond sender
         // Used to route UserResponse from CLI back to the agent loop that's waiting
@@ -655,63 +565,36 @@ impl CoderDaemon for CoderDaemonService {
                     }
                     Some(proto::client_message::Payload::ConfigUpdate(update)) => {
                         let session_id = &update.session_id;
-                        let config = update
-                            .config
-                            .as_ref()
-                            .map(map_llm_config)
+
+                        // 获取当前 session 配置，在其基础上应用更新（保留 langfuse/use_tool 等字段）
+                        let current_config = session_mgr
+                            .get(session_id)
+                            .map(|s| s.config)
                             .unwrap_or_default();
 
-                        // 如果传了 model_key，查找对应的 model 配置并更新 model 名
-                        let mut final_config = if let Some(ref model_key) = config.model_key {
-                            if let Some(mc) = model_configs.iter().find(|mc| mc.key() == *model_key)
-                            {
-                                let mut cfg = LlmConfig {
-                                    model: mc.model.clone(),
-                                    model_key: Some(mc.key()),
-                                    provider: Some(
-                                        mc.provider.clone().unwrap_or_else(|| mc.protocol.clone()),
-                                    ),
-                                    ..config
-                                };
-                                // 用该模型配置填充客户端未显式设置的字段
-                                if cfg.max_tokens == LlmConfig::default().max_tokens
-                                    && let Some(mt) = mc.max_tokens
-                                {
-                                    cfg.max_tokens = mt;
-                                }
-                                if cfg.max_context_tokens == LlmConfig::default().max_context_tokens
-                                    && let Some(mct) = mc.max_context_tokens
-                                {
-                                    cfg.max_context_tokens = mct;
-                                }
-                                if (cfg.temperature - LlmConfig::default().temperature).abs()
-                                    < f64::EPSILON
-                                    && let Some(t) = mc.temperature
-                                {
-                                    cfg.temperature = t;
-                                }
-                                // per-model thinking_budget_tokens
-                                if let Some(budget) = mc.thinking_budget_tokens {
-                                    cfg.extra.insert(
-                                        "thinking_budget_tokens".into(),
-                                        budget.to_string(),
-                                    );
-                                }
-                                // 合并 daemon 默认 extra（保留其他 extra key）
-                                for (k, v) in &default_llm_config_extra {
-                                    cfg.extra.entry(k.clone()).or_insert_with(|| v.clone());
-                                }
-                                // per-model use_tool override
-                                cfg.use_tool = mc.use_tool.unwrap_or(true);
-                                // per-model image_generation override
-                                cfg.image_generation = mc.image_generation.unwrap_or(false);
-                                cfg
-                            } else {
-                                config
-                            }
+                        // 用 visp_config 应用更新
+                        let mut final_config = if let Some(ref update_config) = update.config {
+                            visp_config::apply_config_update(
+                                &current_config,
+                                update_config,
+                                &daemon_config,
+                            )
                         } else {
-                            config
+                            current_config
                         };
+
+                        // apply_config_update 不处理 per-model use_tool/image_generation 覆盖
+                        if let Some(ref update_config) = update.config
+                            && let Some(ref model_key) = update_config.model_key
+                            && let Some(mc) = daemon_config
+                                .llm
+                                .models
+                                .iter()
+                                .find(|mc| mc.matches_key(model_key))
+                        {
+                            final_config.use_tool = mc.use_tool.unwrap_or(true);
+                            final_config.image_generation = mc.image_generation.unwrap_or(false);
+                        }
 
                         // Inject project_path from the existing session so providers
                         // can continue to save base64 images after a config update.
@@ -1176,27 +1059,6 @@ fn session_to_proto(
     }
 }
 
-fn map_llm_config(proto: &proto::LlmConfig) -> LlmConfig {
-    let mut config = LlmConfig::default();
-    if let Some(model) = &proto.model {
-        config.model = model.clone();
-    }
-    if let Some(model_key) = &proto.model_key {
-        config.model_key = Some(model_key.clone());
-    }
-    if let Some(temperature) = proto.temperature {
-        config.temperature = temperature;
-    }
-    if let Some(max_tokens) = proto.max_tokens {
-        config.max_tokens = max_tokens;
-    }
-    if let Some(max_context_tokens) = proto.max_context_tokens {
-        config.max_context_tokens = max_context_tokens;
-    }
-    config.extra = proto.extra.clone();
-    config
-}
-
 #[cfg_attr(not(test), allow(dead_code))]
 fn session_error_msg(code: &str, message: &str, session_id: &str) -> proto::ServerMessage {
     proto::ServerMessage {
@@ -1574,6 +1436,7 @@ mod tests {
             start_time: Instant::now(),
             codegraphs: Arc::new(RwLock::new(HashMap::new())),
             default_llm_config: LlmConfig::default(),
+            daemon_config: Arc::new(visp_config::DaemonConfig::default()),
             context_trimmer: Arc::new(visp_core::context::NoopTrimmer),
             mcp_manager: Arc::new(McpManager::new(vec![])),
             available_models: vec![],
@@ -1767,7 +1630,7 @@ mod tests {
     }
 
     #[test]
-    fn test_map_llm_config_empty() {
+    fn test_proto_to_llm_config_empty() {
         let config = proto::LlmConfig {
             model: None,
             model_key: None,
@@ -1776,14 +1639,14 @@ mod tests {
             max_context_tokens: None,
             extra: HashMap::new(),
         };
-        let llm = map_llm_config(&config);
+        let llm = visp_config::proto_to_llm_config(&config);
         assert_eq!(llm.model, "claude-3-7-sonnet-20250219");
         assert!((llm.temperature - 0.7).abs() < f64::EPSILON);
         assert_eq!(llm.max_tokens, 4096);
     }
 
     #[test]
-    fn test_map_llm_config_full() {
+    fn test_proto_to_llm_config_full() {
         let mut extra = HashMap::new();
         extra.insert("custom_key".into(), "custom_val".into());
         let config = proto::LlmConfig {
@@ -1795,7 +1658,7 @@ mod tests {
             extra,
         };
 
-        let llm = map_llm_config(&config);
+        let llm = visp_config::proto_to_llm_config(&config);
         assert_eq!(llm.model, "gpt-4");
         assert!((llm.temperature - 0.5).abs() < f64::EPSILON);
         assert_eq!(llm.max_tokens, 2048);
@@ -1804,7 +1667,7 @@ mod tests {
     }
 
     #[test]
-    fn test_map_llm_config_partial() {
+    fn test_proto_to_llm_config_partial() {
         let config = proto::LlmConfig {
             model: Some("gpt-4".into()),
             model_key: None,
@@ -1814,7 +1677,7 @@ mod tests {
             extra: HashMap::new(),
         };
 
-        let llm = map_llm_config(&config);
+        let llm = visp_config::proto_to_llm_config(&config);
         assert_eq!(llm.model, "gpt-4");
         assert!((llm.temperature - 0.7).abs() < f64::EPSILON);
         assert_eq!(llm.max_tokens, 4096);
@@ -1841,6 +1704,7 @@ mod tests {
             start_time: Instant::now(),
             codegraphs: Arc::new(RwLock::new(HashMap::new())),
             default_llm_config,
+            daemon_config: Arc::new(visp_config::DaemonConfig::default()),
             context_trimmer: Arc::new(visp_core::context::NoopTrimmer),
             mcp_manager: Arc::new(McpManager::new(vec![])),
             available_models: vec![],
@@ -1890,6 +1754,7 @@ mod tests {
             start_time: Instant::now(),
             codegraphs: Arc::new(RwLock::new(HashMap::new())),
             default_llm_config,
+            daemon_config: Arc::new(visp_config::DaemonConfig::default()),
             context_trimmer: Arc::new(visp_core::context::NoopTrimmer),
             mcp_manager: Arc::new(McpManager::new(vec![])),
             available_models: vec![],
@@ -1958,6 +1823,13 @@ mod tests {
             start_time: Instant::now(),
             codegraphs: Arc::new(RwLock::new(HashMap::new())),
             default_llm_config,
+            daemon_config: Arc::new(visp_config::DaemonConfig {
+                llm: visp_config::LlmSection {
+                    models: vec![mc.clone()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
             context_trimmer: Arc::new(visp_core::context::NoopTrimmer),
             mcp_manager: Arc::new(McpManager::new(vec![])),
             available_models: vec![],
@@ -2024,6 +1896,13 @@ mod tests {
             start_time: Instant::now(),
             codegraphs: Arc::new(RwLock::new(HashMap::new())),
             default_llm_config: LlmConfig::default(),
+            daemon_config: Arc::new(visp_config::DaemonConfig {
+                llm: visp_config::LlmSection {
+                    models: vec![mc.clone()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
             context_trimmer: Arc::new(visp_core::context::NoopTrimmer),
             mcp_manager: Arc::new(McpManager::new(vec![])),
             available_models: vec![],
