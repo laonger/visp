@@ -1967,6 +1967,54 @@ mod tests {
         );
     }
 
+    /// Thinking-only response with finish_reason="length" should continue
+    /// the loop, not terminate. The LLM hit the token budget during thinking
+    /// and needs another iteration to produce the actual response.
+    #[tokio::test]
+    async fn test_thinking_only_with_length_continues_loop() {
+        use crate::ProviderMetadata;
+
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(TestProvider::new(vec![
+            // Phase 1: thinking only, finish_reason="length"
+            vec![
+                ChatEvent::ThinkingBlock(serde_json::json!({
+                    "type": "thinking",
+                    "thinking": "Let me analyze this...",
+                })),
+                ChatEvent::OutputMetadata(ProviderMetadata {
+                    model: "test".into(),
+                    finish_reasons: vec!["length".into()],
+                    input_tokens: 100,
+                    output_tokens: 4096,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    latency_ms: 500,
+                }),
+                ChatEvent::Done,
+            ],
+            // Phase 2: actual text response
+            vec![ChatEvent::TextDelta("Here is my answer.".into()), ChatEvent::Done],
+        ]));
+
+        let (events, _sm, _sid) =
+            run_collect(provider, vec![], test_setup(), 10, 200, Message::user("Hi")).await;
+
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
+            "Should NOT error when LLM returns thinking-only with length finish_reason"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Done)),
+            "Expected Done after continuing loop"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TextDelta(t) if t.contains("Here is my answer"))),
+            "Expected text response from second iteration"
+        );
+    }
+
     // ── Panic safety tests ───────────────────────────────────────────────────
 
     /// 10. agent loop 正常结束 → session 状态为 Idle

@@ -688,6 +688,56 @@ async fn handle_stream_result(
                 "LLM returned response with no text (only tool_calls/thinking)"
             );
         }
+
+        // If the LLM produced only thinking (no text, no tool calls) and the
+        // finish_reason is "length" (token budget exhausted), the model was
+        // cut off mid-generation. Save the thinking to history and continue
+        // the loop so the LLM can generate the actual response.
+        let is_token_limit = provider_metadata
+            .as_ref()
+            .map(|m| {
+                m.finish_reasons
+                    .iter()
+                    .any(|r| r == "length" || r == "max_tokens")
+            })
+            .unwrap_or(false);
+
+        if text_buffer.is_empty()
+            && tool_calls.is_empty()
+            && !thinking_blocks.is_empty()
+            && is_token_limit
+        {
+            tracing::info!(
+                session_id = %sid,
+                output_tokens,
+                "LLM hit token limit during thinking-only response, continuing loop"
+            );
+            // Save thinking to history before continuing
+            let thinking_text = extract_thinking_text(thinking_blocks);
+            if let Some(ref thinking) = thinking_text {
+                let mut thinking_msg = Message::thinking(thinking.clone());
+                thinking_msg.estimated_tokens = estimate_message_tokens(&thinking_msg);
+                ctx.history.push(thinking_msg.clone());
+                if let Err(e) = sm.append_message(sid, thinking_msg) {
+                    send_event(
+                        tx,
+                        sm,
+                        sid,
+                        &ctx.global_tx,
+                        &ctx.session_id,
+                        AgentEvent::Error {
+                            code: AgentErrorCode::Internal,
+                            message: format!("Failed to append thinking message: {e}"),
+                        },
+                    )
+                    .await?;
+                    let _ = sm.finish_loop(sid, SessionStatus::Error);
+                    return Err(());
+                }
+            }
+            return Ok(StreamDecision::Continue);
+        }
+
         let thinking_text = extract_thinking_text(thinking_blocks);
 
         if let Some(ref thinking) = thinking_text {
