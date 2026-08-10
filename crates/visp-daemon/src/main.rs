@@ -92,14 +92,41 @@ fn create_llm_provider(config: &LlmModelConfig) -> Result<Arc<dyn LlmProvider>, 
     }
 }
 
+/// Scan command-line arguments for `--config-dir <value>`.
+///
+/// Returns the value following `--config-dir`, `None` if the flag is absent or
+/// has no value following it.
+fn parse_config_dir_from(args: &[String]) -> Option<String> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--config-dir" {
+            return iter.next().cloned();
+        }
+    }
+    None
+}
+
+/// Read the `--config-dir` override from the real process arguments.
+fn parse_config_dir() -> Option<String> {
+    parse_config_dir_from(&std::env::args().collect::<Vec<_>>())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 0. Initialize global config if not exists
+    // 0. If --config-dir is given, export it as VISP_CONFIG_DIR so that all
+    //    global path functions (daemon.toml, rules, skills, agents, etc.)
+    //    resolve under the user-specified directory instead of ~/.config/visp.
+    //    This must happen before any config loading.
+    if let Some(dir) = parse_config_dir() {
+        // SAFETY: single-threaded setup before any threads are spawned.
+        unsafe { std::env::set_var("VISP_CONFIG_DIR", &dir) };
+        tracing::info!(config_dir = %dir, "using custom config directory");
+    }
+
+    // 1. Initialize global config if not exists
     visp_config::init_config().map_err(|e| format!("init config: {e}"))?;
 
-    // 1. Load config
-    //    The first positional arg (not starting with --) is the config file path.
-    //    This skips flags like --http-addr and their values.
+    // 2. Load config
     let config_path = {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let mut config_path = None;
@@ -119,7 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         config_path
     };
-    let mut config: DaemonConfig =
+    let config: DaemonConfig =
         visp_config::load_config(config_path.as_deref()).map_err(|e| format!("config: {e}"))?;
 
     // 2. Init observability (tracing subscriber stack)
@@ -641,5 +668,39 @@ mod tests {
                 def.name
             );
         }
+    }
+    #[test]
+    fn test_parse_config_dir_arg() {
+        let args = vec![
+            "visp-daemon".to_string(),
+            "--config-dir".to_string(),
+            "/custom/dir".to_string(),
+        ];
+        assert_eq!(parse_config_dir_from(&args), Some("/custom/dir".to_string()));
+    }
+
+    #[test]
+    fn test_parse_config_dir_missing_value() {
+        let args = vec!["visp-daemon".to_string(), "--config-dir".to_string()];
+        assert_eq!(parse_config_dir_from(&args), None);
+    }
+
+    #[test]
+    fn test_parse_config_dir_absent() {
+        let args = vec!["visp-daemon".to_string()];
+        assert_eq!(parse_config_dir_from(&args), None);
+    }
+
+    #[test]
+    fn test_parse_config_dir_with_other_flags() {
+        let args = vec![
+            "visp-daemon".to_string(),
+            "--http-addr".to_string(),
+            "0.0.0.0:9090".to_string(),
+            "--config-dir".to_string(),
+            "/custom/dir".to_string(),
+            "config.toml".to_string(),
+        ];
+        assert_eq!(parse_config_dir_from(&args), Some("/custom/dir".to_string()));
     }
 }

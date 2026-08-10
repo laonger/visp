@@ -15,13 +15,34 @@ pub fn visp_dir(project: &Path) -> PathBuf {
     project.join(".visp")
 }
 
-/// 返回 `~/.config/visp`（配置目录）
+/// 全局配置目录根。
+///
+/// 优先级：
+/// 1. 环境变量 `VISP_CONFIG_DIR`（可由 `--config-dir` CLI 参数设置）
+/// 2. `~/.config/visp`（默认）
+///
+/// 所有 `*_global()` 路径函数都基于此，因此设置 `VISP_CONFIG_DIR`
+/// 即可重定向 daemon.toml / rules / skills / agents / AGENTS.md 等全部全局配置。
 pub fn global_config_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("VISP_CONFIG_DIR") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
     home_dir().map(|h| h.join(".config").join("visp"))
 }
 
-/// 返回 `~/.visp`（数据目录，如 logs）
+/// 全局数据目录根（logs 等）。
+///
+/// 优先级：
+/// 1. 环境变量 `VISP_DATA_DIR`
+/// 2. `~/.visp`（默认）
 pub fn global_data_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("VISP_DATA_DIR") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
     home_dir().map(|h| h.join(".visp"))
 }
 
@@ -157,6 +178,54 @@ mod tests {
     fn test_global_config_dir_no_home() {
         set_home(None);
         assert_eq!(global_config_dir(), None);
+    }
+
+    #[test]
+    #[serial]
+    fn test_global_config_dir_env_override() {
+        set_home(Some("/home/user"));
+        unsafe { std::env::set_var("VISP_CONFIG_DIR", "/custom/config") };
+        assert_eq!(
+            global_config_dir(),
+            Some(PathBuf::from("/custom/config"))
+        );
+        unsafe { std::env::remove_var("VISP_CONFIG_DIR") };
+    }
+
+    #[test]
+    #[serial]
+    fn test_global_config_dir_env_empty_falls_back() {
+        set_home(Some("/home/user"));
+        unsafe { std::env::set_var("VISP_CONFIG_DIR", "") };
+        assert_eq!(
+            global_config_dir(),
+            Some(PathBuf::from("/home/user/.config/visp"))
+        );
+        unsafe { std::env::remove_var("VISP_CONFIG_DIR") };
+    }
+
+    #[test]
+    #[serial]
+    fn test_global_data_dir_env_override() {
+        set_home(Some("/home/user"));
+        unsafe { std::env::set_var("VISP_DATA_DIR", "/custom/data") };
+        assert_eq!(
+            global_data_dir(),
+            Some(PathBuf::from("/custom/data"))
+        );
+        unsafe { std::env::remove_var("VISP_DATA_DIR") };
+    }
+
+    #[test]
+    #[serial]
+    fn test_daemon_toml_global_env_override() {
+        set_home(Some("/home/user"));
+        unsafe { std::env::set_var("VISP_CONFIG_DIR", "/custom/config") };
+        assert_eq!(
+            daemon_toml_global(),
+            Some(PathBuf::from("/custom/config/daemon.toml"))
+        );
+        unsafe { std::env::remove_var("VISP_CONFIG_DIR") };
     }
 
     #[test]
