@@ -228,6 +228,8 @@ pub struct SubSessionParams {
     pub session_id: Option<String>,
     pub project_path: PathBuf,
     pub config: LlmConfig,
+    /// 从父会话继承的已审批工具集合（Always Allow），使子 agent 无需重复审批
+    pub approved_tools: HashSet<String>,
 }
 
 /// 会话管理器
@@ -302,7 +304,7 @@ impl SessionManager {
             last_user_message: None,
             config: params.config,
             system_prompt_template,
-            approved_tools: HashSet::new(),
+            approved_tools: params.approved_tools,
             agent_name: params.agent_name,
             parent_id: params.parent_id,
             permission: params.permission,

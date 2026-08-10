@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -170,6 +171,7 @@ async fn test_create_sub_with_parent_reference() {
                 pattern: "*".to_string(),
                 action: visp_core::agent_definition::PermissionAction::Deny,
             }],
+            approved_tools: HashSet::new(),
         })
         .unwrap();
 
@@ -213,6 +215,7 @@ async fn test_max_depth_exceeded() {
             project_path: std::path::PathBuf::from("/tmp"),
             config: visp_core::provider::LlmConfig::default(),
             permission: vec![],
+            approved_tools: HashSet::new(),
         })
         .unwrap();
 
@@ -247,6 +250,7 @@ async fn test_subagent_permission_inheritance() {
                 pattern: "*".to_string(),
                 action: visp_core::agent_definition::PermissionAction::Deny,
             }],
+            approved_tools: HashSet::new(),
         })
         .unwrap();
 
