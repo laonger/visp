@@ -328,8 +328,18 @@ async fn call_llm_with_retry(
             .await
         {
             Ok(s) => break Ok(Box::pin(s)),
-            Err(e @ (LlmError::RateLimit { .. } | LlmError::Network(_))) => {
-                if attempt >= cfg.llm_retry_attempts {
+            Err(e) => {
+                // Retry on RateLimit, Network, and 5xx server errors
+                // (e.g. 503 "engine overloaded, please try again later").
+                let is_retriable = matches!(
+                    &e,
+                    LlmError::RateLimit { .. } | LlmError::Network(_)
+                ) || matches!(
+                    &e,
+                    LlmError::Api { status, .. } if *status >= 500 && *status < 600
+                );
+
+                if !is_retriable || attempt >= cfg.llm_retry_attempts {
                     let (code, msg) = llm_error_to_code(&e);
                     if matches!(code, AgentErrorCode::Cancelled) {
                         tracing::info!(
@@ -337,13 +347,20 @@ async fn call_llm_with_retry(
                             attempts = attempt + 1,
                             "LLM call cancelled by user"
                         );
-                    } else {
+                    } else if is_retriable {
                         tracing::error!(
                             session_id = %sid,
                             error_code = ?code,
                             error_msg = %msg,
                             attempts = attempt + 1,
                             "LLM provider error after retries exhausted"
+                        );
+                    } else {
+                        tracing::error!(
+                            session_id = %sid,
+                            error_code = ?code,
+                            error_msg = %msg,
+                            "LLM provider error"
                         );
                     }
                     return Err(e);
@@ -358,23 +375,6 @@ async fn call_llm_with_retry(
                     _ = tokio::time::sleep(Duration::from_millis(delay)) => {}
                 }
                 attempt += 1;
-            }
-            Err(e) => {
-                let (code, msg) = llm_error_to_code(&e);
-                if matches!(code, AgentErrorCode::Cancelled) {
-                    tracing::info!(
-                        session_id = %sid,
-                        "LLM call cancelled by user"
-                    );
-                } else {
-                    tracing::error!(
-                        session_id = %sid,
-                        error_code = ?code,
-                        error_msg = %msg,
-                        "LLM provider error"
-                    );
-                }
-                return Err(e);
             }
         }
     }
@@ -1844,6 +1844,114 @@ mod tests {
             count <= 3,
             "expected at most 3 calls (cancelled during retry sleep), got {}",
             count
+        );
+    }
+
+    /// ServerError mock: first `fail_attempts` calls return Api{503}, then Ok(Done)
+    struct ServerErrorProvider {
+        call_count: AtomicUsize,
+        fail_attempts: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for ServerErrorProvider {
+        async fn chat_stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _config: &LlmConfig,
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>
+        {
+            let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if count < self.fail_attempts {
+                return Err(LlmError::Api {
+                    status: 503,
+                    message: r#"{"error":{"code":10110,"message":"the engine is overloaded"}}"#
+                        .to_string(),
+                });
+            }
+            let s: Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>> =
+                Box::pin(stream::iter(vec![Ok(ChatEvent::Done)]));
+            Ok(s)
+        }
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn test_call_llm_with_retry_503_succeeds_after_retries() {
+        let provider = Arc::new(ServerErrorProvider {
+            call_count: AtomicUsize::new(0),
+            fail_attempts: 2,
+        });
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let ctx = AgentLoopContext {
+            session_id: "test".into(),
+            history: vec![],
+            working_dir: PathBuf::from("/tmp"),
+            config: LlmConfig::default(),
+            cancel_token: cancel.clone(),
+            context_trimmer: Arc::new(NoopTrimmer),
+            global_tx: None,
+            permission_rules: None,
+            agent_kind: AgentKind::Primary,
+            depth: 0,
+            parent_session_id: "test".into(),
+        };
+        let cfg = AgentConfig {
+            llm_retry_attempts: 5,
+            llm_retry_base_delay_ms: 1,
+            ..Default::default()
+        };
+
+        let result = call_llm_with_retry(provider.as_ref(), &[], &[], &ctx, &cfg, "test").await;
+        assert!(result.is_ok(), "should succeed after retries");
+        let count = provider.call_count.load(Ordering::SeqCst);
+        assert_eq!(
+            count, 3,
+            "expected 3 calls (2 failures + 1 success), got {count}"
+        );
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn test_call_llm_with_retry_503_exhausted() {
+        let provider = Arc::new(ServerErrorProvider {
+            call_count: AtomicUsize::new(0),
+            fail_attempts: 100,
+        });
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let ctx = AgentLoopContext {
+            session_id: "test".into(),
+            history: vec![],
+            working_dir: PathBuf::from("/tmp"),
+            config: LlmConfig::default(),
+            cancel_token: cancel.clone(),
+            context_trimmer: Arc::new(NoopTrimmer),
+            global_tx: None,
+            permission_rules: None,
+            agent_kind: AgentKind::Primary,
+            depth: 0,
+            parent_session_id: "test".into(),
+        };
+        let cfg = AgentConfig {
+            llm_retry_attempts: 3,
+            llm_retry_base_delay_ms: 1,
+            ..Default::default()
+        };
+
+        let result = call_llm_with_retry(provider.as_ref(), &[], &[], &ctx, &cfg, "test").await;
+        assert!(result.is_err(), "should fail after retries exhausted");
+        if let Err(e) = result {
+            assert!(
+                matches!(e, LlmError::Api { status: 503, .. }),
+                "expected LlmError::Api with status 503, got {e}"
+            );
+        }
+        let count = provider.call_count.load(Ordering::SeqCst);
+        assert_eq!(
+            count, 4,
+            "expected 4 calls (1 initial + 3 retries), got {count}"
         );
     }
 
