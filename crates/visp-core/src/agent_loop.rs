@@ -410,6 +410,11 @@ async fn collect_stream_events(
     let mut cache_read_input_tokens: u32 = 0;
     let mut pending_metadata: Option<ProviderMetadata> = None;
 
+    tracing::info!(
+        session_id = %sid,
+        "collect_stream_events: starting to collect LLM stream events"
+    );
+
     let mut pin_stream = Box::pin(stream);
     loop {
         tokio::select! {
@@ -488,7 +493,17 @@ async fn collect_stream_events(
                     Some(Ok(ChatEvent::OutputMetadata(meta))) => {
                         pending_metadata = Some(meta);
                     }
-                    Some(Ok(ChatEvent::Done)) => break,
+                    Some(Ok(ChatEvent::Done)) => {
+                        tracing::info!(
+                            session_id = %sid,
+                            text_len = text_buffer.len(),
+                            tool_call_count = tool_calls.len(),
+                            thinking_block_count = thinking_blocks.len(),
+                            has_metadata = pending_metadata.is_some(),
+                            "collect_stream_events: received Done event"
+                        );
+                        break;
+                    }
                     Some(Err(e)) => {
                         let (code, msg) = llm_error_to_code(&e);
                         send_event(
@@ -507,7 +522,9 @@ async fn collect_stream_events(
                             partial_response_len = partial_len,
                             tool_calls_received = tool_count,
                             thinking_blocks = thinking_count,
-                            "LLM stream ended without Done event — connection likely dropped"
+                            has_metadata = pending_metadata.is_some(),
+                            finish_reasons = ?pending_metadata.as_ref().map(|m| &m.finish_reasons),
+                            "LLM stream ended without Done event - connection likely dropped"
                         );
                         send_event(
                             tx, sm, sid, &ctx.global_tx, &ctx.session_id,
@@ -565,6 +582,17 @@ async fn handle_stream_result(
     let cache_creation_input_tokens = output.cache_creation_input_tokens;
     let cache_read_input_tokens = output.cache_read_input_tokens;
     let provider_metadata = &output.provider_metadata;
+
+    tracing::info!(
+        session_id = %sid,
+        text_len = text_buffer.len(),
+        tool_call_count = tool_calls.len(),
+        thinking_block_count = thinking_blocks.len(),
+        has_metadata = provider_metadata.is_some(),
+        finish_reasons = ?provider_metadata.as_ref().map(|m| &m.finish_reasons),
+        output_tokens,
+        "handle_stream_result: deciding what to do with stream output"
+    );
 
     if tool_calls.is_empty() {
         // Check [USER_QUERY] marker
@@ -689,10 +717,15 @@ async fn handle_stream_result(
             );
         }
 
-        // If the LLM produced only thinking (no text, no tool calls) and the
-        // finish_reason is "length" (token budget exhausted), the model was
-        // cut off mid-generation. Save the thinking to history and continue
-        // the loop so the LLM can generate the actual response.
+        // If the LLM produced only thinking (no text, no tool calls), the
+        // model ended its turn without generating an actual response. This can
+        // happen when:
+        //   - finish_reason is "length"/"max_tokens" (token budget exhausted
+        //     during thinking)
+        //   - finish_reason is "stop" (some providers like DeepSeek via OpenAI
+        //     protocol return "stop" after exhausting the thinking budget)
+        // In both cases, save the thinking to history and continue the loop so
+        // the LLM can generate the actual response.
         let is_token_limit = provider_metadata
             .as_ref()
             .map(|m| {
@@ -702,20 +735,30 @@ async fn handle_stream_result(
             })
             .unwrap_or(false);
 
+        // Continue the loop when we have provider metadata (the model actually
+        // responded and finished). Without metadata (e.g. redacted_thinking),
+        // we treat the thinking-only response as complete.
+        let has_metadata = provider_metadata.is_some();
+
         if text_buffer.is_empty()
             && tool_calls.is_empty()
             && !thinking_blocks.is_empty()
-            && is_token_limit
+            && has_metadata
         {
             tracing::info!(
                 session_id = %sid,
                 output_tokens,
-                "LLM hit token limit during thinking-only response, continuing loop"
+                is_token_limit,
+                finish_reasons = ?provider_metadata.as_ref().map(|m| &m.finish_reasons),
+                "LLM produced thinking-only response (no text/tool calls), continuing loop"
             );
             // Save thinking to history before continuing
             let thinking_text = extract_thinking_text(thinking_blocks);
             if let Some(ref thinking) = thinking_text {
                 let mut thinking_msg = Message::thinking(thinking.clone());
+                // Preserve the raw thinking blocks in extra_blocks so they can be
+                // passed back to the API (DeepSeek requires reasoning_content).
+                thinking_msg.extra_blocks = Some(thinking_blocks.clone());
                 thinking_msg.estimated_tokens = estimate_message_tokens(&thinking_msg);
                 ctx.history.push(thinking_msg.clone());
                 if let Err(e) = sm.append_message(sid, thinking_msg) {
@@ -794,6 +837,12 @@ async fn handle_stream_result(
         }
 
         // Send usage info and Done
+        tracing::info!(
+            session_id = %sid,
+            text_len = text_buffer.len(),
+            thinking_block_count = thinking_blocks.len(),
+            "handle_stream_result: sending Done (no text, no tool calls, no thinking-only recovery)"
+        );
         send_event(
             tx,
             sm,
@@ -1015,6 +1064,12 @@ async fn execute_tool_calls(
         // Propagate langfuse trace-level fields onto tool span
         record_langfuse_trace_fields(&tool_span, cfg, sid);
 
+        tracing::info!(
+            tool_name = %tc.name,
+            call_id = %tc.id,
+            "dispatching tool for execution"
+        );
+
         exec_tasks.push(tokio::spawn(
             async move {
                 // Helper: forward AgentMessage to global_tx
@@ -1092,7 +1147,16 @@ async fn execute_tool_calls(
                         })
                         .await;
 
-                    let result = resp_rx.await.unwrap_or_default();
+                    let result = tokio::select! {
+                        biased;
+                        // If the user hits Stop while a tool approval dialog
+                        // is open, don't hang forever — treat as denied.
+                        _ = cancel.cancelled() => UserQueryResult {
+                            selected_index: -1,
+                            text: String::new(),
+                        },
+                        r = resp_rx => r.unwrap_or_default(),
+                    };
                     match result.selected_index {
                         0 => {}
                         2 => {
@@ -1261,6 +1325,11 @@ async fn execute_tool_calls(
             }).collect()
         }
     };
+
+    tracing::info!(
+        tool_count = task_results.len(),
+        "all tool executions completed"
+    );
 
     // Append tool results to history (in original order)    // Append tool results to history (in original order)
     let mut sorted_results: Vec<ToolExecResult> = task_results;
@@ -1525,6 +1594,11 @@ pub async fn run_agent_loop(
         let mut doom_loop_window: Vec<Vec<(String, serde_json::Value)>> = Vec::new();
         let mut doom_loop_warned = false;
         loop {
+            tracing::info!(
+                session_id = %sid,
+                iteration,
+                "=== agent loop iteration start ==="
+            );
             // Create iteration span with W3C ID placeholder.
             let iter_span_w3c_id = generate_w3c_span_id();
             let iteration_span = if agent_config.langfuse_enabled {
@@ -1629,7 +1703,14 @@ pub async fn run_agent_loop(
                 .await
             {
                 Some(o) => o,
-                None => return,
+                None => {
+                    tracing::warn!(
+                        session_id = %sid,
+                        iteration,
+                        "run_agent_loop: collect_stream_events returned None, exiting loop"
+                    );
+                    return;
+                }
             };
 
             // f. Handle stream result (check USER_QUERY marker or done)
@@ -1668,10 +1749,26 @@ pub async fn run_agent_loop(
                         total_tool_calls,
                         "agent loop completed"
                     );
+                    tracing::info!(
+                        session_id = %sid,
+                        iteration,
+                        total_tool_calls,
+                        "run_agent_loop: StreamDecision::Done, agent loop completed normally"
+                    );
                     return;
                 }
                 Ok(StreamDecision::UserQuery { response_rx }) => {
-                    let query_result = response_rx.await.unwrap_or_default();
+                    // Await the user's answer, but bail out immediately if the
+                    // agent is cancelled (Stop pressed) — otherwise the loop
+                    // hangs here forever.
+                    let query_result = tokio::select! {
+                        biased;
+                        _ = ctx.cancel_token.cancelled() => {
+                            tracing::info!(session_id = %sid, "agent cancelled while waiting for user query");
+                            return;
+                        }
+                        r = response_rx => r.unwrap_or_default(),
+                    };
 
                     // Build user message from result
                     let marker = parse_user_query_marker(&output.text_buffer).unwrap();
@@ -1703,8 +1800,21 @@ pub async fn run_agent_loop(
                     }
                     continue;
                 }
-                Ok(StreamDecision::Continue) => {}
-                Err(()) => return,
+                Ok(StreamDecision::Continue) => {
+                    tracing::info!(
+                        session_id = %sid,
+                        iteration,
+                        "run_agent_loop: StreamDecision::Continue, continuing to next iteration"
+                    );
+                }
+                Err(()) => {
+                    tracing::warn!(
+                        session_id = %sid,
+                        iteration,
+                        "run_agent_loop: handle_stream_result returned Err, exiting loop"
+                    );
+                    return;
+                }
             }
 
             // g+h: Execute tool calls, collect results, append to history
