@@ -1817,8 +1817,13 @@ pub async fn run_agent_loop(
                 }
             }
 
-            // g+h: Execute tool calls, collect results, append to history
-            if execute_tool_calls(
+            // g+h: Execute tool calls, collect results, append to history.
+            // Only run when there are actual tool calls: empty tool_calls
+            // (e.g. thinking-only responses) must not feed the doom-loop
+            // window with identical empty signatures, which previously made
+            // consecutive thinking-only turns trip "repeated tool call loop".
+            if !output.tool_calls.is_empty()
+                && execute_tool_calls(
                 &output.tool_calls,
                 output.text_buffer,
                 output.thinking_blocks,
@@ -5147,6 +5152,99 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::ImageBlock { .. })),
             "error results must not emit ImageBlock events"
+        );
+    }
+
+    /// Provider that always returns a thinking-only response (no text, no
+    /// tool calls) with metadata — mirrors the Ali/DeepSeek thinking loop.
+    struct ThinkingOnlyProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for ThinkingOnlyProvider {
+        async fn chat_stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _config: &LlmConfig,
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>
+        {
+            let events: Vec<Result<ChatEvent, LlmError>> = vec![
+                Ok(ChatEvent::ThinkingBlock(serde_json::json!({
+                    "type": "thinking",
+                    "thinking": "thinking about the task..."
+                }))),
+                Ok(ChatEvent::OutputMetadata(ProviderMetadata {
+                    model: "thinking-test".into(),
+                    finish_reasons: vec!["length".into()],
+                    input_tokens: 10,
+                    output_tokens: 4096,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    latency_ms: 100,
+                })),
+                Ok(ChatEvent::Done),
+            ];
+            Ok(Box::pin(stream::iter(events)))
+        }
+    }
+
+    /// Regression: thinking-only iterations (empty tool_calls) must NOT be
+    /// counted as a repeated-tool-call loop. Previously execute_tool_calls was
+    /// invoked unconditionally and pushed an empty signature into the doom-loop
+    /// window, so N consecutive thinking-only turns tripped StuckInLoop.
+    #[serial]
+    #[tokio::test]
+    async fn test_thinking_only_loop_does_not_trigger_doom_loop() {
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = std::sync::Arc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: std::sync::Arc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            std::sync::Arc::new(Phase2MockTrimmer);
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
+
+        let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::new(ThinkingOnlyProvider);
+        let rule_engine = std::sync::Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig {
+            hard_limit: 12,         // enough iterations to trip the old bug (5+5)
+            doom_loop_threshold: 3, // small window to make the test fast
+            ..Default::default()
+        };
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            std::sync::Arc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("think about it"),
+            tx,
+        )
+        .await;
+
+        let mut events = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                AgentEvent::Error {
+                    code: AgentErrorCode::StuckInLoop,
+                    ..
+                }
+            )),
+            "thinking-only iterations must not trigger StuckInLoop error event"
         );
     }
 }
