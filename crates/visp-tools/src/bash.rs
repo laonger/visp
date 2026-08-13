@@ -8,6 +8,7 @@ use crate::path::validate_path;
 use crate::truncate::{DEFAULT_MAX_OUTPUT_BYTES, truncate_output};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
+const OUTPUT_DRAIN_TIMEOUT_SECS: u64 = 5;
 const BLOCKED_COMMANDS: &[&str] = &["sudo", "rm -rf /", "chmod 777", "chmod 7777"];
 
 /// Bash 命令执行工具，支持 per-tool 配置
@@ -213,45 +214,131 @@ impl Tool for Bash {
             _ => context.working_dir.clone(),
         };
 
-        let result = timeout(
-            Duration::from_secs(timeout_secs),
-            Command::new("sh")
-                .arg("-c")
-                .arg(command)
-                .current_dir(&workdir)
-                .stdin(std::process::Stdio::null())
-                .output(),
-        )
-        .await;
+        tracing::info!(
+            command = %truncate_for_log(command, 200),
+            timeout_secs,
+            workdir = %workdir.display(),
+            "bash: executing command"
+        );
 
-        match result {
-            Ok(Ok(output)) => {
-                let mut combined = String::new();
-                if !output.stdout.is_empty() {
-                    combined.push_str(&String::from_utf8_lossy(&output.stdout));
-                }
-                if !output.stderr.is_empty() {
-                    if !combined.is_empty() {
-                        combined.push('\n');
-                    }
-                    combined.push_str(&String::from_utf8_lossy(&output.stderr));
-                }
-                let truncated = truncate_output(&combined, self.max_output_bytes);
-                if output.status.success() {
+        // Spawn the child instead of using `Command::output()` so we keep a
+        // handle that can be explicitly killed when the timeout elapses.
+        // `kill_on_drop(true)` guarantees the child is terminated even if the
+        // surrounding future/task is dropped or cancelled.
+        let mut child = match Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(&workdir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => return ToolResult::error(format!("Failed to spawn command: {}", e)),
+        };
+
+        // Drain stdout/stderr concurrently with waiting; otherwise a chatty
+        // child can block forever on a full pipe buffer and never exit.
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+
+        // Each read is individually bounded so an orphaned subprocess holding
+        // the pipe open can't hang us indefinitely.
+        let stdout_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = stdout_pipe {
+                let _ = timeout(
+                    Duration::from_secs(OUTPUT_DRAIN_TIMEOUT_SECS),
+                    tokio::io::AsyncReadExt::read_to_end(&mut pipe, &mut buf),
+                )
+                .await;
+            }
+            buf
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = stderr_pipe {
+                let _ = timeout(
+                    Duration::from_secs(OUTPUT_DRAIN_TIMEOUT_SECS),
+                    tokio::io::AsyncReadExt::read_to_end(&mut pipe, &mut buf),
+                )
+                .await;
+            }
+            buf
+        });
+
+        let status = tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => {
+                // Timeout elapsed: explicitly kill the child and reap the zombie.
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                None
+            }
+            status = child.wait() => {
+                Some(status)
+            }
+        };
+
+        // The reads complete once the pipe write ends are closed (child exited
+        // or was killed); each read is individually bounded.
+        let stdout_bytes = stdout_task.await.unwrap_or_default();
+        let stderr_bytes = stderr_task.await.unwrap_or_default();
+        let mut combined = String::new();
+        if !stdout_bytes.is_empty() {
+            combined.push_str(&String::from_utf8_lossy(&stdout_bytes));
+        }
+        if !stderr_bytes.is_empty() {
+            if !combined.is_empty() {
+                combined.push('\n');
+            }
+            combined.push_str(&String::from_utf8_lossy(&stderr_bytes));
+        }
+        let truncated = truncate_output(&combined, self.max_output_bytes);
+
+        match status {
+            Some(Ok(output_status)) => {
+                tracing::info!(
+                    exit_code = ?output_status.code(),
+                    output_len = truncated.len(),
+                    "bash: command completed"
+                );
+                if output_status.success() {
                     ToolResult::success(truncated)
                 } else {
                     ToolResult::error(format!(
                         "Command failed with exit code {}:\n{}",
-                        output.status.code().unwrap_or(-1),
+                        output_status.code().unwrap_or(-1),
                         truncated
                     ))
                 }
             }
-            Ok(Err(e)) => ToolResult::error(format!("Failed to execute command: {}", e)),
-            Err(_) => {
+            Some(Err(e)) => {
+                tracing::warn!(error = %e, "bash: command execution error");
+                ToolResult::error(format!("Failed to execute command: {}", e))
+            }
+            None => {
+                tracing::warn!(
+                    timeout_secs,
+                    "bash: command timed out, process killed"
+                );
                 ToolResult::error(format!("Command timed out after {} seconds", timeout_secs))
             }
         }
+    }
+}
+
+/// Truncate a string for log output while keeping it on a single line.
+fn truncate_for_log(s: &str, max_len: usize) -> String {
+    let mut end = max_len.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end >= s.len() {
+        s.to_string()
+    } else {
+        format!("{}... [truncated]", &s[..end])
     }
 }
 

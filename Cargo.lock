@@ -4807,6 +4807,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "toml",
+ "tracing",
  "visp-codegraph",
  "visp-config",
  "visp-core",

@@ -629,6 +629,7 @@ impl Orchestrator {
             session_id: Some(sub_session_id.clone()),
             project_path: parent_session.project_path.clone(),
             config: parent_session.config.clone(),
+            approved_tools: parent_session.approved_tools.clone(),
         }) {
             Ok(s) => s,
             Err(e) => {

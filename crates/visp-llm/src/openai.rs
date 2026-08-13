@@ -6,7 +6,7 @@ use tracing::Instrument;
 use tracing::field;
 use visp_config::LlmConfig;
 use visp_core::error::LlmError;
-use visp_core::message::{Message, Role, ToolDefinition};
+use visp_core::message::{Message, MessageType, Role, ToolDefinition};
 use visp_core::provider::{ChatEvent, LlmProvider};
 
 use crate::image_util;
@@ -191,20 +191,28 @@ pub fn build_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                 }
             }
             Role::Assistant => {
-                let content: serde_json::Value =
-                    if msg.content.is_empty() && msg.tool_calls.is_some() {
-                        // OpenAI 规范：纯 tool_calls 消息 content 应为 null
-                        serde_json::Value::Null
-                    } else {
-                        serde_json::Value::String(msg.content.clone())
-                    };
+                let content: serde_json::Value = if msg.content.is_empty()
+                    && msg.tool_calls.as_ref().is_some_and(|c| !c.is_empty())
+                {
+                    // OpenAI 规范：纯 tool_calls 消息 content 应为 null
+                    serde_json::Value::Null
+                } else if msg.kind == MessageType::Thinking {
+                    // Thinking-only message: reasoning goes to reasoning_content,
+                    // but content must be a non-null string (DeepSeek API requires
+                    // content or tool_calls to be set).
+                    serde_json::Value::String(String::new())
+                } else {
+                    serde_json::Value::String(msg.content.clone())
+                };
                 let mut assistant_msg = serde_json::json!({
                     "role": "assistant",
                     "content": content,
                 });
 
-                // 添加 tool_calls（如果有）
-                if let Some(ref calls) = msg.tool_calls {
+                // 添加 tool_calls（如果有且非空 — OpenAI 拒绝空数组）
+                if let Some(ref calls) = msg.tool_calls
+                    && !calls.is_empty()
+                {
                     let tool_calls: Vec<serde_json::Value> = calls
                         .iter()
                         .map(|tc| {
@@ -227,12 +235,23 @@ pub fn build_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                 }
 
                 // 合并 extra_blocks（如 thinking）到 assistant message 顶层字段
-                // 部分 OpenAI 兼容模型支持这些扩展字段
+                // 部分 OpenAI 兼容模型支持这些扩展字段（如 DeepSeek 的 reasoning_content）
                 // 跳过 OpenAI 保留字段，避免意外覆盖
                 const RESERVED_FIELDS: &[&str] = &["type", "role", "content", "tool_calls"];
                 if let Some(ref blocks) = msg.extra_blocks {
                     for block in blocks {
                         if let Some(obj) = block.as_object() {
+                            // Check if this is a thinking block and extract the reasoning text
+                            let block_type = obj.get("type").and_then(|v| v.as_str());
+                            let thinking_text = obj.get("thinking").and_then(|v| v.as_str());
+                            if block_type == Some("thinking") {
+                                if let Some(text) = thinking_text {
+                                    assistant_msg["reasoning_content"] =
+                                        serde_json::Value::String(text.to_string());
+                                }
+                                continue;
+                            }
+                            // For non-thinking blocks, merge keys as before
                             for (key, val) in obj {
                                 if !RESERVED_FIELDS.contains(&key.as_str()) {
                                     assistant_msg[key] = val.clone();
@@ -660,6 +679,13 @@ fn byte_stream_to_chat_events(
             OpenAiStreamEvent::Finish { reason, .. } => {
                 if let Some(ref r) = reason {
                     state.finish_reason = r.clone();
+                    tracing::info!(
+                        finish_reason = %r,
+                        had_text_output = state.had_text_output,
+                        reasoning_len = state.reasoning_text.len(),
+                        tool_acc_count = state.tool_acc.len(),
+                        "OpenAI stream: received finish_reason"
+                    );
                     if r == "content_filter" {
                         tracing::warn!("OpenAI response blocked by content filter");
                     }
@@ -944,6 +970,14 @@ fn byte_stream_to_chat_events(
                         return Some((Err(LlmError::Network(e.to_string())), state));
                     }
                     None => {
+                        tracing::info!(
+                            model = %state.model,
+                            finish_reason = %state.finish_reason,
+                            had_text_output = state.had_text_output,
+                            reasoning_len = state.reasoning_text.len(),
+                            tool_acc_count = state.tool_acc.len(),
+                            "OpenAI stream: byte stream ended (None)"
+                        );
                         // 流自然结束
                         state.stream_ended = true;
                         flush_tool_acc(&mut state);
@@ -1013,21 +1047,18 @@ impl OpenAiProvider {
                 message: "No user message found for image generation prompt".to_string(),
             })?;
 
-        // 2. 构建请求体
+        // 2. 构建请求体与 URL（OpenAI 兼容 /images/generations）
         let mut body = serde_json::json!({
             "model": config.model,
             "prompt": prompt,
             "response_format": "url",
         });
-
-        // 3. 从 config.extra 透传可选参数
+        // 从 config.extra 透传可选参数
         for key in &["size", "output_format", "watermark"] {
             if let Some(val) = config.extra.get(*key) {
                 body[key] = serde_json::Value::String(val.clone());
             }
         }
-
-        // 4. 构建 URL
         let base = self.api_url.trim_end_matches('/');
         let url = if is_versioned_base_url(base) {
             format!("{base}/images/generations")
@@ -1035,7 +1066,7 @@ impl OpenAiProvider {
             format!("{base}/v1/images/generations")
         };
 
-        // 5. 构建请求头
+        // 3. 构建请求头
         let headers = build_openai_headers(&self.api_key);
 
         // 6. 发送请求

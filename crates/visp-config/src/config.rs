@@ -1085,6 +1085,10 @@ pub fn apply_model_override(config: &mut LlmConfig, model_cfg: &LlmModelConfig) 
     if let Some(use_tool) = model_cfg.use_tool {
         config.use_tool = use_tool;
     }
+    // 合并模型级 extra（如 image_api = "dashscope"），模型配置优先
+    for (k, v) in &model_cfg.extra {
+        config.extra.insert(k.clone(), v.clone());
+    }
 }
 
 // ============ Session LLM config merge utilities ============

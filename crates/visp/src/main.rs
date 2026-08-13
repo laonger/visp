@@ -27,11 +27,23 @@ struct Cli {
 
     #[arg(short = 's', long)]
     session: Option<String>,
+
+    /// Custom global config directory (overrides ~/.config/visp).
+    /// Passed to the daemon as --config-dir.
+    #[arg(long)]
+    config_dir: Option<String>,
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    // If --config-dir is given, export it as VISP_CONFIG_DIR so that the
+    // launcher's own path resolution (log_dir etc.) uses it too.
+    if let Some(ref dir) = cli.config_dir {
+        // SAFETY: single-threaded setup before any threads are spawned.
+        unsafe { std::env::set_var("VISP_CONFIG_DIR", dir) };
+    }
 
     // Resolve sibling binary paths (same dir as launcher for cargo run, or PATH)
     let daemon_bin = resolve_bin("visp-daemon");
@@ -67,11 +79,16 @@ async fn main() {
 
     // 4. Start daemon, passing the selected address via env var.
     eprintln!("[visp] Starting daemon (log: {})...", log_path.display());
-    let mut daemon = match Command::new(&daemon_bin)
+    let mut daemon_cmd = Command::new(&daemon_bin);
+    daemon_cmd
         .env("VISP_LISTEN_ADDR", &addr)
         .stdout(log_file_stdout.into_std().await)
-        .stderr(log_file_stderr.into_std().await)
-        .spawn()
+        .stderr(log_file_stderr.into_std().await);
+    // Forward --config-dir if specified.
+    if let Some(ref dir) = cli.config_dir {
+        daemon_cmd.arg("--config-dir").arg(dir);
+    }
+    let mut daemon = match daemon_cmd.spawn()
     {
         Ok(child) => child,
         Err(e) => {
@@ -336,5 +353,17 @@ mod tests {
         let cli = Cli::try_parse_from(["visp", "-s", "abc"]).unwrap();
         assert_eq!(cli.session.as_deref(), Some("abc"));
         assert_eq!(cli.project, ".");
+    }
+
+    #[test]
+    fn config_dir_parsed() {
+        let cli = Cli::try_parse_from(["visp", "--config-dir", "/custom/config"]).unwrap();
+        assert_eq!(cli.config_dir.as_deref(), Some("/custom/config"));
+    }
+
+    #[test]
+    fn config_dir_absent_defaults_none() {
+        let cli = Cli::try_parse_from(["visp"]).unwrap();
+        assert!(cli.config_dir.is_none());
     }
 }

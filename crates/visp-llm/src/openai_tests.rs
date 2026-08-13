@@ -130,10 +130,46 @@ fn test_build_messages_with_extra_blocks() {
     let assistant = &result[1];
     assert_eq!(assistant["role"], "assistant");
     assert_eq!(assistant["content"], "Let me think");
-    assert_eq!(assistant["thinking"], "I need to reason about this");
-    assert_eq!(assistant["signature"], "sig_123");
+    // thinking block 映射为 reasoning_content（DeepSeek 要求）
+    assert_eq!(
+        assistant["reasoning_content"],
+        "I need to reason about this"
+    );
+    assert!(assistant.get("thinking").is_none());
     // "type" 字段应被跳过，不出现在消息中
     assert!(assistant.get("type").is_none());
+}
+
+#[test]
+fn test_build_messages_thinking_only() {
+    // 纯 thinking 消息：content 应为空字符串，reasoning 写入 reasoning_content
+    let mut msg = Message::thinking("Let me think carefully");
+    msg.extra_blocks = Some(vec![serde_json::json!({
+        "type": "thinking",
+        "thinking": "Let me think carefully",
+    })]);
+    let msgs = vec![Message::user("Solve this"), msg];
+    let result = build_openai_messages(&msgs);
+    assert_eq!(result.len(), 2);
+    let assistant = &result[1];
+    assert_eq!(assistant["role"], "assistant");
+    assert_eq!(assistant["content"], "");
+    assert_eq!(assistant["reasoning_content"], "Let me think carefully");
+    assert!(assistant.get("thinking").is_none());
+}
+
+#[test]
+fn test_build_messages_thinking_only_without_blocks() {
+    // 纯 thinking 消息但没有 extra_blocks（退化情况）：content 仍为空字符串
+    let msgs = vec![
+        Message::user("Solve this"),
+        Message::thinking("Thinking..."),
+    ];
+    let result = build_openai_messages(&msgs);
+    let assistant = &result[1];
+    assert_eq!(assistant["role"], "assistant");
+    assert_eq!(assistant["content"], "");
+    assert!(assistant.get("reasoning_content").is_none());
 }
 
 #[test]

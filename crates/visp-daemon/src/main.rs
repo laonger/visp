@@ -72,6 +72,17 @@ fn create_llm_provider(config: &LlmModelConfig) -> Result<Arc<dyn LlmProvider>, 
                 Ok(Arc::new(visp_llm::openai::OpenAiProvider::new(api_key)))
             }
         }
+        "aliyun" => {
+            let api_key = config.api_key.clone().ok_or_else(|| {
+                "ALIYUN_API_KEY not set (configure api_key or set env)".to_string()
+            })?;
+            let base_url = config.base_url.clone().ok_or_else(|| {
+                "ALIYUN base_url not set (configure base_url in daemon.toml)".to_string()
+            })?;
+            Ok(Arc::new(visp_llm::aliyun::AliyunProvider::new(
+                api_key, base_url,
+            )))
+        }
         _ => {
             let api_key = config.api_key.clone().ok_or_else(|| {
                 "ANTHROPIC_API_KEY not set (configure api_key or set env)".to_string()
@@ -92,13 +103,60 @@ fn create_llm_provider(config: &LlmModelConfig) -> Result<Arc<dyn LlmProvider>, 
     }
 }
 
+/// Scan command-line arguments for `--config-dir <value>`.
+///
+/// Returns the value following `--config-dir`, `None` if the flag is absent or
+/// has no value following it.
+fn parse_config_dir_from(args: &[String]) -> Option<String> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--config-dir" {
+            return iter.next().cloned();
+        }
+    }
+    None
+}
+
+/// Read the `--config-dir` override from the real process arguments.
+fn parse_config_dir() -> Option<String> {
+    parse_config_dir_from(&std::env::args().collect::<Vec<_>>())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 0. Initialize global config if not exists
+    // 0. If --config-dir is given, export it as VISP_CONFIG_DIR so that all
+    //    global path functions (daemon.toml, rules, skills, agents, etc.)
+    //    resolve under the user-specified directory instead of ~/.config/visp.
+    //    This must happen before any config loading.
+    if let Some(dir) = parse_config_dir() {
+        // SAFETY: single-threaded setup before any threads are spawned.
+        unsafe { std::env::set_var("VISP_CONFIG_DIR", &dir) };
+        tracing::info!(config_dir = %dir, "using custom config directory");
+    }
+
+    // 1. Initialize global config if not exists
     visp_config::init_config().map_err(|e| format!("init config: {e}"))?;
 
-    // 1. Load config
-    let config_path = std::env::args().nth(1).map(std::path::PathBuf::from);
+    // 2. Load config
+    let config_path = {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let mut config_path = None;
+        let mut skip_next = false;
+        for arg in &args {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if arg.starts_with("--") {
+                // Skip the flag and its value
+                skip_next = true;
+                continue;
+            }
+            config_path = Some(std::path::PathBuf::from(arg));
+            break;
+        }
+        config_path
+    };
     let config: DaemonConfig =
         visp_config::load_config(config_path.as_deref()).map_err(|e| format!("config: {e}"))?;
 
@@ -621,5 +679,39 @@ mod tests {
                 def.name
             );
         }
+    }
+    #[test]
+    fn test_parse_config_dir_arg() {
+        let args = vec![
+            "visp-daemon".to_string(),
+            "--config-dir".to_string(),
+            "/custom/dir".to_string(),
+        ];
+        assert_eq!(parse_config_dir_from(&args), Some("/custom/dir".to_string()));
+    }
+
+    #[test]
+    fn test_parse_config_dir_missing_value() {
+        let args = vec!["visp-daemon".to_string(), "--config-dir".to_string()];
+        assert_eq!(parse_config_dir_from(&args), None);
+    }
+
+    #[test]
+    fn test_parse_config_dir_absent() {
+        let args = vec!["visp-daemon".to_string()];
+        assert_eq!(parse_config_dir_from(&args), None);
+    }
+
+    #[test]
+    fn test_parse_config_dir_with_other_flags() {
+        let args = vec![
+            "visp-daemon".to_string(),
+            "--http-addr".to_string(),
+            "0.0.0.0:9090".to_string(),
+            "--config-dir".to_string(),
+            "/custom/dir".to_string(),
+            "config.toml".to_string(),
+        ];
+        assert_eq!(parse_config_dir_from(&args), Some("/custom/dir".to_string()));
     }
 }

@@ -378,3 +378,66 @@ async fn test_bash_no_workdir_uses_context() {
         result.content
     );
 }
+
+#[tokio::test]
+async fn test_bash_timeout_kills_child() {
+    let dir = tempdir().unwrap();
+    let ctx = test_context(dir.path());
+    let start = std::time::Instant::now();
+    let result = Bash::default()
+        .execute(
+            serde_json::json!({"command": "sleep 61", "timeout": 2}),
+            &ctx,
+        )
+        .await;
+    let elapsed = start.elapsed();
+    assert!(result.is_error, "should time out");
+    assert!(
+        result.content.contains("timed out"),
+        "should mention timeout, got: {:?}",
+        result.content
+    );
+    assert!(
+        elapsed.as_secs() < 10,
+        "tool should return promptly after timeout, took {:?}",
+        elapsed
+    );
+    // The child process must be killed, not left running as a zombie/orphan.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let pgrep = tokio::process::Command::new("pgrep")
+        .arg("-f")
+        .arg("sleep 61")
+        .output()
+        .await
+        .expect("pgrep should run");
+    assert!(
+        !pgrep.status.success(),
+        "child process should be killed after timeout, still running: {}",
+        String::from_utf8_lossy(&pgrep.stdout)
+    );
+}
+
+#[tokio::test]
+async fn test_bash_large_output_no_deadlock() {
+    let dir = tempdir().unwrap();
+    let ctx = test_context(dir.path());
+    // Produces 90KB of output: more than the OS pipe buffer (16-64KB), so the
+    // child would block forever on a full pipe unless stdout is drained
+    // concurrently while waiting for the process to exit.
+    let result = Bash::default()
+        .execute(
+            serde_json::json!({"command": "head -c 90000 /dev/zero", "timeout": 10}),
+            &ctx,
+        )
+        .await;
+    assert!(
+        !result.is_error,
+        "should not spuriously time out on a chatty command, got: {:?}",
+        result.content
+    );
+    assert!(
+        result.content.len() >= 90000,
+        "output should include all 90KB, got {} bytes",
+        result.content.len()
+    );
+}
