@@ -4661,7 +4661,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "tempfile",
- "toml 0.8.23",
+ "toml",
  "tracing",
  "visp-proto",
 ]
