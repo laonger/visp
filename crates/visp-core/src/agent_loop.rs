@@ -331,13 +331,11 @@ async fn call_llm_with_retry(
             Err(e) => {
                 // Retry on RateLimit, Network, and 5xx server errors
                 // (e.g. 503 "engine overloaded, please try again later").
-                let is_retriable = matches!(
-                    &e,
-                    LlmError::RateLimit { .. } | LlmError::Network(_)
-                ) || matches!(
-                    &e,
-                    LlmError::Api { status, .. } if *status >= 500 && *status < 600
-                );
+                let is_retriable = matches!(&e, LlmError::RateLimit { .. } | LlmError::Network(_))
+                    || matches!(
+                        &e,
+                        LlmError::Api { status, .. } if *status >= 500 && *status < 600
+                    );
 
                 if !is_retriable || attempt >= cfg.llm_retry_attempts {
                     let (code, msg) = llm_error_to_code(&e);

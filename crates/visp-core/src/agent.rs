@@ -2059,9 +2059,9 @@ mod tests {
             "Expected Done after continuing loop"
         );
         assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AgentEvent::TextDelta(t) if t.contains("Here is the game design"))),
+            events.iter().any(
+                |e| matches!(e, AgentEvent::TextDelta(t) if t.contains("Here is the game design"))
+            ),
             "Expected text response from second iteration"
         );
     }
