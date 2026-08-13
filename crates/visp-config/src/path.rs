@@ -24,10 +24,10 @@ pub fn visp_dir(project: &Path) -> PathBuf {
 /// 所有 `*_global()` 路径函数都基于此，因此设置 `VISP_CONFIG_DIR`
 /// 即可重定向 daemon.toml / rules / skills / agents / AGENTS.md 等全部全局配置。
 pub fn global_config_dir() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("VISP_CONFIG_DIR") {
-        if !dir.is_empty() {
-            return Some(PathBuf::from(dir));
-        }
+    if let Ok(dir) = std::env::var("VISP_CONFIG_DIR")
+        && !dir.is_empty()
+    {
+        return Some(PathBuf::from(dir));
     }
     home_dir().map(|h| h.join(".config").join("visp"))
 }
@@ -38,10 +38,10 @@ pub fn global_config_dir() -> Option<PathBuf> {
 /// 1. 环境变量 `VISP_DATA_DIR`
 /// 2. `~/.visp`（默认）
 pub fn global_data_dir() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("VISP_DATA_DIR") {
-        if !dir.is_empty() {
-            return Some(PathBuf::from(dir));
-        }
+    if let Ok(dir) = std::env::var("VISP_DATA_DIR")
+        && !dir.is_empty()
+    {
+        return Some(PathBuf::from(dir));
     }
     home_dir().map(|h| h.join(".visp"))
 }
@@ -185,10 +185,7 @@ mod tests {
     fn test_global_config_dir_env_override() {
         set_home(Some("/home/user"));
         unsafe { std::env::set_var("VISP_CONFIG_DIR", "/custom/config") };
-        assert_eq!(
-            global_config_dir(),
-            Some(PathBuf::from("/custom/config"))
-        );
+        assert_eq!(global_config_dir(), Some(PathBuf::from("/custom/config")));
         unsafe { std::env::remove_var("VISP_CONFIG_DIR") };
     }
 
@@ -209,10 +206,7 @@ mod tests {
     fn test_global_data_dir_env_override() {
         set_home(Some("/home/user"));
         unsafe { std::env::set_var("VISP_DATA_DIR", "/custom/data") };
-        assert_eq!(
-            global_data_dir(),
-            Some(PathBuf::from("/custom/data"))
-        );
+        assert_eq!(global_data_dir(), Some(PathBuf::from("/custom/data")));
         unsafe { std::env::remove_var("VISP_DATA_DIR") };
     }
 

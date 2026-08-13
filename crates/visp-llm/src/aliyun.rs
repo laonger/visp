@@ -119,18 +119,9 @@ impl AliyunProvider {
             message: format!("Failed to parse image generation response: {}", e),
         })?;
 
-        // 响应：{output: {results: [{url}]}}
-        let image_url = resp_json
-            .get("output")
-            .and_then(|o| o.get("results"))
-            .and_then(|r| r.get(0))
-            .and_then(|item| item.get("url"))
-            .and_then(|u| u.as_str())
-            .ok_or_else(|| LlmError::Api {
-                status: 502,
-                message: format!("No image URL in response: {}", resp_json),
-            })?
-            .to_string();
+        // 响应：{output: {choices: [{message: {content: [{image}]}}]}}
+        // 其中 content 数组的每一项是 {image: <url>} 或 {text: <说明>}
+        let image_url = parse_dashscope_image_url(&resp_json)?;
 
         let events = vec![
             Ok(ChatEvent::ImageBlock {
@@ -143,6 +134,53 @@ impl AliyunProvider {
 
         Ok(Box::pin(stream::iter(events)))
     }
+}
+
+/// 从 DashScope 文生图响应解析图片 URL。
+///
+/// 实际响应结构：
+/// ```json
+/// {
+///   "output": {
+///     "choices": [{
+///       "message": {
+///         "content": [
+///           { "image": "https://..." },
+///           { "text": "..." }
+///         ]
+///       }
+///     }]
+///   }
+/// }
+/// ```
+/// content 数组中的每一项为 {image: <url>} 或 {text: <说明>}，
+/// 遍历找到第一个带 image 字段的项。
+fn parse_dashscope_image_url(resp_json: &serde_json::Value) -> Result<String, LlmError> {
+    let content = resp_json
+        .get("output")
+        .and_then(|o| o.get("choices"))
+        .and_then(|c| c.get(0))
+        .and_then(|choice| choice.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array());
+
+    let Some(content) = content else {
+        return Err(LlmError::Api {
+            status: 502,
+            message: format!("No image URL in response: {}", resp_json),
+        });
+    };
+
+    for item in content {
+        if let Some(url) = item.get("image").and_then(|u| u.as_str()) {
+            return Ok(url.to_string());
+        }
+    }
+
+    Err(LlmError::Api {
+        status: 502,
+        message: format!("No image URL in response: {}", resp_json),
+    })
 }
 
 #[async_trait]
