@@ -72,6 +72,17 @@ fn create_llm_provider(config: &LlmModelConfig) -> Result<Arc<dyn LlmProvider>, 
                 Ok(Arc::new(visp_llm::openai::OpenAiProvider::new(api_key)))
             }
         }
+        "aliyun" => {
+            let api_key = config.api_key.clone().ok_or_else(|| {
+                "ALIYUN_API_KEY not set (configure api_key or set env)".to_string()
+            })?;
+            let base_url = config.base_url.clone().ok_or_else(|| {
+                "ALIYUN base_url not set (configure base_url in daemon.toml)".to_string()
+            })?;
+            Ok(Arc::new(visp_llm::aliyun::AliyunProvider::new(
+                api_key, base_url,
+            )))
+        }
         _ => {
             let api_key = config.api_key.clone().ok_or_else(|| {
                 "ANTHROPIC_API_KEY not set (configure api_key or set env)".to_string()

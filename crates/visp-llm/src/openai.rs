@@ -1000,64 +1000,6 @@ fn is_versioned_base_url(url: &str) -> bool {
         .is_some_and(|seg| seg.starts_with('v') && seg[1..].chars().all(|c| c.is_ascii_digit()))
 }
 
-// ── DashScope（阿里云百炼）文生图 ──────────────────────────────────────
-// 千问系列文生图模型（如 qwen-image-3.0-pro）不走 OpenAI 兼容的
-// /images/generations 端点，而是 DashScope 原生
-// /api/v1/services/aigc/multimodal-generation/generation 接口，
-// 请求/响应结构也不同。以下函数按该格式构建请求与解析响应。
-
-/// DashScope 文生图请求体：
-/// {model, input: {messages: [{role: user, content: [{text}]}]}, parameters: {...}}
-fn build_dashscope_image_request(
-    model: &str,
-    prompt: &str,
-    extra: &HashMap<String, String>,
-) -> serde_json::Value {
-    let mut parameters = serde_json::json!({});
-    // 透传可选参数（prompt_extend 等）
-    for key in &["prompt_extend"] {
-        if let Some(val) = extra.get(*key) {
-            parameters[key] = serde_json::Value::String(val.clone());
-        }
-    }
-    serde_json::json!({
-        "model": model,
-        "input": {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        { "text": prompt }
-                    ]
-                }
-            ]
-        },
-        "parameters": parameters,
-    })
-}
-
-/// DashScope 文生图 URL：`{base}/api/v1/services/aigc/multimodal-generation/generation`
-fn build_dashscope_image_url(base_url: &str) -> String {
-    let base = base_url.trim_end_matches('/');
-    format!("{base}/api/v1/services/aigc/multimodal-generation/generation")
-}
-
-/// 从 DashScope 响应解析图片 URL：
-/// {output: {results: [{url}]}}
-fn parse_dashscope_image_response(resp_json: &serde_json::Value) -> Result<String, LlmError> {
-    resp_json
-        .get("output")
-        .and_then(|o| o.get("results"))
-        .and_then(|r| r.get(0))
-        .and_then(|item| item.get("url"))
-        .and_then(|u| u.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| LlmError::Api {
-            status: 502,
-            message: format!("No image URL in DashScope response: {}", resp_json),
-        })
-}
-
 /// OpenAI API 提供器
 pub struct OpenAiProvider {
     api_key: String,
@@ -1105,39 +1047,23 @@ impl OpenAiProvider {
                 message: "No user message found for image generation prompt".to_string(),
             })?;
 
-        // 2. 构建请求体与 URL。
-        // 千问文生图（qwen-image-*）走 DashScope 原生接口，其余走 OpenAI 兼容
-        // /images/generations。通过 config.extra["image_api"] = "dashscope" 显式指定。
-        let is_dashscope = config
-            .extra
-            .get("image_api")
-            .map(|v| v == "dashscope")
-            .unwrap_or(false);
-
-        let (url, body) = if is_dashscope {
-            (
-                build_dashscope_image_url(&self.api_url),
-                build_dashscope_image_request(&config.model, &prompt, &config.extra),
-            )
-        } else {
-            let mut body = serde_json::json!({
-                "model": config.model,
-                "prompt": prompt,
-                "response_format": "url",
-            });
-            // 从 config.extra 透传可选参数
-            for key in &["size", "output_format", "watermark"] {
-                if let Some(val) = config.extra.get(*key) {
-                    body[key] = serde_json::Value::String(val.clone());
-                }
+        // 2. 构建请求体与 URL（OpenAI 兼容 /images/generations）
+        let mut body = serde_json::json!({
+            "model": config.model,
+            "prompt": prompt,
+            "response_format": "url",
+        });
+        // 从 config.extra 透传可选参数
+        for key in &["size", "output_format", "watermark"] {
+            if let Some(val) = config.extra.get(*key) {
+                body[key] = serde_json::Value::String(val.clone());
             }
-            let base = self.api_url.trim_end_matches('/');
-            let url = if is_versioned_base_url(base) {
-                format!("{base}/images/generations")
-            } else {
-                format!("{base}/v1/images/generations")
-            };
-            (url, body)
+        }
+        let base = self.api_url.trim_end_matches('/');
+        let url = if is_versioned_base_url(base) {
+            format!("{base}/images/generations")
+        } else {
+            format!("{base}/v1/images/generations")
         };
 
         // 3. 构建请求头
@@ -1167,20 +1093,16 @@ impl OpenAiProvider {
             message: format!("Failed to parse image generation response: {}", e),
         })?;
 
-        let image_url = if is_dashscope {
-            parse_dashscope_image_response(&resp_json)?
-        } else {
-            resp_json
-                .get("data")
-                .and_then(|d| d.get(0))
-                .and_then(|item| item.get("url"))
-                .and_then(|u| u.as_str())
-                .ok_or_else(|| LlmError::Api {
-                    status: 502,
-                    message: format!("No image URL in response: {}", resp_json),
-                })?
-                .to_string()
-        };
+        let image_url = resp_json
+            .get("data")
+            .and_then(|d| d.get(0))
+            .and_then(|item| item.get("url"))
+            .and_then(|u| u.as_str())
+            .ok_or_else(|| LlmError::Api {
+                status: 502,
+                message: format!("No image URL in response: {}", resp_json),
+            })?
+            .to_string();
 
         // 8. 构建事件流：ImageBlock + Done
         let events = vec![

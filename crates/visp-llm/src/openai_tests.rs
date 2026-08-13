@@ -1882,69 +1882,6 @@ fn test_parse_image_generation_response_missing_data() {
     assert!(image_url.is_none());
 }
 
-// --- DashScope（千问文生图）测试 ---
-
-#[test]
-fn test_build_dashscope_image_request() {
-    let mut extra = std::collections::HashMap::new();
-    extra.insert("prompt_extend".to_string(), "true".to_string());
-
-    let body = build_dashscope_image_request("qwen-image-3.0-pro", "a cute cat", &extra);
-
-    assert_eq!(body["model"], "qwen-image-3.0-pro");
-    assert_eq!(body["input"]["messages"][0]["role"], "user");
-    assert_eq!(
-        body["input"]["messages"][0]["content"][0]["text"],
-        "a cute cat"
-    );
-    assert_eq!(body["parameters"]["prompt_extend"], "true");
-}
-
-#[test]
-fn test_build_dashscope_image_request_no_extra() {
-    let body = build_dashscope_image_request("qwen-image-3.0-pro", "hello", &Default::default());
-    assert_eq!(body["model"], "qwen-image-3.0-pro");
-    assert_eq!(body["input"]["messages"][0]["content"][0]["text"], "hello");
-    // No prompt_extend configured → parameters stays empty
-    assert!(
-        body["parameters"]
-            .as_object()
-            .map(|o| o.is_empty())
-            .unwrap_or(false)
-    );
-}
-
-#[test]
-fn test_build_dashscope_image_url() {
-    let url = build_dashscope_image_url(
-        "https://llm-ji63pi09aiovbq89.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
-    );
-    assert_eq!(
-        url,
-        "https://llm-ji63pi09aiovbq89.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/api/v1/services/aigc/multimodal-generation/generation"
-    );
-}
-
-#[test]
-fn test_parse_dashscope_image_response() {
-    let resp = serde_json::json!({
-        "output": {
-            "results": [
-                { "url": "https://dashscope.example.com/img.png" }
-            ]
-        },
-        "request_id": "req-123"
-    });
-    let url = parse_dashscope_image_response(&resp).unwrap();
-    assert_eq!(url, "https://dashscope.example.com/img.png");
-}
-
-#[test]
-fn test_parse_dashscope_image_response_missing_output() {
-    let resp = serde_json::json!({ "output": { "results": [] } });
-    assert!(parse_dashscope_image_response(&resp).is_err());
-}
-
 // --- finish_reason='length' 截断 tool_call 处理 ---
 
 /// 构建 tool_call start 的 SSE chunk
