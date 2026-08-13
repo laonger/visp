@@ -131,7 +131,10 @@ fn test_build_messages_with_extra_blocks() {
     assert_eq!(assistant["role"], "assistant");
     assert_eq!(assistant["content"], "Let me think");
     // thinking block 映射为 reasoning_content（DeepSeek 要求）
-    assert_eq!(assistant["reasoning_content"], "I need to reason about this");
+    assert_eq!(
+        assistant["reasoning_content"],
+        "I need to reason about this"
+    );
     assert!(assistant.get("thinking").is_none());
     // "type" 字段应被跳过，不出现在消息中
     assert!(assistant.get("type").is_none());
@@ -158,7 +161,10 @@ fn test_build_messages_thinking_only() {
 #[test]
 fn test_build_messages_thinking_only_without_blocks() {
     // 纯 thinking 消息但没有 extra_blocks（退化情况）：content 仍为空字符串
-    let msgs = vec![Message::user("Solve this"), Message::thinking("Thinking...")];
+    let msgs = vec![
+        Message::user("Solve this"),
+        Message::thinking("Thinking..."),
+    ];
     let result = build_openai_messages(&msgs);
     let assistant = &result[1];
     assert_eq!(assistant["role"], "assistant");
@@ -1874,6 +1880,69 @@ fn test_parse_image_generation_response_missing_data() {
         .and_then(|u| u.as_str());
 
     assert!(image_url.is_none());
+}
+
+// --- DashScope（千问文生图）测试 ---
+
+#[test]
+fn test_build_dashscope_image_request() {
+    let mut extra = std::collections::HashMap::new();
+    extra.insert("prompt_extend".to_string(), "true".to_string());
+
+    let body = build_dashscope_image_request("qwen-image-3.0-pro", "a cute cat", &extra);
+
+    assert_eq!(body["model"], "qwen-image-3.0-pro");
+    assert_eq!(body["input"]["messages"][0]["role"], "user");
+    assert_eq!(
+        body["input"]["messages"][0]["content"][0]["text"],
+        "a cute cat"
+    );
+    assert_eq!(body["parameters"]["prompt_extend"], "true");
+}
+
+#[test]
+fn test_build_dashscope_image_request_no_extra() {
+    let body = build_dashscope_image_request("qwen-image-3.0-pro", "hello", &Default::default());
+    assert_eq!(body["model"], "qwen-image-3.0-pro");
+    assert_eq!(body["input"]["messages"][0]["content"][0]["text"], "hello");
+    // No prompt_extend configured → parameters stays empty
+    assert!(
+        body["parameters"]
+            .as_object()
+            .map(|o| o.is_empty())
+            .unwrap_or(false)
+    );
+}
+
+#[test]
+fn test_build_dashscope_image_url() {
+    let url = build_dashscope_image_url(
+        "https://llm-ji63pi09aiovbq89.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    );
+    assert_eq!(
+        url,
+        "https://llm-ji63pi09aiovbq89.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/api/v1/services/aigc/multimodal-generation/generation"
+    );
+}
+
+#[test]
+fn test_parse_dashscope_image_response() {
+    let resp = serde_json::json!({
+        "output": {
+            "results": [
+                { "url": "https://dashscope.example.com/img.png" }
+            ]
+        },
+        "request_id": "req-123"
+    });
+    let url = parse_dashscope_image_response(&resp).unwrap();
+    assert_eq!(url, "https://dashscope.example.com/img.png");
+}
+
+#[test]
+fn test_parse_dashscope_image_response_missing_output() {
+    let resp = serde_json::json!({ "output": { "results": [] } });
+    assert!(parse_dashscope_image_response(&resp).is_err());
 }
 
 // --- finish_reason='length' 截断 tool_call 处理 ---
