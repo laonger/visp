@@ -2034,7 +2034,10 @@ mod tests {
                 ChatEvent::Done,
             ],
             // Phase 2: actual text response
-            vec![ChatEvent::TextDelta("Here is my answer.".into()), ChatEvent::Done],
+            vec![
+                ChatEvent::TextDelta("Here is my answer.".into()),
+                ChatEvent::Done,
+            ],
         ]));
 
         let (events, _sm, _sid) =

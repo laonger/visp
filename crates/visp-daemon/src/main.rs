@@ -687,7 +687,10 @@ mod tests {
             "--config-dir".to_string(),
             "/custom/dir".to_string(),
         ];
-        assert_eq!(parse_config_dir_from(&args), Some("/custom/dir".to_string()));
+        assert_eq!(
+            parse_config_dir_from(&args),
+            Some("/custom/dir".to_string())
+        );
     }
 
     #[test]
@@ -712,6 +715,9 @@ mod tests {
             "/custom/dir".to_string(),
             "config.toml".to_string(),
         ];
-        assert_eq!(parse_config_dir_from(&args), Some("/custom/dir".to_string()));
+        assert_eq!(
+            parse_config_dir_from(&args),
+            Some("/custom/dir".to_string())
+        );
     }
 }

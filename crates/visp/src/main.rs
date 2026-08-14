@@ -88,8 +88,7 @@ async fn main() {
     if let Some(ref dir) = cli.config_dir {
         daemon_cmd.arg("--config-dir").arg(dir);
     }
-    let mut daemon = match daemon_cmd.spawn()
-    {
+    let mut daemon = match daemon_cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
             eprintln!("[visp] Failed to start daemon: {e}");

@@ -319,10 +319,7 @@ impl Tool for Bash {
                 ToolResult::error(format!("Failed to execute command: {}", e))
             }
             None => {
-                tracing::warn!(
-                    timeout_secs,
-                    "bash: command timed out, process killed"
-                );
+                tracing::warn!(timeout_secs, "bash: command timed out, process killed");
                 ToolResult::error(format!("Command timed out after {} seconds", timeout_secs))
             }
         }
