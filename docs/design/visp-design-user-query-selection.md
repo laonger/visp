@@ -112,6 +112,7 @@ ToolCall → 检查 Session.approved_tools 是否包含 tc.name
 
 #### 3.2.5 边界情况
 
+- **一次一问**：一个 `[USER_QUERY]` marker 只允许包含一个问题。系统 prompt 明确约束 LLM 一次只问一个问题（多问题须逐个询问）。解析器对该约束做防御：若在选项之后再次出现非空非选项行（即第二个问题），只取第一个问题并输出告警日志，避免多个问题的选项被拍平成一个混合单选列表（UI 只支持单选）。
 - **用户取消（Ctrl+C/Ctrl+D）**：在 confirm 状态下，Ctrl 快捷键应能正常退出或取消。Ctrl+D 应视为退出程序；Ctrl+C 应取消当前查询（相当于 Deny）。
 - **空选项列表 + allow_other=true**：工具审批模式不支持 Other，此时客户端应忽略 allow_other。
 - **Other 输入为空**：用户选中 Other 但未输入内容直接确认 → 视为取消（Deny）。

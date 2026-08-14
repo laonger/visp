@@ -450,7 +450,11 @@ pub(crate) struct UserQueryMarker {
     pub(crate) allow_other: bool,
 }
 
-/// 从文本末尾检测 [USER_QUERY]...[/USER_QUERY] 标记
+/// 从文本末尾检测 [USER_QUERY]...[/USER_QUERY] 标记。
+///
+/// 约定：一个 marker 只能包含一个问题。若 LLM 违反约束塞入多个问题
+/// （选项之后再次出现非空非选项行），防御性地只取第一个问题并告警，
+/// 避免多个问题的选项被拍平成一个混合选项列表（UI 只支持单选）。
 pub(crate) fn parse_user_query_marker(text: &str) -> Option<UserQueryMarker> {
     let text = text.trim_end();
 
@@ -480,15 +484,32 @@ pub(crate) fn parse_user_query_marker(text: &str) -> Option<UserQueryMarker> {
     // 解析：首行是 message，- 前缀行为 options
     let mut message = String::new();
     let mut options = Vec::new();
+    let mut saw_options = false;
+    let mut truncated = false;
 
     for line in body.lines() {
         let trimmed = line.trim();
         if let Some(opt_text) = trimmed.strip_prefix("- ") {
             options.push(opt_text.to_string());
+            saw_options = true;
+        } else if trimmed.is_empty() {
+            // 空行：跳过（可能是选项之间的分隔）
         } else if message.is_empty() {
             message = trimmed.to_string();
+        } else if saw_options {
+            // 选项之后出现非空非选项行 = 检测到第二个问题，截断只保留第一个
+            truncated = true;
+            break;
         }
-        // ignore extra lines after options
+        // 其它（message 与选项之间的说明文本）保持原有忽略行为
+    }
+
+    if truncated {
+        tracing::warn!(
+            body = %body,
+            "parse_user_query_marker: [USER_QUERY] contains multiple questions; only the first \
+             question is used. The agent should ask one question per [USER_QUERY] marker."
+        );
     }
 
     Some(UserQueryMarker {
@@ -1656,6 +1677,26 @@ mod tests {
     fn test_parse_marker_empty_body() {
         let text = "text\n[USER_QUERY]\n\n[/USER_QUERY]";
         assert!(parse_user_query_marker(text).is_none());
+    }
+
+    #[test]
+    fn test_parse_marker_multiple_questions_truncated() {
+        // LLM 违反"一次一问"约束，一个 marker 塞入 3 个问题：
+        // 防御性截断，只保留第一个问题，避免 9 个选项被拍平成一个混合单选列表
+        let text = "Ask?\n[USER_QUERY]\nQ1?\n- A1\n- A2\n\nQ2?\n- B1\n- B2\n\nQ3?\n- C1\n- C2\n[/USER_QUERY]";
+        let marker = parse_user_query_marker(text).unwrap();
+        assert_eq!(marker.message, "Q1?");
+        assert_eq!(marker.options, vec!["A1", "A2"]);
+        assert!(!marker.allow_other);
+    }
+
+    #[test]
+    fn test_parse_marker_blank_lines_between_options_kept() {
+        // 同一问题的选项之间存在空行分隔：不应误判为第二个问题
+        let text = "Pick:\n[USER_QUERY]\nChoose one:\n- A\n\n- B\n[/USER_QUERY]";
+        let marker = parse_user_query_marker(text).unwrap();
+        assert_eq!(marker.message, "Choose one:");
+        assert_eq!(marker.options, vec!["A", "B"]);
     }
 
     #[test]

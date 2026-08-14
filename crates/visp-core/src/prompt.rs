@@ -36,6 +36,7 @@ How should we fix this bug?\n\
 - Options should be REAL choices, not invitations to talk\n\
 - Do NOT create \"listening\" options like \"你来说说看\" or \"I'll listen\"\n\
 - Only use [USER_QUERY] when you genuinely need user input\n\
+- One [USER_QUERY] marker must contain exactly ONE question. If you have multiple questions, ask them one at a time and wait for the user's answer before asking the next.\n\
 - An \"Other\" button is always shown for free-form input";
 
 #[allow(clippy::too_many_arguments)]
