@@ -507,6 +507,9 @@ pub struct AgentSection {
     pub file_max_size_bytes: u64,
     #[serde(default = "default_max_depth")]
     pub max_depth: u32,
+    /// 全局同时运行的 subagent 数量上限（主 agent 不计入，超出排队等待）
+    #[serde(default = "default_max_concurrent_subagents")]
+    pub max_concurrent_subagents: u32,
     /// 内置 agent 覆盖配置（model / temperature / steps）
     #[serde(default)]
     pub builtin: Vec<BuiltinAgentConfig>,
@@ -708,6 +711,9 @@ fn default_file_max_size() -> u64 {
 
 fn default_max_depth() -> u32 {
     5
+}
+fn default_max_concurrent_subagents() -> u32 {
+    3
 }
 fn default_soft_limit() -> u32 {
     50
@@ -933,6 +939,7 @@ fn default_agent_section() -> AgentSection {
         bash_confirm_mode: default_bash_confirm(),
         file_max_size_bytes: default_file_max_size(),
         max_depth: default_max_depth(),
+        max_concurrent_subagents: default_max_concurrent_subagents(),
         builtin: Vec::new(),
     }
 }
@@ -1407,6 +1414,24 @@ mod tests {
             Some(h) => unsafe { std::env::set_var("HOME", h) },
             None => unsafe { std::env::remove_var("HOME") },
         }
+    }
+
+    #[test]
+    fn test_agent_max_concurrent_subagents_from_toml() {
+        let toml_str = r#"
+[agent]
+max_concurrent_subagents = 5
+"#;
+        let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.agent.max_concurrent_subagents, 5);
+    }
+
+    #[test]
+    fn test_agent_max_concurrent_subagents_default() {
+        // 缺省：无该字段时默认 3
+        let config: DaemonConfig = toml::from_str("").unwrap();
+        assert_eq!(config.agent.max_concurrent_subagents, 3);
+        assert_eq!(default_agent_section().max_concurrent_subagents, 3);
     }
 
     #[test]

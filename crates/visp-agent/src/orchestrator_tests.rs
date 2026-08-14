@@ -2559,3 +2559,231 @@ async fn test_end_to_end_agent_tool_spawn() {
         "result from empty MockProvider session should be empty"
     );
 }
+
+// ── Subagent 并发限制（排队等待）────────────────────────────────
+
+/// 构造一个 parent agent 的 SpawnRequest envelope
+fn spawn_request(parent_id: &str, call_id: &str) -> Envelope {
+    Envelope {
+        session_id: parent_id.to_string(),
+        message: AgentMessage::SpawnRequest {
+            call_id: call_id.to_string(),
+            subagent_type: "default".to_string(),
+            description: "do something".to_string(),
+            prompt: "test task".into(),
+            task_id: None,
+            trace_context: None,
+            response_tx: None,
+        },
+        trace_context: None,
+    }
+}
+
+/// 将 parent 注册进 active_agents（真实 spawn 路径要求 parent 可查）
+fn register_parent(orch: &mut Orchestrator, parent_id: &str) {
+    let cancel = CancellationToken::new();
+    let (parent_inbox_tx, _rx) = mpsc::channel(16);
+    orch.active_agents.register(ActiveAgent {
+        session_id: parent_id.to_string(),
+        parent_session_id: None,
+        agent_name: "root".to_string(),
+        cancel_token: cancel,
+        inbox: parent_inbox_tx,
+        pending_call_id: None,
+        started_at: Instant::now(),
+    });
+}
+
+/// 找到 parent 的直接子 subagent 的 session_id
+fn find_subagent_id(orch: &Orchestrator, parent_id: &str) -> String {
+    orch.active_agents
+        .agents_cloned()
+        .into_iter()
+        .find(|a| a.parent_session_id.as_deref() == Some(parent_id))
+        .expect("subagent should be registered")
+        .session_id
+}
+
+/// 用例 1：并发达到上限 → 新 spawn 请求入队（不启动 subagent）
+#[tokio::test]
+async fn test_spawn_queued_when_concurrency_limit_reached() {
+    let agent_config = AgentConfig {
+        max_concurrent_subagents: 1,
+        ..AgentConfig::default()
+    };
+    let (mut orch, _global_tx, _grpc_rx, parent_id) =
+        make_orchestrator_for_spawn_with_config(agent_config);
+    register_parent(&mut orch, &parent_id);
+
+    // 第一个 spawn：未达上限 → 立即启动
+    orch.handle_agent_message(spawn_request(&parent_id, "call-1"))
+        .await;
+    assert_eq!(
+        orch.active_subagent_count(),
+        1,
+        "first spawn should run immediately"
+    );
+    assert!(orch.queued_spawns.is_empty());
+
+    // 第二个 spawn：达到上限 → 入队等待（不启动）
+    orch.handle_agent_message(spawn_request(&parent_id, "call-2"))
+        .await;
+    assert_eq!(
+        orch.active_subagent_count(),
+        1,
+        "second spawn must not start while at limit"
+    );
+    assert_eq!(orch.queued_spawns.len(), 1);
+    assert_eq!(orch.queued_spawns.front().unwrap().call_id, "call-2");
+}
+
+/// 用例 2：一个 subagent done 后 → 队列中的请求被取出执行
+#[tokio::test]
+async fn test_queued_spawn_executed_after_done() {
+    let agent_config = AgentConfig {
+        max_concurrent_subagents: 1,
+        ..AgentConfig::default()
+    };
+    let (mut orch, _global_tx, _grpc_rx, parent_id) =
+        make_orchestrator_for_spawn_with_config(agent_config);
+    register_parent(&mut orch, &parent_id);
+
+    orch.handle_agent_message(spawn_request(&parent_id, "call-1"))
+        .await;
+    let sub_1 = find_subagent_id(&orch, &parent_id);
+    orch.handle_agent_message(spawn_request(&parent_id, "call-2"))
+        .await;
+    assert_eq!(orch.queued_spawns.len(), 1);
+
+    // 第一个 subagent 完成 → 释放并发空位 → 队列请求被取出执行
+    orch.handle_agent_message(Envelope {
+        session_id: sub_1.clone(),
+        message: AgentMessage::Done,
+        trace_context: None,
+    })
+    .await;
+
+    assert!(
+        orch.queued_spawns.is_empty(),
+        "queue should be drained after a subagent finishes"
+    );
+    assert_eq!(
+        orch.active_subagent_count(),
+        1,
+        "queued spawn should now be running"
+    );
+}
+
+/// 用例 3：队列 FIFO 顺序（先入队的先出）
+#[tokio::test]
+async fn test_queued_spawns_fifo_order() {
+    let agent_config = AgentConfig {
+        max_concurrent_subagents: 1,
+        ..AgentConfig::default()
+    };
+    let (mut orch, _global_tx, _grpc_rx, parent_id) =
+        make_orchestrator_for_spawn_with_config(agent_config);
+    register_parent(&mut orch, &parent_id);
+
+    orch.handle_agent_message(spawn_request(&parent_id, "call-1"))
+        .await;
+    let sub_1 = find_subagent_id(&orch, &parent_id);
+    orch.handle_agent_message(spawn_request(&parent_id, "call-2"))
+        .await;
+    orch.handle_agent_message(spawn_request(&parent_id, "call-3"))
+        .await;
+
+    // 队列 FIFO：先入队的 call-2 在前
+    let queued: Vec<String> = orch
+        .queued_spawns
+        .iter()
+        .map(|q| q.call_id.clone())
+        .collect();
+    assert_eq!(queued, vec!["call-2".to_string(), "call-3".to_string()]);
+
+    // call-1 完成 → call-2 被取出执行
+    orch.handle_agent_message(Envelope {
+        session_id: sub_1.clone(),
+        message: AgentMessage::Done,
+        trace_context: None,
+    })
+    .await;
+    let sub_2 = find_subagent_id(&orch, &parent_id);
+    assert_eq!(
+        orch.active_agents
+            .get(&sub_2)
+            .unwrap()
+            .pending_call_id
+            .as_deref(),
+        Some("call-2"),
+        "first queued spawn (call-2) should be executed next"
+    );
+    assert_eq!(orch.queued_spawns.len(), 1);
+    assert_eq!(orch.queued_spawns.front().unwrap().call_id, "call-3");
+
+    // call-2 完成 → call-3 被取出执行
+    orch.handle_agent_message(Envelope {
+        session_id: sub_2.clone(),
+        message: AgentMessage::Done,
+        trace_context: None,
+    })
+    .await;
+    let sub_3 = find_subagent_id(&orch, &parent_id);
+    assert_eq!(
+        orch.active_agents
+            .get(&sub_3)
+            .unwrap()
+            .pending_call_id
+            .as_deref(),
+        Some("call-3"),
+        "second queued spawn (call-3) should be executed next"
+    );
+    assert!(orch.queued_spawns.is_empty());
+}
+
+/// 用例 4：max_concurrent_subagents 配置生效（设 3 时最多 3 个并行，第 4 个排队）
+#[tokio::test]
+async fn test_max_concurrent_subagents_config_limits_parallelism() {
+    let agent_config = AgentConfig {
+        max_concurrent_subagents: 3,
+        ..AgentConfig::default()
+    };
+    let (mut orch, _global_tx, _grpc_rx, parent_id) =
+        make_orchestrator_for_spawn_with_config(agent_config);
+    register_parent(&mut orch, &parent_id);
+
+    for call in ["call-1", "call-2", "call-3"] {
+        orch.handle_agent_message(spawn_request(&parent_id, call))
+            .await;
+    }
+    assert_eq!(
+        orch.active_subagent_count(),
+        3,
+        "three spawns below the limit run in parallel"
+    );
+    assert!(orch.queued_spawns.is_empty());
+
+    // 第 4 个请求 → 排队
+    orch.handle_agent_message(spawn_request(&parent_id, "call-4"))
+        .await;
+    assert_eq!(orch.active_subagent_count(), 3);
+    assert_eq!(orch.queued_spawns.len(), 1);
+    assert_eq!(orch.queued_spawns.front().unwrap().call_id, "call-4");
+}
+
+/// 用例 5：未达上限 → 正常 spawn（不排队）
+#[tokio::test]
+async fn test_spawn_not_queued_when_below_limit() {
+    // 默认配置：上限 3
+    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    register_parent(&mut orch, &parent_id);
+
+    orch.handle_agent_message(spawn_request(&parent_id, "call-1"))
+        .await;
+
+    assert_eq!(orch.active_subagent_count(), 1);
+    assert!(
+        orch.queued_spawns.is_empty(),
+        "spawn below the limit must not queue"
+    );
+}

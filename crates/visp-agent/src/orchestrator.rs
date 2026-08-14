@@ -89,6 +89,18 @@ fn build_subagent_prompt(registry: &AgentRegistry) -> String {
 /// 取消信号
 pub struct CancelSignal;
 
+/// 排队等待执行的 subagent spawn 请求（保存 spawn_sub_agent 的全部参数）
+struct QueuedSpawn {
+    parent_session_id: String,
+    call_id: String,
+    subagent_type: String,
+    description: String,
+    prompt: String,
+    task_id: Option<String>,
+    trace_context: Option<visp_core::TraceContext>,
+    response_tx: Option<tokio::sync::oneshot::Sender<String>>,
+}
+
 /// CLI → 服务器的消息
 #[derive(Debug, Clone)]
 pub enum ClientMessage {
@@ -137,6 +149,8 @@ pub struct Orchestrator {
     sub_agent_handles: HashMap<String, JoinHandle<()>>,
     /// 待处理的 oneshot 响应通道，key 为 session_id
     pending_responses: HashMap<String, tokio::sync::oneshot::Sender<String>>,
+    /// 因并发上限而排队等待的 spawn 请求（FIFO，subagent 完成释放空位后消费）
+    queued_spawns: std::collections::VecDeque<QueuedSpawn>,
 
     // ── 共享依赖 ─────────────────────────────────────────────
     session_mgr: Arc<SessionManager>,
@@ -177,6 +191,7 @@ impl Orchestrator {
             pending_queries: HashMap::new(),
             sub_agent_handles: HashMap::new(),
             pending_responses: HashMap::new(),
+            queued_spawns: std::collections::VecDeque::new(),
             session_mgr,
             agent_registry,
             tool_registry,
@@ -237,6 +252,8 @@ impl Orchestrator {
                 // W2: 错误退出（含 panic 转发）走专属路径，向父 agent 投递 SubAgentError，
                 // 而非 handle_done 默认的 SubAgentComplete 空内容路径。
                 self.handle_agent_error(&session_id, code, message).await;
+                // 错误退出同样释放并发空位 → 消费队列
+                self.drain_queued_spawns().await;
             }
             AgentMessage::ToolCallRequest { .. } => {
                 // ToolCallRequest 已由工具执行任务直接送达 CLI
@@ -312,6 +329,8 @@ impl Orchestrator {
             }
             AgentMessage::Done => {
                 self.handle_done(&session_id).await;
+                // subagent 完成释放并发空位 → 从队列取出下一个等待的 spawn 请求执行
+                self.drain_queued_spawns().await;
             }
         }
     }
@@ -580,6 +599,27 @@ impl Orchestrator {
             );
             self.send_sub_agent_error(parent_session_id, call_id, "Max depth exceeded")
                 .await;
+            return;
+        }
+
+        // 1.5. 并发限制：达到上限 → 入队等待（父 agent 继续阻塞在 response_rx，
+        //      待有 subagent 完成释放空位后由 drain_queued_spawns 消费执行）
+        if self.active_subagent_count() >= self.concurrency_limit() {
+            tracing::info!(
+                count = self.active_subagent_count(),
+                max = self.concurrency_limit(),
+                "subagent concurrency limit reached, queuing spawn"
+            );
+            self.queued_spawns.push_back(QueuedSpawn {
+                parent_session_id: parent_session_id.to_string(),
+                call_id: call_id.to_string(),
+                subagent_type: subagent_type.to_string(),
+                description: description.to_string(),
+                prompt: prompt.to_string(),
+                task_id: _task_id.map(str::to_string),
+                trace_context,
+                response_tx,
+            });
             return;
         }
 
@@ -1122,6 +1162,50 @@ impl Orchestrator {
     }
 
     // ── 辅助方法 ─────────────────────────────────────────────
+
+    /// 并发上限（至少 1，避免配置 0 时所有请求永远排队造成死锁）
+    fn concurrency_limit(&self) -> usize {
+        self.agent_config.max_concurrent_subagents.max(1) as usize
+    }
+
+    /// 当前运行的 subagent 数（parent_session_id 非 None 的 active agent，主 agent 不计入）
+    fn active_subagent_count(&self) -> usize {
+        self.active_agents
+            .agents_cloned()
+            .iter()
+            .filter(|a| a.parent_session_id.is_some())
+            .count()
+    }
+
+    /// 有空位时从队列取出下一个等待的 spawn 请求执行（FIFO）
+    async fn drain_queued_spawns(&mut self) {
+        if self.active_subagent_count() < self.concurrency_limit()
+            && let Some(next) = self.queued_spawns.pop_front()
+        {
+            let QueuedSpawn {
+                parent_session_id,
+                call_id,
+                subagent_type,
+                description,
+                prompt,
+                task_id,
+                trace_context,
+                response_tx,
+            } = next;
+            tracing::info!(call_id = %call_id, "executing queued subagent spawn");
+            self.spawn_sub_agent(
+                &parent_session_id,
+                &call_id,
+                &subagent_type,
+                &description,
+                &prompt,
+                task_id.as_deref(),
+                trace_context,
+                response_tx,
+            )
+            .await;
+        }
+    }
 
     /// 向父 agent 发送子 agent 错误
     async fn send_sub_agent_error(&mut self, parent_session_id: &str, call_id: &str, error: &str) {

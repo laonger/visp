@@ -335,6 +335,8 @@ pub struct AgentConfig {
     pub file_max_size_bytes: u64,
     /// Agent 嵌套深度上限
     pub max_depth: u32,
+    /// 全局同时运行的 subagent 数量上限（主 agent 不计入，超出排队等待）
+    pub max_concurrent_subagents: u32,
     /// Langfuse 总开关
     pub langfuse_enabled: bool,
     /// Langfuse user.id 字段值（None = 不设置）
@@ -372,6 +374,7 @@ impl Default for AgentConfig {
             bash_confirm_mode: true,
             file_max_size_bytes: 1048576,
             max_depth: 5,
+            max_concurrent_subagents: 3,
             langfuse_enabled: false,
             langfuse_user_id: None,
             langfuse_tags: None,

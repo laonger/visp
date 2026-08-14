@@ -435,6 +435,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bash_confirm_mode: config.agent.bash_confirm_mode,
         file_max_size_bytes: config.agent.file_max_size_bytes,
         max_depth: config.agent.max_depth,
+        max_concurrent_subagents: config.agent.max_concurrent_subagents,
         langfuse_enabled: langfuse.enabled,
         langfuse_user_id: langfuse.user_id.clone(),
         langfuse_tags,
