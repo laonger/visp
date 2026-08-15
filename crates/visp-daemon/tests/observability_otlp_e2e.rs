@@ -48,7 +48,7 @@ fn test_otlp_e2e_export_failure_graceful() {
 
     // ── Act: init observability (real exporter path, not test exporter) ──
     // This should NOT panic even though the collector is unreachable.
-    let guard = init_observability(&cfg);
+    let guard = init_observability(&cfg, &cfg.level);
     // If we reach here, init succeeded (no panic from build_tracer_provider).
 
     // ── Act: emit some spans (simulating main flow) ──────────────────────

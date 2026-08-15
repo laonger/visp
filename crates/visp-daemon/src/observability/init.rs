@@ -4,12 +4,13 @@
 //! into a single tracing subscriber stack with JSON or pretty output.
 //! Refs: design §7.3, plan §Step 5.
 
+use std::str::FromStr;
 use std::sync::Arc;
 
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing_opentelemetry::OpenTelemetryLayer;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::prelude::*;
 
 use crate::observability::metrics_layer::MetricsLayer;
@@ -47,7 +48,7 @@ pub struct ObservabilityGuard {
 /// subscriber (same layers, different identity).  Identical subscribers
 /// from the same `tracing_subscriber::registry` do not cause issues.
 #[allow(dead_code)]
-pub fn init_observability(cfg: &ObservabilityConfig) -> ObservabilityGuard {
+pub fn init_observability(cfg: &ObservabilityConfig, log_level: &str) -> ObservabilityGuard {
     if !cfg.enabled {
         return ObservabilityGuard {
             metrics: None,
@@ -58,8 +59,10 @@ pub fn init_observability(cfg: &ObservabilityConfig) -> ObservabilityGuard {
         };
     }
 
-    // 1. EnvFilter: try RUST_LOG env var, fall back to cfg.level.
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.level));
+    // 1. Per-layer level filters: fmt layer (file/stdout) uses `log_level`;
+    //    OTel export + metrics use `cfg.level` (observability.level).
+    let log_filter = LevelFilter::from_str(log_level).unwrap_or(LevelFilter::INFO);
+    let otel_filter = LevelFilter::from_str(&cfg.level).unwrap_or(LevelFilter::INFO);
 
     // 2. Always create layers (lightweight noops when unused).
     let parent_link = if cfg.otlp.enabled {
@@ -100,7 +103,7 @@ pub fn init_observability(cfg: &ObservabilityConfig) -> ObservabilityGuard {
 
     // 5. Assemble subscriber (json vs pretty produce different concrete types).
     //
-    // Assembly order: EnvFilter → OTelLayer? → ParentLinkLayer → MetricsLayer → fmt.
+    // Assembly order: OTelLayer? → ParentLinkLayer → MetricsLayer → fmt.
     // OTel layer must be outer to ParentLinkLayer (registered first = outer),
     // so ParentLinkLayer.on_enter sees the OTel-fixed SpanContext.
     //
@@ -109,26 +112,26 @@ pub fn init_observability(cfg: &ObservabilityConfig) -> ObservabilityGuard {
     // first call wins and subsequent tests silently re-use that subscriber.
     let _ = if cfg.format == "json" {
         tracing_subscriber::registry()
-            .with(filter)
-            .with(otel_layer)
+            .with(otel_layer.with_filter(otel_filter))
             .with(parent_link.clone())
-            .with(metrics.clone())
+            .with(metrics.clone().with_filter(otel_filter))
             .with(
                 tracing_subscriber::fmt::layer()
                     .json()
-                    .with_writer(fmt_writer),
+                    .with_writer(fmt_writer)
+                    .with_filter(log_filter),
             )
             .try_init()
     } else {
         tracing_subscriber::registry()
-            .with(filter)
-            .with(otel_layer)
+            .with(otel_layer.with_filter(otel_filter))
             .with(parent_link.clone())
-            .with(metrics.clone())
+            .with(metrics.clone().with_filter(otel_filter))
             .with(
                 tracing_subscriber::fmt::layer()
                     .pretty()
-                    .with_writer(fmt_writer),
+                    .with_writer(fmt_writer)
+                    .with_filter(log_filter),
             )
             .try_init()
     };
@@ -161,7 +164,11 @@ pub fn init_observability(cfg: &ObservabilityConfig) -> ObservabilityGuard {
 /// Never—`try_init()` errors are silently ignored (expected when the global
 /// subscriber was already set by an earlier call).
 #[allow(dead_code)]
-pub fn init_observability_with_writer<W>(cfg: &ObservabilityConfig, writer: W) -> ObservabilityGuard
+pub fn init_observability_with_writer<W>(
+    cfg: &ObservabilityConfig,
+    log_level: &str,
+    writer: W,
+) -> ObservabilityGuard
 where
     W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
 {
@@ -175,7 +182,9 @@ where
         };
     }
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.level));
+    // Per-layer level filters: fmt layer uses `log_level`, OTel + metrics use cfg.level.
+    let log_filter = LevelFilter::from_str(log_level).unwrap_or(LevelFilter::INFO);
+    let otel_filter = LevelFilter::from_str(&cfg.level).unwrap_or(LevelFilter::INFO);
     let parent_link = if cfg.otlp.enabled {
         ParentLinkLayer::with_otel_mode(true)
     } else {
@@ -197,22 +206,26 @@ where
     // Install globally so spawned tasks on other threads see the subscriber.
     let _ = if cfg.format == "json" {
         tracing_subscriber::registry()
-            .with(filter)
-            .with(otel_layer)
+            .with(otel_layer.with_filter(otel_filter))
             .with(parent_link.clone())
-            .with(metrics.clone())
-            .with(tracing_subscriber::fmt::layer().json().with_writer(writer))
+            .with(metrics.clone().with_filter(otel_filter))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(writer)
+                    .with_filter(log_filter),
+            )
             .try_init()
     } else {
         tracing_subscriber::registry()
-            .with(filter)
-            .with(otel_layer)
+            .with(otel_layer.with_filter(otel_filter))
             .with(parent_link.clone())
-            .with(metrics.clone())
+            .with(metrics.clone().with_filter(otel_filter))
             .with(
                 tracing_subscriber::fmt::layer()
                     .pretty()
-                    .with_writer(writer),
+                    .with_writer(writer)
+                    .with_filter(log_filter),
             )
             .try_init()
     };
@@ -247,6 +260,7 @@ impl Drop for ObservabilityGuard {
 #[allow(dead_code)]
 pub(crate) fn init_observability_with_exporter<W, E>(
     cfg: &ObservabilityConfig,
+    log_level: &str,
     writer: W,
     exporter: E,
 ) -> ObservabilityGuard
@@ -264,7 +278,9 @@ where
         };
     }
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.level));
+    // Per-layer level filters: fmt layer uses `log_level`, OTel + metrics use cfg.level.
+    let log_filter = LevelFilter::from_str(log_level).unwrap_or(LevelFilter::INFO);
+    let otel_filter = LevelFilter::from_str(&cfg.level).unwrap_or(LevelFilter::INFO);
     let parent_link = if cfg.otlp.enabled {
         ParentLinkLayer::with_otel_mode(true)
     } else {
@@ -285,22 +301,26 @@ where
 
     let set_default = if cfg.format == "json" {
         tracing_subscriber::registry()
-            .with(filter)
-            .with(otel_layer)
+            .with(otel_layer.with_filter(otel_filter))
             .with(parent_link.clone())
-            .with(metrics.clone())
-            .with(tracing_subscriber::fmt::layer().json().with_writer(writer))
+            .with(metrics.clone().with_filter(otel_filter))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(writer)
+                    .with_filter(log_filter),
+            )
             .set_default()
     } else {
         tracing_subscriber::registry()
-            .with(filter)
-            .with(otel_layer)
+            .with(otel_layer.with_filter(otel_filter))
             .with(parent_link.clone())
-            .with(metrics.clone())
+            .with(metrics.clone().with_filter(otel_filter))
             .with(
                 tracing_subscriber::fmt::layer()
                     .pretty()
-                    .with_writer(writer),
+                    .with_writer(writer)
+                    .with_filter(log_filter),
             )
             .set_default()
     };
@@ -327,6 +347,7 @@ where
 #[cfg(test)]
 pub(crate) fn init_global_observability_with_writer<W>(
     cfg: &ObservabilityConfig,
+    log_level: &str,
     writer: W,
 ) -> ObservabilityGuard
 where
@@ -342,7 +363,9 @@ where
         };
     }
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.level));
+    // Per-layer level filters: fmt layer uses `log_level`, OTel + metrics use cfg.level.
+    let log_filter = LevelFilter::from_str(log_level).unwrap_or(LevelFilter::INFO);
+    let otel_filter = LevelFilter::from_str(&cfg.level).unwrap_or(LevelFilter::INFO);
     let parent_link = if cfg.otlp.enabled {
         ParentLinkLayer::with_otel_mode(true)
     } else {
@@ -364,22 +387,26 @@ where
     // Install globally — use ok() to ignore "already set" error.
     let _ = if cfg.format == "json" {
         tracing_subscriber::registry()
-            .with(filter)
-            .with(otel_layer)
+            .with(otel_layer.with_filter(otel_filter))
             .with(parent_link.clone())
-            .with(metrics.clone())
-            .with(tracing_subscriber::fmt::layer().json().with_writer(writer))
+            .with(metrics.clone().with_filter(otel_filter))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(writer)
+                    .with_filter(log_filter),
+            )
             .try_init()
     } else {
         tracing_subscriber::registry()
-            .with(filter)
-            .with(otel_layer)
+            .with(otel_layer.with_filter(otel_filter))
             .with(parent_link.clone())
-            .with(metrics.clone())
+            .with(metrics.clone().with_filter(otel_filter))
             .with(
                 tracing_subscriber::fmt::layer()
                     .pretty()
-                    .with_writer(writer),
+                    .with_writer(writer)
+                    .with_filter(log_filter),
             )
             .try_init()
     };
@@ -459,34 +486,40 @@ mod tests {
 
     /// Build a test subscriber with custom writer (mirrors init_observability
     /// assembly logic but uses the test writer instead of stdout/file).
+    ///
+    /// Per-layer filters: fmt layer uses `log_level`, metrics layer uses
+    /// `cfg.level` (otel filter).  Mirrors the production per-layer setup.
     fn make_test_subscriber(
         writer: TestVecWriter,
+        log_level: &str,
         cfg: &ObservabilityConfig,
     ) -> tracing::subscriber::DefaultGuard {
-        // Always use cfg.level directly; RUST_LOG in the ambient environment
-        // (e.g. "info") would otherwise override the test's intended level
-        // and silently filter out events the test expects to see.
-        let filter = EnvFilter::new(&cfg.level);
+        let log_filter = LevelFilter::from_str(log_level).unwrap_or(LevelFilter::INFO);
+        let otel_filter = LevelFilter::from_str(&cfg.level).unwrap_or(LevelFilter::INFO);
 
         let parent_link = ParentLinkLayer::new();
         let metrics = MetricsLayer::new();
 
         if cfg.format == "json" {
             tracing_subscriber::registry()
-                .with(filter)
                 .with(parent_link)
-                .with(metrics)
-                .with(tracing_subscriber::fmt::layer().json().with_writer(writer))
+                .with(metrics.with_filter(otel_filter))
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .with_writer(writer)
+                        .with_filter(log_filter),
+                )
                 .set_default()
         } else {
             tracing_subscriber::registry()
-                .with(filter)
                 .with(parent_link)
-                .with(metrics)
+                .with(metrics.with_filter(otel_filter))
                 .with(
                     tracing_subscriber::fmt::layer()
                         .pretty()
-                        .with_writer(writer),
+                        .with_writer(writer)
+                        .with_filter(log_filter),
                 )
                 .set_default()
         }
@@ -517,7 +550,7 @@ mod tests {
             log_file: None,
             ..Default::default()
         };
-        let guard = init_global_observability_with_writer(&cfg, w.clone());
+        let guard = init_global_observability_with_writer(&cfg, &cfg.level, w.clone());
         // Guard fields should be populated from config
         assert!(guard.metrics.is_none());
         assert!(guard.parent_link.is_none());
@@ -535,13 +568,13 @@ mod tests {
             enabled: false,
             ..Default::default()
         };
-        let guard = init_observability(&cfg);
+        let guard = init_observability(&cfg, &cfg.level);
 
         assert!(guard.metrics.is_none());
         assert!(guard.parent_link.is_none());
 
         // Calling init_observability again with disabled should not panic.
-        let guard2 = init_observability(&cfg);
+        let guard2 = init_observability(&cfg, &cfg.level);
         assert!(guard2.metrics.is_none());
         assert!(guard2.parent_link.is_none());
     }
@@ -559,7 +592,7 @@ mod tests {
             parent_link: false,
             ..Default::default()
         };
-        let guard = init_observability(&cfg);
+        let guard = init_observability(&cfg, &cfg.level);
         assert!(guard.metrics.is_some(), "expected metrics handle");
         assert!(guard.parent_link.is_none());
     }
@@ -573,7 +606,7 @@ mod tests {
             parent_link: true,
             ..Default::default()
         };
-        let guard = init_observability(&cfg);
+        let guard = init_observability(&cfg, &cfg.level);
         assert!(guard.parent_link.is_some(), "expected parent_link handle");
         assert!(guard.metrics.is_none());
     }
@@ -587,7 +620,7 @@ mod tests {
             metrics_summary: false,
             ..Default::default()
         };
-        let guard = init_observability(&cfg);
+        let guard = init_observability(&cfg, &cfg.level);
         assert!(
             guard.parent_link.is_none(),
             "parent_link should be None when disabled"
@@ -614,7 +647,7 @@ mod tests {
             log_file: None,
             ..Default::default()
         };
-        let _guard = make_test_subscriber(writer.clone(), &cfg);
+        let _guard = make_test_subscriber(writer.clone(), "info", &cfg);
 
         tracing::info!("hello json");
 
@@ -648,7 +681,7 @@ mod tests {
             log_file: None,
             ..Default::default()
         };
-        let _guard = make_test_subscriber(writer.clone(), &cfg);
+        let _guard = make_test_subscriber(writer.clone(), "info", &cfg);
 
         tracing::info!("hello pretty");
 
@@ -677,7 +710,8 @@ mod tests {
             log_file: None,
             ..Default::default()
         };
-        let _guard = make_test_subscriber(writer.clone(), &cfg);
+        // log_level="debug": debug + error events both pass the fmt filter.
+        let _guard = make_test_subscriber(writer.clone(), "debug", &cfg);
 
         tracing::debug!("this is a debug message");
         tracing::error!("this is an error message");
@@ -765,7 +799,7 @@ mod tests {
         };
         let writer = TestVecWriter::new();
         let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
-        let guard = init_observability_with_exporter(&cfg, writer, exporter);
+        let guard = init_observability_with_exporter(&cfg, &cfg.level, writer, exporter);
         assert!(guard.tracer_provider.is_none());
     }
 
@@ -788,7 +822,7 @@ mod tests {
             log_file: None,
             ..Default::default()
         };
-        let guard = init_observability(&cfg);
+        let guard = init_observability(&cfg, &cfg.level);
         assert!(
             guard.tracer_provider.is_none(),
             "tracer_provider should be None when OTel is disabled"
@@ -812,7 +846,7 @@ mod tests {
             log_file: None,
             ..Default::default()
         };
-        let guard = init_observability_with_exporter(&cfg, writer, exporter.clone());
+        let guard = init_observability_with_exporter(&cfg, &cfg.level, writer, exporter.clone());
 
         assert!(
             guard.tracer_provider.is_some(),
@@ -854,7 +888,7 @@ mod tests {
             log_file: None,
             ..Default::default()
         };
-        let _guard = init_observability_with_exporter(&cfg, writer, exporter.clone());
+        let _guard = init_observability_with_exporter(&cfg, &cfg.level, writer, exporter.clone());
 
         let span = tracing::info_span!("otel_resource_test");
         drop(span);
@@ -907,7 +941,7 @@ mod tests {
             log_file: None,
             ..Default::default()
         };
-        let guard = init_observability_with_exporter(&cfg, writer.clone(), exporter);
+        let guard = init_observability_with_exporter(&cfg, &cfg.level, writer.clone(), exporter);
 
         // W1: ParentLinkLayer handle is still available.
         assert!(

@@ -94,7 +94,7 @@ fn test_spawned_task_events_captured_with_global_subscriber() {
         log_file: None,
         ..Default::default()
     };
-    let _guard = init_observability_with_writer(&cfg, writer.clone());
+    let _guard = init_observability_with_writer(&cfg, "info", writer.clone());
     // init_observability_with_writer now returns _set_default: None for
     // global; the guard keeps the tracer_provider alive if OTel is active.
 

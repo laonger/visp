@@ -147,7 +147,6 @@ pub struct DaemonSection {
     #[serde(default = "default_listen_addr")]
     pub listen_addr: String,
     #[serde(default = "default_log_level")]
-    #[allow(dead_code)]
     pub log_level: String,
 }
 
@@ -801,9 +800,9 @@ pub fn load_config(config_path: Option<&Path>) -> Result<DaemonConfig, String> {
     if let Ok(addr) = std::env::var("VISP_LISTEN_ADDR") {
         config.daemon.listen_addr = addr;
     }
-    //    RUST_LOG -> observability.level
+    //    RUST_LOG -> daemon.log_level（日志过滤传统语义）
     if let Ok(level) = std::env::var("RUST_LOG") {
-        config.observability.level = level;
+        config.daemon.log_level = level;
     }
     //    OPENAI_API_KEY -> 回填 openai 模型的 api_key（仅当该模型未配置 api_key）
     if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
@@ -2042,7 +2041,10 @@ listen_addr = "[::1]:50051"
 [agent]
 "#;
         let config = run_load_config_with_env(global_toml, &[("RUST_LOG", Some("debug"))]).unwrap();
-        assert_eq!(config.observability.level, "debug");
+        // RUST_LOG -> daemon.log_level（日志过滤传统语义）
+        assert_eq!(config.daemon.log_level, "debug");
+        // RUST_LOG 不覆盖 observability.level（保持默认 info）
+        assert_eq!(config.observability.level, "info");
     }
 
     #[test]

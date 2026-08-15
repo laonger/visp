@@ -82,7 +82,7 @@ fn shared_writer() -> &'static TestVecWriter {
             metrics_summary: true,
             ..Default::default()
         };
-        let guard = init_observability_with_writer(&cfg, w.clone());
+        let guard = init_observability_with_writer(&cfg, &cfg.level, w.clone());
         (w, guard)
     });
     writer
@@ -99,7 +99,7 @@ fn shared_guard() -> &'static visp_daemon::observability::init::ObservabilityGua
             metrics_summary: true,
             ..Default::default()
         };
-        let guard = init_observability_with_writer(&cfg, w.clone());
+        let guard = init_observability_with_writer(&cfg, &cfg.level, w.clone());
         (w, guard)
     });
     guard
@@ -739,7 +739,7 @@ fn test_e2e_observability_disabled_no_logs() {
         enabled: false,
         ..Default::default()
     };
-    let guard = init_observability_with_writer(&cfg, writer.clone());
+    let guard = init_observability_with_writer(&cfg, &cfg.level, writer.clone());
 
     let harness = build_harness(single_agent_phases());
     let (tx, _rx) = mpsc::channel(64);
