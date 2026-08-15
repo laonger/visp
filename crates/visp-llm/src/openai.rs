@@ -607,7 +607,7 @@ fn byte_stream_to_chat_events(
     fn emit_first_token(state: &mut StreamState) {
         if !state.first_content_emitted {
             state.first_content_emitted = true;
-            tracing::info!(target: "gen_ai.client.first_token", "first token received");
+            tracing::debug!(target: "gen_ai.client.first_token", "first token received");
         }
     }
 
@@ -679,7 +679,7 @@ fn byte_stream_to_chat_events(
             OpenAiStreamEvent::Finish { reason, .. } => {
                 if let Some(ref r) = reason {
                     state.finish_reason = r.clone();
-                    tracing::info!(
+                    tracing::debug!(
                         finish_reason = %r,
                         had_text_output = state.had_text_output,
                         reasoning_len = state.reasoning_text.len(),
@@ -938,7 +938,7 @@ fn byte_stream_to_chat_events(
                     }
                     if !state.done_emitted {
                         state.done_emitted = true;
-                        tracing::info!(
+                        tracing::debug!(
                             target: "gen_ai.client.completed",
                             input_tokens = state.input_tokens,
                             output_tokens = state.output_tokens,
@@ -970,7 +970,7 @@ fn byte_stream_to_chat_events(
                         return Some((Err(LlmError::Network(e.to_string())), state));
                     }
                     None => {
-                        tracing::info!(
+                        tracing::debug!(
                             model = %state.model,
                             finish_reason = %state.finish_reason,
                             had_text_output = state.had_text_output,

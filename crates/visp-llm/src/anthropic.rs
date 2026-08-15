@@ -811,7 +811,7 @@ fn byte_stream_to_chat_events(
     fn emit_first_token(state: &mut StreamState) {
         if !state.first_content_emitted {
             state.first_content_emitted = true;
-            tracing::info!(target: "gen_ai.client.first_token", "first token received");
+            tracing::debug!(target: "gen_ai.client.first_token", "first token received");
         }
     }
 
@@ -923,7 +923,7 @@ fn byte_stream_to_chat_events(
                 state.done_pending = false;
                 state.usage_emitted = false;
                 state.metadata_emitted = false;
-                tracing::info!(
+                tracing::debug!(
                     target: "gen_ai.client.completed",
                     input_tokens = state.input_tokens,
                     output_tokens = state.output_tokens,
