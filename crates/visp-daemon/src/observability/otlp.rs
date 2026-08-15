@@ -45,12 +45,21 @@ pub(crate) fn build_tracer_provider(cfg: &OtlpConfig) -> SdkTracerProvider {
         unsafe { std::env::set_var("OTEL_EXPORTER_OTLP_HEADERS", header_str) };
     }
 
-    let exporter = opentelemetry_otlp::SpanExporter::builder()
-        .with_tonic()
-        .with_endpoint(&cfg.endpoint)
-        .with_timeout(Duration::from_secs(cfg.timeout_secs))
-        .build()
-        .expect("failed to build OTLP span exporter");
+    let exporter = if uses_http_protocol(&cfg.protocol) {
+        opentelemetry_otlp::SpanExporter::builder()
+            .with_http()
+            .with_endpoint(&cfg.endpoint)
+            .with_timeout(Duration::from_secs(cfg.timeout_secs))
+            .build()
+            .expect("failed to build OTLP HTTP span exporter")
+    } else {
+        opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(&cfg.endpoint)
+            .with_timeout(Duration::from_secs(cfg.timeout_secs))
+            .build()
+            .expect("failed to build OTLP gRPC span exporter")
+    };
 
     let processor = opentelemetry_sdk::trace::BatchSpanProcessor::builder(exporter).build();
 
@@ -61,6 +70,14 @@ pub(crate) fn build_tracer_provider(cfg: &OtlpConfig) -> SdkTracerProvider {
         ))))
         .with_resource(build_resource())
         .build()
+}
+
+/// Resolve whether the configured OTLP protocol uses HTTP transport.
+/// Protocol matching is case-insensitive ("http"/"HTTP"/"Http" all match);
+/// anything else (including the default "grpc" and unknown values) falls
+/// back to gRPC for backwards compatibility.
+fn uses_http_protocol(protocol: &str) -> bool {
+    protocol.eq_ignore_ascii_case("http")
 }
 
 /// Build a tracer provider with a caller-supplied exporter (e.g., InMemorySpanExporter).
@@ -153,6 +170,58 @@ mod tests {
             !span.is_recording(),
             "AlwaysOff sampler should prevent recording"
         );
+    }
+
+    #[tokio::test]
+    async fn test_protocol_http_builds_provider() {
+        // protocol="http" must select the HTTP exporter and build without panic.
+        let cfg = OtlpConfig {
+            protocol: "http".into(),
+            sample_rate: 1.0,
+            ..Default::default()
+        };
+        let provider = build_tracer_provider(&cfg);
+        let tracer = provider.tracer("test");
+        let span = tracer.start("http_protocol_span");
+        assert!(
+            span.is_recording(),
+            "sample_rate=1.0 should record spans via HTTP exporter"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_protocol_grpc_builds_provider() {
+        // protocol="grpc" (the default) must keep using the gRPC exporter.
+        let cfg = OtlpConfig {
+            protocol: "grpc".into(),
+            sample_rate: 1.0,
+            ..Default::default()
+        };
+        let provider = build_tracer_provider(&cfg);
+        let tracer = provider.tracer("test");
+        let span = tracer.start("grpc_protocol_span");
+        assert!(
+            span.is_recording(),
+            "sample_rate=1.0 should record spans via gRPC exporter"
+        );
+    }
+
+    #[test]
+    fn test_protocol_resolution_case_insensitive_with_grpc_fallback() {
+        // Case-insensitive: HTTP/Http/http all resolve to the HTTP transport.
+        for p in ["http", "HTTP", "Http"] {
+            assert!(
+                super::uses_http_protocol(p),
+                "protocol {p:?} should resolve to HTTP"
+            );
+        }
+        // grpc and any unknown value fall back to gRPC (backwards compatible).
+        for p in ["grpc", "GRPC", "h2c", "unknown", ""] {
+            assert!(
+                !super::uses_http_protocol(p),
+                "protocol {p:?} should NOT resolve to HTTP (fallback to gRPC)"
+            );
+        }
     }
 
     #[test]
