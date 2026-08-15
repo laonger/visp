@@ -441,3 +441,79 @@ async fn test_bash_large_output_no_deadlock() {
         result.content.len()
     );
 }
+
+// ── is_blocked 词边界匹配测试 ─────────────────────────────────────────
+
+fn bash_with_node_blacklist() -> Bash {
+    Bash {
+        blocked_commands: vec!["node".into(), "npm".into(), "pnpm".into()],
+        default_timeout_secs: DEFAULT_TIMEOUT_SECS,
+        max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+    }
+}
+
+#[test]
+fn test_blocked_word_at_start() {
+    // 词首位置
+    assert!(bash_with_node_blacklist().is_blocked("node test/foo.js"));
+}
+
+#[test]
+fn test_blocked_word_before_and() {
+    // 词边界后是 && 运算符
+    assert!(bash_with_node_blacklist().is_blocked("node && echo hi"));
+}
+
+#[test]
+fn test_blocked_word_before_semicolon() {
+    // 词边界后是分号
+    assert!(bash_with_node_blacklist().is_blocked("node; echo"));
+}
+
+#[test]
+fn test_blocked_word_with_flags() {
+    assert!(bash_with_node_blacklist().is_blocked("node -e \"x\""));
+}
+
+#[test]
+fn test_not_blocked_node_modules() {
+    // 不误伤 node_modules（_ 是词字符）
+    assert!(!bash_with_node_blacklist().is_blocked("ls node_modules"));
+}
+
+#[test]
+fn test_not_blocked_prefix_word() {
+    // 不误伤以 node 为前缀的单词（nodemon）
+    assert!(!bash_with_node_blacklist().is_blocked("nodemon server.js"));
+}
+
+#[test]
+fn test_blocked_npm_and_pnpm() {
+    let bash = bash_with_node_blacklist();
+    assert!(bash.is_blocked("npm install"));
+    assert!(bash.is_blocked("pnpm i"));
+}
+
+#[test]
+fn test_blocked_builtin_sudo() {
+    // 内置黑名单单词保持拦截
+    assert!(Bash::default().is_blocked("sudo apt"));
+}
+
+#[test]
+fn test_blocked_word_in_middle_of_pipeline() {
+    // 命令链中间出现也要拦截
+    assert!(bash_with_node_blacklist().is_blocked("echo hi && node test.js"));
+}
+
+#[test]
+fn test_blocked_word_with_trailing_space_config() {
+    // 兼容配置里带尾空格的黑名单项（daemon.toml 现状是 "node "）
+    let bash = Bash {
+        blocked_commands: vec!["node ".into()],
+        default_timeout_secs: DEFAULT_TIMEOUT_SECS,
+        max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+    };
+    assert!(bash.is_blocked("node && echo hi"));
+    assert!(!bash.is_blocked("ls node_modules"));
+}

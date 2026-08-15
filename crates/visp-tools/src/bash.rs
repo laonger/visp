@@ -64,14 +64,20 @@ impl Bash {
     }
 
     /// 检查命令是否命中黑名单（内置 + 自定义）
+    ///
+    /// 单词黑名单（如 "sudo"、"node"）做词边界匹配，避免误伤 node_modules 等；
+    /// 多词黑名单（如 "rm -rf /"）保持子串匹配（现状）。
     fn is_blocked(&self, command: &str) -> bool {
         let lower = command.to_lowercase();
-        // 检查内置黑名单
-        if BLOCKED_COMMANDS.iter().any(|&b| lower.contains(b)) {
-            return true;
-        }
-        // 检查自定义黑名单
-        self.blocked_commands.iter().any(|b| lower.contains(b))
+        BLOCKED_COMMANDS
+            .iter()
+            .copied()
+            .chain(self.blocked_commands.iter().map(|s| s.as_str()))
+            .any(|b| match b.trim() {
+                "" => false,
+                word if word.contains(' ') => lower.contains(word),
+                word => is_command_word(&lower, word),
+            })
     }
 
     /// 判断 bash 命令是否包含删除/清理等危险操作
@@ -337,6 +343,29 @@ fn truncate_for_log(s: &str, max_len: usize) -> String {
     } else {
         format!("{}... [truncated]", &s[..end])
     }
+}
+
+/// 词边界匹配：b 必须作为独立单词出现（前后是串首/串尾或非词字符），
+/// 这样 "node" 能命中 `node && ...` / `node; ...`，但不误伤 node_modules、nodemon。
+fn is_command_word(lower: &str, b: &str) -> bool {
+    let bytes = lower.as_bytes();
+    let b_bytes = b.as_bytes();
+    let mut start = 0;
+    while let Some(rel) = lower[start..].find(b) {
+        let abs = start + rel;
+        let before_ok = abs == 0 || !is_word_char(bytes[abs - 1]);
+        let after_pos = abs + b_bytes.len();
+        let after_ok = after_pos >= bytes.len() || !is_word_char(bytes[after_pos]);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
+}
+
+fn is_word_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 #[cfg(test)]
