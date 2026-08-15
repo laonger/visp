@@ -7,7 +7,7 @@ use visp_core::tool::{Tool, ToolContext, ToolResult};
 use crate::path::validate_path;
 use crate::truncate::{DEFAULT_MAX_OUTPUT_BYTES, truncate_output};
 
-const DEFAULT_TIMEOUT_SECS: u64 = 120;
+const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const OUTPUT_DRAIN_TIMEOUT_SECS: u64 = 5;
 const BLOCKED_COMMANDS: &[&str] = &["sudo", "rm -rf /", "chmod 777", "chmod 7777"];
 
