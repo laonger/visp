@@ -458,11 +458,11 @@ pub(crate) struct UserQueryMarker {
 pub(crate) fn parse_user_query_marker(text: &str) -> Option<UserQueryMarker> {
     let text = text.trim_end();
 
-    // 查找结尾标记
-    let close_pos = text.rfind("[/USER_QUERY]")?;
-    let before_close = &text[..close_pos];
+    // 查找结尾标记（可选：LLM 可能截断输出导致缺闭合标记，容错解析到文本末尾）
+    let close_pos = text.rfind("[/USER_QUERY]");
+    let before_close = &text[..close_pos.unwrap_or(text.len())];
 
-    // 查找开头标记
+    // 查找开头标记（必须存在）
     let open_pos = before_close.rfind("[USER_QUERY")?;
 
     // 提取开头标记内容 [USER_QUERY ...]
@@ -474,7 +474,11 @@ pub(crate) fn parse_user_query_marker(text: &str) -> Option<UserQueryMarker> {
 
     // 提取标记内内容（去除头部标记行）
     let body_start = open_pos + header_end + 1;
-    let body = &before_close[body_start..close_pos];
+    let body = match close_pos {
+        Some(cp) if cp >= body_start => &before_close[body_start..cp],
+        // 无闭合标记：解析到文本末尾（LLM 可能截断）
+        _ => &before_close[body_start..],
+    };
     let body = body.trim();
 
     if body.is_empty() {
@@ -1669,7 +1673,9 @@ mod tests {
     fn test_parse_marker_no_marker() {
         assert!(parse_user_query_marker("Just a normal message").is_none());
         assert!(parse_user_query_marker("").is_none());
-        assert!(parse_user_query_marker("[USER_QUERY]unclosed").is_none());
+        // 无闭合但 body 非空：容错解析（不再是 None）
+        let marker = parse_user_query_marker("[USER_QUERY]unclosed").unwrap();
+        assert_eq!(marker.message, "unclosed");
         assert!(parse_user_query_marker("[/USER_QUERY]no open").is_none());
     }
 
@@ -1720,6 +1726,39 @@ mod tests {
         let text = "  \n[USER_QUERY]\nHi\n[/USER_QUERY]  \n";
         let marker = parse_user_query_marker(text).unwrap();
         assert_eq!(marker.message, "Hi");
+    }
+
+    #[test]
+    fn test_parse_marker_unclosed() {
+        // LLM 输出被截断、缺 [/USER_QUERY] 闭合标记：容错解析到文本末尾
+        let text = "What do you want?\n[USER_QUERY]\nPick one:\n- Option A\n- Option B";
+        let marker = parse_user_query_marker(text).unwrap();
+        assert_eq!(marker.message, "Pick one:");
+        assert_eq!(marker.options, vec!["Option A", "Option B"]);
+        assert!(!marker.allow_other);
+    }
+
+    #[test]
+    fn test_parse_marker_unclosed_allow_other() {
+        let text = "Pick:\n[USER_QUERY allow_other=true]\nCustom:\n- Option 1\n- Option 2";
+        let marker = parse_user_query_marker(text).unwrap();
+        assert_eq!(marker.message, "Custom:");
+        assert_eq!(marker.options, vec!["Option 1", "Option 2"]);
+        assert!(marker.allow_other);
+    }
+
+    #[test]
+    fn test_parse_marker_unclosed_empty_body() {
+        // 无闭合标记且 body 为空 → None
+        assert!(parse_user_query_marker("text\n[USER_QUERY]\n\n").is_none());
+        assert!(parse_user_query_marker("text\n[USER_QUERY]").is_none());
+    }
+
+    #[test]
+    fn test_parse_marker_no_open_tag() {
+        // 无开头标记 → None（无论有无闭合标记）
+        assert!(parse_user_query_marker("[/USER_QUERY]").is_none());
+        assert!(parse_user_query_marker("Just options\n- A\n- B").is_none());
     }
 
     // ── strip_user_query_marker tests ──────────────────────────────────────
