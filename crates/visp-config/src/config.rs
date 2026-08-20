@@ -507,7 +507,8 @@ pub struct AgentSection {
     pub file_max_size_bytes: u64,
     #[serde(default = "default_max_depth")]
     pub max_depth: u32,
-    /// 全局同时运行的 subagent 数量上限（主 agent 不计入，超出排队等待）
+    /// 全局同时运行的 subagent 数量上限（主 agent 不计入，超出排队等待）。
+    /// 0 表示无限制（所有 subagent 立即并行执行，不排队）。
     #[serde(default = "default_max_concurrent_subagents")]
     pub max_concurrent_subagents: u32,
     /// 内置 agent 覆盖配置（model / temperature / steps）

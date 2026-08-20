@@ -1163,9 +1163,15 @@ impl Orchestrator {
 
     // ── 辅助方法 ─────────────────────────────────────────────
 
-    /// 并发上限（至少 1，避免配置 0 时所有请求永远排队造成死锁）
+    /// 并发上限。0 表示无限制（所有 subagent 立即并行执行，不排队）。
+    /// 非 0 时返回配置值（至少 1，避免配置 0 时所有请求永远排队造成死锁）。
     fn concurrency_limit(&self) -> usize {
-        self.agent_config.max_concurrent_subagents.max(1) as usize
+        let limit = self.agent_config.max_concurrent_subagents;
+        if limit == 0 {
+            usize::MAX
+        } else {
+            limit as usize
+        }
     }
 
     /// 当前运行的 subagent 数（parent_session_id 非 None 的 active agent，主 agent 不计入）

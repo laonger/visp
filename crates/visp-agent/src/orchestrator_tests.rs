@@ -2771,7 +2771,35 @@ async fn test_max_concurrent_subagents_config_limits_parallelism() {
     assert_eq!(orch.queued_spawns.front().unwrap().call_id, "call-4");
 }
 
-/// 用例 5：未达上限 → 正常 spawn（不排队）
+/// 用例 5：max_concurrent_subagents = 0 表示无限制 → 所有 spawn 立即并行执行，不排队
+#[tokio::test]
+async fn test_zero_concurrency_limit_means_unlimited() {
+    let agent_config = AgentConfig {
+        max_concurrent_subagents: 0,
+        ..AgentConfig::default()
+    };
+    let (mut orch, _global_tx, _grpc_rx, parent_id) =
+        make_orchestrator_for_spawn_with_config(agent_config);
+    register_parent(&mut orch, &parent_id);
+
+    // 多个 spawn 全部立即启动，不排队
+    for call in ["call-1", "call-2", "call-3", "call-4", "call-5"] {
+        orch.handle_agent_message(spawn_request(&parent_id, call))
+            .await;
+    }
+
+    assert_eq!(
+        orch.active_subagent_count(),
+        5,
+        "all spawns should run in parallel when limit is 0 (unlimited)"
+    );
+    assert!(
+        orch.queued_spawns.is_empty(),
+        "no spawn should be queued when limit is 0 (unlimited)"
+    );
+}
+
+/// 用例 6：未达上限 → 正常 spawn（不排队）
 #[tokio::test]
 async fn test_spawn_not_queued_when_below_limit() {
     // 默认配置：上限 3
