@@ -63,6 +63,8 @@ pub trait SessionStore: Send {
 
     /// 获取会话的全部消息
     fn get_messages(&self, session_id: &str) -> Result<Vec<Message>, SessionError>;
+    /// 轻量查询：仅获取会话的 system_prompt_template，避免全量加载消息
+    fn get_system_prompt(&self, session_id: &str) -> Result<String, SessionError>;
     /// 追加一条消息到会话
     fn append_message(&mut self, session_id: &str, message: Message) -> Result<(), SessionError>;
     /// 按项目路径过滤会话列表
@@ -147,6 +149,13 @@ impl SessionStore for InMemorySessionStore {
             .ok_or_else(|| SessionError::NotFound(session_id.to_string()))
     }
 
+    fn get_system_prompt(&self, session_id: &str) -> Result<String, SessionError> {
+        self.sessions
+            .get(session_id)
+            .map(|s| s.system_prompt_template.clone())
+            .ok_or_else(|| SessionError::NotFound(session_id.to_string()))
+    }
+
     fn append_message(&mut self, session_id: &str, message: Message) -> Result<(), SessionError> {
         self.sessions
             .get_mut(session_id)
@@ -207,6 +216,9 @@ impl SessionStore for Box<dyn SessionStore> {
     }
     fn get_messages(&self, session_id: &str) -> Result<Vec<Message>, SessionError> {
         (**self).get_messages(session_id)
+    }
+    fn get_system_prompt(&self, session_id: &str) -> Result<String, SessionError> {
+        (**self).get_system_prompt(session_id)
     }
     fn append_message(&mut self, session_id: &str, message: Message) -> Result<(), SessionError> {
         (**self).append_message(session_id, message)
@@ -431,6 +443,12 @@ impl SessionManager {
         store.get_messages(id)
     }
 
+    /// 轻量查询：仅获取会话的 system_prompt_template（避免全量加载消息）
+    pub fn get_system_prompt(&self, id: &str) -> Result<String, SessionError> {
+        let store = self.store.lock().unwrap();
+        store.get_system_prompt(id)
+    }
+
     /// 获取指定父 session 的所有子 session（直接代理 SessionStore.list_child_sessions）
     pub fn list_child_sessions(&self, parent_id: &str) -> Result<Vec<Session>, SessionError> {
         let store = self.store.lock().unwrap();
@@ -503,6 +521,9 @@ mod tests {
         }
         fn get_messages(&self, _session_id: &str) -> Result<Vec<Message>, SessionError> {
             unimplemented!()
+        }
+        fn get_system_prompt(&self, _session_id: &str) -> Result<String, SessionError> {
+            Ok("mock-template".into())
         }
         fn append_message(
             &mut self,

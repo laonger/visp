@@ -220,8 +220,8 @@ async fn setup_iteration(
     }
 
     // c. Build prompt
-    let session = match sm.get(sid) {
-        Ok(s) => s,
+    let system_prompt_template = match sm.get_system_prompt(sid) {
+        Ok(t) => t,
         Err(e) => {
             send_event(
                 tx,
@@ -243,9 +243,9 @@ async fn setup_iteration(
 
     let tool_guide = render_tool_guide(tool_registry);
     let mut enriched_template = if tool_guide.is_empty() {
-        session.system_prompt_template.clone()
+        system_prompt_template.clone()
     } else {
-        format!("{}{}", session.system_prompt_template, tool_guide)
+        format!("{}{}", system_prompt_template, tool_guide)
     };
 
     // Soft limit check

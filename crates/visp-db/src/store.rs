@@ -1,5 +1,6 @@
 use std::sync::Mutex;
 
+use rusqlite::OptionalExtension;
 use visp_core::error::SessionError;
 use visp_core::message::Message;
 use visp_core::session::{Session, SessionStore};
@@ -124,6 +125,21 @@ impl SessionStore for SqliteSessionStore {
             .map_err(|e| SessionError::Other(format!("Lock error: {e}")))?;
         MessageRepo::get_by_session(&conn, session_id)
             .map_err(|e| SessionError::Other(format!("Get messages failed: {e}")))
+    }
+
+    fn get_system_prompt(&self, session_id: &str) -> Result<String, SessionError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| SessionError::Other(format!("Lock error: {e}")))?;
+        conn.query_row(
+            "SELECT system_prompt_template FROM session WHERE id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| SessionError::Other(format!("Get system prompt failed: {e}")))?
+        .ok_or_else(|| SessionError::NotFound(session_id.to_string()))
     }
 
     fn append_message(&mut self, session_id: &str, message: Message) -> Result<(), SessionError> {

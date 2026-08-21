@@ -2292,6 +2292,9 @@ mod tests {
             fn get_messages(&self, _id: &str) -> Result<Vec<Message>, SessionError> {
                 Ok(vec![])
             }
+            fn get_system_prompt(&self, _id: &str) -> Result<String, SessionError> {
+                Ok("mock".into())
+            }
             fn append_message(&mut self, _id: &str, _m: Message) -> Result<(), SessionError> {
                 Ok(())
             }
@@ -3450,6 +3453,13 @@ mod tests {
             }
             fn get_messages(&self, _id: &str) -> Result<Vec<Message>, SessionError> {
                 Ok(vec![])
+            }
+            fn get_system_prompt(&self, id: &str) -> Result<String, SessionError> {
+                self.sessions
+                    .iter()
+                    .find(|s| s.id == id)
+                    .map(|s| s.system_prompt_template.clone())
+                    .ok_or_else(|| SessionError::NotFound("mock".into()))
             }
             fn append_message(&mut self, _id: &str, _m: Message) -> Result<(), SessionError> {
                 Ok(())

@@ -126,6 +126,24 @@ fn test_store_create_already_exists() {
 }
 
 #[test]
+fn test_store_get_system_prompt() {
+    let mut store = setup();
+    let mut session = sample_session("sp1");
+    session.system_prompt_template = "custom-template".into();
+    store.create(session).unwrap();
+
+    let template = store.get_system_prompt("sp1").unwrap();
+    assert_eq!(template, "custom-template");
+}
+
+#[test]
+fn test_store_get_system_prompt_not_found() {
+    let store = setup();
+    let err = store.get_system_prompt("nonexistent").unwrap_err();
+    assert!(matches!(err, SessionError::NotFound(_)));
+}
+
+#[test]
 fn test_store_delete_cascade() {
     let mut store = setup();
     store.create(sample_session("c1")).unwrap();
