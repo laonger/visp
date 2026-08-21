@@ -4,7 +4,7 @@ use visp_core::message::Role;
 use visp_core::message::ToolCallRequest;
 use visp_core::message::estimate_message_tokens;
 
-const TOOL_OUTPUT_MAX_CHARS: usize = 2_000;
+const TOOL_OUTPUT_MAX_CHARS: usize = 8_000;
 const PROTECTED_HEAD_TURNS: usize = 5;
 const PROTECTED_TAIL_TURNS: usize = 10;
 
@@ -44,9 +44,10 @@ impl ContextTrimmer for DefaultContextTrimmer {
         let budget = available.saturating_sub(system_overhead);
 
         let result = if budget == 0 {
-            keep_head_and_tail(history, 0)
+            keep_head_and_tail(history, 0, self.tool_output_max_chars)
         } else {
-            let total_tokens = estimate_messages_tokens_for_prompt(history);
+            let total_tokens =
+                estimate_messages_tokens_for_prompt(history, self.tool_output_max_chars);
             if total_tokens <= budget {
                 history.to_vec()
             } else {
@@ -55,22 +56,27 @@ impl ContextTrimmer for DefaultContextTrimmer {
 
                 // HEAD 和 TAIL 重叠 → 使用 keep_head_and_tail
                 if head_end >= tail_start {
-                    keep_head_and_tail(history, budget)
+                    keep_head_and_tail(history, budget, self.tool_output_max_chars)
                 } else {
                     let head = &history[..head_end];
                     let middle = &history[head_end..tail_start];
                     let tail = &history[tail_start..];
 
-                    let head_tokens: u32 =
-                        head.iter().map(estimate_message_tokens_for_prompt).sum();
-                    let tail_tokens: u32 =
-                        tail.iter().map(estimate_message_tokens_for_prompt).sum();
+                    let head_tokens: u32 = head
+                        .iter()
+                        .map(|m| estimate_message_tokens_for_prompt(m, self.tool_output_max_chars))
+                        .sum();
+                    let tail_tokens: u32 = tail
+                        .iter()
+                        .map(|m| estimate_message_tokens_for_prompt(m, self.tool_output_max_chars))
+                        .sum();
 
                     if head_tokens + tail_tokens > budget {
-                        keep_head_and_tail(history, budget)
+                        keep_head_and_tail(history, budget, self.tool_output_max_chars)
                     } else {
                         let mid_budget = budget - head_tokens - tail_tokens;
-                        let trimmed_middle = drop_old_turns(middle, mid_budget);
+                        let trimmed_middle =
+                            drop_old_turns(middle, mid_budget, self.tool_output_max_chars);
 
                         let mut result =
                             Vec::with_capacity(head.len() + trimmed_middle.len() + tail.len());
@@ -87,7 +93,7 @@ impl ContextTrimmer for DefaultContextTrimmer {
         let mut result = result;
         for msg in &mut result {
             if msg.role == Role::Tool {
-                let truncated = truncate_tool_output(&msg.content);
+                let truncated = truncate_tool_output(&msg.content, self.tool_output_max_chars);
                 if truncated != msg.content {
                     msg.content = truncated;
                     msg.estimated_tokens = estimate_message_tokens(msg);
@@ -110,30 +116,30 @@ pub(crate) fn calculate_available(max_context_tokens: u32, output_tokens: u32) -
 
 /// 估算消息列表中每条消息在 prompt 中的实际 token 数
 /// - 非 Tool 消息：直接返回 msg.estimated_tokens
-/// - Tool 消息超过 TOOL_OUTPUT_MAX_CHARS：按截断后长度估算
-pub(crate) fn estimate_message_tokens_for_prompt(msg: &Message) -> u32 {
-    if msg.role == Role::Tool && msg.content.chars().count() > TOOL_OUTPUT_MAX_CHARS {
-        ((TOOL_OUTPUT_MAX_CHARS as f64 / 4.0).ceil() as u32) + 1
+/// - Tool 消息超过 max_chars：按截断后长度估算
+pub(crate) fn estimate_message_tokens_for_prompt(msg: &Message, max_chars: usize) -> u32 {
+    if msg.role == Role::Tool && msg.content.chars().count() > max_chars {
+        ((max_chars as f64 / 4.0).ceil() as u32) + 1
     } else {
         msg.estimated_tokens
     }
 }
 
 /// 批量版本
-pub(crate) fn estimate_messages_tokens_for_prompt(messages: &[Message]) -> u32 {
+pub(crate) fn estimate_messages_tokens_for_prompt(messages: &[Message], max_chars: usize) -> u32 {
     messages
         .iter()
-        .map(estimate_message_tokens_for_prompt)
+        .map(|m| estimate_message_tokens_for_prompt(m, max_chars))
         .sum()
 }
 
-/// 截断工具输出到 TOOL_OUTPUT_MAX_CHARS 字符（按字符计数，不是字节）
+/// 截断工具输出到 max_chars 字符（按字符计数，不是字节）
 /// 使用 chars().take() 保证 Unicode 安全
-pub(crate) fn truncate_tool_output(content: &str) -> String {
-    if content.chars().count() <= TOOL_OUTPUT_MAX_CHARS {
+pub(crate) fn truncate_tool_output(content: &str, max_chars: usize) -> String {
+    if content.chars().count() <= max_chars {
         content.to_string()
     } else {
-        let truncated: String = content.chars().take(TOOL_OUTPUT_MAX_CHARS).collect();
+        let truncated: String = content.chars().take(max_chars).collect();
         format!("{}... (truncated)", truncated)
     }
 }
@@ -174,12 +180,12 @@ pub(crate) fn find_tail_start(history: &[Message], n: usize) -> usize {
 /// 从前往后删除完整轮次，直到预算满足或无可删除。
 /// 一个"轮次"从 User 开始到下一个 User 之前结束。
 /// 返回裁剪后的消息列表。
-pub(crate) fn drop_old_turns(messages: &[Message], budget: u32) -> Vec<Message> {
+pub(crate) fn drop_old_turns(messages: &[Message], budget: u32, max_chars: usize) -> Vec<Message> {
     if messages.is_empty() {
         return vec![];
     }
 
-    let mut tokens = estimate_messages_tokens_for_prompt(messages);
+    let mut tokens = estimate_messages_tokens_for_prompt(messages, max_chars);
     if tokens <= budget {
         return messages.to_vec();
     }
@@ -203,7 +209,7 @@ pub(crate) fn drop_old_turns(messages: &[Message], budget: u32) -> Vec<Message> 
         // 删除 messages[start..boundary]
         let removed_tokens: u32 = messages[start..boundary]
             .iter()
-            .map(estimate_message_tokens_for_prompt)
+            .map(|m| estimate_message_tokens_for_prompt(m, max_chars))
             .sum();
 
         start = boundary;
@@ -219,7 +225,11 @@ pub(crate) fn drop_old_turns(messages: &[Message], budget: u32) -> Vec<Message> 
 
 /// 极端情况：HEAD+TAIL 已超预算时使用。
 /// 保留首条 User + 尾部最近消息，过滤孤立 ToolResult。
-pub(crate) fn keep_head_and_tail(history: &[Message], budget: u32) -> Vec<Message> {
+pub(crate) fn keep_head_and_tail(
+    history: &[Message],
+    budget: u32,
+    max_chars: usize,
+) -> Vec<Message> {
     if history.is_empty() {
         return vec![];
     }
@@ -230,7 +240,7 @@ pub(crate) fn keep_head_and_tail(history: &[Message], budget: u32) -> Vec<Messag
         None => return vec![],
     };
 
-    let first_user_tokens = estimate_message_tokens_for_prompt(&history[first_user_idx]);
+    let first_user_tokens = estimate_message_tokens_for_prompt(&history[first_user_idx], max_chars);
     if first_user_tokens > budget {
         return vec![history[first_user_idx].clone()];
     }
@@ -242,7 +252,7 @@ pub(crate) fn keep_head_and_tail(history: &[Message], budget: u32) -> Vec<Messag
     // 从尾往前遍历
     for i in (first_user_idx + 1..history.len()).rev() {
         let msg = &history[i];
-        let tokens = estimate_message_tokens_for_prompt(msg);
+        let tokens = estimate_message_tokens_for_prompt(msg, max_chars);
         if tokens <= remaining {
             tail_indices.push(i);
             remaining -= tokens;
@@ -358,7 +368,7 @@ mod tests {
         let trimmer = DefaultContextTrimmer::default();
         assert_eq!(trimmer.head_turns, 5);
         assert_eq!(trimmer.tail_turns, 10);
-        assert_eq!(trimmer.tool_output_max_chars, 2000);
+        assert_eq!(trimmer.tool_output_max_chars, 8000);
     }
 
     #[test]
@@ -389,7 +399,7 @@ mod tests {
     fn test_estimate_msg_tokens_for_prompt_user() {
         let msg = Message::user("hello world");
         assert_eq!(
-            estimate_message_tokens_for_prompt(&msg),
+            estimate_message_tokens_for_prompt(&msg, 8000),
             msg.estimated_tokens
         );
     }
@@ -398,21 +408,21 @@ mod tests {
     fn test_estimate_msg_tokens_for_prompt_short_tool() {
         let msg = Message::tool("short output", "call_1");
         assert_eq!(
-            estimate_message_tokens_for_prompt(&msg),
+            estimate_message_tokens_for_prompt(&msg, 8000),
             msg.estimated_tokens
         );
     }
 
     #[test]
     fn test_estimate_msg_tokens_for_prompt_long_tool() {
-        let long = "a".repeat(2500);
+        let long = "a".repeat(9000);
         let msg = Message::tool(&long, "id");
-        assert_eq!(estimate_message_tokens_for_prompt(&msg), 501);
+        assert_eq!(estimate_message_tokens_for_prompt(&msg, 8000), 2001);
     }
 
     #[test]
     fn test_estimate_messages_tokens_for_prompt_empty() {
-        assert_eq!(estimate_messages_tokens_for_prompt(&[]), 0);
+        assert_eq!(estimate_messages_tokens_for_prompt(&[], 8000), 0);
     }
 
     #[test]
@@ -436,24 +446,24 @@ mod tests {
 
     #[test]
     fn test_truncate_tool_output_short() {
-        assert_eq!(truncate_tool_output("short"), "short");
+        assert_eq!(truncate_tool_output("short", 8000), "short");
     }
 
     #[test]
     fn test_truncate_tool_output_long() {
-        let long = "x".repeat(3000);
-        let result = truncate_tool_output(&long);
-        let expected_prefix: String = "x".repeat(2000);
+        let long = "x".repeat(9000);
+        let result = truncate_tool_output(&long, 8000);
+        let expected_prefix: String = "x".repeat(8000);
         assert!(result.starts_with(&expected_prefix));
-        assert!(result.len() > 2000);
+        assert!(result.len() > 8000);
         assert!(result.contains("truncated"));
     }
 
     #[test]
     fn test_truncate_tool_output_unicode() {
-        let chinese = "你好".repeat(1500); // 3000 chars
-        let result = truncate_tool_output(&chinese);
-        let expected_prefix: String = "你好".repeat(1000); // 2000 chars
+        let chinese = "你好".repeat(4500); // 9000 chars
+        let result = truncate_tool_output(&chinese, 8000);
+        let expected_prefix: String = "你好".repeat(4000); // 8000 chars
         assert!(result.starts_with(&expected_prefix));
         assert!(result.contains("truncated"));
     }
@@ -505,7 +515,7 @@ mod tests {
 
     #[test]
     fn test_drop_old_turns_empty() {
-        let result = drop_old_turns(&[], 1000);
+        let result = drop_old_turns(&[], 1000, 8000);
         assert!(result.is_empty());
     }
 
@@ -517,7 +527,7 @@ mod tests {
             Message::user("u2"),
             Message::assistant("a2"),
         ];
-        let result = drop_old_turns(&history, 1000);
+        let result = drop_old_turns(&history, 1000, 8000);
         assert_eq!(result.len(), 4);
         assert_eq!(result[0], Message::user("u1"));
         assert_eq!(result[1], Message::assistant("a1"));
@@ -534,7 +544,7 @@ mod tests {
             Message::user("u2"),
             Message::assistant("a2"),
         ];
-        let result = drop_old_turns(&history, 4);
+        let result = drop_old_turns(&history, 4, 8000);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0], Message::user("u2"));
         assert_eq!(result[1], Message::assistant("a2"));
@@ -549,7 +559,7 @@ mod tests {
             Message::user("u2"),
             Message::assistant("a2"),
         ];
-        let result = drop_old_turns(&history, 0);
+        let result = drop_old_turns(&history, 0, 8000);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0], Message::user("u2"));
         assert_eq!(result[1], Message::assistant("a2"));
@@ -559,7 +569,7 @@ mod tests {
     fn test_drop_old_turns_not_enough_for_turn() {
         // Single turn [U1,A1] — no second User to form a complete turn boundary
         let history = vec![Message::user("u1"), Message::assistant("a1")];
-        let result = drop_old_turns(&history, 0);
+        let result = drop_old_turns(&history, 0, 8000);
         assert_eq!(result.len(), 2);
     }
 
@@ -573,7 +583,7 @@ mod tests {
             Message::user("u2"),
             Message::assistant("a2"),
         ];
-        let result = keep_head_and_tail(&history, 1000);
+        let result = keep_head_and_tail(&history, 1000, 8000);
         assert_eq!(result.len(), 4);
         assert_eq!(result[0], Message::user("u1"));
     }
@@ -591,7 +601,7 @@ mod tests {
             Message::assistant("a2"),
         ];
         // Budget=12: fits all but TR1 is orphan (no corresponding Assistant tool_calls)
-        let result = keep_head_and_tail(&history, 12);
+        let result = keep_head_and_tail(&history, 12, 8000);
         assert_eq!(result.len(), 4, "TR1 should be filtered as orphan");
         assert_eq!(result[0], Message::user("u1"));
         assert_eq!(result[1], Message::assistant("a1"));
@@ -618,7 +628,7 @@ mod tests {
             Message::assistant("a2"),
         ];
         // Budget=16: all fit, TR1 call_id matches A1's tool_calls → kept
-        let result = keep_head_and_tail(&history, 16);
+        let result = keep_head_and_tail(&history, 16, 8000);
         assert_eq!(result.len(), 5, "TR1 should be kept (confirmed by A1)");
         assert_eq!(result[0], Message::user("u1"));
         assert_eq!(result[1].role, Role::Assistant);
@@ -627,14 +637,14 @@ mod tests {
 
     #[test]
     fn test_keep_head_and_tail_empty() {
-        let result = keep_head_and_tail(&[], 1000);
+        let result = keep_head_and_tail(&[], 1000, 8000);
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_keep_head_and_tail_no_user() {
         let history = vec![Message::assistant("a1")];
-        let result = keep_head_and_tail(&history, 1000);
+        let result = keep_head_and_tail(&history, 1000, 8000);
         assert!(result.is_empty());
     }
 
@@ -658,7 +668,7 @@ mod tests {
         ];
         // budget=12: 从后往前，u2(2)+a2(2)+a1(2) fits, u1(2) fits
         // 但 a1 有 tool_calls("call_a")，没有对应的 tool_result → 应被过滤
-        let result = keep_head_and_tail(&history, 12);
+        let result = keep_head_and_tail(&history, 12, 8000);
         // a1 应该被过滤掉（orphan tool_call）
         assert!(
             !result
@@ -688,7 +698,7 @@ mod tests {
             Message::assistant("a2"),
         ];
         // budget=20: u1(2)+a1(6)+tr1(4)+u2(2)+a2(2) = 16, all fit
-        let result = keep_head_and_tail(&history, 20);
+        let result = keep_head_and_tail(&history, 20, 8000);
         // a1 和 tr1 应该都被保留
         let has_call = result
             .iter()
@@ -752,14 +762,33 @@ mod tests {
     #[test]
     fn test_trim_truncates_tool_output() {
         let trimmer = DefaultContextTrimmer::default();
-        let long_output = "x".repeat(3000);
+        let long_output = "x".repeat(9000);
         let tool_msg = Message::tool(&long_output, "call_1");
         let history = vec![Message::user("u1"), tool_msg];
         let result = trimmer.trim(&history, 128_000, 20, 4096);
         // Tool message should be truncated
         let tool_result = &result[1]; // user + tool
         assert_eq!(tool_result.role, Role::Tool);
-        assert!(tool_result.content.len() < 3000);
+        assert!(tool_result.content.len() < 9000);
+        assert!(tool_result.content.contains("truncated"));
+    }
+
+    #[test]
+    fn test_trim_truncates_tool_output_custom_max_chars() {
+        // 自定义参数：tool_output_max_chars=100 时，Tool 消息按 100 字符截断
+        let trimmer = DefaultContextTrimmer {
+            head_turns: 5,
+            tail_turns: 10,
+            tool_output_max_chars: 100,
+        };
+        let long_output = "x".repeat(500);
+        let tool_msg = Message::tool(&long_output, "call_1");
+        let history = vec![Message::user("u1"), tool_msg];
+        let result = trimmer.trim(&history, 128_000, 20, 4096);
+        let tool_result = &result[1];
+        assert_eq!(tool_result.role, Role::Tool);
+        assert!(tool_result.content.starts_with(&"x".repeat(100)));
+        assert!(!tool_result.content.contains(&"x".repeat(101)));
         assert!(tool_result.content.contains("truncated"));
     }
 }

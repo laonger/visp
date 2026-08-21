@@ -347,8 +347,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rule_engine = Arc::new(RuleEngine::new(&cwd)?);
 
     // 6.5. Create context trimmer
+    // 无配置项时使用默认值；如需自定义，可通过结构体字面量注入：
+    //   DefaultContextTrimmer { head_turns, tail_turns, tool_output_max_chars }
     let context_trimmer: Arc<dyn ContextTrimmer + Send + Sync> =
-        Arc::new(visp_context::DefaultContextTrimmer::default());
+        Arc::new(visp_context::DefaultContextTrimmer {
+            head_turns: 5,
+            tail_turns: 10,
+            tool_output_max_chars: 8_000,
+        });
 
     // 7. Create session manager
     let store: Box<dyn SessionStore> = match config.storage.driver.as_str() {
