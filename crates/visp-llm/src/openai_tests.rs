@@ -304,6 +304,47 @@ fn test_build_request_tool_choice_auto() {
     assert_eq!(req["tool_choice"], "auto");
 }
 
+// --- enable_thinking 透传测试 ---
+
+#[test]
+fn test_build_request_enable_thinking_true() {
+    let msgs = vec![Message::user("Hi")];
+    let mut config = LlmConfig::default();
+    config.extra.insert("enable_thinking".into(), "true".into());
+    let req = build_openai_request(&msgs, &[], &config);
+    assert_eq!(req["enable_thinking"], true);
+}
+
+#[test]
+fn test_build_request_enable_thinking_false() {
+    let msgs = vec![Message::user("Hi")];
+    let mut config = LlmConfig::default();
+    config
+        .extra
+        .insert("enable_thinking".into(), "false".into());
+    let req = build_openai_request(&msgs, &[], &config);
+    assert_eq!(req["enable_thinking"], false);
+}
+
+#[test]
+fn test_build_request_no_enable_thinking() {
+    // extra 中无该键时，请求体不应包含该字段（向后兼容）
+    let msgs = vec![Message::user("Hi")];
+    let config = LlmConfig::default();
+    let req = build_openai_request(&msgs, &[], &config);
+    assert!(req.get("enable_thinking").is_none());
+}
+
+#[test]
+fn test_build_request_invalid_enable_thinking() {
+    // 非法值应被忽略，不写入请求体
+    let msgs = vec![Message::user("Hi")];
+    let mut config = LlmConfig::default();
+    config.extra.insert("enable_thinking".into(), "yes".into());
+    let req = build_openai_request(&msgs, &[], &config);
+    assert!(req.get("enable_thinking").is_none());
+}
+
 // --- parse_openai_sse_data 测试 ---
 
 #[test]

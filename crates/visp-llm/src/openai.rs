@@ -125,6 +125,21 @@ pub fn build_openai_request(
         }
     }
 
+    // enable_thinking（DeepSeek 等模型：true 启用思考，false 关闭）
+    if let Some(val) = config.extra.get("enable_thinking") {
+        match val.as_str() {
+            "true" => {
+                request["enable_thinking"] = serde_json::json!(true);
+            }
+            "false" => {
+                request["enable_thinking"] = serde_json::json!(false);
+            }
+            _ => {
+                tracing::warn!("invalid enable_thinking value {:?}", val);
+            }
+        }
+    }
+
     request
 }
 
