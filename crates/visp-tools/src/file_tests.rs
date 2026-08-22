@@ -112,8 +112,13 @@ fn test_read_file_image_png() {
     let tool = ReadFile::default();
     let result = tool.read_single_file("visp_test_image.png", &working_dir, None, None);
 
-    let expected = format!("<image: {}>", file_path.canonicalize().unwrap().display());
-    assert_eq!(result.unwrap(), expected);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("vision") || err.contains("image"),
+        "unexpected error: {}",
+        err
+    );
 
     let _ = std::fs::remove_file(&file_path);
 }
@@ -127,8 +132,13 @@ fn test_read_file_image_jpg() {
     let tool = ReadFile::default();
     let result = tool.read_single_file("visp_test_image.jpg", &working_dir, None, None);
 
-    let expected = format!("<image: {}>", file_path.canonicalize().unwrap().display());
-    assert_eq!(result.unwrap(), expected);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("vision") || err.contains("image"),
+        "unexpected error: {}",
+        err
+    );
 
     let _ = std::fs::remove_file(&file_path);
 }
@@ -142,8 +152,13 @@ fn test_read_file_image_uppercase_ext() {
     let tool = ReadFile::default();
     let result = tool.read_single_file("visp_test_image_upper.PNG", &working_dir, None, None);
 
-    let expected = format!("<image: {}>", file_path.canonicalize().unwrap().display());
-    assert_eq!(result.unwrap(), expected);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("vision") || err.contains("image"),
+        "unexpected error: {}",
+        err
+    );
 
     let _ = std::fs::remove_file(&file_path);
 }

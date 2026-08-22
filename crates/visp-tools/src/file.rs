@@ -45,11 +45,16 @@ impl ReadFile {
     ) -> Result<String, String> {
         let path = validate_path(Path::new(path_str), working_dir)?;
 
-        // Image file detection: return marker instead of reading binary content
+        // Image file detection: image content cannot be read as text via read_file.
+        // Return an explicit error to guide the model to use the vision tool instead.
         if let Some(ext) = path.extension().and_then(|e| e.to_str())
             && IMAGE_EXTENSIONS.contains(&ext.to_lowercase().as_str())
         {
-            return Ok(format!("<image: {}>", path.display()));
+            return Err(format!(
+                "Cannot read image file {} with read_file: image content is not accessible as text. \
+                 Use the vision tool to view the image instead.",
+                path.display()
+            ));
         }
 
         // 检查文件大小
