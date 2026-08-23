@@ -153,6 +153,8 @@ impl Tool for Bash {
     fn description(&self) -> &str {
         "Execute a single shell command string on the host system with the user's permissions. \
          Use this for running scripts, build tools, git operations, file manipulation, and other CLI tasks. \
+         IMPORTANT: ALWAYS wrap file/directory paths in double or single quotes when they appear in commands \
+         (e.g. ls -la \"/path/with spaces/file\"); project paths frequently contain spaces, unquoted paths will break. \
          The command runs in a persistent shell session with timeout control. \
          Not suitable for interactive programs (no stdin/stdout). \
          Blocked commands: sudo, rm -rf with top-level paths. \
@@ -160,13 +162,33 @@ impl Tool for Bash {
     }
 
     fn parameters(&self) -> serde_json::Value {
+        // 动态反映实际黑名单（内置 + 配置），让 agent 知道哪些命令被禁，
+        // 避免浪费时间构造会被拦截的命令。
+        let mut blocked: Vec<&str> = BLOCKED_COMMANDS.to_vec();
+        for b in &self.blocked_commands {
+            let t = b.trim();
+            if !t.is_empty() {
+                blocked.push(t);
+            }
+        }
+        let blocked_str = if blocked.is_empty() {
+            "none".to_string()
+        } else {
+            blocked.join(", ")
+        };
+        let cmd_desc = format!(
+            "Shell command string to execute. Can include pipes, redirects, and multiple commands \
+             separated by && or ;. ALWAYS wrap file/directory paths in quotes (paths may contain \
+             spaces, e.g. \"/Users/me/project folder/file.txt\" - unquoted paths will break). \
+             Blocked commands: {blocked_str}."
+        );
         serde_json::json!({
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Shell command string to execute. Can include pipes, redirects, and multiple commands separated by && or ;."
+                    "description": cmd_desc,
                 },
                 "description": {
                     "type": "string",

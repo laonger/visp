@@ -517,3 +517,33 @@ fn test_blocked_word_with_trailing_space_config() {
     assert!(bash.is_blocked("node && echo hi"));
     assert!(!bash.is_blocked("ls node_modules"));
 }
+
+#[test]
+fn test_description_mentions_path_quoting() {
+    // 回归：bash 工具必须提示"文件路径用引号包裹"（项目路径常含空格，如 "untitled folder 37"）
+    use visp_core::tool::Tool;
+    let bash = Bash::default();
+    let desc = bash.description();
+    assert!(
+        desc.to_lowercase().contains("quotes") || desc.to_lowercase().contains("quote"),
+        "description 应提示路径引号：{desc}"
+    );
+    assert!(
+        desc.to_lowercase().contains("spaces") || desc.contains("空格"),
+        "description 应提示路径含空格：{desc}"
+    );
+}
+
+#[test]
+fn test_parameters_mention_path_quoting() {
+    use visp_core::tool::Tool;
+    let bash = Bash::default();
+    let params = bash.parameters();
+    let cmd_desc = params["properties"]["command"]["description"]
+        .as_str()
+        .expect("command 参数应有描述");
+    assert!(
+        cmd_desc.to_lowercase().contains("quotes") || cmd_desc.to_lowercase().contains("quote"),
+        "command 参数描述应提示路径引号：{cmd_desc}"
+    );
+}
