@@ -282,3 +282,37 @@ async fn test_execute_ftp_url() {
         .await;
     assert!(result.is_error);
 }
+
+// ── per-call timeout 生效 ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_execute_per_call_timeout_applied() {
+    // 起一个接受连接但永不返回 HTTP 响应的本地服务器
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        // 接受连接后挂起，不写任何响应
+        let _ = listener.accept().await;
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+
+    let wf = test_webfetch();
+    let ctx = test_context(Path::new("/tmp"));
+    let url = format!("http://{addr}/slow");
+    let started = std::time::Instant::now();
+    let result = wf
+        .execute(serde_json::json!({"url": url, "timeout": 1}), &ctx)
+        .await;
+    let elapsed = started.elapsed();
+
+    assert!(result.is_error);
+    assert!(
+        result.content.contains("Unable to fetch"),
+        "期望超时错误，got: {:?}",
+        result.content
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "per-call timeout 未生效，耗时 {elapsed:?}"
+    );
+}

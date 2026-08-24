@@ -7,8 +7,8 @@ use visp_core::tool::{Tool, ToolContext, ToolResult};
 /// 最大响应大小：5MB
 const MAX_RESPONSE_BYTES: u64 = 5 * 1024 * 1024;
 
-/// 默认超时秒数
-const DEFAULT_TIMEOUT_SECS: u64 = 30;
+/// 默认超时秒数（一分钟）
+const DEFAULT_TIMEOUT_SECS: u64 = 60;
 
 /// 允许的 URL 协议
 const ALLOWED_SCHEMES: &[&str] = &["http", "https"];
@@ -143,7 +143,7 @@ impl Tool for WebFetch {
          Supports HTTP and HTTPS URLs. Only textual content (HTML, plain text, JSON, XML) \
          is extracted. Binary content (images, PDFs) is rejected. \
          Respects the project's allowed domain whitelist if configured. \
-         Timeout defaults to 30s (max 120s). \
+         Timeout defaults to 60s (max 120s, per-call via 'timeout'). \
          Prefer reading local files with ReadFile when the content is already available locally."
     }
 
@@ -157,7 +157,7 @@ impl Tool for WebFetch {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Optional timeout in seconds (default: 30, max: 120)."
+                    "description": "Optional timeout in seconds (default: 60, max: 120)."
                 }
             },
             "required": ["url"]
@@ -202,8 +202,14 @@ impl Tool for WebFetch {
             // 到达 execute 说明用户已批准，直接放行
         }
 
-        // 4. HTTP GET
-        let response = match self.client.get(url.clone()).send().await {
+        // 4. HTTP GET（per-call timeout 覆盖默认，上限 120s）
+        let mut request = self.client.get(url.clone());
+        if let Some(secs) = arguments.get("timeout").and_then(|v| v.as_u64())
+            && secs > 0
+        {
+            request = request.timeout(std::time::Duration::from_secs(secs.min(120)));
+        }
+        let response = match request.send().await {
             Ok(r) => r,
             Err(e) => {
                 return ToolResult::error(format!("Unable to fetch {}: {e}", url_str));

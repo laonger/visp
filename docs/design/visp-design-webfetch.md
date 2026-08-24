@@ -30,7 +30,7 @@ LLM 调用 fetch_web(url)
          └─ 未命中 → requires_approval() = true → 弹 UserQuery
       3. HTTP GET 请求 ← reqwest (原生 async)
          ├─ Content-Length > 5MB → 拒绝
-         ├─ 超时 30s → 拒绝
+         ├─ 超时 60s → 拒绝
          └─ 非文本 MIME → 拒绝
       4. 流式读取 body ← reqwest 流 (async)，累计 > 5MB 截断
       5. HTML→Markdown ← spawn_blocking 卸到线程池（html-to-markdown-rs 是同步 CPU 操作）
@@ -75,7 +75,7 @@ WebFetch 通过 `WebFetch::from_toml(value: Option<&toml::Value>)` 自行解析�
 | 协议白名单 | 仅允许 `http://`、`https://`，拒绝 `file://`、`ftp://`、`data:` 等 |
 | 内容类型过滤 | 仅接受 `text/*`、`application/json`、`application/xml` 等文本 MIME |
 | 大小限制 | Content-Length > 5MB 直接拒绝；流式读取超 5MB 截断 |
-| 超时控制 | 默认 30s，可通过 daemon.toml 配置（`timeout_secs`，最大 120s） |
+| 超时控制 | 默认 60s，可通过 daemon.toml 配置（`timeout_secs`）或 per-call `timeout` 参数覆盖，最大 120s |
 | 权限确认 | 非白名单 URL 需用户确认，拒绝执行 |
 | 错误封装 | 内部错误统一映射，不暴露网络细节 |
 

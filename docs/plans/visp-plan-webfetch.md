@@ -140,7 +140,7 @@ pub struct DaemonConfig {
 ```toml
 [tool.webfetch]
 allow_domains = ["docs.rs", "crates.io", "github.com"]
-timeout_secs = 30
+timeout_secs = 60
 ```
 
 `default_config()` 中 `tool: HashMap::new()`。
@@ -225,7 +225,7 @@ cargo test -p visp-daemon && cargo clippy -p visp-daemon -- -D warnings
 
 **常量**：
 - `MAX_RESPONSE_BYTES = 5 * 1024 * 1024`
-- `DEFAULT_TIMEOUT_SECS = 30`
+- `DEFAULT_TIMEOUT_SECS = 60`
 - 允许的协议：`http`, `https`
 
 #### 🧪 测试 → 🔍 类型检查
