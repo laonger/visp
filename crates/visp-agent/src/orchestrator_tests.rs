@@ -902,6 +902,21 @@ where
             span.fields.extend(visitor.fields);
         }
     }
+
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        let mut visitor = SpanFieldVisitor { fields: Vec::new() };
+        event.record(&mut visitor);
+        let msg = visitor
+            .fields
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("{}: {}", event.metadata().name(), msg));
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -1218,8 +1233,8 @@ async fn test_orchestrator_reads_trace_context_from_envelope() {
 
 #[tokio::test]
 async fn test_orchestrator_missing_trace_context_falls_back_to_orphan() {
-    let (spans, _events, _tcs) = setup_tracing();
-    let _guard = make_tracing_guard(&spans, &_events, &_tcs);
+    let (spans, events, _tcs) = setup_tracing();
+    let _guard = make_tracing_guard(&spans, &events, &_tcs);
     let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
 
     // Envelope 不带 trace_context（None），orchestrator 回退到
@@ -1239,11 +1254,20 @@ async fn test_orchestrator_missing_trace_context_falls_back_to_orphan() {
     };
     orch.handle_agent_message(envelope).await;
 
+    // 诊断探针：断言前发一个探针 span，验证当前线程 dispatcher 是否仍指向本测试的 TestLayer
+    let _probe = tracing::info_span!("__orphan_probe");
+
     // 验证不 panic，且 spawn span 已创建
     let captured = spans.lock().unwrap();
     assert!(
         captured.iter().any(|s| s.name == "visp.subagent.spawn"),
-        "'visp.subagent.spawn' span should be created even without trace_context"
+        "'visp.subagent.spawn' span should be created even without trace_context; \
+         level_filter={:?}, probe_captured={}, captured {} spans: {:?}, events: {:?}",
+        tracing::level_filters::LevelFilter::current(),
+        captured.iter().any(|s| s.name == "__orphan_probe"),
+        captured.len(),
+        captured.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        events.lock().unwrap()
     );
 
     // W2-S4: orchestrator 会生成 fallback TraceContext（UUID based），因此
