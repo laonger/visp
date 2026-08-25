@@ -947,56 +947,66 @@ async fn execute_tool_calls(
 
     // g. Doom loop detection
     if cfg.doom_loop_threshold > 0 {
+        // Only *valid* tool calls participate in loop detection. Calls whose
+        // arguments fail to parse (empty/truncated/invalid JSON — e.g. a
+        // streaming interruption producing 0-byte arguments) are broken calls,
+        // not repeated behavior: folding them all to Null made distinct broken
+        // calls look identical and falsely tripped StuckInLoop. Skip a round
+        // entirely when no valid call remains, so empty rounds don't compare
+        // equal to each other.
         let round_sig: Vec<(String, serde_json::Value)> = tool_calls
             .iter()
-            .map(|tc| {
-                let args: serde_json::Value =
-                    serde_json::from_str(&tc.arguments).unwrap_or_default();
-                (tc.name.clone(), args)
+            .filter_map(|tc| {
+                serde_json::from_str(&tc.arguments)
+                    .ok()
+                    .map(|args| (tc.name.clone(), args))
             })
             .collect();
-        doom_loop_window.push(round_sig);
-        let threshold = cfg.doom_loop_threshold as usize;
-        if doom_loop_window.len() > threshold {
-            doom_loop_window.remove(0);
-        }
-        if doom_loop_window.len() == threshold {
-            let first = &(*doom_loop_window)[0];
-            let all_same = doom_loop_window.iter().all(|sig| sig == first);
-            if all_same {
-                if *doom_loop_warned {
+        if !round_sig.is_empty() {
+            doom_loop_window.push(round_sig);
+            let threshold = cfg.doom_loop_threshold as usize;
+            if doom_loop_window.len() > threshold {
+                doom_loop_window.remove(0);
+            }
+            if doom_loop_window.len() == threshold {
+                let first = &(*doom_loop_window)[0];
+                let all_same = doom_loop_window.iter().all(|sig| sig == first);
+                if all_same {
+                    if *doom_loop_warned {
+                        let _ = send_event(
+                            tx,
+                            sm,
+                            sid,
+                            &ctx.global_tx,
+                            &ctx.session_id,
+                            AgentEvent::Error {
+                                code: AgentErrorCode::StuckInLoop,
+                                message: "Agent stuck in repeated tool call loop after warning"
+                                    .into(),
+                            },
+                        )
+                        .await;
+                        let _ = sm.finish_loop(sid, SessionStatus::Error);
+                        return true; // fatal
+                    }
+                    *doom_loop_warned = true;
+                    doom_loop_window.clear();
                     let _ = send_event(
                         tx,
                         sm,
                         sid,
                         &ctx.global_tx,
                         &ctx.session_id,
-                        AgentEvent::Error {
-                            code: AgentErrorCode::StuckInLoop,
-                            message: "Agent stuck in repeated tool call loop after warning".into(),
-                        },
+                        AgentEvent::StatusUpdate(
+                            "Agent appears stuck in a loop of repeated tool calls".into(),
+                        ),
                     )
                     .await;
-                    let _ = sm.finish_loop(sid, SessionStatus::Error);
-                    return true; // fatal
+                    ctx.history.push(Message::system(
+                        "You appear to be repeating the same tool calls. \
+                         Please change your approach or summarize the current progress.",
+                    ));
                 }
-                *doom_loop_warned = true;
-                doom_loop_window.clear();
-                let _ = send_event(
-                    tx,
-                    sm,
-                    sid,
-                    &ctx.global_tx,
-                    &ctx.session_id,
-                    AgentEvent::StatusUpdate(
-                        "Agent appears stuck in a loop of repeated tool calls".into(),
-                    ),
-                )
-                .await;
-                ctx.history.push(Message::system(
-                    "You appear to be repeating the same tool calls. \
-                     Please change your approach or summarize the current progress.",
-                ));
             }
         }
     }
@@ -1196,14 +1206,28 @@ async fn execute_tool_calls(
                             error = %e,
                             "tool call arguments truncated or malformed (likely max_output_tokens exceeded)"
                         );
+                        // 区分"参数为空（传输中断）"与"内容超长被截断"：
+                        // 前者是流式传输问题，重发即可；后者必须拆分内容。
+                        let (tag, hint) = if tc.arguments.trim().is_empty() {
+                            (
+                                "EMPTY",
+                                "The tool call arguments were empty (0 bytes) — the call was \
+                                 likely interrupted during streaming. Re-issue the call with \
+                                 complete arguments.",
+                            )
+                        } else {
+                            (
+                                "TRUNCATED",
+                                "The content exceeded max_output_tokens.\n\
+                                 To fix this, split the content into smaller parts:\n\
+                                 - Use multiple smaller write_file or edit_file calls\n\
+                                 - Or use edit_file to incrementally build the file\n\
+                                 - Do NOT retry the same large write_file call — it will fail again.",
+                            )
+                        };
                         let result = ToolResult::error(format!(
-                            "[TRUNCATED] Tool call arguments incomplete ({} bytes, parse: {}). \
-                             The content exceeded max_output_tokens.\n\
-                             To fix this, split the content into smaller parts:\n\
-                             - Use multiple smaller write_file or edit_file calls\n\
-                             - Or use edit_file to incrementally build the file\n\
-                             - Do NOT retry the same large write_file call — it will fail again.",
-                            tc.arguments.len(), e
+                            "[{tag}] Tool call arguments incomplete ({} bytes, parse: {e}). {hint}",
+                            tc.arguments.len(),
                         ));
                         forward_global!(AgentMessage::ToolCallResult {
                             call_id: tc.id.clone(),
@@ -5243,6 +5267,103 @@ mod tests {
                 }
             )),
             "thinking-only iterations must not trigger StuckInLoop error event"
+        );
+    }
+
+    /// Provider that always returns a tool call whose arguments are malformed
+    /// (empty or invalid JSON), cycling through *different* contents — mirrors
+    /// streaming interruptions that produce 0-byte/truncated arguments.
+    /// Regression: such calls must NOT be folded into identical doom-loop
+    /// signatures; previously unwrap_or_default() collapsed every parse failure
+    /// to Null, so distinct broken calls looked identical and tripped
+    /// StuckInLoop, killing the whole session.
+    struct MalformedArgsProvider {
+        call_count: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for MalformedArgsProvider {
+        async fn chat_stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _config: &LlmConfig,
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>
+        {
+            let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+            let bad_args = ["", "not json", "{oops"];
+            let events: Vec<Result<ChatEvent, LlmError>> = vec![
+                Ok(ChatEvent::ToolCall {
+                    id: format!("call_bad_{count}"),
+                    name: "write_file".into(),
+                    arguments: bad_args[count % 3].to_string(),
+                }),
+                Ok(ChatEvent::Done),
+            ];
+            Ok(Box::pin(stream::iter(events)))
+        }
+    }
+
+    /// Regression: consecutive tool calls with malformed/empty arguments
+    /// (all parsing to the same Null fallback) must not be treated as a
+    /// repeated-tool-call loop. The loop should run to the hard limit
+    /// (MaxIterations), never terminate early with StuckInLoop.
+    #[serial]
+    #[tokio::test]
+    async fn test_malformed_arguments_do_not_trigger_doom_loop() {
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = std::sync::Arc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: std::sync::Arc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            std::sync::Arc::new(Phase2MockTrimmer);
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
+
+        let provider: std::sync::Arc<dyn LlmProvider> =
+            std::sync::Arc::new(MalformedArgsProvider {
+                call_count: AtomicUsize::new(0),
+            });
+        let rule_engine = std::sync::Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig {
+            hard_limit: 8,          // enough iterations to trip the old bug (warn at 3, fatal at 6)
+            doom_loop_threshold: 3, // small window to make the test fast
+            ..Default::default()
+        };
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            std::sync::Arc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("write the file"),
+            tx,
+        )
+        .await;
+
+        let mut events = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                AgentEvent::Error {
+                    code: AgentErrorCode::StuckInLoop,
+                    ..
+                }
+            )),
+            "malformed/empty tool call arguments must not trigger StuckInLoop"
         );
     }
 }
