@@ -649,7 +649,46 @@ impl LlmProvider for AnthropicProvider {
             }
         }
 
-        tracing::debug!(url = %url, model = %config.model, "Anthropic request");
+        // 诊断统计：历史回传中的可疑块（空 input 的 tool_use / 无 signature 的
+        // thinking）。第三方 Anthropic 兼容端点对这类畸形历史可能返回空响应。
+        let mut empty_input_tool_uses = 0usize;
+        let mut thinking_blocks = 0usize;
+        let mut unsigned_thinking_blocks = 0usize;
+        if let Some(msgs) = body["messages"].as_array() {
+            for m in msgs {
+                if let Some(blocks) = m["content"].as_array() {
+                    for b in blocks {
+                        match b["type"].as_str().unwrap_or("") {
+                            "tool_use" => {
+                                if b["input"].as_object().is_some_and(|o| o.is_empty()) {
+                                    empty_input_tool_uses += 1;
+                                }
+                            }
+                            "thinking" | "redacted_thinking" => {
+                                thinking_blocks += 1;
+                                if b["signature"].as_str().unwrap_or("").is_empty() {
+                                    unsigned_thinking_blocks += 1;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        tracing::debug!(
+            url = %url,
+            model = %config.model,
+            messages = body["messages"].as_array().map(|a| a.len()).unwrap_or(0),
+            tools = body["tools"].as_array().map(|a| a.len()).unwrap_or(0),
+            max_tokens = body["max_tokens"].as_u64().unwrap_or(0),
+            thinking_budget = body["thinking"]["budget_tokens"].as_u64(),
+            empty_input_tool_uses,
+            thinking_blocks,
+            unsigned_thinking_blocks,
+            "Anthropic request"
+        );
+        tracing::trace!(body = %serde_json::to_string(&body).unwrap_or_default(), "Anthropic request body");
         let start_time = std::time::Instant::now();
         let send_fut = self.client.post(&url).headers(headers).json(&body).send();
         let response = tokio::select! {
@@ -980,6 +1019,12 @@ fn byte_stream_to_chat_events(
                     for sse in sse_events {
                         let event_name = sse.event.as_deref().unwrap_or("");
                         let data = sse.data.as_deref().unwrap_or("");
+                        tracing::trace!(
+                            target: "visp.sse.anthropic",
+                            event = event_name,
+                            data,
+                            "raw SSE event"
+                        );
                         match parse_anthropic_event(event_name, data) {
                             Ok(ParsedEvent::Emit(chat_event)) => {
                                 // message_stop → 先标记 pending，返回后发 UsageInfo

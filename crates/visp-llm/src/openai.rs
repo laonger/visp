@@ -794,6 +794,11 @@ fn byte_stream_to_chat_events(
 
                     for line in raw.lines() {
                         if let Some(data) = line.strip_prefix("data: ") {
+                            tracing::trace!(
+                                target: "visp.sse.openai",
+                                data,
+                                "raw SSE data line"
+                            );
                             // 从 chunk 顶层提取 model 字段
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(data)
                                 && let Some(m) = v.get("model").and_then(|m| m.as_str())

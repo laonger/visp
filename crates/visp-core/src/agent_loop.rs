@@ -683,6 +683,8 @@ async fn handle_stream_result(
                     session_id = %sid,
                     input_tokens,
                     output_tokens,
+                    finish_reasons = ?provider_metadata.as_ref().map(|m| &m.finish_reasons),
+                    has_metadata = provider_metadata.is_some(),
                     "LLM returned empty response after consuming output tokens"
                 );
                 send_event(
@@ -5438,5 +5440,74 @@ mod tests {
             }
         }
         assert!(found_ok, "expected a ToolCallResult event");
+    }
+
+    /// Regression: a stream that ends normally (UsageInfo + Done) but carries
+    /// no text/tool_calls/thinking while consuming output tokens must surface
+    /// an Internal error whose message includes the consumed token count —
+    /// this is the "LLM returned empty response after consuming N output
+    /// tokens" diagnostic path.
+    #[serial]
+    #[tokio::test]
+    async fn test_empty_stream_with_output_tokens_reports_error() {
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = std::sync::Arc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: std::sync::Arc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            std::sync::Arc::new(Phase2MockTrimmer);
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
+
+        let provider: std::sync::Arc<dyn LlmProvider> =
+            std::sync::Arc::new(SimpleProvider::new(vec![vec![
+                ChatEvent::UsageInfo {
+                    input_tokens: 100,
+                    output_tokens: 11,
+                    tool_calls: 0,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                },
+                ChatEvent::Done,
+            ]]));
+        let rule_engine = std::sync::Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig::default();
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            std::sync::Arc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("hello"),
+            tx,
+        )
+        .await;
+
+        let mut events = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+        let found = events.iter().any(|e| {
+            matches!(
+                e,
+                AgentEvent::Error {
+                    code: AgentErrorCode::Internal,
+                    message,
+                } if message.contains("11 output tokens")
+            )
+        });
+        assert!(
+            found,
+            "empty stream with output_tokens=11 must produce Internal error mentioning token count"
+        );
     }
 }
