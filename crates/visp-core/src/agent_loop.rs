@@ -1196,8 +1196,19 @@ async fn execute_tool_calls(
                     }
                 }
 
-                // Parse arguments and execute
-                let args = match serde_json::from_str(&tc.arguments) {
+                // Parse arguments and execute.
+                // Empty (0-byte) arguments are normalized to `{}`: some
+                // OpenAI-compatible endpoints emit `"arguments": ""` for
+                // parameterless calls, and Anthropic sends no input_json_delta
+                // when the model passes no input. Parameterless tools then run
+                // normally; tools with required params fail via ToolResult and
+                // the model retries with correct arguments.
+                let raw_args: &str = if tc.arguments.trim().is_empty() {
+                    "{}"
+                } else {
+                    &tc.arguments
+                };
+                let args = match serde_json::from_str(raw_args) {
                     Ok(v) => v,
                     Err(e) => {
                         tracing::warn!(
@@ -1206,27 +1217,14 @@ async fn execute_tool_calls(
                             error = %e,
                             "tool call arguments truncated or malformed (likely max_output_tokens exceeded)"
                         );
-                        // 区分"参数为空（传输中断）"与"内容超长被截断"：
-                        // 前者是流式传输问题，重发即可；后者必须拆分内容。
-                        let (tag, hint) = if tc.arguments.trim().is_empty() {
-                            (
-                                "EMPTY",
-                                "The tool call arguments were empty (0 bytes) — the call was \
-                                 likely interrupted during streaming. Re-issue the call with \
-                                 complete arguments.",
-                            )
-                        } else {
-                            (
-                                "TRUNCATED",
-                                "The content exceeded max_output_tokens.\n\
-                                 To fix this, split the content into smaller parts:\n\
-                                 - Use multiple smaller write_file or edit_file calls\n\
-                                 - Or use edit_file to incrementally build the file\n\
-                                 - Do NOT retry the same large write_file call — it will fail again.",
-                            )
-                        };
+                        // 内容超长被截断时必须拆分内容重发，不能原样重试。
                         let result = ToolResult::error(format!(
-                            "[{tag}] Tool call arguments incomplete ({} bytes, parse: {e}). {hint}",
+                            "[TRUNCATED] Tool call arguments incomplete ({} bytes, parse: {e}). \
+                             The content exceeded max_output_tokens.\n\
+                             To fix this, split the content into smaller parts:\n\
+                             - Use multiple smaller write_file or edit_file calls\n\
+                             - Or use edit_file to incrementally build the file\n\
+                             - Do NOT retry the same large write_file call — it will fail again.",
                             tc.arguments.len(),
                         ));
                         forward_global!(AgentMessage::ToolCallResult {
@@ -5365,5 +5363,80 @@ mod tests {
             )),
             "malformed/empty tool call arguments must not trigger StuckInLoop"
         );
+    }
+
+    /// Regression: a tool call with empty (0-byte) arguments — as produced by
+    /// some OpenAI-compatible endpoints for parameterless calls, or by
+    /// Anthropic when no input_json_delta follows content_block_start — must
+    /// be normalized to `{}` and executed, not rejected as a hard error.
+    #[serial]
+    #[tokio::test]
+    async fn test_empty_arguments_normalized_for_parameterless_tool() {
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = std::sync::Arc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: std::sync::Arc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            std::sync::Arc::new(Phase2MockTrimmer);
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
+
+        // Iteration 1: tool call with empty arguments; iteration 2: stop.
+        let provider: std::sync::Arc<dyn LlmProvider> =
+            std::sync::Arc::new(SimpleProvider::new(vec![
+                vec![
+                    ChatEvent::ToolCall {
+                        id: "call_empty_1".into(),
+                        name: "noargs".into(),
+                        arguments: String::new(),
+                    },
+                    ChatEvent::Done,
+                ],
+                vec![ChatEvent::Done],
+            ]));
+        let rule_engine = std::sync::Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(std::sync::Arc::new(MockTestTool { name: "noargs" }))
+            .unwrap();
+        let config = AgentConfig::default();
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(64);
+
+        run_agent_loop(
+            provider,
+            std::sync::Arc::new(registry),
+            rule_engine,
+            session_mgr.clone(),
+            ctx,
+            &config,
+            Message::user("call the noargs tool"),
+            tx,
+        )
+        .await;
+
+        let mut events = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+        let mut found_ok = false;
+        for e in &events {
+            if let AgentEvent::ToolCallResult {
+                content, is_error, ..
+            } = e
+            {
+                assert!(
+                    !is_error,
+                    "empty-arguments call on a parameterless tool must succeed, got error: {content}"
+                );
+                assert_eq!(content, "ok");
+                found_ok = true;
+            }
+        }
+        assert!(found_ok, "expected a ToolCallResult event");
     }
 }
