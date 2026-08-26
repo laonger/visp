@@ -225,7 +225,6 @@ LLM 相关用 OTel 标准命名 `gen_ai.client.operation`，agent loop / tool / 
 | `gen_ai.usage.cache_creation_input_tokens` | u64 | 完成时 | Anthropic 扩展（同上） |
 | `gen_ai.response.finish_reasons` | String（逗号分隔） | 完成时 | OTel 标准为数组，tracing field 不支持 Vec 类型，存储为逗号分隔字符串 |
 | `gen_ai.response.model` | String | 完成时 | 实际响应模型版本 |
-| `visp.llm.cost_usd` | f64 | 完成时 | visp 计算 |
 
 ### 5.3.3 工具调用 fields（`visp.tool.execute` span）
 
@@ -325,7 +324,7 @@ visp daemon 通过 gRPC Chat 流**并发服务多个 CLI 客户端**，多个 pr
 INFO 级日志，进 fmt layer 与 OTLP layer：
 
 ```text
-[session=a3f2..] visp.agent.completed total_tokens=4521/1283 cache_read=120 cost_usd=0.0234 llm_calls=8 tool_calls=12 duration_ms=14200 iterations=4 subagents=1
+[session=a3f2..] visp.agent.completed total_tokens=4521/1283 cache_read=120 llm_calls=8 tool_calls=12 duration_ms=14200 iterations=4 subagents=1
 ```
 
 **特点**：
@@ -612,7 +611,6 @@ Sampler::ParentBased(TraceIdRatioBased(sample_rate))
   total_input_tokens=4521
   total_output_tokens=1283
   cache_read_tokens=120
-  cost_usd=0.0234
   llm_calls=8
   tool_calls=12
   duration_ms=14200
@@ -864,7 +862,6 @@ tracing span 设计为短生命周期（典型 ms~s）。Session 可能跨数小
 |---|---|
 | 单 session 总 input tokens | `sum(gen_ai.usage.input_tokens) where session.id = X` |
 | 单 session 总 output tokens | `sum(gen_ai.usage.output_tokens) where session.id = X` |
-| 跨 session 平均成本 | `avg(visp.llm.cost_usd) group by gen_ai.request.model` |
 | Cache 命中率 | `sum(gen_ai.usage.cache_read_input_tokens) / sum(gen_ai.usage.input_tokens)` |
 
 ## A.2 延迟类

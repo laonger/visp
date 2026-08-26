@@ -418,9 +418,8 @@ cargo fmt -- --check
 
 #### W1-S3b-3 红：completion 时 record usage fields
 - **测试**：
-  - `test_gen_ai_usage_fields_recorded_on_completion`：完成后 span 含 `gen_ai.usage.input_tokens` / `output_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens` / `gen_ai.response.finish_reasons` / `gen_ai.response.model` / `visp.llm.cost_usd`（§5.3.2）
+  - `test_gen_ai_usage_fields_recorded_on_completion`：完成后 span 含 `gen_ai.usage.input_tokens` / `output_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens` / `gen_ai.response.finish_reasons` / `gen_ai.response.model`（§5.3.2）
   - `test_finish_reasons_serialized_as_comma_separated_string`：tracing field 不支持 Vec，存为逗号分隔字符串（设计 §5.3.2 finish_reasons 类型修正）
-  - `test_cost_usd_computed_from_usage_and_pricing`：cost_usd 通过 provider 已知定价表与 usage 计算得出
 
 #### W1-S3b-4 绿：record 完成时字段
 - LLM 响应处理结束时调用 `Span::current().record(...)` 填入 usage / model / finish_reasons / cost

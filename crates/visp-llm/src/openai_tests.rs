@@ -1320,7 +1320,6 @@ fn test_gen_ai_client_operation_span_created_openai() {
         gen_ai.usage.output_tokens = tracing::field::Empty,
         gen_ai.response.finish_reasons = tracing::field::Empty,
         gen_ai.response.model = tracing::field::Empty,
-        visp.llm.cost_usd = tracing::field::Empty,
         visp.llm.token_limit_hit = tracing::field::Empty,
     );
     span.record("gen_ai.request.max_tokens", 4096i64);
@@ -1350,7 +1349,6 @@ fn test_gen_ai_request_fields_at_span_start_openai() {
         gen_ai.usage.output_tokens = tracing::field::Empty,
         gen_ai.response.finish_reasons = tracing::field::Empty,
         gen_ai.response.model = tracing::field::Empty,
-        visp.llm.cost_usd = tracing::field::Empty,
         visp.llm.token_limit_hit = tracing::field::Empty,
     );
 
@@ -1417,7 +1415,6 @@ async fn test_gen_ai_usage_fields_recorded_on_completion_openai() {
         gen_ai.usage.output_tokens = tracing::field::Empty,
         gen_ai.response.finish_reasons = tracing::field::Empty,
         gen_ai.response.model = tracing::field::Empty,
-        visp.llm.cost_usd = tracing::field::Empty,
         visp.llm.token_limit_hit = tracing::field::Empty,
     );
     span.record("gen_ai.request.max_tokens", 4096i64);
@@ -1489,13 +1486,6 @@ async fn test_gen_ai_usage_fields_recorded_on_completion_openai() {
             .iter()
             .any(|(k, _)| k == "gen_ai.usage.cache_creation.input_tokens")
     );
-
-    // cost_usd 应为正数
-    assert!(
-        fields
-            .iter()
-            .any(|(k, v)| k == "visp.llm.cost_usd" && v.parse::<f64>().unwrap_or(0.0) > 0.0)
-    );
 }
 
 #[tokio::test]
@@ -1508,7 +1498,6 @@ async fn test_openai_client_first_token_event() {
         gen_ai.usage.input_tokens = tracing::field::Empty,
         gen_ai.usage.output_tokens = tracing::field::Empty,
         gen_ai.response.model = tracing::field::Empty,
-        visp.llm.cost_usd = tracing::field::Empty,
     );
 
     let sse = make_openai_complete_sse("gpt-4o", "stop");
@@ -1548,7 +1537,6 @@ async fn test_openai_client_completed_event() {
         gen_ai.usage.input_tokens = tracing::field::Empty,
         gen_ai.usage.output_tokens = tracing::field::Empty,
         gen_ai.response.model = tracing::field::Empty,
-        visp.llm.cost_usd = tracing::field::Empty,
     );
 
     let sse = make_openai_complete_sse("gpt-4o", "stop");
@@ -1752,15 +1740,6 @@ async fn test_openai_no_cache_fields() {
         "OpenAI span should not have any cache fields, got: {:?}",
         fields
     );
-}
-
-#[test]
-fn test_openai_cost_usd_computed_from_usage() {
-    use crate::cost::openai_cost_usd;
-    // gpt-4o: $2.5/MTok input, $10/MTok output
-    let cost = openai_cost_usd("gpt-4o", 1000, 500);
-    let expected = (1000.0 / 1_000_000.0 * 2.5) + (500.0 / 1_000_000.0 * 10.0);
-    assert!((cost - expected).abs() < 1e-10);
 }
 
 // --- 文生图（image generation）测试 ---

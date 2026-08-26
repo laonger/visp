@@ -111,7 +111,6 @@ Anthropic 和 OpenAI provider 都会创建 `gen_ai.client.operation` span。该 
 | `gen_ai.usage.cache_creation.input_tokens` | cache creation token |
 | `gen_ai.response.finish_reasons` | finish reason，JSON/数组字符串形式 |
 | `gen_ai.response.model` | 实际响应模型 |
-| `visp.llm.cost_usd` | 根据模型和 token 估算的成本 |
 | `visp.llm.token_limit_hit` | 命中 token limit 时记录 |
 | `langfuse.observation.type` | 固定为 `generation` |
 | `langfuse.observation.input` | provider 请求体，JSON 字符串 |

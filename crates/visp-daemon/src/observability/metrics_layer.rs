@@ -46,8 +46,6 @@ pub struct SessionMetrics {
     pub cache_read_input: u64,
     /// Sum of `gen_ai.usage.cache_creation_input_tokens`.
     pub cache_creation_input: u64,
-    /// Sum of `visp.llm.cost_usd` across all LLM calls.
-    pub total_cost_usd: f64,
     /// Sum of `visp.tool.duration_ms` across all tool calls.
     pub tool_duration_ms: u64,
     /// Number of tool calls (`visp.tool.execute` spans closed).
@@ -71,7 +69,6 @@ impl Default for SessionMetrics {
             total_tokens_output: 0,
             cache_read_input: 0,
             cache_creation_input: 0,
-            total_cost_usd: 0.0,
             tool_duration_ms: 0,
             tool_calls: 0,
             llm_calls: 0,
@@ -322,10 +319,6 @@ where
                     .get("gen_ai.usage.cache_creation_input_tokens")
                     .and_then(|v| v.parse::<u64>().ok())
                     .unwrap_or(0);
-                let cost_usd = fields
-                    .get("visp.llm.cost_usd")
-                    .and_then(|v| v.parse::<f64>().ok())
-                    .unwrap_or(0.0);
                 let provider_name = fields.get("gen_ai.provider.name").map(|s| s.to_string());
 
                 let mut entry = self.sessions.entry(session_id).or_default();
@@ -333,7 +326,6 @@ where
                 entry.total_tokens_output += output_tokens;
                 entry.cache_read_input += cache_read;
                 entry.cache_creation_input += cache_creation;
-                entry.total_cost_usd += cost_usd;
                 entry.llm_calls += 1;
                 if entry.provider_name.is_none() {
                     entry.provider_name = provider_name;
@@ -373,7 +365,6 @@ where
                     total_tokens_output = metrics.total_tokens_output,
                     cache_read_tokens = metrics.cache_read_input,
                     cache_creation_tokens = metrics.cache_creation_input,
-                    cost_usd = metrics.total_cost_usd,
                     llm_calls = metrics.llm_calls,
                     tool_calls = metrics.tool_calls,
                     tool_duration_ms = metrics.tool_duration_ms,
@@ -542,13 +533,11 @@ mod tests {
             gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
             gen_ai.response.finish_reasons = tracing::field::Empty,
             gen_ai.response.model = tracing::field::Empty,
-            visp.llm.cost_usd = tracing::field::Empty,
         );
         llm.record("gen_ai.usage.input_tokens", 100u64);
         llm.record("gen_ai.usage.output_tokens", 50u64);
         llm.record("gen_ai.usage.cache_read_input_tokens", 20u64);
         llm.record("gen_ai.usage.cache_creation_input_tokens", 10u64);
-        llm.record("visp.llm.cost_usd", 0.0025f64);
         // LLM updates are finalized in on_close, so drop llm first.
         drop(llm);
 
@@ -558,7 +547,6 @@ mod tests {
         assert_eq!(metrics.total_tokens_output, 50);
         assert_eq!(metrics.cache_read_input, 20);
         assert_eq!(metrics.cache_creation_input, 10);
-        assert!((metrics.total_cost_usd - 0.0025).abs() < 1e-9);
         assert_eq!(metrics.llm_calls, 1);
 
         drop(_enter);
@@ -610,11 +598,9 @@ mod tests {
                 gen_ai.usage.output_tokens = tracing::field::Empty,
                 gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
                 gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
-                visp.llm.cost_usd = tracing::field::Empty,
             );
             llm.record("gen_ai.usage.input_tokens", 50u64);
             llm.record("gen_ai.usage.output_tokens", 25u64);
-            llm.record("visp.llm.cost_usd", 0.001f64);
             drop(llm);
 
             metrics_a = layer.session_metrics("sess_a").unwrap();
@@ -647,7 +633,6 @@ mod tests {
                 gen_ai.usage.output_tokens = tracing::field::Empty,
                 gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
                 gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
-                visp.llm.cost_usd = tracing::field::Empty,
             );
             llm1.record("gen_ai.usage.input_tokens", 30u64);
             llm1.record("gen_ai.usage.output_tokens", 15u64);
@@ -659,7 +644,6 @@ mod tests {
                 gen_ai.usage.output_tokens = tracing::field::Empty,
                 gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
                 gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
-                visp.llm.cost_usd = tracing::field::Empty,
             );
             llm2.record("gen_ai.usage.input_tokens", 70u64);
             llm2.record("gen_ai.usage.output_tokens", 35u64);
@@ -723,11 +707,9 @@ mod tests {
             gen_ai.usage.output_tokens = tracing::field::Empty,
             gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
             gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
-            visp.llm.cost_usd = tracing::field::Empty,
         );
         llm.record("gen_ai.usage.input_tokens", 200u64);
         llm.record("gen_ai.usage.output_tokens", 100u64);
-        llm.record("visp.llm.cost_usd", 0.005f64);
         drop(llm);
 
         drop(_enter);
@@ -1043,7 +1025,6 @@ mod tests {
             gen_ai.usage.output_tokens = tracing::field::Empty,
             gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
             gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
-            visp.llm.cost_usd = tracing::field::Empty,
         );
         llm.record("gen_ai.usage.input_tokens", 100u64);
         llm.record("gen_ai.usage.output_tokens", 50u64);

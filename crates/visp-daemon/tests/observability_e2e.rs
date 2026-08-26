@@ -214,7 +214,6 @@ impl LlmProvider for E2eMockProvider {
             gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
             gen_ai.response.finish_reasons = tracing::field::Empty,
             gen_ai.response.model = tracing::field::Empty,
-            visp.llm.cost_usd = tracing::field::Empty,
         );
         // Record completion fields (as the real providers do).
         span.record("gen_ai.usage.input_tokens", 100u64);
@@ -223,7 +222,6 @@ impl LlmProvider for E2eMockProvider {
         span.record("gen_ai.usage.cache_creation_input_tokens", 5u64);
         span.record("gen_ai.response.finish_reasons", "end_turn");
         span.record("gen_ai.response.model", "mock-model");
-        span.record("visp.llm.cost_usd", 0.0015f64);
 
         // Emit gen_ai.client.completed event INSIDE the span so the
         // span name appears in JSON output.
@@ -499,12 +497,6 @@ fn test_e2e_single_agent_emits_expected_span_tree() {
     assert!(
         output.contains("gen_ai.usage.input_tokens"),
         "expected gen_ai.usage.input_tokens field\n{}",
-        output
-    );
-
-    assert!(
-        output.contains("visp.llm.cost_usd"),
-        "expected visp.llm.cost_usd field\n{}",
         output
     );
 }

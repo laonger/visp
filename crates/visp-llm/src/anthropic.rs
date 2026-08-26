@@ -558,7 +558,6 @@ impl LlmProvider for AnthropicProvider {
             gen_ai.usage.cache_creation.input_tokens = field::Empty,
             gen_ai.response.finish_reasons = field::Empty,
             gen_ai.response.model = field::Empty,
-            visp.llm.cost_usd = field::Empty,
             visp.llm.token_limit_hit = field::Empty,
             langfuse.observation.type = field::Empty,
             langfuse.observation.input = field::Empty,
@@ -879,12 +878,6 @@ fn byte_stream_to_chat_events(
                     &state.model
                 };
                 state.span.record("gen_ai.response.model", effective_model);
-                let cost = crate::cost::anthropic_cost_usd(
-                    effective_model,
-                    state.input_tokens,
-                    state.output_tokens,
-                );
-                state.span.record("visp.llm.cost_usd", cost);
 
                 // Langfuse generation capture: record output if enabled
                 let raw_output_len = state.accumulated_output.len();
@@ -2124,7 +2117,6 @@ mod tests {
             gen_ai.usage.cache_creation.input_tokens = tracing::field::Empty,
             gen_ai.response.finish_reasons = tracing::field::Empty,
             gen_ai.response.model = tracing::field::Empty,
-            visp.llm.cost_usd = tracing::field::Empty,
             visp.llm.token_limit_hit = tracing::field::Empty,
         );
         span.record("gen_ai.request.max_tokens", 4096i64);
@@ -2156,7 +2148,6 @@ mod tests {
             gen_ai.usage.cache_creation.input_tokens = tracing::field::Empty,
             gen_ai.response.finish_reasons = tracing::field::Empty,
             gen_ai.response.model = tracing::field::Empty,
-            visp.llm.cost_usd = tracing::field::Empty,
             visp.llm.token_limit_hit = tracing::field::Empty,
         );
 
@@ -2278,7 +2269,6 @@ mod tests {
             gen_ai.usage.cache_creation.input_tokens = tracing::field::Empty,
             gen_ai.response.finish_reasons = tracing::field::Empty,
             gen_ai.response.model = tracing::field::Empty,
-            visp.llm.cost_usd = tracing::field::Empty,
             visp.llm.token_limit_hit = tracing::field::Empty,
         );
         span.record("gen_ai.request.max_tokens", 4096i64);
@@ -2341,13 +2331,6 @@ mod tests {
                 .iter()
                 .any(|(k, v)| k == "gen_ai.response.model" && v == "claude-sonnet-4-6")
         );
-
-        // cost_usd 应为正数
-        assert!(
-            fields
-                .iter()
-                .any(|(k, v)| k == "visp.llm.cost_usd" && v.parse::<f64>().unwrap_or(0.0) > 0.0)
-        );
     }
 
     #[test]
@@ -2362,57 +2345,6 @@ mod tests {
 
         let empty: Vec<String> = vec![];
         assert_eq!(serde_json::to_string(&empty).unwrap(), "[]");
-    }
-
-    #[tokio::test]
-    async fn test_cost_usd_computed_from_usage_and_pricing() {
-        let (spans, _events) = setup_tracing();
-        let _guard = make_guard(&spans, &_events);
-
-        let span = tracing::info_span!(
-            "gen_ai.client.operation",
-            gen_ai.usage.input_tokens = tracing::field::Empty,
-            gen_ai.usage.output_tokens = tracing::field::Empty,
-            gen_ai.response.model = tracing::field::Empty,
-            visp.llm.cost_usd = tracing::field::Empty,
-        );
-
-        let sse = make_complete_sse("claude-sonnet-4-6", "end_turn");
-        let byte_stream =
-            futures::stream::iter(vec![sse].into_iter().map(|s| Ok(bytes::Bytes::from(s))));
-        let start = std::time::Instant::now();
-        let event_stream = byte_stream_to_chat_events(
-            byte_stream,
-            start,
-            span,
-            "test-model".to_string(),
-            "/tmp".to_string(),
-            false,
-            20000,
-            true,
-        );
-        let _: Vec<ChatEvent> = event_stream
-            .filter_map(|e| futures::future::ready(e.ok()))
-            .collect()
-            .await;
-
-        drop(_guard);
-
-        let spans = spans.lock().unwrap();
-        let fields = &spans[0].fields;
-
-        // claude-sonnet-4-6: input $3/MTok, output $15/MTok
-        // input_tokens=105, output_tokens=420
-        let expected = (105.0 / 1_000_000.0 * 3.0) + (420.0 / 1_000_000.0 * 15.0);
-        let cost_field = fields
-            .iter()
-            .find(|(k, _)| k == "visp.llm.cost_usd")
-            .expect("cost_usd field should exist");
-        let actual: f64 = cost_field.1.parse().expect("cost_usd should be a float");
-        assert!(
-            (actual - expected).abs() < 1e-10,
-            "cost_usd {actual} != expected {expected}"
-        );
     }
 
     #[test]
@@ -2445,7 +2377,6 @@ mod tests {
             gen_ai.usage.input_tokens = tracing::field::Empty,
             gen_ai.usage.output_tokens = tracing::field::Empty,
             gen_ai.response.model = tracing::field::Empty,
-            visp.llm.cost_usd = tracing::field::Empty,
         );
 
         let sse = make_complete_sse("claude-sonnet-4-6", "end_turn");
@@ -2735,7 +2666,6 @@ mod tests {
             gen_ai.usage.input_tokens = tracing::field::Empty,
             gen_ai.usage.output_tokens = tracing::field::Empty,
             gen_ai.response.model = tracing::field::Empty,
-            visp.llm.cost_usd = tracing::field::Empty,
         );
 
         let sse = make_complete_sse("claude-sonnet-4-6", "end_turn");

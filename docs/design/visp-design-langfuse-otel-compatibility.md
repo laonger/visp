@@ -158,7 +158,6 @@ Langfuse trace 级字段采用手动传播，不使用 OpenTelemetry baggage。
 | `visp.llm.cache_hit_ratio` | cache 命中占比，按 cache read tokens / input tokens 计算 |
 | `visp.llm.token_limit_hit` | finish reason 归一化为 `length` 时写入 true |
 | `gen_ai.usage.cost` | Langfuse 可识别的成本字段 |
-| `visp.llm.cost_usd` | visp 内部成本字段，保留用于调试和兼容旧字段 |
 
 暂不额外写入 `langfuse.observation.model.name`。model parameters 继续通过 `gen_ai.request.*` 表达，不额外构造 `langfuse.observation.model.parameters` JSON 字段。
 

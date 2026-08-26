@@ -32,7 +32,6 @@ fn test_deferred_record_with_context_activation() {
             gen_ai.usage.input_tokens = tracing::field::Empty,
             gen_ai.usage.output_tokens = tracing::field::Empty,
             gen_ai.response.model = tracing::field::Empty,
-            visp.llm.cost_usd = tracing::field::Empty,
         );
 
         span.record("gen_ai.system", "openai");
@@ -40,7 +39,6 @@ fn test_deferred_record_with_context_activation() {
         span.record("gen_ai.usage.input_tokens", 100i64);
         span.record("gen_ai.usage.output_tokens", 50i64);
         span.record("gen_ai.response.model", "gpt-4o-2024-08-06");
-        span.record("visp.llm.cost_usd", 0.0015f64);
 
         let _guard = span.enter();
         drop(_guard);
@@ -89,11 +87,6 @@ fn test_deferred_record_with_context_activation() {
         attrs.get("gen_ai.response.model"),
         Some(&opentelemetry::Value::String("gpt-4o-2024-08-06".into())),
         "gen_ai.response.model should be 'gpt-4o-2024-08-06'"
-    );
-    assert_eq!(
-        attrs.get("visp.llm.cost_usd"),
-        Some(&opentelemetry::Value::F64(0.0015)),
-        "visp.llm.cost_usd should be 0.0015"
     );
 
     let _ = provider.shutdown();

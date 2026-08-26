@@ -895,12 +895,6 @@ fn byte_stream_to_chat_events(
                             &state.model
                         };
                         state.span.record("gen_ai.response.model", effective_model);
-                        let cost = crate::cost::openai_cost_usd(
-                            effective_model,
-                            state.input_tokens,
-                            state.output_tokens,
-                        );
-                        state.span.record("visp.llm.cost_usd", cost);
 
                         // Langfuse generation capture: record output if enabled
                         let raw_output_len = state.accumulated_output.len();
@@ -1143,7 +1137,6 @@ impl LlmProvider for OpenAiProvider {
             gen_ai.usage.output_tokens = field::Empty,
             gen_ai.response.finish_reasons = field::Empty,
             gen_ai.response.model = field::Empty,
-            visp.llm.cost_usd = field::Empty,
             visp.llm.token_limit_hit = field::Empty,
             langfuse.observation.type = field::Empty,
             langfuse.observation.input = field::Empty,
