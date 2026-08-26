@@ -472,6 +472,67 @@ fn test_parse_reasoning_field_delta() {
     }
 }
 
+/// Regression: the opencode zen gateway attaches an incremental `usage` object
+/// to EVERY chunk (violating the OpenAI convention where only the final chunk
+/// carries usage and has empty choices). The parser must not let the usage
+/// branch swallow the delta content in the same chunk.
+#[test]
+fn test_parse_usage_does_not_swallow_content_delta() {
+    let data = r#"{"id":"router-1","object":"chat.completion.chunk","choices":[{"index":0,"finish_reason":null,"delta":{"content":"我是"}}],"usage":{"prompt_tokens":87,"completion_tokens":27,"total_tokens":114,"prompt_tokens_details":{}}}"#;
+    let events = parse_openai_sse_data(data).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, OpenAiStreamEvent::TextDelta(t) if t == "我是")),
+        "content delta must be emitted even when chunk carries usage, got: {:?}",
+        events
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            OpenAiStreamEvent::Usage {
+                output_tokens: 27,
+                ..
+            }
+        )),
+        "usage must still be recorded, got: {:?}",
+        events
+    );
+}
+
+/// Same regression for reasoning_content deltas.
+#[test]
+fn test_parse_usage_does_not_swallow_reasoning_delta() {
+    let data = r#"{"id":"router-1","object":"chat.completion.chunk","choices":[{"index":0,"finish_reason":null,"delta":{"reasoning_content":"我们"}}],"usage":{"prompt_tokens":87,"completion_tokens":1,"total_tokens":88,"prompt_tokens_details":{}}}"#;
+    let events = parse_openai_sse_data(data).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, OpenAiStreamEvent::ReasoningDelta(t) if t == "我们")),
+        "reasoning delta must be emitted even when chunk carries usage, got: {:?}",
+        events
+    );
+}
+
+/// Standard-convention chunks (empty choices + usage) must still yield Usage.
+#[test]
+fn test_parse_usage_with_empty_choices_still_works() {
+    let data = r#"{"id":"router-1","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":87,"completion_tokens":34,"total_tokens":121}}"#;
+    let events = parse_openai_sse_data(data).unwrap();
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        OpenAiStreamEvent::Usage {
+            input_tokens,
+            output_tokens,
+            ..
+        } => {
+            assert_eq!(*input_tokens, 87);
+            assert_eq!(*output_tokens, 34);
+        }
+        _ => panic!("expected Usage, got {:?}", events),
+    }
+}
+
 // --- 图片内容块解析测试 ---
 
 /// OpenAI 图片输出：delta.content 为数组，含 data URI 图片

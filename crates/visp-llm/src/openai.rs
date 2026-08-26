@@ -346,7 +346,11 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<Vec<OpenAiStreamEvent>
     let v: serde_json::Value = serde_json::from_str(data)
         .map_err(|e| LlmError::Stream(format!("parse openai data: {e}")))?;
 
-    // 检查 usage（跳过 "usage": null，部分 provider 在非最终 chunk 中发送 null）
+    // 检查 usage（跳过 "usage": null，部分 provider 在非最终 chunk 中发送 null）。
+    // 注意：OpenAI 官方约定只有最后一个 chunk 带 usage 且 choices 为空，但部分
+    // 兼容网关（如 opencode zen）在每个 chunk 都附带增量 usage。因此这里先解析
+    // 暂存，不让 usage 分支拦截同 chunk 中 delta 内容的解析。
+    let mut usage_events: Vec<OpenAiStreamEvent> = Vec::new();
     if let Some(usage) = v.get("usage").filter(|u| !u.is_null()) {
         let input_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
         let output_tokens = usage["completion_tokens"].as_u64().unwrap_or(0) as u32;
@@ -371,19 +375,26 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<Vec<OpenAiStreamEvent>
             cache_read
         };
         if input_tokens > 0 || output_tokens > 0 {
-            return Ok(vec![OpenAiStreamEvent::Usage {
+            usage_events.push(OpenAiStreamEvent::Usage {
                 input_tokens,
                 output_tokens,
                 cache_creation_input_tokens: cache_creation,
                 cache_read_input_tokens: cache_read,
-            }]);
+            });
         }
     }
 
     // 解析 choices
     let choices = match v.get("choices").and_then(|c| c.as_array()) {
         Some(arr) if !arr.is_empty() => arr,
-        _ => return Ok(vec![OpenAiStreamEvent::Skip]),
+        _ => {
+            // 无内容 chunk：仅 usage（官方约定的最终 usage chunk）或 Skip
+            return Ok(if usage_events.is_empty() {
+                vec![OpenAiStreamEvent::Skip]
+            } else {
+                usage_events
+            });
+        }
     };
 
     let choice = &choices[0];
@@ -397,7 +408,9 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<Vec<OpenAiStreamEvent>
         if let Some(text) = content.as_str()
             && !text.is_empty()
         {
-            return Ok(vec![OpenAiStreamEvent::TextDelta(text.to_string())]);
+            let mut events = vec![OpenAiStreamEvent::TextDelta(text.to_string())];
+            events.extend(usage_events);
+            return Ok(events);
         }
 
         // 数组形式（OpenAI 图片输出：text + image_url 块）
@@ -442,6 +455,7 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<Vec<OpenAiStreamEvent>
                 image_events.insert(0, OpenAiStreamEvent::TextDelta(text_parts.join("")));
             }
             if !image_events.is_empty() {
+                image_events.extend(usage_events);
                 return Ok(image_events);
             }
         }
@@ -451,17 +465,17 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<Vec<OpenAiStreamEvent>
     if let Some(reasoning) = delta.get("reasoning_content").and_then(|c| c.as_str())
         && !reasoning.is_empty()
     {
-        return Ok(vec![OpenAiStreamEvent::ReasoningDelta(
-            reasoning.to_string(),
-        )]);
+        let mut events = vec![OpenAiStreamEvent::ReasoningDelta(reasoning.to_string())];
+        events.extend(usage_events);
+        return Ok(events);
     }
     // 部分提供商使用 "reasoning" 字段
     if let Some(reasoning) = delta.get("reasoning").and_then(|c| c.as_str())
         && !reasoning.is_empty()
     {
-        return Ok(vec![OpenAiStreamEvent::ReasoningDelta(
-            reasoning.to_string(),
-        )]);
+        let mut events = vec![OpenAiStreamEvent::ReasoningDelta(reasoning.to_string())];
+        events.extend(usage_events);
+        return Ok(events);
     }
 
     // 检查 tool_calls delta
@@ -476,34 +490,44 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<Vec<OpenAiStreamEvent>
             {
                 let name = func["name"].as_str().unwrap_or("").to_string();
                 // arguments 在首个 delta 中总是空的，后续通过 ToolCallDelta 累积
-                return Ok(vec![OpenAiStreamEvent::ToolCallStart {
+                let mut events = vec![OpenAiStreamEvent::ToolCallStart {
                     index: tc_index,
                     id: id.to_string(),
                     name,
-                }]);
+                }];
+                events.extend(usage_events);
+                return Ok(events);
             }
 
             // 参数增量
             if let Some(arguments) = func.get("arguments").and_then(|a| a.as_str())
                 && !arguments.is_empty()
             {
-                return Ok(vec![OpenAiStreamEvent::ToolCallDelta {
+                let mut events = vec![OpenAiStreamEvent::ToolCallDelta {
                     index: tc_index,
                     arguments: arguments.to_string(),
-                }]);
+                }];
+                events.extend(usage_events);
+                return Ok(events);
             }
         }
     }
 
     // 检查 finish_reason
     if let Some(reason) = finish_reason {
-        return Ok(vec![OpenAiStreamEvent::Finish {
+        let mut events = vec![OpenAiStreamEvent::Finish {
             index,
             reason: Some(reason),
-        }]);
+        }];
+        events.extend(usage_events);
+        return Ok(events);
     }
 
-    Ok(vec![OpenAiStreamEvent::Skip])
+    Ok(if usage_events.is_empty() {
+        vec![OpenAiStreamEvent::Skip]
+    } else {
+        usage_events
+    })
 }
 
 /// 按字符边界安全截取，最多取 `max_chars` 个字符。

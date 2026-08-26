@@ -92,6 +92,15 @@ fn create_llm_provider(config: &LlmModelConfig) -> Result<Arc<dyn LlmProvider>, 
                 config.base_url.clone(),
             )))
         }
+        "opencode" => {
+            let api_key = config.api_key.clone().ok_or_else(|| {
+                "OPENCODE_API_KEY not set (configure api_key or set env)".to_string()
+            })?;
+            Ok(Arc::new(visp_llm::opencode::OpencodeProvider::new(
+                api_key,
+                config.base_url.clone(),
+            )))
+        }
         _ => {
             let api_key = config.api_key.clone().ok_or_else(|| {
                 "ANTHROPIC_API_KEY not set (configure api_key or set env)".to_string()
