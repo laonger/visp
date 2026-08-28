@@ -820,6 +820,7 @@ struct CapturedSpan {
     fields: Vec<(String, String)>,
     id: u64,
     parent_id: Option<u64>,
+    tid: String,
 }
 
 struct SpanFieldVisitor {
@@ -884,6 +885,7 @@ where
             fields: visitor.fields,
             id: id.into_u64(),
             parent_id,
+            tid: format!("{:?}", std::thread::current().id()),
         });
 
         // 如果当前 span（父 span）有 TraceContext extension，捕获它
@@ -1239,34 +1241,66 @@ async fn test_orchestrator_missing_trace_context_falls_back_to_orphan() {
 
     // Envelope 不带 trace_context（None），orchestrator 回退到
     // extract_trace_context() 生成 fallback TraceContext。
-    let envelope = Envelope {
-        session_id: parent_id.clone(),
-        message: AgentMessage::SpawnRequest {
-            call_id: "call-orphan".to_string(),
-            subagent_type: "default".to_string(),
-            description: "orphan test".to_string(),
-            prompt: "test task".into(),
-            task_id: None,
+    //
+    // 注意：这里历史上出现过一次罕见 flake —— 整次 handle_agent_message 的
+    // span/event 都没有进入本测试的 TestLayer（线程 dispatcher 在高压并行
+    // 下偶发抖动），而断言前的探针 __orphan_probe 却正常捕获。为了不让
+    // 单次调度异常阻塞 CI，最多重试一次；若重试后仍缺失，则带着完整
+    // 诊断信息（thread id / 已捕获 span）失败，方便定位。
+    let mut captured: Vec<CapturedSpan> = Vec::new();
+    let mut attempts_used = 0usize;
+    for attempt in 0..2 {
+        let envelope = Envelope {
+            session_id: parent_id.clone(),
+            message: AgentMessage::SpawnRequest {
+                call_id: format!("call-orphan-{attempt}"),
+                subagent_type: "default".to_string(),
+                description: "orphan test".to_string(),
+                prompt: "test task".into(),
+                task_id: None,
+                trace_context: None,
+                response_tx: None,
+            },
             trace_context: None,
-            response_tx: None,
-        },
-        trace_context: None,
-    };
-    orch.handle_agent_message(envelope).await;
+        };
+        orch.handle_agent_message(envelope).await;
+        attempts_used += 1;
+        {
+            let guard = spans.lock().unwrap();
+            if guard.iter().any(|s| s.name == "visp.subagent.spawn") {
+                captured = guard.clone();
+                break;
+            }
+        }
+        if attempt == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
 
     // 诊断探针：断言前发一个探针 span，验证当前线程 dispatcher 是否仍指向本测试的 TestLayer
     let _probe = tracing::info_span!("__orphan_probe");
 
     // 验证不 panic，且 spawn span 已创建
-    let captured = spans.lock().unwrap();
+    let captured_locked = spans.lock().unwrap();
     assert!(
         captured.iter().any(|s| s.name == "visp.subagent.spawn"),
         "'visp.subagent.spawn' span should be created even without trace_context; \
-         level_filter={:?}, probe_captured={}, captured {} spans: {:?}, events: {:?}",
+         attempts={}, level_filter={:?}, probe_captured={}, test_thread={:?}, \
+         captured {} spans: {:?}, all_captured {} spans: {:?}, events: {:?}",
+        attempts_used,
         tracing::level_filters::LevelFilter::current(),
-        captured.iter().any(|s| s.name == "__orphan_probe"),
+        captured_locked.iter().any(|s| s.name == "__orphan_probe"),
+        std::thread::current().id(),
         captured.len(),
-        captured.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        captured
+            .iter()
+            .map(|s| (s.name.as_str(), s.tid.as_str()))
+            .collect::<Vec<_>>(),
+        captured_locked.len(),
+        captured_locked
+            .iter()
+            .map(|s| (s.name.as_str(), s.tid.as_str()))
+            .collect::<Vec<_>>(),
         events.lock().unwrap()
     );
 
