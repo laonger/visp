@@ -360,6 +360,10 @@ pub struct LlmConfig {
     pub use_tool: bool,
     /// 是否为文生图模型（true 时使用 /images/generations 端点）
     pub image_generation: bool,
+    /// 会话 ID（运行时由 agent loop 注入，每会话稳定）。
+    /// opencode 网关要求请求携带 x-opencode-session 头用于服务优化。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 impl Default for LlmConfig {
@@ -388,6 +392,7 @@ impl Default for LlmConfig {
             langfuse_redact_secrets: true,
             use_tool: true,
             image_generation: false,
+            session_id: None,
         }
     }
 }

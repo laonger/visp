@@ -2169,3 +2169,60 @@ fn test_build_messages_empty_arguments_kept() {
         "empty arguments should be kept as-is (valid)"
     );
 }
+
+#[test]
+fn test_extra_headers_applied_with_session_placeholder() {
+    let provider = OpenAiProvider::with_base_url("k".into(), "https://example.com".into())
+        .with_extra_headers(vec![(
+            "x-opencode-session".into(),
+            "{session}".into(),
+        )]);
+    let mut headers = reqwest::header::HeaderMap::new();
+    let config = LlmConfig {
+        session_id: Some("sess-123".into()),
+        ..Default::default()
+    };
+    provider.apply_extra_headers(&mut headers, &config);
+    assert_eq!(
+        headers.get("x-opencode-session").unwrap(),
+        "sess-123",
+        "placeholder {{session}} should be replaced with config.session_id"
+    );
+}
+
+#[test]
+fn test_extra_headers_skipped_without_session_id() {
+    let provider = OpenAiProvider::with_base_url("k".into(), "https://example.com".into())
+        .with_extra_headers(vec![(
+            "x-opencode-session".into(),
+            "{session}".into(),
+        )]);
+    let mut headers = reqwest::header::HeaderMap::new();
+    let config = LlmConfig::default();
+    provider.apply_extra_headers(&mut headers, &config);
+    assert!(
+        headers.get("x-opencode-session").is_none(),
+        "header with unresolved {{session}} placeholder should be skipped"
+    );
+}
+
+#[test]
+fn test_extra_headers_static_value_passes_through() {
+    let provider = OpenAiProvider::with_base_url("k".into(), "https://example.com".into())
+        .with_extra_headers(vec![("x-custom".into(), "static-value".into())]);
+    let mut headers = reqwest::header::HeaderMap::new();
+    provider.apply_extra_headers(&mut headers, &LlmConfig::default());
+    assert_eq!(headers.get("x-custom").unwrap(), "static-value");
+}
+
+#[test]
+fn test_extra_headers_invalid_name_skipped() {
+    let provider = OpenAiProvider::with_base_url("k".into(), "https://example.com".into())
+        .with_extra_headers(vec![("bad header\u{0}name".into(), "v".into())]);
+    let mut headers = reqwest::header::HeaderMap::new();
+    provider.apply_extra_headers(&mut headers, &LlmConfig::default());
+    assert!(
+        headers.is_empty(),
+        "invalid header name should be skipped without panic"
+    );
+}

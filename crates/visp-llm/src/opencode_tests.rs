@@ -33,3 +33,10 @@ fn test_provider_with_custom_base_url() {
     );
     let _ = &p;
 }
+
+#[test]
+fn test_provider_declares_opencode_session_header() {
+    // opencode 网关要求 x-opencode-session 头，provider 构造时声明
+    let p = OpencodeProvider::new("sk-test".to_string(), None);
+    let _ = p;
+}

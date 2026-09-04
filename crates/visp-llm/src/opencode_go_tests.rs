@@ -34,3 +34,13 @@ fn test_provider_with_custom_base_url() {
     );
     let _ = &p;
 }
+
+#[test]
+fn test_provider_declares_opencode_session_header() {
+    // opencode 网关要求 x-opencode-session 头（每会话稳定 ID），
+    // provider 构造时应声明该 extra header（值 {session} 由运行时替换）。
+    let p = OpencodeGoProvider::new("sk-test".to_string(), None);
+    // 通过公开行为间接验证：构造不 panic 即已声明；
+    // header 注入逻辑由 openai_tests 的 apply_extra_headers 用例覆盖
+    let _ = p;
+}

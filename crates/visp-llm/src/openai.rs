@@ -1028,6 +1028,9 @@ pub struct OpenAiProvider {
     api_key: String,
     api_url: String,
     client: reqwest::Client,
+    /// 附加请求头（如 opencode 网关的 x-opencode-session），随每个请求发送。
+    /// 值中的 {session} 占位符会被 LlmConfig.session_id 替换。
+    extra_headers: Vec<(String, String)>,
 }
 
 impl OpenAiProvider {
@@ -1036,6 +1039,7 @@ impl OpenAiProvider {
             api_key,
             api_url: "https://api.openai.com".to_string(),
             client: build_client(),
+            extra_headers: Vec::new(),
         }
     }
 
@@ -1044,6 +1048,41 @@ impl OpenAiProvider {
             api_key,
             api_url: base_url,
             client: build_client(),
+            extra_headers: Vec::new(),
+        }
+    }
+
+    /// 设置附加请求头（如 opencode 的 x-opencode-session）。
+    /// 值中的 `{session}` 占位符在请求时替换为 LlmConfig.session_id。
+    pub fn with_extra_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.extra_headers = headers;
+        self
+    }
+
+    /// 将 extra_headers 应用到请求头，`{session}` 占位符替换为 config.session_id。
+    /// 未设置 session_id 时含占位符的头跳过。
+    fn apply_extra_headers(&self, headers: &mut reqwest::header::HeaderMap, config: &LlmConfig) {
+        for (name, value) in &self.extra_headers {
+            let Ok(name) = reqwest::header::HeaderName::from_bytes(name.as_bytes()) else {
+                tracing::warn!(header = %name, "invalid extra header name, skipping");
+                continue;
+            };
+            let resolved = if value.contains("{session}") {
+                let Some(sid) = config.session_id.as_deref() else {
+                    continue;
+                };
+                value.replace("{session}", sid)
+            } else {
+                value.clone()
+            };
+            match reqwest::header::HeaderValue::from_str(&resolved) {
+                Ok(v) => {
+                    headers.insert(name, v);
+                }
+                Err(e) => {
+                    tracing::warn!(header = %name, error = %e, "invalid extra header value, skipping");
+                }
+            }
         }
     }
 
@@ -1090,7 +1129,8 @@ impl OpenAiProvider {
         };
 
         // 3. 构建请求头
-        let headers = build_openai_headers(&self.api_key);
+        let mut headers = build_openai_headers(&self.api_key);
+        self.apply_extra_headers(&mut headers, config);
 
         // 6. 发送请求
         tracing::debug!(url = %url, model = %config.model, "image generation request");
@@ -1233,9 +1273,8 @@ impl LlmProvider for OpenAiProvider {
             format!("{base}/v1/chat/completions")
         };
         let body = build_openai_request(messages, tools, config);
-        let headers = build_openai_headers(&self.api_key);
-
-        // Langfuse generation capture: record input if enabled
+        let mut headers = build_openai_headers(&self.api_key);
+        self.apply_extra_headers(&mut headers, config);
         let capture_enabled = config.langfuse_capture_input || config.langfuse_capture_output;
         if capture_enabled {
             span.record("langfuse.observation.type", "generation");

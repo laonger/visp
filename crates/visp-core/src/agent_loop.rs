@@ -306,6 +306,8 @@ async fn call_llm_with_retry(
     let llm_config = LlmConfig {
         langfuse_enabled: cfg.langfuse_enabled,
         langfuse_session_id: Some(ctx.session_id.clone()),
+        // opencode 网关要求 x-opencode-session 头（每会话稳定 ID）
+        session_id: Some(ctx.session_id.clone()),
         langfuse_trace_name: Some("visp.agent.run".to_string()),
         langfuse_user_id: cfg.langfuse_user_id.clone(),
         langfuse_tags: cfg.langfuse_tags.clone(),
