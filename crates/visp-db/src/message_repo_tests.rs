@@ -430,5 +430,8 @@ fn test_tool_result_is_error_roundtrip() {
     assert_eq!(loaded[0].tool_result_duration_ms, Some(123));
     assert_eq!(loaded[0].content, "File not found");
     assert_eq!(loaded[1].tool_result_is_error, Some(false));
-    assert_eq!(loaded[2].tool_result_is_error, None, "legacy row keeps NULL");
+    assert_eq!(
+        loaded[2].tool_result_is_error, None,
+        "legacy row keeps NULL"
+    );
 }

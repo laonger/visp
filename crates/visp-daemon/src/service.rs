@@ -773,7 +773,8 @@ impl CoderDaemon for CoderDaemonService {
                                                             .unwrap_or_default(),
                                                         tool_name: String::new(),
                                                         content: msg.content.clone(),
-                                                        is_error: msg.tool_result_is_error
+                                                        is_error: msg
+                                                            .tool_result_is_error
                                                             .unwrap_or(
                                                                 msg.kind == MessageType::Error,
                                                             ),
@@ -1246,9 +1247,9 @@ async fn replay_session_history(
                             call_id: msg.tool_call_id.clone().unwrap_or_default(),
                             tool_name: String::new(),
                             content: msg.content.clone(),
-                            is_error: msg.tool_result_is_error.unwrap_or(
-                                msg.kind == visp_core::message::MessageType::Error,
-                            ),
+                            is_error: msg
+                                .tool_result_is_error
+                                .unwrap_or(msg.kind == visp_core::message::MessageType::Error),
                             session_id: session_id.clone(),
                             agent_name: agent_name.clone(),
                         },

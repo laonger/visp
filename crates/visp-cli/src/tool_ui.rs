@@ -232,8 +232,14 @@ pub(crate) fn format_tool_args_full(tool_name: &str, args_json: &str) -> String 
         }
         "edit_file" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
-            let old_string = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-            let new_string = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+            let old_string = args
+                .get("old_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let new_string = args
+                .get("new_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             format!(
                 "path: {}\n--- old\n{}\n+++ new\n{}",
                 path, old_string, new_string
@@ -846,7 +852,10 @@ mod tests {
             !collapsed_text.contains(&long_cmd),
             "collapsed should not contain full command"
         );
-        assert!(collapsed_text.contains("..."), "collapsed keeps truncated summary");
+        assert!(
+            collapsed_text.contains("..."),
+            "collapsed keeps truncated summary"
+        );
     }
 
     #[test]
