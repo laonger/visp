@@ -65,14 +65,25 @@ fn create_llm_provider(config: &LlmModelConfig) -> Result<Arc<dyn LlmProvider>, 
                 config.base_url.clone(),
             )))
         }
-        "opencode" => {
+        "opencode" | "opencode-go" => {
             let api_key = config.api_key.clone().ok_or_else(|| {
                 "OPENCODE_API_KEY not set (configure api_key or set env)".to_string()
             })?;
-            Ok(Arc::new(visp_llm::opencode::OpencodeProvider::new(
-                api_key,
-                config.base_url.clone(),
-            )))
+            if let Some(ref base_url) = config.base_url {
+                Ok(Arc::new(visp_llm::opencode::OpencodeProvider::new(
+                    api_key,
+                    Some(base_url.clone()),
+                )))
+            } else if config.protocol == "opencode-go" {
+                // "opencode-go" 默认指向 Go 通道 v1 端点
+                Ok(Arc::new(visp_llm::opencode_go::OpencodeGoProvider::new(
+                    api_key, None,
+                )))
+            } else {
+                Ok(Arc::new(visp_llm::opencode::OpencodeProvider::new(
+                    api_key, None,
+                )))
+            }
         }
         _ => {
             let api_key = config.api_key.clone().ok_or_else(|| {

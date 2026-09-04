@@ -5,6 +5,7 @@ pub(crate) mod image_util;
 pub mod mock;
 pub mod openai;
 pub mod opencode;
+pub mod opencode_go;
 pub mod sanitize;
 pub(crate) mod streaming;
 pub(crate) mod util;
