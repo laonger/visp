@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -402,7 +402,7 @@ impl HttpPostClient {
                 arr.iter()
                     .map(|c| {
                         let text = c.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                        Content::text(text.to_string())
+                        ContentBlock::text(text.to_string())
                     })
                     .collect::<Vec<_>>()
             })
@@ -410,7 +410,11 @@ impl HttpPostClient {
 
         let is_error = result.get("isError").and_then(|v| v.as_bool());
 
-        Ok(CallToolResult { content, is_error })
+        Ok(if is_error.unwrap_or(false) {
+            CallToolResult::error(content)
+        } else {
+            CallToolResult::success(content)
+        })
     }
 
     /// 检查是否已完成初始化

@@ -4,7 +4,17 @@ use std::sync::OnceLock;
 /// 创建一个测试用 WebFetch（daemon 白名单为空）
 fn test_webfetch() -> &'static WebFetch {
     static INSTANCE: OnceLock<WebFetch> = OnceLock::new();
-    INSTANCE.get_or_init(|| WebFetch::from_toml(None))
+    INSTANCE.get_or_init(|| {
+        // reqwest 0.13+ 会读取 macOS 等系统代理设置；本机若开启系统代理
+        // 会拦截对 127.0.0.1 测试服务器的请求，导致超时测试不稳定。
+        // 测试夹具统一禁用代理，确保直连本地服务器。
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .unwrap();
+        WebFetch { client, daemon_allow_domains: Vec::new() }
+    })
 }
 
 fn test_context(dir: &Path) -> ToolContext {

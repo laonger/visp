@@ -271,9 +271,11 @@ max_context_tokens = 128000
 # Daemon 启动时会自动连接列出的服务器，将提供的工具集成到 Tool Registry 中，
 # Agent 循环即可一视同仁调用。
 #
-# 支持两种传输方式：
+# 支持四种传输方式：
 #   stdio — 以子进程方式启动 MCP 服务器（如 npx、uvx 命令）
 #   sse   — HTTP SSE 方式连接已运行的 MCP 服务器
+#   http  — MCP Streamable HTTP（POST-only 单端点，遵循官方规范）
+#   get   — 简易 HTTP GET 方式（非标准 MCP，无协议握手）
 #
 # 每项可选字段：
 #   enabled             — 是否自动连接（默认 true）
@@ -304,3 +306,23 @@ max_context_tokens = 128000
 # name = "custom-api"
 # transport = { type = "sse", url = "http://localhost:8080/mcp", headers = { Authorization = "Bearer sk-xxx" } }
 # tool_prefix = "custom_"
+
+# ----- http 示例（MCP Streamable HTTP，如 context7） -----
+# 所有交互通过单一 POST 端点完成：initialize / tools/list / tools/call
+# [[mcp.servers]]
+# name = "context7"
+# transport = { type = "http", url = "https://mcp.context7.com/mcp" }
+
+# ----- http 示例（带认证头） -----
+# [[mcp.servers]]
+# name = "remote-api"
+# transport = { type = "http", url = "https://example.com/mcp", headers = { Authorization = "Bearer sk-xxx" } }
+
+# ----- get 示例（简易 HTTP GET，非标准 MCP） -----
+# 无协议握手：工具发现 GET {url}/tools，工具调用 GET {url}/call?name=xxx
+# 端点可用 tools_endpoint / call_endpoint 自定义（默认 "/tools" 和 "/call"）
+# [[mcp.servers]]
+# name = "simple-tools"
+# transport = { type = "get", url = "http://localhost:9000" }
+# tools_endpoint = "/tools"
+# call_endpoint = "/call"

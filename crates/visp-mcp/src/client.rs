@@ -4,14 +4,16 @@
 //! 底层使用 rmcp crate 处理 MCP 协议握手和 JSON-RPC 通信（stdio/sse），
 //! 或使用自定义 HTTP 客户端（get/http 传输）。
 
-use rmcp::model::{CallToolRequestParam, CallToolResult, RawContent, Tool as McpToolModel};
-use rmcp::service::{RoleClient, RunningService, ServiceExt};
+use rmcp::model::{
+    CallToolRequestParams, CallToolResult, ContentBlock, ProtocolVersion, Tool as McpToolModel,
+};
+use rmcp::service::{ClientLifecycleMode, ClientServiceExt, RoleClient, RunningService};
 
 use crate::config::{McpServerConfig, McpTransport};
 use crate::error::McpError;
 use crate::get_client::GetClient;
 use crate::http_client::HttpPostClient;
-use crate::transport::{create_sse_transport, create_stdio_transport};
+use crate::transport::{create_http_transport, create_stdio_transport};
 
 /// MCP 服务器返回的工具定义
 #[derive(Debug, Clone)]
@@ -44,12 +46,23 @@ pub struct McpSession {
 
 /// 内部会话变体
 enum SessionInner {
-    /// 标准 MCP 协议（stdio/sse），使用 rmcp
-    StdioSse(RunningService<RoleClient, ()>),
+    /// 标准 MCP 协议（stdio / Streamable HTTP），使用 rmcp
+    Rmcp(RunningService<RoleClient, ()>),
     /// HTTP GET 简易 MCP，使用自定义 HTTP 客户端
     Get(GetClient),
     /// HTTP Streamable MCP（POST-only），使用自定义 HTTP 客户端
     Http(HttpPostClient),
+}
+
+/// rmcp 客户端启动时的生命周期模式（构造函数，因含 Vec 不能用 const）
+///
+/// 优先尝试 MCP 2026-07-28 的 discover 启动，失败则回退到
+/// 传统 initialize 握手（协议版本 2025-11-25），兼容所有服务器。
+fn client_lifecycle() -> ClientLifecycleMode {
+    ClientLifecycleMode::Auto {
+        preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+        legacy_version: Some(ProtocolVersion::V_2025_11_25),
+    }
 }
 
 impl std::fmt::Debug for McpSession {
@@ -76,27 +89,34 @@ impl McpSession {
     /// 建立连接
     ///
     /// 根据配置创建 transport 并执行 MCP 握手（initialize + initialized）。
-    /// - Stdio/Sse：使用 rmcp 创建 transport 并 serve（自动完成 initialize 握手）
+    /// - Stdio / Sse（映射为 Streamable HTTP）：使用 rmcp，Auto 生命周期
+    ///   （先尝试 2026-07-28 discover 启动，失败回退传统 initialize）
     /// - Get：直接创建 HTTP GET 客户端，无需握手
     /// - Http：创建 HTTP POST 客户端并执行 initialize 握手
     pub async fn connect(&mut self) -> Result<(), McpError> {
         match &self.config.transport {
             McpTransport::Stdio { .. } => {
                 let transport = create_stdio_transport(&self.config.transport)?;
-                let service = ().serve(transport).await.map_err(|e: std::io::Error| {
-                    McpError::Transport(format!("failed to serve stdio transport: {}", e))
-                })?;
-                self.session = Some(SessionInner::StdioSse(service));
+                let service = ()
+                    .serve_with_lifecycle(transport, client_lifecycle())
+                    .await
+                    .map_err(|e| {
+                        McpError::Transport(format!("failed to serve stdio transport: {}", e))
+                    })?;
+                self.session = Some(SessionInner::Rmcp(service));
                 self.connected = true;
                 Ok(())
             }
             McpTransport::Sse { url, headers } => {
-                let transport = create_sse_transport(url, headers).await?;
+                // rmcp 3.x 移除了 SSE-only 客户端，sse 配置走 Streamable HTTP
+                let transport = create_http_transport(url, headers)?;
                 let service = ()
-                    .serve(transport)
+                    .serve_with_lifecycle(transport, client_lifecycle())
                     .await
-                    .map_err(|e| McpError::Transport(format!("SSE serve failed: {}", e)))?;
-                self.session = Some(SessionInner::StdioSse(service));
+                    .map_err(|e| {
+                        McpError::Transport(format!("HTTP connect to '{}' failed: {}", url, e))
+                    })?;
+                self.session = Some(SessionInner::Rmcp(service));
                 self.connected = true;
                 Ok(())
             }
@@ -113,6 +133,7 @@ impl McpSession {
                 Ok(())
             }
             McpTransport::Http { url, headers } => {
+                // 已有 HttpPostClient 自定义实现，保持不变
                 let mut client = HttpPostClient::new(&self.name, url, headers)?;
                 client.initialize().await?;
                 self.session = Some(SessionInner::Http(client));
@@ -133,7 +154,7 @@ impl McpSession {
             .as_ref()
             .ok_or_else(|| McpError::NotConnected(self.name.clone()))?
         {
-            SessionInner::StdioSse(peer) => {
+            SessionInner::Rmcp(peer) => {
                 let tools = peer
                     .list_all_tools()
                     .await
@@ -160,7 +181,7 @@ impl McpSession {
             .as_ref()
             .ok_or_else(|| McpError::NotConnected(self.name.clone()))?
         {
-            SessionInner::StdioSse(peer) => {
+            SessionInner::Rmcp(peer) => {
                 // 将 arguments 转为 JsonObject
                 let args_map = match arguments {
                     serde_json::Value::Object(map) => Some(map),
@@ -172,10 +193,8 @@ impl McpSession {
                     }
                 };
 
-                let params = CallToolRequestParam {
-                    name: std::borrow::Cow::Owned(name.to_owned()),
-                    arguments: args_map,
-                };
+                let params = CallToolRequestParams::new(name.to_owned())
+                    .with_arguments(args_map.unwrap_or_default());
 
                 let result = peer
                     .call_tool(params)
@@ -191,11 +210,11 @@ impl McpSession {
 
     /// 关闭连接
     ///
-    /// - Stdio/Sse：cancel RunningService（自动发送 shutdown，kill 子进程）
+    /// - Rmcp（stdio / Streamable HTTP）：cancel RunningService（自动发送 shutdown，kill 子进程）
     /// - Get/Http：标记为断开
     pub async fn shutdown(&mut self) {
         match self.session.take() {
-            Some(SessionInner::StdioSse(service)) => {
+            Some(SessionInner::Rmcp(service)) => {
                 let _ = service.cancel().await;
             }
             Some(SessionInner::Get(mut client)) => {
@@ -224,11 +243,10 @@ impl McpSession {
 fn mcp_tool_to_definition(tool: McpToolModel) -> McpToolDefinition {
     McpToolDefinition {
         name: tool.name.to_string(),
-        description: if tool.description.is_empty() {
-            None
-        } else {
-            Some(tool.description.to_string())
-        },
+        description: tool
+            .description
+            .filter(|d| !d.is_empty())
+            .map(|d| d.to_string()),
         input_schema: serde_json::Value::Object(tool.input_schema.as_ref().clone()),
     }
 }
@@ -237,9 +255,9 @@ fn mcp_tool_to_definition(tool: McpToolModel) -> McpToolDefinition {
 pub(crate) fn call_tool_result_to_text(result: &CallToolResult) -> String {
     let mut texts: Vec<String> = Vec::new();
     for content in &result.content {
-        match &content.raw {
-            RawContent::Text(t) => texts.push(t.text.clone()),
-            RawContent::Image(img) => {
+        match content {
+            ContentBlock::Text(t) => texts.push(t.text.clone()),
+            ContentBlock::Image(img) => {
                 // Try to interpret image data as a UTF-8 file path
                 if let Ok(path_str) = std::str::from_utf8(img.data.as_bytes()) {
                     let path = std::path::Path::new(path_str);
@@ -261,8 +279,14 @@ pub(crate) fn call_tool_result_to_text(result: &CallToolResult) -> String {
                     img.data.len()
                 ));
             }
-            RawContent::Resource(_) => {
+            ContentBlock::Audio(_) => {
+                texts.push("[Audio]".into());
+            }
+            ContentBlock::ResourceLink(_) | ContentBlock::Resource(_) => {
                 texts.push("[Resource]".into());
+            }
+            _ => {
+                texts.push("[Unknown content]".into());
             }
         }
     }
@@ -272,7 +296,7 @@ pub(crate) fn call_tool_result_to_text(result: &CallToolResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rmcp::model::Content;
+    use rmcp::model::ContentBlock;
 
     /// 创建一个测试用的 stdio config（echo 命令，用于验证连接）
     fn test_stdio_config(name: &str) -> McpServerConfig {
@@ -461,20 +485,14 @@ mod tests {
 
     #[test]
     fn test_call_tool_result_to_text() {
-        let result = CallToolResult {
-            content: vec![Content::text("hello"), Content::text("world")],
-            is_error: Some(false),
-        };
+        let result = CallToolResult::success(vec![ContentBlock::text("hello"), ContentBlock::text("world")]);
         let text = call_tool_result_to_text(&result);
         assert_eq!(text, "hello\nworld");
     }
 
     #[test]
     fn test_call_tool_result_to_text_empty() {
-        let result = CallToolResult {
-            content: vec![],
-            is_error: Some(false),
-        };
+        let result = CallToolResult::success(vec![]);
         let text = call_tool_result_to_text(&result);
         assert_eq!(text, "");
     }

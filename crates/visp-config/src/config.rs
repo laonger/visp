@@ -161,7 +161,7 @@ pub struct LlmSection {
     /// 多模型配置列表
     #[serde(default)]
     pub models: Vec<LlmModelConfig>,
-    /// 默认模型 key（格式 {provider}.{name}），缺省时使用 models 第一个
+    /// 默认模型 key（格式 {provider}/{name}），缺省时使用 models 第一个
     #[serde(default)]
     pub default: Option<String>,
     /// 默认文生图模型 key（格式 {provider}/{name}）

@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use serde::Deserialize;
 
 use crate::client::McpToolDefinition;
@@ -246,22 +246,20 @@ impl GetClient {
 
         // 尝试解析为 CallToolResponse 格式
         if let Ok(parsed) = serde_json::from_str::<CallToolResponse>(&text) {
-            let contents: Vec<Content> = parsed
+            let contents: Vec<ContentBlock> = parsed
                 .content
                 .into_iter()
-                .map(|c| Content::text(c.text))
+                .map(|c| ContentBlock::text(c.text))
                 .collect();
-            return Ok(CallToolResult {
-                content: contents,
-                is_error: parsed.is_error,
+            return Ok(if parsed.is_error.unwrap_or(false) {
+                CallToolResult::error(contents)
+            } else {
+                CallToolResult::success(contents)
             });
         }
 
         // 退回纯文本模式：将整个响应体作为文本内容
-        Ok(CallToolResult {
-            content: vec![Content::text(text)],
-            is_error: Some(false),
-        })
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
     /// 检查是否已连接
