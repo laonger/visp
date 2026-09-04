@@ -267,6 +267,9 @@ impl CoderDaemonService {
 // ── trait implementation ──────────────────────────────────────────────────────
 
 #[tonic::async_trait]
+// tonic 的 gRPC trait 方法返回 Result<_, tonic::Status>（约 176 字节），
+// 触发 clippy::result_large_err（CI 以 -D warnings 运行）。
+#[allow(clippy::result_large_err)]
 impl CoderDaemon for CoderDaemonService {
     type ChatStream = ResponseStream;
 
