@@ -143,6 +143,10 @@ pub struct CoderDaemonService {
     client_tx: mpsc::Sender<visp_agent::orchestrator::ClientMessage>,
 }
 
+// gRPC 辅助方法返回 Result<_, tonic::Status>（约 176 字节），
+// 触发 clippy::result_large_err（CI 以 -D warnings 运行）。
+// 与下方 CoderDaemon trait impl 块同一根因。
+#[allow(clippy::result_large_err)]
 impl CoderDaemonService {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
