@@ -97,12 +97,12 @@ impl McpSession {
         match &self.config.transport {
             McpTransport::Stdio { .. } => {
                 let transport = create_stdio_transport(&self.config.transport)?;
-                let service = ()
-                    .serve_with_lifecycle(transport, client_lifecycle())
-                    .await
-                    .map_err(|e| {
-                        McpError::Transport(format!("failed to serve stdio transport: {}", e))
-                    })?;
+                let service =
+                    ().serve_with_lifecycle(transport, client_lifecycle())
+                        .await
+                        .map_err(|e| {
+                            McpError::Transport(format!("failed to serve stdio transport: {}", e))
+                        })?;
                 self.session = Some(SessionInner::Rmcp(service));
                 self.connected = true;
                 Ok(())
@@ -110,12 +110,12 @@ impl McpSession {
             McpTransport::Sse { url, headers } => {
                 // rmcp 3.x 移除了 SSE-only 客户端，sse 配置走 Streamable HTTP
                 let transport = create_http_transport(url, headers)?;
-                let service = ()
-                    .serve_with_lifecycle(transport, client_lifecycle())
-                    .await
-                    .map_err(|e| {
-                        McpError::Transport(format!("HTTP connect to '{}' failed: {}", url, e))
-                    })?;
+                let service =
+                    ().serve_with_lifecycle(transport, client_lifecycle())
+                        .await
+                        .map_err(|e| {
+                            McpError::Transport(format!("HTTP connect to '{}' failed: {}", url, e))
+                        })?;
                 self.session = Some(SessionInner::Rmcp(service));
                 self.connected = true;
                 Ok(())
@@ -485,7 +485,10 @@ mod tests {
 
     #[test]
     fn test_call_tool_result_to_text() {
-        let result = CallToolResult::success(vec![ContentBlock::text("hello"), ContentBlock::text("world")]);
+        let result = CallToolResult::success(vec![
+            ContentBlock::text("hello"),
+            ContentBlock::text("world"),
+        ]);
         let text = call_tool_result_to_text(&result);
         assert_eq!(text, "hello\nworld");
     }

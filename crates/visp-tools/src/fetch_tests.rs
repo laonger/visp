@@ -13,7 +13,10 @@ fn test_webfetch() -> &'static WebFetch {
             .timeout(std::time::Duration::from_secs(60))
             .build()
             .unwrap();
-        WebFetch { client, daemon_allow_domains: Vec::new() }
+        WebFetch {
+            client,
+            daemon_allow_domains: Vec::new(),
+        }
     })
 }
 
