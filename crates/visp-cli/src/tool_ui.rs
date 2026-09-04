@@ -194,6 +194,69 @@ pub(crate) fn format_tool_args_summary(tool_name: &str, args_json: &str) -> Stri
     }
 }
 
+/// Format tool arguments as full human-readable text for the expanded view.
+/// 不截断任何内容；JSON 解析失败时原样返回 args_json。
+pub(crate) fn format_tool_args_full(tool_name: &str, args_json: &str) -> String {
+    let args: serde_json::Value = match serde_json::from_str(args_json) {
+        Ok(v) => v,
+        Err(_) => return args_json.to_string(),
+    };
+
+    match tool_name {
+        "bash" | "cmd" | "powershell" => {
+            // 完整 command，不截断
+            args.get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        }
+        "read_file" | "read_files" => {
+            let path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .or_else(|| args.get("paths").and_then(|v| v.as_str()))
+                .unwrap_or("?");
+            let start = args.get("start_line").and_then(|v| v.as_i64());
+            let end = args.get("end_line").and_then(|v| v.as_i64());
+            match (start, end) {
+                (Some(s), Some(e)) => format!("{}:{}-{}", path, s, e),
+                (Some(s), None) => format!("{}:{}-", path, s),
+                (None, Some(e)) => format!("{}:-{}", path, e),
+                (None, None) => path.to_string(),
+            }
+        }
+        "write_file" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+            let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            format!("path: {}\n{}", path, content)
+        }
+        "edit_file" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+            let old_string = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+            let new_string = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+            format!(
+                "path: {}\n--- old\n{}\n+++ new\n{}",
+                path, old_string, new_string
+            )
+        }
+        _ => {
+            if let Some(obj) = args.as_object() {
+                let mut parts = Vec::new();
+                for (k, v) in obj {
+                    let val_str = match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        _ => serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string()),
+                    };
+                    parts.push(format!("{}: {}", k, val_str));
+                }
+                parts.join("\n")
+            } else {
+                serde_json::to_string_pretty(&args).unwrap_or_else(|_| args_json.to_string())
+            }
+        }
+    }
+}
+
 // ════════════════════════════════════════════════════════════════
 // Tool rendering functions (extracted from MessageCache::from_message)
 // ════════════════════════════════════════════════════════════════
@@ -225,15 +288,35 @@ pub(crate) fn render_tool_call(msg: &ChatLine, width: u16, expanded: bool) -> Ve
         ));
     }
 
+    // Expanded: show full tool arguments (before result, or standalone if no result yet)
+    if expanded {
+        let args_full = format_tool_args_full(name, &msg.content);
+        if !args_full.is_empty() {
+            // Empty separator line
+            lines.push(Line::styled(
+                pad_to_width("", width as usize),
+                Style::default().fg(theme::TOOL_CALL_FG),
+            ));
+            // Full args, wrapped to width, no truncation
+            let args_wrapped = wrap_text(&args_full, width);
+            for dl in args_wrapped.iter() {
+                let content = if dl.is_empty() {
+                    " ".repeat(width as usize)
+                } else {
+                    pad_to_width(dl, width as usize)
+                };
+                lines.push(Line::styled(
+                    content,
+                    Style::default().fg(theme::TOOL_CALL_FG),
+                ));
+            }
+        }
+    }
+
     // If we have a merged result, show it
     if let Some(ref result) = msg.tool_result {
         if expanded {
-            // Expanded: show empty separator + full result content
-            lines.push(Line::styled(
-                pad_to_width("", width as usize),
-                Style::default().fg(theme::TOOL_RESULT_FG),
-            ));
-
+            // Expanded: show full result content (separator already added with args block)
             let result_style = if msg.tool_error {
                 Style::default().fg(theme::ERROR_FG)
             } else {
@@ -665,6 +748,130 @@ mod tests {
     fn test_args_summary_bash_invalid_json() {
         let summary = format_tool_args_summary("bash", "bad json");
         assert_eq!(summary, "bad json");
+    }
+
+    // ── format_tool_args_full ─────────────────────────────
+
+    #[test]
+    fn test_args_full_bash_long_command() {
+        let long_cmd = "a".repeat(70);
+        let args = format!(r#"{{"command":"{}","timeout":120}}"#, long_cmd);
+        let full = format_tool_args_full("bash", &args);
+        assert_eq!(full, long_cmd);
+        assert!(!full.contains("..."));
+    }
+
+    #[test]
+    fn test_args_full_edit_file() {
+        let args = r#"{"path":"src/lib.rs","old_string":"foo\nbar","new_string":"baz"}"#;
+        let full = format_tool_args_full("edit_file", args);
+        assert!(full.contains("path: src/lib.rs"));
+        assert!(full.contains("--- old"));
+        assert!(full.contains("foo\nbar"));
+        assert!(full.contains("+++ new"));
+        assert!(full.contains("baz"));
+    }
+
+    #[test]
+    fn test_args_full_write_file() {
+        let args = r#"{"path":"src/main.rs","content":"fn main() {}\n"}"#;
+        let full = format_tool_args_full("write_file", args);
+        assert!(full.contains("path: src/main.rs"));
+        assert!(full.contains("fn main() {}"));
+    }
+
+    #[test]
+    fn test_args_full_read_file_with_lines() {
+        let args = r#"{"path":"src/lib.rs","start_line":10,"end_line":20}"#;
+        let full = format_tool_args_full("read_file", args);
+        assert_eq!(full, "src/lib.rs:10-20");
+    }
+
+    #[test]
+    fn test_args_full_other_tool() {
+        let args = r#"{"pattern":"fn main","include":"*.rs"}"#;
+        let full = format_tool_args_full("grep", args);
+        assert!(full.contains("pattern: fn main"));
+        assert!(full.contains("include: *.rs"));
+    }
+
+    #[test]
+    fn test_args_full_invalid_json() {
+        let full = format_tool_args_full("bash", "not json");
+        assert_eq!(full, "not json");
+    }
+
+    // ── render_tool_call: expanded 显示完整参数 ────────────
+
+    #[test]
+    fn test_render_tool_call_expanded_shows_full_command() {
+        let long_cmd =
+            "cargo build --release --target x86_64-unknown-linux-gnu --features foo bar baz qux"
+                .to_string();
+        assert!(long_cmd.chars().count() > 60);
+        let msg = ChatLine {
+            id: 1,
+            version: 0,
+            line_type: LineType::ToolCall {
+                name: "bash".into(),
+            },
+            content: format!(r#"{{"command":"{}","timeout":120}}"#, long_cmd),
+            call_id: Some("call-1".into()),
+            tool_result: Some("done".into()),
+            tool_error: false,
+            sub_session_id: None,
+        };
+
+        // 展开态：包含完整命令，不含截断标记
+        let expanded_lines = render_tool_call(&msg, 80, true);
+        let expanded_text: String = expanded_lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.trim_end())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            expanded_text.contains(&long_cmd),
+            "expanded should contain full command"
+        );
+
+        // 收起态：仍是截断摘要，不含完整命令
+        let collapsed_lines = render_tool_call(&msg, 80, false);
+        let collapsed_text: String = collapsed_lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            !collapsed_text.contains(&long_cmd),
+            "collapsed should not contain full command"
+        );
+        assert!(collapsed_text.contains("..."), "collapsed keeps truncated summary");
+    }
+
+    #[test]
+    fn test_render_tool_call_expanded_no_result_shows_args() {
+        // 工具尚未返回结果时，展开也应显示完整参数
+        let long_cmd = "b".repeat(70);
+        let msg = ChatLine {
+            id: 1,
+            version: 0,
+            line_type: LineType::ToolCall {
+                name: "bash".into(),
+            },
+            content: format!(r#"{{"command":"{}"}}"#, long_cmd),
+            call_id: Some("call-1".into()),
+            tool_result: None,
+            tool_error: false,
+            sub_session_id: None,
+        };
+        let lines = render_tool_call(&msg, 80, true);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(text.contains(&long_cmd));
     }
 
     // ── count_diff_lines ──────────────────────────────────

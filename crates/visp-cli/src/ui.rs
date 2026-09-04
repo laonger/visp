@@ -578,11 +578,11 @@ fn render_block(
     }
 }
 
-/// 确保所有消息的渲染缓存有效（惰性渲染）
-pub(crate) fn ensure_all_caches(app: &mut AppState, width: u16) {
-    if width != app.cache_width {
-        app.cache_width = width;
-    }
+/// 确保所有消息的渲染缓存有效（惰性渲染）。
+///
+/// 返回是否有缓存被重建或新增（即自上次渲染以来布局可能已变化）。
+pub(crate) fn ensure_all_caches(app: &mut AppState, width: u16) -> bool {
+    let mut rebuilt = false;
     // Max image height: 40% of visible terminal height, at least 3 rows
     let max_rows = ((app.chat_area_rect.3 as u32 * 40 / 100) as u16).max(3);
     let metrics = crate::image::ImageMetrics {
@@ -613,6 +613,7 @@ pub(crate) fn ensure_all_caches(app: &mut AppState, width: u16) {
             if !app.message_caches[idx].matches(msg, width, expanded) || image_state_changed {
                 app.message_caches[idx] =
                     MessageCache::from_message(msg, width, expanded, Some(&metrics));
+                rebuilt = true;
             }
         } else {
             app.message_caches.push(MessageCache::from_message(
@@ -621,10 +622,12 @@ pub(crate) fn ensure_all_caches(app: &mut AppState, width: u16) {
                 expanded,
                 Some(&metrics),
             ));
+            rebuilt = true;
         }
     }
     app.message_caches
         .retain(|c| msgs.iter().any(|m| m.id == c.msg_id));
+    rebuilt
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -713,6 +716,10 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
         app.scroll_state.y = max_scroll;
     }
     let scroll_y = app.scroll_state.y.min(max_scroll);
+    // 无条件把钳制后的滚动值写回状态：内容变矮（折叠 block、消息合并）时
+    // scroll_state.y 可能超出 max_scroll，若不回写，鼠标 hit-test 用的
+    // scroll_state.y 与屏幕实际渲染位置不一致，导致点击偏移。
+    app.scroll_state.y = scroll_y;
 
     // ── 统一渲染循环 ──────────────────────────────────────
     let sep_style = Style::default().bg(theme::BG);

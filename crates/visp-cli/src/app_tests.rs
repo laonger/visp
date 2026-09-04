@@ -2487,7 +2487,7 @@ fn test_button_hit_after_completion() {
 
     // 点击按钮区域应命中 (AGENT_CALL_STYLE: top_margin=1, margin_vertical=1 -> header at y+2)
     let result = crate::tool_ui::agent_open_tab_hit_test(
-        &app.messages(),
+        app.messages(),
         &app.message_caches,
         2,  // virtual_row = header 行 (y + top_margin + margin_vertical)
         70, // column 在按钮区域内
@@ -2508,7 +2508,7 @@ fn test_ensure_all_caches_image_state_ready() {
     let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
     let img_path =
         std::env::temp_dir().join(format!("visp_test_appcache_{}.png", std::process::id()));
-    let img = image::RgbaImage::from_raw(2, 2, vec![255, 0, 0, 255].repeat(4)).unwrap();
+    let img = image::RgbaImage::from_raw(2, 2, [255, 0, 0, 255].repeat(4)).unwrap();
     img.save(&img_path).unwrap();
 
     // 用户输入包含图片标记 → add_message 拆分为 文本+图片+文本 三条 ChatLine

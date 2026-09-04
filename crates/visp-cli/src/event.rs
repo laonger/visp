@@ -828,10 +828,15 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
             if in_chat && !app.show_help {
                 let virtual_row = m.row.saturating_sub(cy) + app.scroll_state.y;
 
-                // 确保缓存是最新的（渲染可能被流节流跳过，导致缓存过时）
+                // 确保缓存是最新的（渲染可能被流节流跳过，导致缓存过时）。
+                // 若自上次渲染以来布局发生变化（新消息、缓存重建、宽度变化），
+                // 屏幕显示的还是旧布局，本次点击坐标已不可信：
+                // 先强制渲染一帧对齐屏幕与缓存，吞掉此次点击，
+                // 用户下一次点击即可命中真实布局。
                 let content_w = app.cache_width;
-                if content_w > 0 {
-                    crate::ui::ensure_all_caches(app, content_w);
+                if content_w > 0 && crate::ui::ensure_all_caches(app, content_w) {
+                    app.needs_render = true;
+                    return false;
                 }
 
                 // 子 tab 的 task_prompt 占据渲染最顶部的若干行，

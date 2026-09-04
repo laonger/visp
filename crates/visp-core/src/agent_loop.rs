@@ -1358,8 +1358,10 @@ async fn execute_tool_calls(
     sorted_results.sort_by_key(|r| r.index);
 
     for tr in sorted_results {
-        let tool_msg =
+        let mut tool_msg =
             Message::tool_with_duration(tr.result.content.as_str(), &tr.call_id, tr.duration_ms);
+        // 记录工具执行是否出错，持久化到 message 表的 tool_result_is_error 字段
+        tool_msg.tool_result_is_error = Some(tr.result.is_error);
         ctx.history.push(tool_msg.clone());
         if let Err(e) = sm.append_message(sid, tool_msg) {
             let _ = send_event(
@@ -5402,7 +5404,7 @@ mod tests {
                 vec![ChatEvent::Done],
             ]));
         let rule_engine = std::sync::Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         registry
             .register(std::sync::Arc::new(MockTestTool { name: "noargs" }))
             .unwrap();

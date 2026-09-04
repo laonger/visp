@@ -8,6 +8,11 @@
 //! - gRPC server/client trait（`coder_daemon_server::CoderDaemon` /
 //!   `coder_daemon_client::CoderDaemonClient`）
 
+// tonic 生成的代码中所有 gRPC 方法返回 Result<_, tonic::Status>，
+// 而 tonic::Status 体积较大（约 176 字节），会触发 clippy 的
+// result_large_err lint（CI 以 -D warnings 运行）。生成的代码
+// 无法修改，此处对该模块整体豁免该 lint。
+#[allow(clippy::result_large_err)]
 pub mod visp {
     tonic::include_proto!("visp");
 }

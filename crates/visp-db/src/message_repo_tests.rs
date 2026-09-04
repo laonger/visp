@@ -401,3 +401,34 @@ fn test_images_empty_default() {
     assert_eq!(loaded.len(), 1);
     assert!(loaded[0].images.is_empty());
 }
+
+#[test]
+fn test_tool_result_is_error_roundtrip() {
+    let conn = setup();
+    insert_session(&conn, "ses-tie-1");
+
+    // 错误的 tool result：tool_result_is_error = Some(true)
+    let err_msg = Message::tool("File not found", "call_err");
+    let mut err_msg = err_msg;
+    err_msg.tool_result_is_error = Some(true);
+    err_msg.tool_result_duration_ms = Some(123);
+    MessageRepo::insert(&conn, "ses-tie-1", &err_msg).unwrap();
+
+    // 成功的 tool result：tool_result_is_error = Some(false)
+    let ok_msg = Message::tool("done", "call_ok");
+    let mut ok_msg = ok_msg;
+    ok_msg.tool_result_is_error = Some(false);
+    MessageRepo::insert(&conn, "ses-tie-1", &ok_msg).unwrap();
+
+    // 未设置标志的 tool result（旧行为）：保持 None
+    let legacy_msg = Message::tool("legacy", "call_legacy");
+    MessageRepo::insert(&conn, "ses-tie-1", &legacy_msg).unwrap();
+
+    let loaded = MessageRepo::get_by_session(&conn, "ses-tie-1").unwrap();
+    assert_eq!(loaded.len(), 3);
+    assert_eq!(loaded[0].tool_result_is_error, Some(true));
+    assert_eq!(loaded[0].tool_result_duration_ms, Some(123));
+    assert_eq!(loaded[0].content, "File not found");
+    assert_eq!(loaded[1].tool_result_is_error, Some(false));
+    assert_eq!(loaded[2].tool_result_is_error, None, "legacy row keeps NULL");
+}
