@@ -2173,10 +2173,7 @@ fn test_build_messages_empty_arguments_kept() {
 #[test]
 fn test_extra_headers_applied_with_session_placeholder() {
     let provider = OpenAiProvider::with_base_url("k".into(), "https://example.com".into())
-        .with_extra_headers(vec![(
-            "x-opencode-session".into(),
-            "{session}".into(),
-        )]);
+        .with_extra_headers(vec![("x-opencode-session".into(), "{session}".into())]);
     let mut headers = reqwest::header::HeaderMap::new();
     let config = LlmConfig {
         session_id: Some("sess-123".into()),
@@ -2193,10 +2190,7 @@ fn test_extra_headers_applied_with_session_placeholder() {
 #[test]
 fn test_extra_headers_skipped_without_session_id() {
     let provider = OpenAiProvider::with_base_url("k".into(), "https://example.com".into())
-        .with_extra_headers(vec![(
-            "x-opencode-session".into(),
-            "{session}".into(),
-        )]);
+        .with_extra_headers(vec![("x-opencode-session".into(), "{session}".into())]);
     let mut headers = reqwest::header::HeaderMap::new();
     let config = LlmConfig::default();
     provider.apply_extra_headers(&mut headers, &config);

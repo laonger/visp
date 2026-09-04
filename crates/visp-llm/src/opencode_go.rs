@@ -32,11 +32,10 @@ impl OpencodeGoProvider {
     pub fn new(api_key: String, base_url: Option<String>) -> Self {
         let base = base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
         Self {
-            openai: OpenAiProvider::with_base_url(api_key, base)
-                .with_extra_headers(vec![(
-                    "x-opencode-session".to_string(),
-                    "{session}".to_string(),
-                )]),
+            openai: OpenAiProvider::with_base_url(api_key, base).with_extra_headers(vec![(
+                "x-opencode-session".to_string(),
+                "{session}".to_string(),
+            )]),
         }
     }
 }
