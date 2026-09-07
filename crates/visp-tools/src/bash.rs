@@ -227,8 +227,7 @@ impl Tool for Bash {
             .get("command")
             .and_then(|v| v.as_str())
             .map(|cmd| {
-                self.is_destructive_command(cmd)
-                    || self.contains_approval_required_command(cmd)
+                self.is_destructive_command(cmd) || self.contains_approval_required_command(cmd)
             })
             .unwrap_or(false)
     }

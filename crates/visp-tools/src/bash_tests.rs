@@ -173,7 +173,9 @@ fn test_approval_ssh_start() {
 
 #[test]
 fn test_approval_ssh_with_flags() {
-    assert!(require_approval("ssh -i ~/.ssh/id_ed25519 -p 2222 user@host 'ls /'"));
+    assert!(require_approval(
+        "ssh -i ~/.ssh/id_ed25519 -p 2222 user@host 'ls /'"
+    ));
 }
 
 #[test]
