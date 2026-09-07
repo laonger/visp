@@ -160,6 +160,58 @@ fn test_non_destructive_transform() {
     assert!(!destructive().is_destructive_command("echo transform_data"));
 }
 
+// ── ssh / scp / rsync 审批测试 ────────────────────────────────────────
+
+fn require_approval(cmd: &str) -> bool {
+    destructive().requires_approval_for(&serde_json::json!({ "command": cmd }))
+}
+
+#[test]
+fn test_approval_ssh_start() {
+    assert!(require_approval("ssh user@host"));
+}
+
+#[test]
+fn test_approval_ssh_with_flags() {
+    assert!(require_approval("ssh -i ~/.ssh/id_ed25519 -p 2222 user@host 'ls /'"));
+}
+
+#[test]
+fn test_approval_scp() {
+    assert!(require_approval("scp ./file.txt user@host:/tmp/"));
+}
+
+#[test]
+fn test_approval_rsync() {
+    assert!(require_approval("rsync -avz ./dist/ user@host:/srv/app/"));
+}
+
+#[test]
+fn test_approval_in_middle_of_pipeline() {
+    assert!(require_approval("tar czf - . | ssh user@host 'tar xzf -'"));
+}
+
+#[test]
+fn test_approval_case_insensitive() {
+    assert!(require_approval("SSH user@host"));
+    assert!(require_approval("Rsync -av . host:/backup"));
+}
+
+#[test]
+fn test_no_approval_for_sshd_substring() {
+    // 词边界：sshd / verify_ssh_key / rsyncd 不应触发审批
+    assert!(!require_approval("cat /var/log/sshd.log"));
+    assert!(!require_approval("./scripts/verify_ssh_key.sh id_ed25519"));
+    assert!(!require_approval("tail -f /var/log/rsyncd.log"));
+}
+
+#[test]
+fn test_no_approval_for_local_copy() {
+    // scp/rssh 类无关词不应误伤；普通本地命令不审批
+    assert!(!require_approval("cp a b"));
+    assert!(!require_approval("ls -la"));
+}
+
 #[tokio::test]
 async fn test_bash_non_utf8_output() {
     let dir = tempdir().unwrap();

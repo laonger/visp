@@ -11,6 +11,10 @@ const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const OUTPUT_DRAIN_TIMEOUT_SECS: u64 = 5;
 const BLOCKED_COMMANDS: &[&str] = &["sudo", "rm -rf /", "chmod 777", "chmod 7777"];
 
+/// 必须经过用户审批才能执行的远程访问命令（ssh / scp / rsync）。
+/// 词边界匹配，避免误伤 sshd、rsyncd 等无关词。
+const APPROVAL_REQUIRED_COMMANDS: &[&str] = &["ssh", "scp", "rsync"];
+
 /// Bash 命令执行工具，支持 per-tool 配置
 pub struct Bash {
     blocked_commands: Vec<String>,
@@ -138,6 +142,15 @@ impl Bash {
 
         false
     }
+
+    /// 判断 bash 命令是否包含需要用户审批的远程访问命令（ssh/scp/rsync）。
+    /// 词边界匹配：`ssh user@host` 命中，`sshd`、路径中的 `verify_ssh_key` 不命中。
+    fn contains_approval_required_command(&self, command: &str) -> bool {
+        let lower = command.to_lowercase();
+        APPROVAL_REQUIRED_COMMANDS
+            .iter()
+            .any(|cmd| is_command_word(&lower, cmd))
+    }
 }
 
 #[async_trait]
@@ -158,6 +171,8 @@ impl Tool for Bash {
          The command runs in a persistent shell session with timeout control. \
          Not suitable for interactive programs (no stdin/stdout). \
          Blocked commands: sudo, rm -rf with top-level paths. \
+         Requires user approval: ssh, scp, rsync and any command containing them \
+         (remote access always asks for permission). \
          Timeout is configurable (default 120s, max 600s)."
     }
 
@@ -211,7 +226,10 @@ impl Tool for Bash {
         arguments
             .get("command")
             .and_then(|v| v.as_str())
-            .map(|cmd| self.is_destructive_command(cmd))
+            .map(|cmd| {
+                self.is_destructive_command(cmd)
+                    || self.contains_approval_required_command(cmd)
+            })
             .unwrap_or(false)
     }
 
