@@ -669,6 +669,10 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     // 所有 style 的 margin_horizontal 均为 1，按渲染实际宽度折行
     let render_w = content_w.saturating_sub(2);
     ensure_all_caches(app, render_w);
+    // 记录当前渲染宽度，供鼠标 hit-test 使用（如 AgentCall 的
+    // "[show in new tab]" 按钮命中检测）。若不同步，按钮矩形按宽度 0
+    // 计算，点击永远无法命中。
+    app.cache_width = render_w;
 
     const CHAT_PAD: u16 = 0;
 

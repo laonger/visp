@@ -1,5 +1,43 @@
 use super::*;
 
+// ── cache_width 同步（鼠标 hit-test 依赖） ───────────────────
+
+#[test]
+fn test_render_sets_cache_width_for_hit_test() {
+    // 回归：cache_width 此前从未被赋值（恒为 0），导致 AgentCall 头部的
+    // "[show in new tab]" 按钮命中矩形按宽度 0 计算，点击永远无效。
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.add_message(
+        LineType::AgentCall {
+            name: "explorer".into(),
+        },
+        r#"{"prompt":"test"}"#.into(),
+    );
+    app.tab_bar.tabs[0].messages[0].sub_session_id = Some("sub-1".into());
+
+    let backend = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::ui::render(&mut app, f)).unwrap();
+
+    // 渲染后 cache_width 必须等于渲染宽度（area.width 76 - 1 - 2 = 73）
+    assert_eq!(app.cache_width, 73);
+    assert!(!app.message_caches.is_empty());
+
+    // 用渲染产出的 cache_width 做按钮命中检测：header 行在 block 内
+    // 第 3 行（top_margin=1 + margin_vertical=1），列取按钮区域中部
+    let virtual_row = 2u16;
+    let content_w = app.cache_width;
+    let button_start = 1u16 + content_w - (2 + 18);
+    let hit = crate::tool_ui::agent_open_tab_hit_test(
+        app.messages(),
+        &app.message_caches,
+        virtual_row,
+        button_start + 2,
+        content_w,
+    );
+    assert_eq!(hit.as_deref(), Some("sub-1"));
+}
+
 #[test]
 fn test_split_model_name_normal() {
     assert_eq!(
