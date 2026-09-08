@@ -875,12 +875,8 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
         // 记录滑块几何供滚动条拖拽命中测试（与下方组件共用同一计算，
         // 保证渲染位置与拖拽映射一致）。content_length 语义为"可滚动
         // 位置数"（max_scroll + 1），滚到底时滑块贴住轨道底部。
-        let (thumb_start, thumb_len) = crate::app::scrollbar_thumb_geometry(
-            total_lines,
-            visible,
-            scroll_y,
-            area.height,
-        );
+        let (thumb_start, thumb_len) =
+            crate::app::scrollbar_thumb_geometry(total_lines, visible, scroll_y, area.height);
         app.scrollbar_geo = Some(crate::app::ScrollbarGeo {
             area: scrollbar_area,
             thumb_start,

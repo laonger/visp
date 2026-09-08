@@ -1103,9 +1103,7 @@ fn handle_scrollbar_mouse(event: &Event, app: &mut AppState) -> bool {
     if app.scrollbar_drag_offset.is_some() {
         match m.kind {
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-                if let (Some(geo), Some(offset)) =
-                    (app.scrollbar_geo, app.scrollbar_drag_offset)
-                {
+                if let (Some(geo), Some(offset)) = (app.scrollbar_geo, app.scrollbar_drag_offset) {
                     let track = geo.area.height;
                     // 目标滑块顶部偏移（纵向跟随指针，允许拖出滚动条列）
                     let target = (m.row as i32 - geo.area.y as i32 - offset as i32)
@@ -1135,9 +1133,8 @@ fn handle_scrollbar_mouse(event: &Event, app: &mut AppState) -> bool {
     if m.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left)
         && let Some(geo) = app.scrollbar_geo
     {
-        let in_track = m.column == geo.area.x
-            && m.row >= geo.area.y
-            && m.row < geo.area.y + geo.area.height;
+        let in_track =
+            m.column == geo.area.x && m.row >= geo.area.y && m.row < geo.area.y + geo.area.height;
         if in_track {
             let track = geo.area.height;
             let row = m.row - geo.area.y;

@@ -78,8 +78,7 @@ pub(crate) fn scrollbar_thumb_geometry(
     }
     let rd = |n: u32, d: u32| (n + d / 2) / d;
     let thumb_len = rd(visible * track, max_vp).clamp(1, track);
-    let thumb_start =
-        rd(scroll * track, max_vp).clamp(0, track - thumb_len);
+    let thumb_start = rd(scroll * track, max_vp).clamp(0, track - thumb_len);
     (thumb_start as u16, thumb_len as u16)
 }
 

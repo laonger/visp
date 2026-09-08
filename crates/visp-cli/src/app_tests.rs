@@ -2656,7 +2656,10 @@ fn test_scrollbar_drag_round_trip_boundaries() {
     let (total, visible, track) = (500u16, 25u16, 25u16);
     let max_scroll = total - visible;
     // 边界精确还原
-    assert_eq!(scrollbar_scroll_from_thumb(0, track, visible, max_scroll), 0);
+    assert_eq!(
+        scrollbar_scroll_from_thumb(0, track, visible, max_scroll),
+        0
+    );
     let (start_max, len) = scrollbar_thumb_geometry(total, visible, max_scroll, track);
     assert_eq!(start_max + len, track);
     assert_eq!(
