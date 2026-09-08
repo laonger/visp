@@ -95,6 +95,19 @@ pub const TAB_DIVIDER_FG: Color = Color::DarkGray;
 pub const TAB_PAGE_FG: Color = Color::DarkGray;
 
 // ════════════════════════════════════════════════════════════════
+// 对话区滚动条
+// ════════════════════════════════════════════════════════════════
+
+/// 对话区滚动条轨道符号
+pub const SCROLLBAR_TRACK: &str = "│";
+/// 对话区滚动条滑块符号
+pub const SCROLLBAR_THUMB: &str = "▐";
+/// 对话区滚动条轨道颜色
+pub const SCROLLBAR_TRACK_FG: Color = Color::DarkGray;
+/// 对话区滚动条滑块颜色
+pub const SCROLLBAR_THUMB_FG: Color = Color::Gray;
+
+// ════════════════════════════════════════════════════════════════
 // Help Popup
 // ════════════════════════════════════════════════════════════════
 

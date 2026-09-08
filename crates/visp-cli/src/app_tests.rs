@@ -2544,3 +2544,163 @@ fn test_ensure_all_caches_image_state_ready() {
 
     let _ = std::fs::remove_file(&img_path);
 }
+
+// ════════════════════════════════════════════════════════════
+// wrap_styled_line / 代码块折行测试
+// ════════════════════════════════════════════════════════════
+
+use ratatui::style::Color;
+use unicode_width::UnicodeWidthStr;
+
+fn styled_line_display_width(line: &Line<'_>) -> usize {
+    line.spans.iter().map(|s| s.content.width()).sum()
+}
+
+#[test]
+fn test_wrap_styled_line_splits_long_line() {
+    let line = Line::styled("abcdefghij", Style::default().fg(Color::Red));
+    let out = wrap_styled_line(&line, 4);
+    assert_eq!(out.len(), 3, "10 字符按宽 4 应折成 3 行");
+    for l in &out {
+        assert!(styled_line_display_width(l) <= 4);
+    }
+    // 字符无丢失（去行尾补齐空格后拼接应还原原文）
+    let joined: String = out
+        .iter()
+        .map(|l| {
+            let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            text.trim_end().to_string()
+        })
+        .collect();
+    assert_eq!(joined, "abcdefghij");
+}
+
+#[test]
+fn test_wrap_styled_line_preserves_span_styles() {
+    let line = Line::from(vec![
+        Span::styled("aaaa", Style::default().fg(Color::Red)),
+        Span::styled("bbbb", Style::default().fg(Color::Blue)),
+    ]);
+    let out = wrap_styled_line(&line, 6);
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0].spans[0].style.fg, Some(Color::Red));
+    assert_eq!(out[1].spans[0].style.fg, Some(Color::Blue));
+}
+
+#[test]
+fn test_assistant_code_block_wraps_to_width() {
+    // 回归：Markdown 代码块中的超长代码行必须折行，不能超出渲染宽度
+    let long = "let value = some_function(argument_one, argument_two, argument_three);";
+    let msg = ChatLine {
+        id: 1,
+        version: 0,
+        line_type: LineType::Assistant,
+        content: format!("```rust\n{long}\n```"),
+        call_id: None,
+        tool_result: None,
+        tool_error: false,
+        sub_session_id: None,
+    };
+    let width = 30;
+    let cache = MessageCache::from_message(&msg, width, false, None);
+    assert!(cache.lines.len() > 1, "超长代码行应折成多行");
+    for l in &cache.lines {
+        let w = styled_line_display_width(l);
+        assert!(w <= width as usize, "行宽 {w} 超过渲染宽度 {width}");
+    }
+    // 代码内容无丢失（去行尾补齐空格后拼接还原）
+    let joined: String = cache
+        .lines
+        .iter()
+        .map(|l| {
+            let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            text.trim_end().to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(
+        joined.contains("some_function(argument_one"),
+        "折行不应丢失代码内容，实际: {joined}"
+    );
+}
+
+// ════════════════════════════════════════════════════════════
+// 滚动条几何 / 拖拽映射测试
+// ════════════════════════════════════════════════════════════
+
+#[test]
+fn test_scrollbar_thumb_geometry_top_and_bottom() {
+    let (total, visible, track) = (200u16, 30u16, 30u16);
+    // 顶部：滑块在轨道顶端，长度 > 0 且成比例
+    let (start, len) = scrollbar_thumb_geometry(total, visible, 0, track);
+    assert_eq!(start, 0);
+    assert!(len > 0 && len < track);
+    // 底部：滑块贴住轨道底部（start + len == track）
+    let max_scroll = total - visible;
+    let (start_b, len_b) = scrollbar_thumb_geometry(total, visible, max_scroll, track);
+    assert_eq!(start_b + len_b, track, "滚到底时滑块应贴住轨道底部");
+    assert_eq!(len, len_b);
+}
+
+#[test]
+fn test_scrollbar_thumb_geometry_proportional() {
+    // 滑块长度 ≈ visible * track / (max_scroll + visible) = visible²/total
+    let (total, visible, track) = (1000u16, 40u16, 40u16);
+    let (_, len) = scrollbar_thumb_geometry(total, visible, 0, track);
+    let expect = (visible as u32 * track as u32) / ((total - visible) as u32 + visible as u32);
+    assert!((len as i32 - expect as i32).abs() <= 1);
+}
+
+#[test]
+fn test_scrollbar_drag_round_trip_boundaries() {
+    let (total, visible, track) = (500u16, 25u16, 25u16);
+    let max_scroll = total - visible;
+    // 边界精确还原
+    assert_eq!(scrollbar_scroll_from_thumb(0, track, visible, max_scroll), 0);
+    let (start_max, len) = scrollbar_thumb_geometry(total, visible, max_scroll, track);
+    assert_eq!(start_max + len, track);
+    assert_eq!(
+        scrollbar_scroll_from_thumb(start_max, track, visible, max_scroll),
+        max_scroll
+    );
+    // 往返误差不超过滑块量化粒度（每个滑块行 ≈ max_scroll/(track-len) 个滚动行）
+    let quant = max_scroll / (track - len) + 1;
+    for s in (0..=max_scroll).step_by(7) {
+        let (start, _) = scrollbar_thumb_geometry(total, visible, s, track);
+        let back = scrollbar_scroll_from_thumb(start, track, visible, max_scroll);
+        assert!(
+            (back as i32 - s as i32).abs() <= quant as i32,
+            "scroll={s} round-trip={back} quant={quant}"
+        );
+    }
+}
+
+#[test]
+fn test_scrollbar_drag_preserves_grab_offset() {
+    let (total, visible, track) = (500u16, 25u16, 25u16);
+    let max_scroll = total - visible;
+    let (start0, len) = scrollbar_thumb_geometry(total, visible, 0, track);
+    let offset = len / 2;
+    // 从滑块中点抓住，向下逐行拖动：滚动单调不减，拖到底达到最大滚动
+    let mut prev = 0u16;
+    for row in (start0 + offset)..=(track - len + offset) {
+        let target = (row - offset).min(track - len);
+        let s = scrollbar_scroll_from_thumb(target, track, visible, max_scroll);
+        assert!(s <= max_scroll && s >= prev, "row={row} s={s} prev={prev}");
+        prev = s;
+    }
+    assert_eq!(prev, max_scroll, "拖到轨道底部应达到最大滚动");
+}
+
+#[test]
+fn test_scrollbar_drag_monotonic_and_bounded() {
+    let (total, visible, track) = (300u16, 20u16, 20u16);
+    let max_scroll = total - visible;
+    let mut prev = 0u16;
+    for t in 0..track {
+        let s = scrollbar_scroll_from_thumb(t, track, visible, max_scroll);
+        assert!(s >= prev, "拖拽映射应单调不减");
+        assert!(s <= max_scroll, "映射结果不得超过最大滚动偏移");
+        prev = s;
+    }
+}

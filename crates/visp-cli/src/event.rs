@@ -411,6 +411,10 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
     }
 
     app.needs_render = true;
+    // ── 滚动条拖拽：优先处理，未命中滚动条的事件透传给下方逻辑 ──────
+    if handle_scrollbar_mouse(&event, app) {
+        return false;
+    }
     match event {
         Event::Key(key) => {
             // F1: 切换帮助弹窗
@@ -1083,6 +1087,81 @@ fn tc_display(tc: &visp_proto::visp::ToolCall) -> String {
         }
         _ => format!("{}: {}", tc.tool_name, tc.arguments),
     }
+}
+
+// ════════════════════════════════════════════════════════════════
+// 滚动条拖拽
+// ════════════════════════════════════════════════════════════════
+
+/// 滚动条鼠标处理（抓取滑块 / 拖拽 / 点击轨道跳转 / 释放）。
+/// 返回 true 表示事件已消费；未命中滚动条返回 false 透传给常规鼠标逻辑。
+fn handle_scrollbar_mouse(event: &Event, app: &mut AppState) -> bool {
+    let Event::Mouse(m) = event else {
+        return false;
+    };
+    // 拖拽中：指针行映射为滚动偏移；左键抬起结束拖拽
+    if app.scrollbar_drag_offset.is_some() {
+        match m.kind {
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                if let (Some(geo), Some(offset)) =
+                    (app.scrollbar_geo, app.scrollbar_drag_offset)
+                {
+                    let track = geo.area.height;
+                    // 目标滑块顶部偏移（纵向跟随指针，允许拖出滚动条列）
+                    let target = (m.row as i32 - geo.area.y as i32 - offset as i32)
+                        .clamp(0, track.saturating_sub(geo.thumb_len) as i32)
+                        as u16;
+                    app.scroll_state.y = crate::app::scrollbar_scroll_from_thumb(
+                        target,
+                        track,
+                        geo.area.height,
+                        geo.max_scroll,
+                    );
+                    app.scroll_following = false;
+                } else {
+                    // 内容变矮（滚动条消失）时结束拖拽
+                    app.scrollbar_drag_offset = None;
+                }
+                return true;
+            }
+            MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                app.scrollbar_drag_offset = None;
+                return true;
+            }
+            _ => {}
+        }
+    }
+    // 左键按下：命中滚动条轨道 → 抓滑块或跳转
+    if m.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left)
+        && let Some(geo) = app.scrollbar_geo
+    {
+        let in_track = m.column == geo.area.x
+            && m.row >= geo.area.y
+            && m.row < geo.area.y + geo.area.height;
+        if in_track {
+            let track = geo.area.height;
+            let row = m.row - geo.area.y;
+            if row >= geo.thumb_start && row < geo.thumb_start.saturating_add(geo.thumb_len) {
+                // 抓住滑块：记录指针相对滑块顶部的偏移，保持相对位置不跳变
+                app.scrollbar_drag_offset = Some(row - geo.thumb_start);
+            } else {
+                // 点击轨道空白：滑块中心跳到点击行，并立即进入拖拽
+                app.scrollbar_drag_offset = Some(geo.thumb_len / 2);
+                let target = row
+                    .saturating_sub(geo.thumb_len / 2)
+                    .min(track.saturating_sub(geo.thumb_len));
+                app.scroll_state.y = crate::app::scrollbar_scroll_from_thumb(
+                    target,
+                    track,
+                    geo.area.height,
+                    geo.max_scroll,
+                );
+                app.scroll_following = false;
+            }
+            return true;
+        }
+    }
+    false
 }
 
 fn build_input_from_key(key: KeyEvent) -> ratatui_textarea::Input {

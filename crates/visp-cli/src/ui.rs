@@ -5,7 +5,10 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap},
+    widgets::{
+        Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Tabs, Wrap,
+    },
 };
 
 use crate::app::{
@@ -857,6 +860,46 @@ fn render_chat_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                 render_block(f, area, bs, &text_lines, visible_lines, area.y + rel_y);
             }
         }
+    }
+
+    // ── 滚动条（最右 1 列；内容不足一屏时不渲染）─────────────────
+    // 该列原本只有 drop shadow（render_block 的 shadow_col），内容
+    // Paragraph 不占此列，滚动条最后渲染覆盖其上即可。
+    if max_scroll > 0 && area.width > 1 {
+        let scrollbar_area = Rect::new(
+            area.x + area.width.saturating_sub(1),
+            area.y,
+            1,
+            area.height,
+        );
+        // 记录滑块几何供滚动条拖拽命中测试（与下方组件共用同一计算，
+        // 保证渲染位置与拖拽映射一致）。content_length 语义为"可滚动
+        // 位置数"（max_scroll + 1），滚到底时滑块贴住轨道底部。
+        let (thumb_start, thumb_len) = crate::app::scrollbar_thumb_geometry(
+            total_lines,
+            visible,
+            scroll_y,
+            area.height,
+        );
+        app.scrollbar_geo = Some(crate::app::ScrollbarGeo {
+            area: scrollbar_area,
+            thumb_start,
+            thumb_len,
+            max_scroll,
+        });
+        let mut scrollbar_state = ScrollbarState::new(max_scroll as usize + 1)
+            .position(scroll_y as usize)
+            .viewport_content_length(visible as usize);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some(theme::SCROLLBAR_TRACK))
+            .thumb_symbol(theme::SCROLLBAR_THUMB)
+            .track_style(Style::default().fg(theme::SCROLLBAR_TRACK_FG))
+            .thumb_style(Style::default().fg(theme::SCROLLBAR_THUMB_FG));
+        f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+    } else {
+        app.scrollbar_geo = None;
     }
 }
 

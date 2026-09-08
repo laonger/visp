@@ -2,6 +2,7 @@
 #![allow(clippy::bool_assert_comparison)]
 
 use ratatui::{
+    layout::Rect,
     style::Style,
     text::{Line, Span},
     widgets::ListState,
@@ -44,6 +45,58 @@ impl ScrollState {
     pub fn scroll_down(&mut self) {
         self.y = self.y.saturating_add(1);
     }
+}
+
+/// 滚动条几何快照（渲染时记录，供鼠标拖拽命中测试）
+#[derive(Clone, Copy, Debug)]
+pub struct ScrollbarGeo {
+    /// 滚动条 1 列矩形（屏幕坐标）
+    pub area: Rect,
+    /// 滑块相对轨道顶部的偏移
+    pub thumb_start: u16,
+    /// 滑块长度
+    pub thumb_len: u16,
+    /// 最大滚动偏移（total_lines - visible）
+    pub max_scroll: u16,
+}
+
+/// 计算滑块几何，与 ratatui `Scrollbar` 组件内部公式一致（rounding_divide
+/// 为四舍五入整除）。`content_length` 语义取"可滚动位置数"（max_scroll + 1），
+/// 保证滚到底时滑块贴住轨道底部。
+/// 返回 (thumb_start, thumb_len)。
+pub(crate) fn scrollbar_thumb_geometry(
+    total_lines: u16,
+    visible: u16,
+    scroll_y: u16,
+    track: u16,
+) -> (u16, u16) {
+    let max_scroll = total_lines.saturating_sub(visible);
+    let (track, visible, scroll) = (track as u32, visible as u32, scroll_y as u32);
+    let max_vp = max_scroll as u32 + visible; // max_position + viewport_length
+    if track == 0 || max_vp == 0 {
+        return (0, track as u16);
+    }
+    let rd = |n: u32, d: u32| (n + d / 2) / d;
+    let thumb_len = rd(visible * track, max_vp).clamp(1, track);
+    let thumb_start =
+        rd(scroll * track, max_vp).clamp(0, track - thumb_len);
+    (thumb_start as u16, thumb_len as u16)
+}
+
+/// 由目标滑块顶部偏移反推滚动偏移（拖拽映射，`scrollbar_thumb_geometry` 的逆运算）
+pub(crate) fn scrollbar_scroll_from_thumb(
+    thumb_start: u16,
+    track: u16,
+    visible: u16,
+    max_scroll: u16,
+) -> u16 {
+    let (track, visible) = (track as u32, visible as u32);
+    let max_vp = max_scroll as u32 + visible;
+    if track == 0 || max_vp == 0 {
+        return 0;
+    }
+    let scroll = (thumb_start as u32 * max_vp + track / 2) / track;
+    (scroll as u16).min(max_scroll)
 }
 
 /// 用 syntect 高亮代码块，返回 ratatui 行
@@ -931,7 +984,12 @@ impl MessageCache {
                             && let Ok(idx) = id_tag[..end].parse::<usize>()
                             && idx < highlighted_blocks.len()
                         {
-                            return highlighted_blocks[idx].clone();
+                            // 代码行按宽度折行（保留语法高亮样式）。超宽的代码行
+                            // 会被 render_block 的 Paragraph（无 Wrap）直接裁掉。
+                            return highlighted_blocks[idx]
+                                .iter()
+                                .flat_map(|cl| wrap_styled_line(cl, width as usize))
+                                .collect();
                         }
                         // 非代码行：白色
                         vec![Line::styled(text, Style::default().fg(theme::ASSISTANT_FG))]
@@ -1202,6 +1260,10 @@ pub struct AppState {
     pub message_caches: Vec<MessageCache>,
     pub scroll_following: bool,
     pub scroll_state: ScrollState,
+    /// 滚动条几何（渲染时更新，供滚动条拖拽命中测试）
+    pub scrollbar_geo: Option<ScrollbarGeo>,
+    /// 滚动条拖拽中：指针相对滑块顶部的偏移（None = 未拖拽）
+    pub scrollbar_drag_offset: Option<u16>,
     pub cache_width: u16,
 
     // 输入
@@ -1296,6 +1358,8 @@ impl AppState {
             message_caches: Vec::new(),
             scroll_following: true,
             scroll_state: ScrollState::default(),
+            scrollbar_geo: None,
+            scrollbar_drag_offset: None,
             cache_width: 0,
             textarea,
             input_history: Vec::new(),
