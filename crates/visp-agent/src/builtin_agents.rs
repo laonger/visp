@@ -17,7 +17,7 @@ fn register_default(registry: &mut AgentRegistry) {
     let default_agent = AgentDefinition {
         name: "default".to_string(),
         description: "通用 AI 编程助手".to_string(),
-        mode: AgentMode::All,
+        mode: AgentMode::Primary,
         model: None,
         temperature: None,
         steps: None,
