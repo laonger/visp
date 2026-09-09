@@ -432,7 +432,6 @@ mod tests {
 
     use serial_test::serial;
     use tracing_subscriber::fmt::MakeWriter;
-    use tracing_subscriber::prelude::*;
 
     use super::*;
     use crate::config::{ObservabilityConfig, OtlpConfig};
