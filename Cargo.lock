@@ -4955,6 +4955,7 @@ version = "0.5.1"
 dependencies = [
  "async-trait",
  "html-to-markdown-rs",
+ "libc",
  "reqwest",
  "serde_json",
  "similar",

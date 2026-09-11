@@ -472,6 +472,39 @@ async fn test_bash_timeout_kills_child() {
 }
 
 #[tokio::test]
+async fn test_bash_timeout_kills_process_tree() {
+    let dir = tempdir().unwrap();
+    let ctx = test_context(dir.path());
+    // A pipeline forces the shell to fork a child (a single simple command
+    // may be exec'd in place on some shells, but dash on Debian/Ubuntu forks).
+    // Killing only the direct child would leave this orphan running.
+    let result = Bash::default()
+        .execute(
+            serde_json::json!({"command": "sleep 62 | cat", "timeout": 2}),
+            &ctx,
+        )
+        .await;
+    assert!(result.is_error, "should time out");
+    assert!(
+        result.content.contains("timed out"),
+        "should mention timeout, got: {:?}",
+        result.content
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let pgrep = tokio::process::Command::new("pgrep")
+        .arg("-f")
+        .arg("sleep 62")
+        .output()
+        .await
+        .expect("pgrep should run");
+    assert!(
+        !pgrep.status.success(),
+        "grandchild process should be killed after timeout, still running: {}",
+        String::from_utf8_lossy(&pgrep.stdout)
+    );
+}
+
+#[tokio::test]
 async fn test_bash_large_output_no_deadlock() {
     let dir = tempdir().unwrap();
     let ctx = test_context(dir.path());

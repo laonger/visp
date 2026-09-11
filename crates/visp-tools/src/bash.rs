@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use std::time::Duration;
-use tokio::process::Command;
 use tokio::time::timeout;
 use visp_core::tool::{Tool, ToolContext, ToolResult};
 
@@ -270,13 +269,26 @@ impl Tool for Bash {
         // handle that can be explicitly killed when the timeout elapses.
         // `kill_on_drop(true)` guarantees the child is terminated even if the
         // surrounding future/task is dropped or cancelled.
-        let mut child = match Command::new("sh")
+        // Build a std Command so we can put the child in its own process group on
+        // unix. This lets a timeout kill the entire process tree: some shells
+        // (e.g. dash on Debian/Ubuntu) fork instead of exec'ing the command, so
+        // killing only the direct child would leave orphaned grandchildren behind.
+        let mut std_cmd = std::process::Command::new("sh");
+        std_cmd
             .arg("-c")
             .arg(command)
             .current_dir(&workdir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // New process group whose pgid == the child's pid, so we can signal
+            // the whole group with kill(-pgid, SIGKILL).
+            std_cmd.process_group(0);
+        }
+        let mut child = match tokio::process::Command::from(std_cmd)
             .kill_on_drop(true)
             .spawn()
         {
@@ -316,8 +328,14 @@ impl Tool for Bash {
 
         let status = tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => {
-                // Timeout elapsed: explicitly kill the child and reap the zombie.
+                // Timeout elapsed: kill the whole process tree (the shell may have
+                // forked) and reap the direct child so no zombie is left behind.
+                let pid = child.id();
                 let _ = child.start_kill();
+                #[cfg(unix)]
+                if let Some(pid) = pid {
+                    kill_process_group(pid);
+                }
                 let _ = child.wait().await;
                 None
             }
@@ -368,6 +386,19 @@ impl Tool for Bash {
                 ToolResult::error(format!("Command timed out after {} seconds", timeout_secs))
             }
         }
+    }
+}
+
+/// Kill the entire process group led by `pid` (the child was spawned with
+/// `process_group(0)`, so its pid == its pgid). SIGKILL so grandchildren
+/// cannot be left running; ESRCH (group already gone) is ignored.
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    // SAFETY: `kill(2)` with a negated pid targets a process group and has no
+    // memory-safety requirements. A stale/reused pgid is the only risk, kept
+    // negligible because we call this immediately after the child timed out.
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
     }
 }
 
