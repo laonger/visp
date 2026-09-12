@@ -595,14 +595,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         orchestrator_grpc_rx,
         client_tx,
     )
-    .map_err(|error| {
+    .inspect_err(|error| {
         // The desktop launcher redirects release stdout/stderr to a log file.
         // Persist the actionable startup error so it can show the user what
         // needs fixing instead of only reporting an exit code.
         if let Some(err_file) = visp_config::path::startup_error_file() {
-            let _ = std::fs::write(&err_file, &error);
+            let _ = std::fs::write(&err_file, error);
         }
-        error
     })?;
 
     // 10. Start gRPC server
