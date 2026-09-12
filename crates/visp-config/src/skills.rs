@@ -47,11 +47,15 @@ pub fn find_builtin_skill(name: &str) -> Option<&'static BuiltinSkill> {
 /// 每个技能目录下需有 `SKILL.md` 文件。
 /// 项目级技能优先级高于全局级（同名时项目技能覆盖全局技能）。
 pub fn load_skills(project_path: &Path) -> String {
-    load_skills_inner(project_path, crate::path::home_dir())
+    load_skills_inner(project_path, crate::path::skills_dir_global())
 }
 
-/// 与 `load_skills` 相同，但允许指定 home 目录（用于测试隔离）。
-fn load_skills_inner(project_path: &Path, home: Option<PathBuf>) -> String {
+/// 与 `load_skills` 相同，但允许指定全局技能目录（用于测试隔离）。
+///
+/// 全局技能目录默认由 `crate::path::skills_dir_global()` 解析，该函数基于
+/// `global_config_dir()`，因此 `VISP_CONFIG_DIR`（`--config-dir` CLI 参数）
+/// 会生效，而不是硬编码 `~/.config/visp`。
+fn load_skills_inner(project_path: &Path, global_skills_dir: Option<PathBuf>) -> String {
     let mut seen_names = HashSet::new();
     let mut sections = Vec::new();
 
@@ -72,8 +76,8 @@ fn load_skills_inner(project_path: &Path, home: Option<PathBuf>) -> String {
     load_skills_from_dir(&project_dir, &mut seen_names, &mut sections);
 
     // 2. Global skills (lower priority, skipped if project already has same name)
-    if let Some(home) = home {
-        let global_dir = home.join(".config").join("visp").join("skills");
+    //    路径来自 skills_dir_global()，遵循 VISP_CONFIG_DIR。
+    if let Some(global_dir) = global_skills_dir {
         load_skills_from_dir(&global_dir, &mut seen_names, &mut sections);
     }
 
@@ -171,7 +175,14 @@ pub fn strip_frontmatter(content: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use tempfile::TempDir;
+
+    /// 测试用全局技能目录：`{home}/.config/visp/skills`
+    /// （等价于 skills_dir_global() 在未设置 VISP_CONFIG_DIR 时的结果）
+    fn home_global_skills_dir(home: &TempDir) -> PathBuf {
+        home.path().join(".config").join("visp").join("skills")
+    }
 
     #[test]
     fn test_builtin_skills_non_empty() {
@@ -244,7 +255,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let home = TempDir::new().unwrap();
         // No skills dir → only built-in skills
-        let result = load_skills_inner(tmp.path(), Some(home.path().to_path_buf()));
+        let result = load_skills_inner(tmp.path(), Some(home_global_skills_dir(&home)));
         assert!(result.contains("delegation-workflow"));
         assert!(result.contains("Available Skills"));
     }
@@ -262,7 +273,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = load_skills_inner(tmp.path(), Some(home.path().to_path_buf()));
+        let result = load_skills_inner(tmp.path(), Some(home_global_skills_dir(&home)));
         assert!(result.contains("my-skill"));
         assert!(result.contains("A custom skill"));
         assert!(!result.contains("Do something useful.")); // body 不应包含在提示词中
@@ -282,7 +293,7 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join(".visp").join("skills").join("not-a-skill"))
             .unwrap();
 
-        let result = load_skills_inner(tmp.path(), Some(home.path().to_path_buf()));
+        let result = load_skills_inner(tmp.path(), Some(home_global_skills_dir(&home)));
         assert!(result.contains("my-skill"));
     }
 
@@ -304,7 +315,7 @@ mod tests {
         f.write_all(b"---\ndescription: A global skill\n---\n\nDo stuff.\n")
             .unwrap();
 
-        let result = load_skills_inner(tmp.path(), Some(home.path().to_path_buf()));
+        let result = load_skills_inner(tmp.path(), Some(home_global_skills_dir(&home)));
         assert!(
             result.contains("global-tool"),
             "should contain global skill"
@@ -341,7 +352,7 @@ mod tests {
         f.write_all(b"---\ndescription: Global version\n---\n\nGlobal content.\n")
             .unwrap();
 
-        let result = load_skills_inner(tmp.path(), Some(home.path().to_path_buf()));
+        let result = load_skills_inner(tmp.path(), Some(home_global_skills_dir(&home)));
         assert!(
             result.contains("Project version"),
             "should use project version description"
@@ -378,7 +389,7 @@ mod tests {
         f.write_all(b"---\ndescription: Global only\n---\n\nContent.\n")
             .unwrap();
 
-        let result = load_skills_inner(tmp.path(), Some(home.path().to_path_buf()));
+        let result = load_skills_inner(tmp.path(), Some(home_global_skills_dir(&home)));
         assert!(
             result.contains("proj-skill"),
             "should contain project skill"
@@ -386,5 +397,34 @@ mod tests {
         assert!(result.contains("glob-skill"), "should contain global skill");
         assert!(result.contains("Project only"));
         assert!(result.contains("Global only"));
+    }
+
+    /// 回归：全局技能目录必须遵循 VISP_CONFIG_DIR（--config-dir），
+    /// 而不是硬编码 `~/.config/visp`。
+    #[test]
+    #[serial]
+    fn test_load_skills_respects_visp_config_dir() {
+        use std::io::Write;
+        let project = TempDir::new().unwrap();
+        let config = TempDir::new().unwrap();
+        let skill_dir = config.path().join("skills").join("cfg-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let mut f = std::fs::File::create(skill_dir.join("SKILL.md")).unwrap();
+        f.write_all(b"---\ndescription: From config dir\n---\n\nBody.\n")
+            .unwrap();
+
+        let orig = std::env::var("VISP_CONFIG_DIR").ok();
+        unsafe { std::env::set_var("VISP_CONFIG_DIR", config.path()) };
+        let result = load_skills(project.path());
+        match orig {
+            Some(v) => unsafe { std::env::set_var("VISP_CONFIG_DIR", v) },
+            None => unsafe { std::env::remove_var("VISP_CONFIG_DIR") },
+        }
+
+        assert!(
+            result.contains("cfg-skill"),
+            "global skills must honor VISP_CONFIG_DIR, got: {result}"
+        );
+        assert!(result.contains("From config dir"));
     }
 }
