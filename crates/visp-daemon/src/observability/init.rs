@@ -4,6 +4,7 @@
 //! into a single tracing subscriber stack with JSON or pretty output.
 //! Refs: design §7.3, plan §Step 5.
 
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -31,6 +32,28 @@ pub struct ObservabilityGuard {
     /// subscriber was installed globally via `try_init` (production or
     /// `init_global_observability_with_writer`).
     _set_default: Option<tracing::subscriber::DefaultGuard>,
+}
+
+/// Check that a configured log directory can actually be written before
+/// constructing the rolling appender. `tracing_appender::rolling::daily`
+/// panics when its directory is inaccessible, which must not bring down the
+/// desktop client during startup.
+fn log_dir_is_writable(dir: &Path) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(format!(".visp-log-write-test-{}", std::process::id()));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(probe);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// Initialise the tracing subscriber stack from configuration.
@@ -73,20 +96,37 @@ pub fn init_observability(cfg: &ObservabilityConfig, log_level: &str) -> Observa
     let metrics = MetricsLayer::new();
 
     // 3. File output (optional).
-    let _file_guard: Option<tracing_appender::non_blocking::WorkerGuard>;
-    let fmt_writer: Box<dyn Fn() -> Box<dyn std::io::Write + Send> + Send + Sync>;
+    let mut _file_guard: Option<tracing_appender::non_blocking::WorkerGuard> = None;
+    let mut fmt_writer: Box<dyn Fn() -> Box<dyn std::io::Write + Send> + Send + Sync> =
+        Box::new(|| Box::new(std::io::stdout()));
     if let Some(ref path) = cfg.log_file {
         // Expand ~/ to $HOME for the log directory path
         let expanded = visp_config::path::expand_home(path);
-        // Ensure the directory exists
-        let _ = std::fs::create_dir_all(&expanded);
-        let appender = tracing_appender::rolling::daily(&expanded, "visp-daemon.log");
-        let (nb, guard) = tracing_appender::non_blocking(appender);
-        _file_guard = Some(guard);
-        fmt_writer = Box::new(move || -> Box<dyn std::io::Write + Send> { Box::new(nb.clone()) });
-    } else {
-        _file_guard = None;
-        fmt_writer = Box::new(|| -> Box<dyn std::io::Write + Send> { Box::new(std::io::stdout()) });
+        if log_dir_is_writable(&expanded) {
+            // `daily` panics internally on an inaccessible directory. The
+            // probe above handles the normal case; catch the remaining race
+            // so observability can safely fall back to stdout.
+            let appender = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                tracing_appender::rolling::daily(&expanded, "visp-daemon.log")
+            }))
+            .ok();
+            if let Some(appender) = appender {
+                let (nb, guard) = tracing_appender::non_blocking(appender);
+                _file_guard = Some(guard);
+                fmt_writer =
+                    Box::new(move || -> Box<dyn std::io::Write + Send> { Box::new(nb.clone()) });
+            } else {
+                eprintln!(
+                    "visp-daemon log directory became unavailable: {}; using stdout",
+                    expanded.display()
+                );
+            }
+        } else {
+            eprintln!(
+                "visp-daemon log directory is not writable: {}; using stdout",
+                expanded.display()
+            );
+        }
     }
 
     // 4. Build OTel layer conditionally.
@@ -975,5 +1015,41 @@ mod tests {
             "visp.span.w3c_id should appear in JSON output when ParentLinkLayer is attached.\nOutput:\n{}",
             output
         );
+    }
+
+    #[test]
+    fn test_log_dir_is_writable_true_for_temp_dir() {
+        let dir = std::env::temp_dir().join(format!(
+            "visp-log-probe-ok-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            log_dir_is_writable(&dir),
+            "a creatable temp dir must be reported writable"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_log_dir_is_writable_false_when_path_is_not_a_dir() {
+        // A regular file standing where a directory is expected makes
+        // create_dir_all fail with ENOTDIR -> must report unwritable
+        // instead of letting rolling::daily panic at startup.
+        let base = std::env::temp_dir().join(format!(
+            "visp-log-probe-bad-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("create base temp dir");
+        let blocker = base.join("blocker");
+        std::fs::write(&blocker, b"not a directory").expect("write blocker file");
+        assert!(
+            !log_dir_is_writable(&blocker.join("nested")),
+            "a path under a regular file must be reported unwritable"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

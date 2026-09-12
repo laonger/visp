@@ -162,7 +162,7 @@ impl CoderDaemonService {
         cancel_tx: mpsc::Sender<visp_agent::orchestrator::CancelSignal>,
         orchestrator_grpc_rx: mpsc::Receiver<visp_core::agent::AgentEventFrame>,
         client_tx: mpsc::Sender<visp_agent::orchestrator::ClientMessage>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         // 查找默认模型（匹配 {provider}/{name} 或 {provider}/{model} 格式）
         let default_idx = if let Some(ref default_key) = daemon_config.llm.default {
             match model_configs
@@ -191,8 +191,12 @@ impl CoderDaemonService {
         };
         let default_cfg = &model_configs[default_idx];
 
-        let initial_provider =
-            create_llm_provider(default_cfg).expect("failed to create initial LLM provider");
+        let initial_provider = create_llm_provider(default_cfg).map_err(|error| {
+            format!(
+                "failed to create initial LLM provider '{}': {error}",
+                default_cfg.key()
+            )
+        })?;
 
         // 使用 visp_config 构建默认 LLM 配置（含 per-model thinking_budget_tokens 与 langfuse）
         let mut default_llm_config = visp_config::build_llm_config_from_model(
@@ -217,7 +221,7 @@ impl CoderDaemonService {
         default_llm_config.use_tool = default_cfg.use_tool.unwrap_or(true);
         default_llm_config.image_generation = default_cfg.image_generation.unwrap_or(false);
         let model_config_keys: Vec<String> = model_configs.iter().map(|mc| mc.key()).collect();
-        Self {
+        Ok(Self {
             provider: Arc::new(StdRwLock::new(initial_provider)),
             tool_registry,
             rule_engine,
@@ -235,7 +239,7 @@ impl CoderDaemonService {
             cancel_tx,
             orchestrator_grpc_rx: std::sync::Mutex::new(Some(orchestrator_grpc_rx)),
             client_tx,
-        }
+        })
     }
 
     /// Phase 5: lazy-load a CodeGraph for a project path.

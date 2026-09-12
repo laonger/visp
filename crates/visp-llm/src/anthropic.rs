@@ -1831,17 +1831,24 @@ mod tests {
         } = image_events[0]
         {
             assert!(!path.is_empty(), "base64 image should be saved to disk");
-            assert!(
-                path.contains(".visp/images/"),
+            let saved = std::path::Path::new(path);
+            assert_eq!(
+                saved.parent().and_then(std::path::Path::file_name),
+                Some(std::ffi::OsStr::new("images")),
                 "image should be saved under .visp/images/, got {path}"
+            );
+            assert_eq!(
+                saved
+                    .parent()
+                    .and_then(std::path::Path::parent)
+                    .and_then(std::path::Path::file_name),
+                Some(std::ffi::OsStr::new(".visp")),
+                "image should be saved under a project's .visp directory, got {path}"
             );
             assert_eq!(mime_type, "image/png");
             assert!(remote_url.is_none());
             // 文件确实写入磁盘
-            assert!(
-                std::path::Path::new(path).exists(),
-                "saved image file should exist"
-            );
+            assert!(saved.exists(), "saved image file should exist");
         } else {
             panic!("expected ImageBlock event");
         }

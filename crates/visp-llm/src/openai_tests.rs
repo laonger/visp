@@ -775,9 +775,18 @@ async fn test_byte_stream_base64_image() {
             assert!(remote_url.is_none());
             let saved = std::path::Path::new(path);
             assert!(saved.is_file(), "image file should exist on disk: {path}");
-            assert!(
-                path.contains(".visp/images/"),
+            assert_eq!(
+                saved.parent().and_then(std::path::Path::file_name),
+                Some(std::ffi::OsStr::new("images")),
                 "image should be saved under .visp/images, got {path}"
+            );
+            assert_eq!(
+                saved
+                    .parent()
+                    .and_then(std::path::Path::parent)
+                    .and_then(std::path::Path::file_name),
+                Some(std::ffi::OsStr::new(".visp")),
+                "image should be saved under a project's .visp directory, got {path}"
             );
         }
         other => panic!("expected ImageBlock, got {:?}", other),
