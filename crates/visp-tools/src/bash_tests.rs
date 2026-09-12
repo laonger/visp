@@ -449,7 +449,7 @@ async fn test_bash_timeout_kills_child() {
     let start = std::time::Instant::now();
     let result = Bash::default()
         .execute(
-            serde_json::json!({"command": "sleep 61", "timeout": 2}),
+            serde_json::json!({"command": "sleep 61.37", "timeout": 2}),
             &ctx,
         )
         .await;
@@ -466,18 +466,8 @@ async fn test_bash_timeout_kills_child() {
         elapsed
     );
     // The child process must be killed, not left running as a zombie/orphan.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    let pgrep = tokio::process::Command::new("pgrep")
-        .arg("-f")
-        .arg("sleep 61")
-        .output()
-        .await
-        .expect("pgrep should run");
-    assert!(
-        !pgrep.status.success(),
-        "child process should be killed after timeout, still running: {}",
-        String::from_utf8_lossy(&pgrep.stdout)
-    );
+    // 时长带小数以避免与其他测试/历史遗留进程的 pgrep 误匹配。
+    assert_process_gone("sleep 61.37").await;
 }
 
 #[tokio::test]
@@ -489,7 +479,7 @@ async fn test_bash_timeout_kills_process_tree() {
     // Killing only the direct child would leave this orphan running.
     let result = Bash::default()
         .execute(
-            serde_json::json!({"command": "sleep 62 | cat", "timeout": 2}),
+            serde_json::json!({"command": "sleep 62.41 | cat", "timeout": 2}),
             &ctx,
         )
         .await;
@@ -499,18 +489,30 @@ async fn test_bash_timeout_kills_process_tree() {
         "should mention timeout, got: {:?}",
         result.content
     );
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    let pgrep = tokio::process::Command::new("pgrep")
-        .arg("-f")
-        .arg("sleep 62")
-        .output()
-        .await
-        .expect("pgrep should run");
-    assert!(
-        !pgrep.status.success(),
-        "grandchild process should be killed after timeout, still running: {}",
-        String::from_utf8_lossy(&pgrep.stdout)
-    );
+    assert_process_gone("sleep 62.41").await;
+}
+
+/// 轮询确认没有进程的 cmdline 匹配 `pattern`（最长等待约 5s）。
+///
+/// SIGKILL 的投递与进程回收在负载高的 CI runner 上可能滞后于一次采样，
+/// 因此单次 200ms 检查会造成偶发失败。真实泄漏的孤儿进程会存活到超时时长
+/// （60s+），轮询同样能抓到，不会掩盖 bug。
+async fn assert_process_gone(pattern: &str) {
+    let mut last_seen = String::new();
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let pgrep = tokio::process::Command::new("pgrep")
+            .arg("-f")
+            .arg(pattern)
+            .output()
+            .await
+            .expect("pgrep should run");
+        if !pgrep.status.success() {
+            return;
+        }
+        last_seen = String::from_utf8_lossy(&pgrep.stdout).trim().to_string();
+    }
+    panic!("process matching {pattern:?} still running after timeout: {last_seen}");
 }
 
 #[tokio::test]

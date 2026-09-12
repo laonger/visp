@@ -2834,10 +2834,10 @@ async fn wait_for_sub_session_first_message(
         .expect("sub-session should exist")
         .id;
     for _ in 0..100 {
-        if let Ok(msgs) = orch.session_mgr.get_messages(&sub_session_id) {
-            if let Some(first) = msgs.first() {
-                return first.clone();
-            }
+        if let Ok(msgs) = orch.session_mgr.get_messages(&sub_session_id)
+            && let Some(first) = msgs.first()
+        {
+            return first.clone();
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
