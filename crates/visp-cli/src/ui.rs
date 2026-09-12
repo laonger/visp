@@ -16,8 +16,23 @@ use crate::app::{
 };
 use crate::debug_log;
 
-/// 将数字格式化为千位分隔符形式，如 `1234567` → `1,234,567`
-fn format_number(n: u32) -> String {
+/// 将 token 数值格式化（状态栏右侧统计）：
+/// 超过 1 万 → `10.xxk`，超过 1 千万 → `10.xxm`，超过 1 百亿 → `10.xxb`
+/// （均为两位小数）；阈值以内保持千位分隔符形式。
+fn format_number(n: u64) -> String {
+    if n > 10_000_000_000 {
+        format!("{:.2}b", n as f64 / 1_000_000_000.0)
+    } else if n > 10_000_000 {
+        format!("{:.2}m", n as f64 / 1_000_000.0)
+    } else if n > 10_000 {
+        format!("{:.2}k", n as f64 / 1_000.0)
+    } else {
+        format_thousands(n)
+    }
+}
+
+/// 千位分隔符形式，如 `1234567` → `1,234,567`
+fn format_thousands(n: u64) -> String {
     let s = n.to_string();
     let mut result = String::with_capacity(s.len() + s.len() / 3);
     for (i, c) in s.chars().enumerate() {
@@ -355,9 +370,9 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
         .unwrap_or(0);
     let bottom_chunks_height = input_area_height
         + (if app.confirm.is_some() {
-            confirm_height + 2
+            confirm_height + 3
         } else {
-            4
+            5
         });
 
     // 纵向分割：Tab栏(2) | 对话区 | 分隔线 | 底部区域
@@ -390,13 +405,13 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
                 Constraint::Length(confirm_height), // 确认栏
                 Constraint::Min(2),                 // input area
                 Constraint::Length(1),              // 分隔线
-                Constraint::Length(1),              // status area
+                Constraint::Length(2),              // status area
             ]
         } else {
             vec![
                 Constraint::Min(2),    // input area
                 Constraint::Length(1), // 分隔线
-                Constraint::Length(1), // status area
+                Constraint::Length(2), // status area
             ]
         })
         .split(bottom_area);
@@ -1181,68 +1196,132 @@ fn format_status_left(session_id: &str, model_key: &str, generating: bool) -> St
     let status = if generating { "Generating" } else { "Idle" };
     let (provider, model_label) = split_model_name(model_key);
     format!(
-        "{sid} | {model}({provider}) | {status} | /help = help",
+        "{sid} | {model}({provider}) | {status}",
         sid = sid,
         model = model_label,
         provider = provider
     )
 }
 
-/// 底部状态栏：左对齐显示会话 ID / 模型 / 状态，token 统计靠右对齐
+/// 格式化状态栏第 2 行右侧 token / cache 统计
+fn format_status_tokens(app: &AppState) -> String {
+    format!(
+        "Tokens: {} input / {} output | Cache: {} create / {} read",
+        format_number(app.total_input_tokens as u64),
+        format_number(app.total_output_tokens as u64),
+        format_number(app.total_cache_creation_input_tokens as u64),
+        format_number(app.total_cache_read_input_tokens as u64),
+    )
+}
+
+/// 按显示宽度压缩 workdir 路径（状态栏第 2 行左侧）：
+/// 优先全长度；超长时先压缩中间路径段（保留头尾、中间以 "..." 替代）；
+/// 仍超长则压缩头部，仅保留尾部，形如 ".../xxx"。
+fn compress_workdir(path: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(path) <= max_width {
+        return path.to_string();
+    }
+    // 阶段 1：压缩中间路径段。从压缩 1 段开始逐步扩大范围，
+    // 保留尽可能多的头部与尾部路径段。
+    let (prefix, core) = match path.strip_prefix('/') {
+        Some(rest) => ("/", rest),
+        None => ("", path),
+    };
+    let segs: Vec<&str> = core.split('/').collect();
+    let n = segs.len();
+    if n >= 2 {
+        // keep = 保留的路径段总数（含首尾），从 n-1 递减到 2
+        for keep in (2..n).rev() {
+            let head_keep = keep / 2;
+            let tail_keep = keep - head_keep;
+            let candidate = format!(
+                "{}{}/.../{}",
+                prefix,
+                segs[..head_keep].join("/"),
+                segs[n - tail_keep..].join("/")
+            );
+            if UnicodeWidthStr::width(candidate.as_str()) <= max_width {
+                return candidate;
+            }
+        }
+    }
+    compress_path_head(path, max_width)
+}
+
+/// 压缩路径头部，仅保留尾部（".../xxx" 形式）：
+/// 优先以 '/' 为起点保留完整目录后缀；无可用 '/' 边界时退化为尾部字符截断。
+fn compress_path_head(path: &str, max_width: usize) -> String {
+    let dots = UnicodeWidthStr::width("...");
+    let budget = max_width.saturating_sub(dots);
+    if budget == 0 {
+        return "...".to_string();
+    }
+    // 优先保留以 '/' 开头的最长可行后缀
+    for (i, c) in path.char_indices() {
+        if c == '/' && UnicodeWidthStr::width(&path[i..]) <= budget {
+            return format!("...{}", &path[i..]);
+        }
+    }
+    // 无 '/' 边界：取宽度允许的最长字符后缀
+    let chars: Vec<char> = path.chars().collect();
+    for s in 0..chars.len() {
+        let suffix: String = chars[s..].iter().collect();
+        if UnicodeWidthStr::width(suffix.as_str()) <= budget {
+            return format!("...{}", suffix);
+        }
+    }
+    "...".to_string()
+}
+
+/// 渲染状态栏单行：左侧左对齐（STATUS 样式），右侧右对齐（TOOL_RESULT 样式）
+fn render_status_row(f: &mut Frame, area: Rect, left_text: &str, right_text: &str) {
+    let right_w = UnicodeWidthStr::width(right_text) as u16;
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(1), Constraint::Length(right_w)])
+        .split(area);
+
+    let left = Paragraph::new(left_text)
+        .style(Style::default().fg(theme::STATUS_FG).bg(theme::STATUS_BG))
+        .block(Block::default());
+    f.render_widget(left, chunks[0]);
+
+    let right = Paragraph::new(right_text)
+        .style(
+            Style::default()
+                .fg(theme::TOOL_RESULT_FG)
+                .bg(theme::STATUS_BG),
+        )
+        .alignment(Alignment::Right)
+        .block(Block::default());
+    f.render_widget(right, chunks[1]);
+}
+
+/// 底部状态栏（2 行）：第 1 行会话/模型/状态 + 快捷键，第 2 行工作目录 + token 统计
 fn render_status_bar(app: &AppState, f: &mut Frame, area: Rect) {
-    // 复制提示激活时，状态栏左侧显示复制信息
-    let left_text = if app.last_copy_msg.is_some() {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .split(area);
+
+    // 复制提示激活时，状态栏第 1 行左侧显示复制信息
+    let left1 = if app.last_copy_msg.is_some() {
         app.last_copy_msg.clone().unwrap_or_default()
     } else {
         format_status_left(&app.session_id, &app.model_key, app.generating())
     };
+    render_status_row(f, rows[0], &left1, "Ctrl-d: quit | /help = help");
 
-    // 有 token 时左右分割显示，否则整行给左侧
-    if app.total_input_tokens > 0 || app.total_output_tokens > 0 {
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(1), Constraint::Length(36)])
-            .split(area);
-
-        // 左侧常规信息
-        let left = Paragraph::new(left_text)
-            .style(Style::default().fg(theme::STATUS_FG).bg(theme::STATUS_BG))
-            .block(Block::default());
-        f.render_widget(left, chunks[0]);
-
-        // 右侧 token 统计（靠右显示）
-        let token_text =
-            if app.total_cache_creation_input_tokens > 0 || app.total_cache_read_input_tokens > 0 {
-                format!(
-                    "T:{}i/{}o C:{}r/{}c ",
-                    format_number(app.total_input_tokens),
-                    format_number(app.total_output_tokens),
-                    format_number(app.total_cache_read_input_tokens),
-                    format_number(app.total_cache_creation_input_tokens),
-                )
-            } else {
-                format!(
-                    "T:{}i/{}o ",
-                    format_number(app.total_input_tokens),
-                    format_number(app.total_output_tokens),
-                )
-            };
-        let right = Paragraph::new(token_text)
-            .style(
-                Style::default()
-                    .fg(theme::TOOL_RESULT_FG)
-                    .bg(theme::STATUS_BG),
-            )
-            .alignment(Alignment::Right)
-            .block(Block::default());
-        f.render_widget(right, chunks[1]);
-    } else {
-        // 无 token 时直接用整行
-        let left = Paragraph::new(left_text)
-            .style(Style::default().fg(theme::STATUS_FG).bg(theme::STATUS_BG))
-            .block(Block::default());
-        f.render_widget(left, area);
-    }
+    // 第 2 行：workdir 动态压缩 —— 优先全长度；超长（workdir + 4 空格间隔 +
+    // Tokens 数据 > 一行宽度）时先压缩中间、仍超长再压缩头部（".../xxx"）
+    let tokens = format_status_tokens(app);
+    let tokens_w = UnicodeWidthStr::width(tokens.as_str()) as u16;
+    let workdir_max = area.width.saturating_sub(tokens_w + 4) as usize;
+    let workdir = compress_workdir(&app.project_path, workdir_max);
+    render_status_row(f, rows[1], &workdir, &tokens);
 }
 
 // ════════════════════════════════════════════════════════════════

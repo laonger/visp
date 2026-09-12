@@ -73,24 +73,183 @@ fn test_split_model_name_multi_word() {
 #[test]
 fn test_format_status_left_generating() {
     let s = format_status_left("abc12345", "Ollama/DeepSeek", true);
-    assert_eq!(s, "abc12345 | DeepSeek(Ollama) | Generating | /help = help");
+    assert_eq!(s, "abc12345 | DeepSeek(Ollama) | Generating");
 }
 
 #[test]
 fn test_format_status_left_idle() {
     let s = format_status_left("sess_xyz", "Anthropic/Claude Sonnet", false);
-    assert_eq!(
-        s,
-        "sess_xyz | Claude Sonnet(Anthropic) | Idle | /help = help"
-    );
+    assert_eq!(s, "sess_xyz | Claude Sonnet(Anthropic) | Idle");
 }
 
 #[test]
 fn test_format_status_left_empty_provider() {
     let s = format_status_left("abcdefgh", "ollama/deepseek-v4-flash", false);
+    assert_eq!(s, "abcdefgh | deepseek-v4-flash(ollama) | Idle");
+}
+
+#[test]
+fn test_format_status_tokens() {
+    let mut app = AppState::new("sess".into(), "m".into(), "m".into(), "/tmp/p".into());
+    app.total_input_tokens = 1234;
+    app.total_output_tokens = 567;
+    app.total_cache_creation_input_tokens = 89;
+    app.total_cache_read_input_tokens = 10000;
     assert_eq!(
-        s,
-        "abcdefgh | deepseek-v4-flash(ollama) | Idle | /help = help"
+        format_status_tokens(&app),
+        "Tokens: 1,234 input / 567 output | Cache: 89 create / 10,000 read"
+    );
+}
+
+#[test]
+fn test_render_status_bar_two_rows() {
+    // 冒烟测试：状态栏渲染为 2 行，第 1 行含 model/status + 快捷键，
+    // 第 2 行含工作目录 + token 统计
+    let mut app = AppState::new(
+        "sess_12345678".into(),
+        "m".into(),
+        "Anthropic/Claude Sonnet".into(),
+        "/tmp/project".into(),
+    );
+    app.total_input_tokens = 1234;
+    app.total_output_tokens = 567;
+
+    let backend = ratatui::backend::TestBackend::new(120, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::ui::render(&mut app, f)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let lines: Vec<String> = buffer
+        .content()
+        .chunks(buffer.area().width as usize)
+        .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+        .collect();
+
+    // 第 1 行：model(provider) + status
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("Claude Sonnet(Anthropic)") && l.contains("| Idle"))
+    );
+    // 第 1 行右侧：快捷键
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("Ctrl-d: quit | /help = help"))
+    );
+    // 第 2 行：工作目录 + token 统计
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("/tmp/project") && l.contains("Tokens:"))
+    );
+}
+
+// ── 状态栏：token 数值压缩（k/m/b） ──────────────────
+
+#[test]
+fn test_format_number_compression() {
+    // 阈值以内：千位分隔符（“超过一万”指严格大于）
+    assert_eq!(format_number(0), "0");
+    assert_eq!(format_number(9_999), "9,999");
+    assert_eq!(format_number(10_000), "10,000");
+    // 超过一万 → k（两位小数）
+    assert_eq!(format_number(10_001), "10.00k");
+    assert_eq!(format_number(123_456), "123.46k");
+    // 超过一千万 → m
+    assert_eq!(format_number(10_000_001), "10.00m");
+    assert_eq!(format_number(12_345_678), "12.35m");
+    // 超过一百亿 → b
+    assert_eq!(format_number(10_000_000_001), "10.00b");
+    assert_eq!(format_number(987_654_321_098), "987.65b");
+}
+
+#[test]
+fn test_format_status_tokens_compression() {
+    let mut app = AppState::new("sess".into(), "m".into(), "m".into(), "/tmp/p".into());
+    app.total_input_tokens = 123_456;
+    app.total_output_tokens = 12_345_678;
+    app.total_cache_creation_input_tokens = 89;
+    app.total_cache_read_input_tokens = 10_000_001;
+    assert_eq!(
+        format_status_tokens(&app),
+        "Tokens: 123.46k input / 12.35m output | Cache: 89 create / 10.00m read"
+    );
+}
+
+// ── 状态栏：workdir 动态压缩 ─────────────────────────
+
+#[test]
+fn test_compress_workdir_fits() {
+    // 优先全长度
+    assert_eq!(compress_workdir("/tmp/project", 20), "/tmp/project");
+    assert_eq!(compress_workdir("/tmp/project", 12), "/tmp/project");
+}
+
+#[test]
+fn test_compress_workdir_zero_width() {
+    assert_eq!(compress_workdir("/tmp/project", 0), "");
+}
+
+#[test]
+fn test_compress_workdir_middle() {
+    // 阶段 1：压缩中间路径段，保留头尾、以 "..." 替代
+    assert_eq!(
+        compress_workdir("/Users/laonger/visp", 15),
+        "/Users/.../visp"
+    );
+}
+
+#[test]
+fn test_compress_workdir_middle_keeps_max_segments() {
+    let path = "/Users/laonger/Documents/Work/self/coding_agent/visp";
+    let out = compress_workdir(path, 45);
+    // 在宽度允许下尽量多保留头部与尾部路径段
+    assert_eq!(out, "/Users/laonger/.../self/coding_agent/visp");
+    assert!(out.chars().count() <= 45);
+}
+
+#[test]
+fn test_compress_workdir_head() {
+    // 阶段 2：中间压缩仍超长 → 压缩头部，形如 ".../xxx"
+    assert_eq!(compress_workdir("/Users/laonger/visp", 12), ".../visp");
+}
+
+#[test]
+fn test_compress_workdir_no_slash_fallback() {
+    // 无 '/' 边界时退化为尾部截断
+    assert_eq!(compress_workdir("abcdefghij", 6), "...hij");
+}
+
+#[test]
+fn test_render_status_bar_compresses_long_workdir() {
+    // 渲染级：窄终端下长 workdir 被压缩，且仍显示 Tokens 统计
+    let mut app = AppState::new(
+        "sess_12345678".into(),
+        "m".into(),
+        "Anthropic/Claude Sonnet".into(),
+        "/Users/laonger/Documents/Work/self/coding_agent/visp".into(),
+    );
+
+    let backend = ratatui::backend::TestBackend::new(80, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::ui::render(&mut app, f)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let lines: Vec<String> = buffer
+        .content()
+        .chunks(buffer.area().width as usize)
+        .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+        .collect();
+
+    let row = lines
+        .iter()
+        .find(|l| l.contains("Tokens:"))
+        .expect("status bar row 2 should contain Tokens stats");
+    assert!(row.contains("..."), "workdir should be compressed: {row}");
+    assert!(
+        row.trim_start().starts_with('/'),
+        "compressed workdir should keep head segment: {row}"
     );
 }
 
