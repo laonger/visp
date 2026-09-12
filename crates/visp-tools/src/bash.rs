@@ -307,6 +307,18 @@ impl Tool for Bash {
             Err(e) => return ToolResult::error(format!("Failed to spawn command: {}", e)),
         };
 
+        // Capture the pid immediately: `Child::id()` returns None once the child
+        // has been reaped, and the timeout path must never silently skip the
+        // process-group kill (that would orphan the shell's grandchildren).
+        // The child leads its own group (`process_group(0)`), so pid == pgid.
+        #[cfg(unix)]
+        let child_pid = child.id();
+        // `kill_on_drop(true)` only SIGKILLs the direct child. If this future is
+        // cancelled (caller aborts, client disconnects) the shell's grandchildren
+        // would survive as orphans, so tie that whole group's fate to the future.
+        #[cfg(unix)]
+        let mut group_guard = child_pid.map(ProcessGroupGuard::new);
+
         // Drain stdout/stderr concurrently with waiting; otherwise a chatty
         // child can block forever on a full pipe buffer and never exit.
         let stdout_pipe = child.stdout.take();
@@ -341,19 +353,37 @@ impl Tool for Bash {
             _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => {
                 // Timeout elapsed: kill the whole process tree (the shell may have
                 // forked) and reap the direct child so no zombie is left behind.
-                let pid = child.id();
                 let _ = child.start_kill();
                 #[cfg(unix)]
-                if let Some(pid) = pid {
+                if let Some(pid) = child_pid {
                     kill_process_group(pid);
+                    // The group is already dead; disarming keeps the guard from
+                    // re-signalling a pgid the OS could have recycled meanwhile.
+                    if let Some(guard) = group_guard.as_mut() {
+                        guard.disarm();
+                    }
                 }
-                let _ = child.wait().await;
+                // SIGKILL lands at once on runnable processes but not on one in
+                // uninterruptible sleep, so bound the reap: the tool must always
+                // return instead of hanging its caller.
+                let _ = timeout(
+                    Duration::from_secs(KILL_REAP_TIMEOUT_SECS),
+                    child.wait(),
+                )
+                .await;
                 None
             }
             status = child.wait() => {
                 Some(status)
             }
         };
+
+        // The command finished on its own, so anything it deliberately left behind
+        // (e.g. `npm run dev &`) is the caller's business: do not kill that group.
+        #[cfg(unix)]
+        if let Some(guard) = group_guard.as_mut().filter(|_| status.is_some()) {
+            guard.disarm();
+        }
 
         // The reads complete once the pipe write ends are closed (child exited
         // or was killed); each read is individually bounded.
@@ -396,6 +426,48 @@ impl Tool for Bash {
                 tracing::warn!(timeout_secs, "bash: command timed out, process killed");
                 ToolResult::error(format!("Command timed out after {} seconds", timeout_secs))
             }
+        }
+    }
+}
+
+/// Upper bound on reaping a just-SIGKILLed child. SIGKILL reaches runnable
+/// processes at once, but one stuck in uninterruptible sleep (e.g. blocked on a
+/// dead network mount) cannot be reaped until it returns; the tool must still
+/// return rather than hang its caller forever.
+#[cfg(unix)]
+const KILL_REAP_TIMEOUT_SECS: u64 = 5;
+
+/// Armed for as long as a spawned command may have survivors left in its process
+/// group; on drop it SIGKILLs that whole group unless disarmed.
+///
+/// `kill_on_drop(true)` on the tokio `Child` covers only the direct child, so a
+/// cancelled `execute` future (task abort, client disconnect) would leave the
+/// shell's grandchildren orphaned. This guard closes that hole. It is disarmed
+/// once the group cannot hold survivors we care about: after the timeout path
+/// already killed it, and on normal completion so that a deliberately
+/// backgrounded process (`npm run dev &`) still survives as before.
+#[cfg(unix)]
+struct ProcessGroupGuard {
+    pgid: u32,
+    armed: bool,
+}
+
+#[cfg(unix)]
+impl ProcessGroupGuard {
+    fn new(pgid: u32) -> Self {
+        Self { pgid, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            kill_process_group(self.pgid);
         }
     }
 }

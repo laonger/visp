@@ -496,6 +496,30 @@ async fn test_bash_timeout_kills_process_tree() {
     assert_process_group_gone(read_child_pid(&pid_file)).await;
 }
 
+/// 调用方取消 `execute` future（任务中止、客户端断开）后，进程组里也不能有残留。
+///
+/// `kill_on_drop(true)` 只能杀直接子进程，sh 派生出的孙进程会变成孤儿；Bash 里那个
+/// `ProcessGroupGuard` 就是为此存在。去掉它这条用例立刻失败（管道迫使 shell fork 出
+/// 孙进程，否则直接子进程被 kill_on_drop 杀掉后组内已无存活者，用例抓不到泄漏）。
+/// 这里的取消来自外层 `tokio::time::timeout` 丢弃 future，不是 Bash 自身的超时分支。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_bash_cancelled_execution_leaves_no_orphans() {
+    let dir = tempdir().unwrap();
+    let ctx = test_context(dir.path());
+    let pid_file = dir.path().join("cancel.pid");
+    let command = format!("echo $$ > '{}' ; sleep 43.57 | cat", pid_file.display());
+    let bash = Bash::default();
+    let fut = bash.execute(serde_json::json!({"command": command, "timeout": 30}), &ctx);
+    // 3s 时丢弃 future：命令自身的 30s 超时远未到，走的正是取消路径。
+    let cancelled = tokio::time::timeout(std::time::Duration::from_secs(3), fut).await;
+    assert!(
+        cancelled.is_err(),
+        "execute should still be pending when the caller cancels"
+    );
+    assert_process_group_gone(read_child_pid(&pid_file)).await;
+}
+
 /// 读取被测命令写入的自身 pid（`echo $$ > file`）。
 #[cfg(unix)]
 fn read_child_pid(path: &Path) -> u32 {
@@ -540,6 +564,18 @@ async fn assert_process_group_gone(pgid: u32) {
         .lines()
         .filter(|l| l.split_whitespace().nth(2) == Some(want.as_str()))
         .collect();
+    // 区分两种失败形态：没被杀掉的成员（仍在运行）与已被杀但没被回收的成员
+    // （stat == Z，`wait` 漏了）。两者的修法不同，不能报成同一件事。
+    let all_zombies = !survivors.is_empty()
+        && survivors
+            .iter()
+            .all(|l| l.split_whitespace().nth(3) == Some("Z"));
+    if all_zombies {
+        panic!(
+            "bash 工具超时后进程组 {pgid} 的成员已死但未被回收（zombie 残留：杀进程成功、wait 回收失败）:\n{}",
+            survivors.join("\n")
+        );
+    }
     panic!(
         "bash 工具超时后进程组 {pgid} 内仍有进程存活（真实泄漏）:\n{}",
         survivors.join("\n")
