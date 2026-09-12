@@ -446,12 +446,14 @@ async fn test_bash_no_workdir_uses_context() {
 async fn test_bash_timeout_kills_child() {
     let dir = tempdir().unwrap();
     let ctx = test_context(dir.path());
+    // 让被测进程把自己的 pid 写进文件：Bash 工具用 `process_group(0)` 把子进程
+    // 放进以自身 pid 为 pgid 的新进程组，因此这个 pid 同时也是 pgid。
+    // 断言时就能精确针对"我们自己 spawn 的进程组"，而不是模糊匹配 cmdline。
+    let pid_file = dir.path().join("child.pid");
+    let command = format!("echo $$ > '{}' ; exec sleep 61.37", pid_file.display());
     let start = std::time::Instant::now();
     let result = Bash::default()
-        .execute(
-            serde_json::json!({"command": "sleep 61.37", "timeout": 2}),
-            &ctx,
-        )
+        .execute(serde_json::json!({"command": command, "timeout": 2}), &ctx)
         .await;
     let elapsed = start.elapsed();
     assert!(result.is_error, "should time out");
@@ -466,8 +468,8 @@ async fn test_bash_timeout_kills_child() {
         elapsed
     );
     // The child process must be killed, not left running as a zombie/orphan.
-    // 时长带小数以避免与其他测试/历史遗留进程的 pgrep 误匹配。
-    assert_process_gone("sleep 61.37").await;
+    #[cfg(unix)]
+    assert_process_group_gone(read_child_pid(&pid_file)).await;
 }
 
 #[tokio::test]
@@ -477,11 +479,12 @@ async fn test_bash_timeout_kills_process_tree() {
     // A pipeline forces the shell to fork a child (a single simple command
     // may be exec'd in place on some shells, but dash on Debian/Ubuntu forks).
     // Killing only the direct child would leave this orphan running.
+    // `$$` 是外层 shell 的 pid，即 Bash 工具直接 spawn 的那个进程（也是 pgid）；
+    // 管道里的 sleep/cat 都继承同一进程组，因此按 pgid 断言能覆盖孙进程。
+    let pid_file = dir.path().join("tree.pid");
+    let command = format!("echo $$ > '{}' ; sleep 62.41 | cat", pid_file.display());
     let result = Bash::default()
-        .execute(
-            serde_json::json!({"command": "sleep 62.41 | cat", "timeout": 2}),
-            &ctx,
-        )
+        .execute(serde_json::json!({"command": command, "timeout": 2}), &ctx)
         .await;
     assert!(result.is_error, "should time out");
     assert!(
@@ -489,30 +492,58 @@ async fn test_bash_timeout_kills_process_tree() {
         "should mention timeout, got: {:?}",
         result.content
     );
-    assert_process_gone("sleep 62.41").await;
+    #[cfg(unix)]
+    assert_process_group_gone(read_child_pid(&pid_file)).await;
 }
 
-/// 轮询确认没有进程的 cmdline 匹配 `pattern`（最长等待约 5s）。
+/// 读取被测命令写入的自身 pid（`echo $$ > file`）。
+#[cfg(unix)]
+fn read_child_pid(path: &Path) -> u32 {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("child pid file {path:?} unreadable: {e}"))
+        .trim()
+        .parse()
+        .unwrap_or_else(|e| panic!("child pid file {path:?} should contain a pid: {e}"))
+}
+
+/// 断言进程组 `pgid` 已经不存在（轮询最长约 5s）。
 ///
-/// SIGKILL 的投递与进程回收在负载高的 CI runner 上可能滞后于一次采样，
-/// 因此单次 200ms 检查会造成偶发失败。真实泄漏的孤儿进程会存活到超时时长
-/// （60s+），轮询同样能抓到，不会掩盖 bug。
-async fn assert_process_gone(pattern: &str) {
-    let mut last_seen = String::new();
+/// 为什么按 pgid 而不是 `pgrep -f <cmdline>`：后者会匹配任何 cmdline 含该串的进程
+/// （历史遗留孤儿、其他测试、手工启动的进程），把"无关的 sleep 存在"报成
+/// "我们没杀掉子进程"，产生无法与真实泄漏区分的误报。pgid 来自本测试自己的子进程，
+/// 组内任何存活进程都意味着 kill 进程树失败 —— 既不会误报，也能抓到逃逸的孙进程。
+/// SIGKILL 投递/回收在高负载 CI 上可能滞后，故轮询；真实泄漏的进程会活到命令自身
+/// 结束（60s+），轮询不会掩盖问题。
+/// 失败时打印组内进程的 ps 详情，便于直接判断泄漏原因。
+#[cfg(unix)]
+async fn assert_process_group_gone(pgid: u32) {
+    let want = pgid.to_string();
     for _ in 0..50 {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let pgrep = tokio::process::Command::new("pgrep")
-            .arg("-f")
-            .arg(pattern)
+            .arg("-g")
+            .arg(&want)
             .output()
             .await
             .expect("pgrep should run");
         if !pgrep.status.success() {
             return;
         }
-        last_seen = String::from_utf8_lossy(&pgrep.stdout).trim().to_string();
     }
-    panic!("process matching {pattern:?} still running after timeout: {last_seen}");
+    let ps = tokio::process::Command::new("ps")
+        .args(["-o", "pid,ppid,pgid,stat,command"])
+        .output()
+        .await
+        .expect("ps should run");
+    let ps_out = String::from_utf8_lossy(&ps.stdout);
+    let survivors: Vec<&str> = ps_out
+        .lines()
+        .filter(|l| l.split_whitespace().nth(2) == Some(want.as_str()))
+        .collect();
+    panic!(
+        "bash 工具超时后进程组 {pgid} 内仍有进程存活（真实泄漏）:\n{}",
+        survivors.join("\n")
+    );
 }
 
 #[tokio::test]
