@@ -273,12 +273,7 @@ impl crate::tool::Tool for AgentTool {
             ));
         }
 
-        match response_rx.await {
-            Ok(content) => ToolResult::success(content),
-            Err(_) => {
-                ToolResult::error("[SubAgent Error] Sub-agent response channel closed unexpectedly")
-            }
-        }
+        wait_subagent_response(response_rx, SUBAGENT_RESPONSE_TIMEOUT).await
     }
 
     fn category(&self) -> &str {
@@ -287,6 +282,22 @@ impl crate::tool::Tool for AgentTool {
 
     fn tool_type(&self) -> ToolType {
         ToolType::Agent
+    }
+}
+
+/// 等待子代理响应，超时返回错误（防止 orchestrator 未处理时永久挂起）。
+const SUBAGENT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(1800);
+
+async fn wait_subagent_response(
+    response_rx: oneshot::Receiver<String>,
+    timeout: Duration,
+) -> ToolResult {
+    match tokio::time::timeout(timeout, response_rx).await {
+        Ok(Ok(content)) => ToolResult::success(content),
+        Ok(Err(_)) => {
+            ToolResult::error("[SubAgent Error] Sub-agent response channel closed unexpectedly")
+        }
+        Err(_) => ToolResult::error("[SubAgent Error] Sub-agent response timed out"),
     }
 }
 
@@ -746,6 +757,32 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc as StdArc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn test_wait_subagent_response_success() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tx.send("done".to_string()).unwrap();
+        let result = wait_subagent_response(rx, Duration::from_secs(5)).await;
+        assert!(!result.is_error);
+        assert!(result.content.contains("done"));
+    }
+
+    #[tokio::test]
+    async fn test_wait_subagent_response_timeout() {
+        let (_tx, rx) = tokio::sync::oneshot::channel::<String>();
+        let result = wait_subagent_response(rx, Duration::from_millis(50)).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn test_wait_subagent_response_channel_closed() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        drop(tx); // 通道关闭，无人发送
+        let result = wait_subagent_response(rx, Duration::from_secs(5)).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("channel closed"));
+    }
 
     struct MockTrimmer;
     impl ContextTrimmer for MockTrimmer {
