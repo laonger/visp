@@ -2815,3 +2815,116 @@ async fn test_spawn_not_queued_when_below_limit() {
         "spawn below the limit must not queue"
     );
 }
+
+// ── Spawn prompt 中的 <image: path> 标记解析 ─────────────────────
+
+/// 等待子会话的首条 user 消息被 append（create_sub 在 handle_agent_message
+/// 内同步完成，但首消息由 run_agent_loop 异步 append 到会话历史）
+async fn wait_for_sub_session_first_message(
+    orch: &Orchestrator,
+    parent_id: &str,
+    agent_name: &str,
+) -> visp_core::message::Message {
+    let sub_session_id = orch
+        .session_mgr
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.agent_name == agent_name && s.parent_id.as_deref() == Some(parent_id))
+        .expect("sub-session should exist")
+        .id;
+    for _ in 0..100 {
+        if let Ok(msgs) = orch.session_mgr.get_messages(&sub_session_id) {
+            if let Some(first) = msgs.first() {
+                return first.clone();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("sub session initial message was not appended in time");
+}
+
+/// 用例 1：prompt 含 `<image: path>` 标记 → 图片解析进首消息，标记从文本剥离
+#[tokio::test]
+async fn test_spawn_sub_agent_extracts_images_from_prompt() {
+    // 创建真实的小图片文件（extract_images 只要求文件可读，不校验格式）
+    let img_path =
+        std::env::temp_dir().join(format!("visp_test_prompt_img_{}.png", std::process::id()));
+    std::fs::write(&img_path, b"\x89PNG\r\n\x1a\nfake-image-bytes").unwrap();
+    let img_path_str = img_path.to_str().unwrap().to_string();
+
+    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+
+    let prompt = format!("Describe this screenshot: <image: {img_path_str}>");
+    let envelope = Envelope {
+        session_id: parent_id.clone(),
+        message: AgentMessage::SpawnRequest {
+            call_id: "call-img-1".to_string(),
+            subagent_type: "default".to_string(),
+            description: "vision task".to_string(),
+            prompt: prompt.clone(),
+            task_id: None,
+            trace_context: None,
+            response_tx: None,
+        },
+        trace_context: None,
+    };
+    orch.handle_agent_message(envelope).await;
+
+    let first = wait_for_sub_session_first_message(&orch, &parent_id, "default").await;
+    assert_eq!(first.role, visp_core::message::Role::User);
+    assert!(
+        !first.images.is_empty(),
+        "prompt <image:> marker should be parsed into the initial message images"
+    );
+    assert_eq!(first.images[0].path, img_path_str);
+    assert!(
+        !first.content.contains("<image:"),
+        "image marker should be stripped from the message text, got: {}",
+        first.content
+    );
+    assert!(first.content.contains("Describe this screenshot"));
+
+    let _ = std::fs::remove_file(&img_path);
+}
+
+/// 用例 2：prompt 无 `<image:>` 标记 → 保留父会话最近含图消息的兜底转发
+#[tokio::test]
+async fn test_spawn_sub_agent_falls_back_to_parent_images() {
+    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+
+    // 父会话有一条含图的 user 消息（模拟用户上传截图）
+    let mut parent_msg = visp_core::message::Message::user("user attached an image");
+    parent_msg.images = vec![visp_core::message::ImageData {
+        path: "/tmp/parent-img.png".to_string(),
+        base64: "cGFyZW50LWltZw==".to_string(),
+        mime_type: "image/png".to_string(),
+    }];
+    orch.session_mgr
+        .append_message(&parent_id, parent_msg)
+        .unwrap();
+
+    // prompt 无图片标记 → 走兜底逻辑，转发父会话图片
+    let envelope = Envelope {
+        session_id: parent_id.clone(),
+        message: AgentMessage::SpawnRequest {
+            call_id: "call-img-2".to_string(),
+            subagent_type: "default".to_string(),
+            description: "task".to_string(),
+            prompt: "plain text task".to_string(),
+            task_id: None,
+            trace_context: None,
+            response_tx: None,
+        },
+        trace_context: None,
+    };
+    orch.handle_agent_message(envelope).await;
+
+    let first = wait_for_sub_session_first_message(&orch, &parent_id, "default").await;
+    assert_eq!(first.role, visp_core::message::Role::User);
+    assert!(
+        !first.images.is_empty(),
+        "fallback should forward the parent session's images"
+    );
+    assert_eq!(first.images[0].path, "/tmp/parent-img.png");
+}

@@ -795,15 +795,25 @@ impl Orchestrator {
         };
         let mut msg = Message::user(task_msg);
 
-        // 10a. Forward images from the parent session's most recent user message
-        //      that contains images.  This ensures vision/painter sub-agents can
-        //      actually "see" the image the user provided, instead of receiving a
-        //      text-only prompt.
-        if let Ok(parent_messages) = self.session_mgr.get_messages(parent_session_id) {
-            for m in parent_messages.iter().rev() {
-                if !m.images.is_empty() {
-                    msg.images = m.images.clone();
-                    break;
+        // 10a. If the task prompt itself carries `<image: path>` markers, parse
+        //      them so the sub-agent receives the actual image data (vision
+        //      sub-agents rely on `msg.images` to "see" the image).  The marker
+        //      is stripped from the text and the encoded image is attached.
+        let (clean_text, prompt_images) = Message::extract_images(&msg.content);
+        if !prompt_images.is_empty() {
+            msg.content = clean_text;
+            msg.images = prompt_images;
+        } else {
+            // 10b. Fallback: forward images from the parent session's most
+            //      recent user message that contains images.  This ensures
+            //      vision/painter sub-agents can actually "see" the image the
+            //      user provided, instead of receiving a text-only prompt.
+            if let Ok(parent_messages) = self.session_mgr.get_messages(parent_session_id) {
+                for m in parent_messages.iter().rev() {
+                    if !m.images.is_empty() {
+                        msg.images = m.images.clone();
+                        break;
+                    }
                 }
             }
         }
