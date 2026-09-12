@@ -18,6 +18,11 @@ use crate::prompt::PromptBuilder;
 use crate::provider::ChatEvent;
 use crate::provider::LlmConfig;
 use crate::provider::LlmProvider;
+
+/// 工具审批弹窗的超时秒数。用户在此时间内未响应则视为拒绝，
+/// 避免 agent loop 因审批弹窗无人响应而无限挂起。
+const APPROVAL_TIMEOUT_SECS: u64 = 120;
+
 use crate::rules::RuleEngine;
 use crate::session::SessionManager;
 use crate::session::SessionStatus;
@@ -1164,6 +1169,13 @@ async fn execute_tool_calls(
                         // If the user hits Stop while a tool approval dialog
                         // is open, don't hang forever — treat as denied.
                         _ = cancel.cancelled() => UserQueryResult {
+                            selected_index: -1,
+                            text: String::new(),
+                        },
+                        // If the user doesn't respond to the approval dialog
+                        // within the timeout, treat as denied instead of
+                        // hanging the agent loop forever.
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(APPROVAL_TIMEOUT_SECS)) => UserQueryResult {
                             selected_index: -1,
                             text: String::new(),
                         },

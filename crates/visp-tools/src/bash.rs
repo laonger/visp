@@ -111,7 +111,6 @@ impl Bash {
             "\nformat ",
             " mkfs ",
             "\nmkfs ",
-            " > ", // echo > file
         ];
         if mid_patterns.iter().any(|p| lower.contains(p)) {
             return true;
@@ -133,10 +132,22 @@ impl Bash {
             "format ",
             "mkfs ",
             "mkfs.", // mkfs.ext4 etc.
-            "> ",    // redirect at start
         ];
         if start_patterns.iter().any(|p| trimmed.starts_with(p)) {
             return true;
+        }
+
+        // 重定向（> 或 >>）到系统关键路径才视为危险。
+        // 写项目内文件 / /tmp / 用户目录是正常操作（如 cat > file），不审批；
+        // 但重定向到 /etc /usr /bin /sbin /var /root 等系统目录是危险的。
+        if lower.contains(">") {
+            let sys_paths = [
+                "/etc/", "/usr/", "/bin/", "/sbin/", "/var/", "/root/", "/boot/", "/dev/",
+                "/proc/", "/sys/",
+            ];
+            if sys_paths.iter().any(|p| lower.contains(p)) {
+                return true;
+            }
         }
 
         false

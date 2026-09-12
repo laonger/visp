@@ -138,6 +138,15 @@ fn test_destructive_redirect_at_start() {
 }
 
 #[test]
+fn test_redirect_to_project_or_tmp_not_destructive() {
+    // 写项目内文件 / /tmp / 用户目录是正常操作，不应触发审批
+    assert!(!destructive().is_destructive_command("cat > /tmp/t8repro.mjs"));
+    assert!(!destructive().is_destructive_command("echo x > js/main.js"));
+    assert!(!destructive().is_destructive_command("cat > test/test.html"));
+    assert!(!destructive().is_destructive_command("echo hi > ~/notes.txt"));
+}
+
+#[test]
 fn test_non_destructive_echo() {
     assert!(!destructive().is_destructive_command("echo hello"));
 }
