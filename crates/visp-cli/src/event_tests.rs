@@ -1,6 +1,6 @@
 use super::*;
 use crate::app::AppState;
-use visp_proto::visp::{Done, Error, ServerMessage, server_message};
+use visp_proto::visp::{Done, Error, ServerMessage, UsageDelta, server_message};
 
 fn make_done_msg(sid: &str) -> ServerMessage {
     ServerMessage {
@@ -160,4 +160,31 @@ fn test_stale_done_not_consumed_by_sub_done() {
         !app.stale_done_expected,
         "stale_done_expected should be consumed by main Done"
     );
+}
+
+fn make_usage_delta_msg(sid: &str, output_tokens: u32) -> ServerMessage {
+    ServerMessage {
+        payload: Some(server_message::Payload::UsageDelta(UsageDelta {
+            input_tokens: 0,
+            output_tokens,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            session_id: sid.into(),
+        })),
+    }
+}
+
+/// UsageDelta 必须被分发到实时速率统计（此前落入 `_ => {}` 被忽略），
+/// 且不参与结算累加。
+#[test]
+fn test_usage_delta_is_applied_to_stream_rate() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    let chat = ChatHandle::new_mock("main");
+
+    handle_grpc_message(make_usage_delta_msg("main", 12), &mut app, &chat);
+    handle_grpc_message(make_usage_delta_msg("main", 8), &mut app, &chat);
+
+    assert_eq!(app.tab_bar.tabs[0].stream_output_tokens, 20);
+    assert_eq!(app.total_output_tokens, 0, "实时增量不得计入结算总量");
+    assert!(app.active_tab().pending_usage.is_none());
 }

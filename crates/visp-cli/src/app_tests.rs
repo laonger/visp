@@ -2850,3 +2850,90 @@ fn test_flush_streaming_resets_timer() {
     assert!(tab.stream_started_at.is_none());
     assert!(tab.streaming_text.is_empty());
 }
+
+#[test]
+fn test_apply_usage_delta_routes_without_touching_totals() {
+    let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
+    app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
+
+    app.apply_usage_delta("main-sid", 7);
+    app.apply_usage_delta("sub-1", 11);
+    app.apply_usage_delta("sub-1", 3);
+
+    assert_eq!(app.tab_bar.tabs[0].stream_output_tokens, 7);
+    let i = app.tab_bar.find_index_by_session("sub-1").unwrap();
+    assert_eq!(app.tab_bar.tabs[i].stream_output_tokens, 14);
+
+    // 关键防回归：实时增量绝不能污染总量/成本/待结算值（结算只认 UsageInfo）
+    assert_eq!(app.total_input_tokens, 0);
+    assert_eq!(app.total_output_tokens, 0);
+    assert_eq!(app.total_cache_creation_input_tokens, 0);
+    assert_eq!(app.total_cache_read_input_tokens, 0);
+    assert_eq!(app.total_cost, 0.0);
+    assert_eq!(app.current_request_usage, (0, 0, 0, 0));
+    assert!(app.active_tab().pending_usage.is_none());
+}
+
+#[test]
+fn test_apply_usage_delta_unknown_session_goes_to_hidden_tab() {
+    let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
+    app.apply_usage_delta("unknown-sid", 5);
+
+    assert_eq!(app.tab_bar.tabs[0].stream_output_tokens, 0);
+    let hidden = app
+        .tab_bar
+        .hidden_tabs
+        .iter()
+        .find(|t| t.session_id == "unknown-sid")
+        .expect("应创建 hidden tab");
+    assert_eq!(hidden.stream_output_tokens, 5);
+}
+
+#[test]
+fn test_tokens_per_second_prefers_reported_output_tokens() {
+    let mut tab = TabEntry::new("sid", "agent");
+
+    // 只有 provider 上报的增量、没有流式文本（纯工具调用/纯推理场景）
+    tab.stream_output_tokens = 100;
+    tab.stream_started_at =
+        Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+    let tps = tab
+        .tokens_per_second()
+        .expect("有上报增量时应给出速率（不依赖 streaming_text）");
+    assert!((tps - 50.0).abs() < 0.1, "got {tps}");
+
+    // 流刚开始（< 0.5s）：None
+    tab.stream_started_at = Some(std::time::Instant::now());
+    assert_eq!(tab.tokens_per_second(), None);
+
+    // 无上报增量时回落字符估算：400 chars / 4 = 100 tokens, 2s -> 50.0
+    tab.stream_output_tokens = 0;
+    tab.streaming_text = "a".repeat(400);
+    tab.stream_started_at =
+        Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+    let tps = tab.tokens_per_second().unwrap();
+    assert!((tps - 50.0).abs() < 0.1, "got {tps}");
+}
+
+#[test]
+fn test_stream_output_tokens_reset_with_timer() {
+    let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
+
+    app.set_generating(true);
+    app.apply_usage_delta("sid", 42);
+    assert_eq!(app.active_tab().stream_output_tokens, 42);
+
+    // set_generating(false) 重置
+    app.set_generating(false);
+    assert_eq!(app.active_tab().stream_output_tokens, 0);
+
+    // stop_generating 重置
+    app.apply_usage_delta("sid", 5);
+    app.active_tab_mut().stop_generating();
+    assert_eq!(app.active_tab().stream_output_tokens, 0);
+
+    // flush_streaming（工具调用打断/收尾）重置
+    app.apply_usage_delta("sid", 9);
+    app.active_tab_mut().flush_streaming();
+    assert_eq!(app.active_tab().stream_output_tokens, 0);
+}

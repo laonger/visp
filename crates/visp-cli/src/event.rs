@@ -993,6 +993,10 @@ fn handle_grpc_message(
             );
             app.apply_usage_cost(&ui.session_id, ui.cost);
         }
+        Some(server_message::Payload::UsageDelta(d)) => {
+            // 逐事件增量：仅供实时速率展示，不参与结算累加
+            app.apply_usage_delta(&d.session_id, d.output_tokens);
+        }
         Some(server_message::Payload::UserQuery(uq)) => {
             // 将已积累的 streaming text 刷入消息列表，使其走 markdown 渲染路径
             app.flush_streaming();

@@ -342,6 +342,9 @@ pub struct TabEntry {
     pub generating: bool,
     /// 当前流式输出的起始时间（首个 TextDelta 到达时启用），用于估算输出速率
     pub stream_started_at: Option<std::time::Instant>,
+    /// 本次生成中 provider 逐事件上报的输出 token 增量之和
+    /// （仅供实时速率展示；结算仍以 UsageInfo 为准）
+    pub stream_output_tokens: u64,
     pub pending_usage: Option<(u32, u32, u32, u32, u32)>,
     pub next_message_id: u64,
     pub scroll: usize,
@@ -363,6 +366,7 @@ impl TabEntry {
             streaming_text: String::new(),
             generating: false,
             stream_started_at: None,
+            stream_output_tokens: 0,
             pending_usage: None,
             next_message_id: 0,
             scroll: 0,
@@ -425,6 +429,7 @@ impl TabEntry {
 
     pub fn flush_streaming(&mut self) {
         self.stream_started_at = None;
+        self.stream_output_tokens = 0;
         if !self.streaming_text.is_empty() {
             let text = std::mem::take(&mut self.streaming_text);
             let lines = crate::image::split_image_markers(&text, LineType::Assistant);
@@ -436,14 +441,25 @@ impl TabEntry {
     pub fn stop_generating(&mut self) {
         self.generating = false;
         self.stream_started_at = None;
+        self.stream_output_tokens = 0;
     }
 
-    /// 输出速率估算（ui.md 输入栏设计）：streaming_text 字符数 / 4 ≈ token 数，
-    /// 除以流起始经过的秒数。流刚开始（< 0.5s）或无流式文本时返回 None。
+    /// 输出速率（ui.md 输入栏设计）：优先使用 provider 逐事件上报的输出 token
+    /// 增量（`AppState::apply_usage_delta` 累加的 `stream_output_tokens`），未收到
+    /// 增量时回落到「streaming_text 字符数 / 4 ≈ token 数」的估算。
+    ///
+    /// 流刚开始（< 0.5s，避免速率尖峰）或两种数据都没有时返回 None。
     pub fn tokens_per_second(&self) -> Option<f64> {
         let started = self.stream_started_at?;
         let elapsed = started.elapsed().as_secs_f64();
-        if elapsed < 0.5 || self.streaming_text.is_empty() {
+        if elapsed < 0.5 {
+            return None;
+        }
+        if self.stream_output_tokens > 0 {
+            // 精确值：provider 上报的输出 token；纯工具调用/纯推理流（无文本）同样有速率
+            return Some(self.stream_output_tokens as f64 / elapsed);
+        }
+        if self.streaming_text.is_empty() {
             return None;
         }
         let chars = self.streaming_text.chars().count() as f64;
@@ -1632,6 +1648,7 @@ impl AppState {
         tab.generating = v;
         // 重新开始生成或停止生成都重置流式计时器（提交新请求 / 取消 / 会话切换）
         tab.stream_started_at = None;
+        tab.stream_output_tokens = 0;
     }
     pub fn clear_streaming(&mut self) {
         self.active_tab_mut().streaming_text.clear();
@@ -1839,6 +1856,28 @@ impl AppState {
         self.total_output_tokens += output;
         self.total_cache_creation_input_tokens += cache_create;
         self.total_cache_read_input_tokens += cache_read;
+    }
+
+    /// 消费 provider 逐事件上报的增量 usage（`Payload::UsageDelta`）。
+    ///
+    /// 仅用于「生成中」的实时速率展示（累加到 tab 的 `stream_output_tokens`），
+    /// **不会**累加进任何会话/请求总量——结算数据一律以 `UsageInfo` 为准，
+    /// 在此处累加总量会导致重复计数。
+    ///
+    /// 路由与 [`AppState::apply_usage_info`] 的 L1 一致：空 ID/主 session 归
+    /// default tab，命中已知 session 归对应 tab，否则归 hidden tab。
+    pub fn apply_usage_delta(&mut self, session_id: &str, output_tokens: u32) {
+        let is_main = session_id.is_empty() || session_id == self.main_session_id;
+        let target = if is_main {
+            &mut self.tab_bar.tabs[0]
+        } else if let Some(i) = self.tab_bar.find_index_by_session(session_id) {
+            &mut self.tab_bar.tabs[i]
+        } else {
+            self.tab_bar.find_or_create_hidden_tab(session_id, "agent")
+        };
+        target.stream_output_tokens = target
+            .stream_output_tokens
+            .saturating_add(u64::from(output_tokens));
     }
 
     /// 累计 provider 上报的成本（L3，状态栏展示）。

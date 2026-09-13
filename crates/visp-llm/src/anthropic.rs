@@ -791,6 +791,11 @@ fn byte_stream_to_chat_events(
         output_tokens: u32,
         cache_creation_input_tokens: u32,
         cache_read_input_tokens: u32,
+        /// 已上报给 UsageDelta 的累计值（与最终统计字段区分，仅供实时速率展示）
+        reported_input_tokens: u32,
+        reported_output_tokens: u32,
+        reported_cache_creation_input_tokens: u32,
+        reported_cache_read_input_tokens: u32,
         /// 响应模型名称（从 message_start 提取）
         model: String,
         /// 请求时的模型名称（用于 response model 为空时的 fallback）
@@ -829,6 +834,10 @@ fn byte_stream_to_chat_events(
         output_tokens: 0,
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 0,
+        reported_input_tokens: 0,
+        reported_output_tokens: 0,
+        reported_cache_creation_input_tokens: 0,
+        reported_cache_read_input_tokens: 0,
         model: String::new(),
         request_model,
         project_path,
@@ -1000,6 +1009,49 @@ fn byte_stream_to_chat_events(
                 }
             }
 
+            /// 计算本次 usage 相对「已上报累计值」的增量，并更新已上报值。
+            ///
+            /// 返回的 `UsageDelta` 仅供 CLI 实时速率展示；最终结算仍以流末
+            /// `UsageInfo` 为准，因此这里只更新 `reported_*` 字段，不影响
+            /// `input_tokens` 等最终统计字段。
+            fn report_usage_delta(
+                state: &mut StreamState,
+                input_tokens: u32,
+                output_tokens: u32,
+                cache_creation_input_tokens: u32,
+                cache_read_input_tokens: u32,
+            ) -> Option<ChatEvent> {
+                // 相对已上报值求差分（饱和减法防止累计值回退时产生下溢）
+                let delta_in = input_tokens.saturating_sub(state.reported_input_tokens);
+                let delta_out = output_tokens.saturating_sub(state.reported_output_tokens);
+                let delta_cc = cache_creation_input_tokens
+                    .saturating_sub(state.reported_cache_creation_input_tokens);
+                let delta_cr = cache_read_input_tokens
+                    .saturating_sub(state.reported_cache_read_input_tokens);
+                // 已上报值只增不减（message_delta 只携带 output_tokens，其余字段为 0，
+                // 不应把已上报的 input/cache 值回退）
+                state.reported_input_tokens = state.reported_input_tokens.max(input_tokens);
+                state.reported_output_tokens = state.reported_output_tokens.max(output_tokens);
+                state.reported_cache_creation_input_tokens = state
+                    .reported_cache_creation_input_tokens
+                    .max(cache_creation_input_tokens);
+                state.reported_cache_read_input_tokens = state
+                    .reported_cache_read_input_tokens
+                    .max(cache_read_input_tokens);
+
+                // 无增量时不发射，保持事件流不变
+                if delta_in > 0 || delta_out > 0 || delta_cc > 0 || delta_cr > 0 {
+                    Some(ChatEvent::UsageDelta {
+                        input_tokens: delta_in,
+                        output_tokens: delta_out,
+                        cache_creation_input_tokens: delta_cc,
+                        cache_read_input_tokens: delta_cr,
+                    })
+                } else {
+                    None
+                }
+            }
+
             /// 构建 UsageInfo（表示 Done 事件）
             fn build_done_usage_info(state: &StreamState) -> ChatEvent {
                 ChatEvent::UsageInfo {
@@ -1061,6 +1113,17 @@ fn byte_stream_to_chat_events(
                                     model,
                                     stop_reason,
                                 );
+                                // 逐事件上报增量（供 CLI 实时速率显示；最终总量仍以
+                                // 流末 UsageInfo 为准，因此调用方不应把它累加进结算统计）
+                                if let Some(evt) = report_usage_delta(
+                                    &mut state,
+                                    input_tokens,
+                                    output_tokens,
+                                    cache_creation_input_tokens,
+                                    cache_read_input_tokens,
+                                ) {
+                                    return Some((Ok(evt), state));
+                                }
                             }
                             Ok(ParsedEvent::ThinkingDelta {
                                 index,
@@ -1247,6 +1310,16 @@ fn byte_stream_to_chat_events(
                                             model,
                                             stop_reason,
                                         );
+                                        // 逐事件上报增量（与主循环一致；无增量时不发射）
+                                        if let Some(evt) = report_usage_delta(
+                                            &mut state,
+                                            input_tokens,
+                                            output_tokens,
+                                            cache_creation_input_tokens,
+                                            cache_read_input_tokens,
+                                        ) {
+                                            return Some((Ok(evt), state));
+                                        }
                                         continue;
                                     }
                                     Ok(_) => continue,
@@ -1642,11 +1715,13 @@ mod tests {
             panic!("expected OutputMetadata");
         }
 
-        // 验证事件顺序：TextDelta → UsageInfo → OutputMetadata → Done
+        // 验证事件顺序：UsageDelta → TextDelta → UsageDelta → UsageInfo → OutputMetadata → Done
+        // （message_start / message_delta 携带非零 usage，各自先发 UsageDelta 供实时速率展示）
         let type_names: Vec<&str> = events
             .iter()
             .map(|e| match e {
                 ChatEvent::TextDelta(_) => "TextDelta",
+                ChatEvent::UsageDelta { .. } => "UsageDelta",
                 ChatEvent::UsageInfo { .. } => "UsageInfo",
                 ChatEvent::OutputMetadata(_) => "OutputMetadata",
                 ChatEvent::Done => "Done",
@@ -1655,8 +1730,15 @@ mod tests {
             .collect();
         assert_eq!(
             type_names,
-            vec!["TextDelta", "UsageInfo", "OutputMetadata", "Done"],
-            "event order should be TextDelta → UsageInfo → OutputMetadata → Done"
+            vec![
+                "UsageDelta",
+                "TextDelta",
+                "UsageDelta",
+                "UsageInfo",
+                "OutputMetadata",
+                "Done"
+            ],
+            "event order should be UsageDelta → TextDelta → UsageDelta → UsageInfo → OutputMetadata → Done"
         );
     }
 
@@ -1701,6 +1783,69 @@ mod tests {
         assert_eq!(meta.cache_read_input_tokens, Some(300));
         assert_eq!(meta.cache_creation_input_tokens, Some(80));
         assert_eq!(meta.finish_reasons, vec!["end_turn"]);
+    }
+
+    /// 逐事件上报 UsageDelta（message_start 的 input/cache 增量 + message_delta 的
+    /// output 增量），最终 UsageInfo 仍取流末累计总量，不被增量重复累加。
+    #[tokio::test]
+    async fn test_anthropic_usage_delta_emitted_and_totals_settle() {
+        let message_start = r#"{"type":"message_start","message":{"id":"msg_04","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":100,"output_tokens":0,"cache_creation_input_tokens":20,"cache_read_input_tokens":10}}}"#;
+        let message_delta = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":30}}"#;
+        let message_stop = r#"{"type":"message_stop"}"#;
+
+        let sse = format!(
+            "{}{}{}",
+            sse_line("message_start", message_start),
+            sse_line("message_delta", message_delta),
+            sse_line("message_stop", message_stop),
+        );
+        let events = collect_anthropic_events(vec![sse], "/tmp").await;
+
+        // UsageDelta 序列：message_start 上报 input/cache 增量，message_delta 上报 output 增量
+        let deltas: Vec<(u32, u32, u32, u32)> = events
+            .iter()
+            .filter_map(|e| match e {
+                ChatEvent::UsageDelta {
+                    input_tokens,
+                    output_tokens,
+                    cache_creation_input_tokens,
+                    cache_read_input_tokens,
+                } => Some((
+                    *input_tokens,
+                    *output_tokens,
+                    *cache_creation_input_tokens,
+                    *cache_read_input_tokens,
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            deltas,
+            vec![(100, 0, 20, 10), (0, 30, 0, 0)],
+            "每个 usage 事件的增量（相对已上报值求差分）"
+        );
+
+        // 结算总量仍与改动前一致：input 100 / output 30 / cache_creation 20 / cache_read 10
+        let usage = events.iter().find_map(|e| match e {
+            ChatEvent::UsageInfo {
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                ..
+            } => Some((
+                *input_tokens,
+                *output_tokens,
+                *cache_creation_input_tokens,
+                *cache_read_input_tokens,
+            )),
+            _ => None,
+        });
+        assert_eq!(
+            usage,
+            Some((100, 30, 20, 10)),
+            "结算总量取流末累计值，不被 UsageDelta 重复累加"
+        );
     }
 
     #[tokio::test]
