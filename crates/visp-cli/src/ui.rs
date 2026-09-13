@@ -362,15 +362,9 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
     let bg = Block::default().style(Style::default().bg(theme::BG));
     f.render_widget(Paragraph::new("").block(bg), f.area());
 
-    let input_area_height = {
-        let h = calc_input_height(&app.textarea, area.width);
-        // 正在推理时的输入栏为带边框的状态框（上边框 + 空行 + 内容行 + 下边框，至少 4 行）
-        if app.confirm.is_none() && app.generating() {
-            h.max(4)
-        } else {
-            h
-        }
-    };
+    // 输入状态与推理状态保持同一几何高度：推理时状态文字显示在输入框内，
+    // 不改变输入框的布局高度
+    let input_area_height = calc_input_height(&app.textarea, area.width);
     let confirm_height = app
         .confirm
         .as_ref()
@@ -1136,9 +1130,17 @@ fn render_input_area(app: &mut AppState, f: &mut Frame, area: Rect) {
         app.textarea
             .set_placeholder_text("Type your custom input...");
     } else if app.generating() && app.confirm.is_none() {
-        // 正在推理时的输入栏：Generating 状态框（ui.md 输入栏设计）
-        render_generating_box(app, f, input_area);
-        return;
+        // 推理中：输入框几何高度不变，状态文字以 placeholder 显示在框内
+        let tps = match app.active_tab().tokens_per_second() {
+            Some(v) => format!("{v:.1}"),
+            None => "--".to_string(),
+        };
+        app.textarea
+            .set_style(Style::default().fg(theme::INPUT_NOTICE_FG));
+        app.textarea.set_placeholder_text(format!(
+            "Generating {}  {tps} tokens/s output",
+            app.spinner_glyph()
+        ));
     } else {
         app.textarea.set_style(Style::default().fg(theme::INPUT_FG));
         app.textarea.set_placeholder_text("Type your message...");
@@ -1188,34 +1190,6 @@ fn render_input_area(app: &mut AppState, f: &mut Frame, area: Rect) {
         .set_block(Block::default().style(Style::default().bg(theme::INPUT_BG)));
     // 单次渲染：既设置内部 area（折行/导航所需的 screen map），也完成可视输出
     f.render_widget(&app.textarea, input_area);
-}
-
-/// 正在推理时的输入栏（ui.md 输入栏设计）：
-/// 带边框的状态框，第一空行后显示 "Generating ... {{token_per_second}} tokens/s output"。
-/// 输出速率由流式文本估算（tokens_per_second），流刚开始（< 0.5s）时显示 "--"。
-fn render_generating_box(app: &AppState, f: &mut Frame, area: Rect) {
-    let tps = match app.active_tab().tokens_per_second() {
-        Some(v) => format!("{v:.1}"),
-        None => "--".to_string(),
-    };
-    let content = format!(
-        "  Generating {}  {tps} tokens/s output",
-        app.spinner_glyph()
-    );
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(SEP_FG))
-        .style(Style::default().bg(theme::INPUT_BG));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    let lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            content,
-            Style::default().fg(theme::INPUT_NOTICE_FG),
-        )),
-    ];
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 /// 将 model 字符串拆为 (provider, model_label)

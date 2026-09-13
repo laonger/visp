@@ -345,6 +345,16 @@ pub struct TabEntry {
     /// 本次生成中 provider 逐事件上报的输出 token 增量之和
     /// （仅供实时速率展示；结算仍以 UsageInfo 为准）
     pub stream_output_tokens: u64,
+    /// 流结束时冻结的实时估算速率。仅作 assistant 统计行最终统计速度的
+    /// 兜底（结算数据缺失时），主指标见 `last_stream_elapsed` +
+    /// `final_token_speed`。实时路径中 Done 帧会先经 `stop_generating`
+    /// 清空流式计时器、再渲染统计行（`consume_pending_usage`），此时钟
+    /// 已不存在，需用冻结值兜底，否则统计行 t/s 恒为 "--"。
+    pub last_stream_tps: Option<f64>,
+    /// 流结束时冻结的总耗时（秒）。assistant 统计行的速率是**最终统计
+    /// 速度** = 结算输出 tokens（UsageInfo）/ 本次流总耗时，与输入栏的
+    /// 实时速率（`tokens_per_second`，流式估算）是两个不同指标（ui.md）。
+    pub last_stream_elapsed: Option<f64>,
     pub pending_usage: Option<(u32, u32, u32, u32, u32)>,
     pub next_message_id: u64,
     pub scroll: usize,
@@ -367,6 +377,8 @@ impl TabEntry {
             generating: false,
             stream_started_at: None,
             stream_output_tokens: 0,
+            last_stream_tps: None,
+            last_stream_elapsed: None,
             pending_usage: None,
             next_message_id: 0,
             scroll: 0,
@@ -430,6 +442,8 @@ impl TabEntry {
     pub fn flush_streaming(&mut self) {
         self.stream_started_at = None;
         self.stream_output_tokens = 0;
+        self.last_stream_tps = None;
+        self.last_stream_elapsed = None;
         if !self.streaming_text.is_empty() {
             let text = std::mem::take(&mut self.streaming_text);
             let lines = crate::image::split_image_markers(&text, LineType::Assistant);
@@ -437,17 +451,31 @@ impl TabEntry {
         }
     }
 
-    /// 停止生成：清除 generating 标记与流式计时器
+    /// 停止生成：冻结最终统计速度所需的总耗时与实时估算兜底值，
+    /// 并清除 generating 标记与流式计时器
     pub fn stop_generating(&mut self) {
+        // 冻结再清时钟：实时路径（event.rs）在渲染 Done 帧前调用本方法，
+        // 统计行渲染（consume_pending_usage）时实时速率已不可得。
+        // 统计行主指标是最终统计速度（结算输出 / 冻结总耗时，
+        // 见 final_token_speed）；冻结的实时估算仅作结算数据缺失时的兜底
+        self.last_stream_tps = self.tokens_per_second();
+        self.last_stream_elapsed = self.stream_started_at.map(|s| s.elapsed().as_secs_f64());
         self.generating = false;
         self.stream_started_at = None;
         self.stream_output_tokens = 0;
     }
 
-    /// 输出速率（ui.md 输入栏设计）：优先使用 provider 逐事件上报的输出 token
-    /// 增量（`AppState::apply_usage_delta` 累加的 `stream_output_tokens`），未收到
-    /// 增量时回落到「streaming_text 字符数 / 4 ≈ token 数」的估算。
+    /// 输出速率（ui.md 输入栏设计）：取「provider 上报的输出增量」
+    /// （`AppState::apply_usage_delta` 累加的 `stream_output_tokens`）与
+    /// 「字符数 / 4 ≈ token 数」估算的**较大者**，而非上报值短路。
+    /// 融合的原因：
+    /// - Anthropic `message_start` 携带 `output_tokens: 1`，若上报值短路，
+    ///   整个流会显示 `1/elapsed` 的近似冻结假速率；
+    /// - 推理（thinking）阶段没有 TextDelta，需要用 thinking 内容估算；
+    /// - 纯工具调用流无文本但有上报增量，用上报值。
     ///
+    /// 估算来源：`streaming_text` + 最后一条 Thinking 消息（仅当其为最新
+    /// 消息时计入，避免把上一轮遗留的 thinking 计入新一轮速率）。
     /// 流刚开始（< 0.5s，避免速率尖峰）或两种数据都没有时返回 None。
     pub fn tokens_per_second(&self) -> Option<f64> {
         let started = self.stream_started_at?;
@@ -455,33 +483,58 @@ impl TabEntry {
         if elapsed < 0.5 {
             return None;
         }
-        if self.stream_output_tokens > 0 {
-            // 精确值：provider 上报的输出 token；纯工具调用/纯推理流（无文本）同样有速率
-            return Some(self.stream_output_tokens as f64 / elapsed);
+        let mut estimated_tokens = self.streaming_text.chars().count() as f64 / 4.0;
+        if let Some(last) = self.messages.last()
+            && let LineType::Thinking = last.line_type
+        {
+            let content = last
+                .content
+                .strip_prefix("[Thinking] ")
+                .unwrap_or(&last.content);
+            estimated_tokens += content.chars().count() as f64 / 4.0;
         }
-        if self.streaming_text.is_empty() {
-            return None;
+        let tokens = self.stream_output_tokens as f64;
+        let tokens = tokens.max(estimated_tokens);
+        if tokens > 0.0 {
+            Some(tokens / elapsed)
+        } else {
+            None
         }
-        let chars = self.streaming_text.chars().count() as f64;
-        Some(chars / 4.0 / elapsed)
+    }
+
+    /// 最终统计速度（ui.md 对话栏设计）：assistant 统计行的速率取
+    /// 「结算输出 tokens（UsageInfo 的 output）」/「本次流总耗时」，
+    /// 与输入栏的实时速率（[`Self::tokens_per_second`]，流式估算）是
+    /// 两个不同指标。不受实时速率 0.5s 防尖峰守卫影响（快速回复也有值）。
+    /// 结算数据缺失（输出 tokens 为 0 或无冻结/进行中耗时）时退回流结束
+    /// 时冻结的实时估算；两者都不可得（如历史回放）时返回 None（显示 "--"）。
+    pub fn final_token_speed(&self, output_tokens: u32) -> Option<f64> {
+        let elapsed = self.last_stream_elapsed.or_else(|| {
+            // 防御路径：统计行在时钟清空前渲染时直接取当前耗时
+            self.stream_started_at.map(|s| s.elapsed().as_secs_f64())
+        });
+        if output_tokens > 0
+            && let Some(elapsed) = elapsed.filter(|e| *e > 0.0)
+        {
+            return Some(f64::from(output_tokens) / elapsed);
+        }
+        self.last_stream_tps
     }
 
     /// 消费 pending_usage，将 token 统计追加到最后一条 Assistant 消息或 streaming_text。
     /// 用于回放时在 UserMessage 和 Done 帧处理中追加 token footer。
     pub fn consume_pending_usage(&mut self) {
-        if let Some((it, ot, tc, ccit, crit)) = self.pending_usage.take() {
+        if let Some((it, ot, tc, ..)) = self.pending_usage.take() {
             let time = chrono::Local::now().format("%H:%M:%S");
-            let suffix = if ccit > 0 || crit > 0 {
-                format!(
-                    "\n\n[{} | Tokens: {} in / {} out | Cache: {} create / {} read | Tools: {}]",
-                    time, it, ot, ccit, crit, tc
-                )
-            } else {
-                format!(
-                    "\n\n[{} | Tokens: {} in / {} out | Tools: {}]",
-                    time, it, ot, tc
-                )
+            // ui.md 对话栏设计：统计行速率为最终统计速度（结算输出 tokens /
+            // 总耗时），与输入栏实时速率是两个指标；两者都不可得（如历史
+            // 回放）时显示 "--"
+            let tps = match self.final_token_speed(ot) {
+                Some(v) => format!("{v:.1}"),
+                None => "--".to_string(),
             };
+            let suffix =
+                format!("\n\n[{time} | Tokens {it} in / {ot} out on {tps} t/s | Tools: {tc}]");
             if !self.streaming_text.is_empty() {
                 // 有流式文本：追加到 streaming_text，flush 时一并成为本条 Assistant
                 self.streaming_text.push_str(&suffix);
@@ -615,6 +668,11 @@ impl TabEntry {
                     }
                 }
                 Some(server_message::Payload::ThinkingBlock(tb)) => {
+                    // thinking 也是输出：首个 thinking 块到达即启动速率时钟，
+                    // 否则推理阶段 tokens_per_second 会因无时钟而一直显示 "--"
+                    if self.stream_started_at.is_none() {
+                        self.stream_started_at = Some(std::time::Instant::now());
+                    }
                     let text = format!("[Thinking] {}", tb.thinking);
                     self.update_thinking(text);
                 }
@@ -984,6 +1042,21 @@ pub struct ConfirmState {
     pub other_active: bool,
 }
 
+/// 拆分 assistant 消息内容与尾部统计行。
+///
+/// 统计行由 `consume_pending_usage` 以 `\n\n[...]` 追加到内容末尾（含
+/// "| Tokens"），返回 `(正文, Some(统计行含方括号))`；无统计行时返回
+/// 原内容与 None。
+fn split_assistant_footer(content: &str) -> (&str, Option<&str>) {
+    if let Some(idx) = content.rfind("\n\n[") {
+        let footer = &content[idx + 2..];
+        if footer.ends_with(']') && footer.contains("| Tokens") {
+            return (&content[..idx], Some(footer));
+        }
+    }
+    (content, None)
+}
+
 pub struct MessageCache {
     pub msg_id: u64,
     pub msg_version: u64,
@@ -1005,16 +1078,21 @@ impl MessageCache {
         let base_style = Style::default().fg(theme::fg_for(msg.line_type.clone()));
         let lines: Vec<Line<'static>> = match msg.line_type {
             LineType::Assistant => {
+                // assistant 消息无边框渲染：markdown 内容占满整行宽度，内容尾部
+                // 若带统计行（consume_pending_usage 追加的
+                // `[time | Tokens ... | Tools: n]`）则作为页脚显示（与正文空一行）。
+                let inner_w = (width as usize).max(1);
+                let (body, footer) = split_assistant_footer(&msg.content);
                 // 第一步：用 syntect 高亮代码块，替换为标记
-                let (processed, highlighted_blocks) = process_code_blocks(&msg.content);
+                let (processed, highlighted_blocks) = process_code_blocks(body);
                 // 第二步：ratatui-markdown 渲染（代码块位置是标记）
                 use ratatui_markdown::markdown::MarkdownRenderer;
-                let renderer = MarkdownRenderer::new(width as usize);
+                let renderer = MarkdownRenderer::new(inner_w);
                 let blocks = renderer.parse(&processed);
                 let md_lines =
                     renderer.render(&blocks, &ratatui_markdown::theme::ThemeConfig::default());
                 // 第三步：将标记替换为 syntect 高亮行
-                md_lines
+                let body_lines: Vec<Line<'static>> = md_lines
                     .into_iter()
                     .flat_map(|l| {
                         let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -1024,17 +1102,27 @@ impl MessageCache {
                             && let Ok(idx) = id_tag[..end].parse::<usize>()
                             && idx < highlighted_blocks.len()
                         {
-                            // 代码行按宽度折行（保留语法高亮样式）。超宽的代码行
+                            // 代码行按内宽折行（保留语法高亮样式）。超宽的代码行
                             // 会被 render_block 的 Paragraph（无 Wrap）直接裁掉。
                             return highlighted_blocks[idx]
                                 .iter()
-                                .flat_map(|cl| wrap_styled_line(cl, width as usize))
+                                .flat_map(|cl| wrap_styled_line(cl, inner_w))
                                 .collect();
                         }
                         // 非代码行：白色
                         vec![Line::styled(text, Style::default().fg(theme::ASSISTANT_FG))]
                     })
-                    .collect()
+                    .collect();
+                // 第四步：页脚（正文与页脚之间空一行）
+                let footer_fg = Style::default().fg(theme::TOOL_RESULT_FG);
+                let mut out = body_lines;
+                if let Some(footer) = footer {
+                    out.push(Line::from(String::new()));
+                    for fl in wrap_text(footer, inner_w as u16) {
+                        out.push(Line::styled(fl, footer_fg));
+                    }
+                }
+                out
             }
             LineType::Image {
                 ref path,
@@ -1646,9 +1734,12 @@ impl AppState {
     pub fn set_generating(&mut self, v: bool) {
         let tab = self.active_tab_mut();
         tab.generating = v;
-        // 重新开始生成或停止生成都重置流式计时器（提交新请求 / 取消 / 会话切换）
+        // 重新开始生成或停止生成都重置流式计时器（提交新请求 / 取消 / 会话切换），
+        // 并清除冻结速率与冻结耗时，避免上一轮的值泄漏进本轮统计行
         tab.stream_started_at = None;
         tab.stream_output_tokens = 0;
+        tab.last_stream_tps = None;
+        tab.last_stream_elapsed = None;
     }
     pub fn clear_streaming(&mut self) {
         self.active_tab_mut().streaming_text.clear();
@@ -1878,6 +1969,11 @@ impl AppState {
         target.stream_output_tokens = target
             .stream_output_tokens
             .saturating_add(u64::from(output_tokens));
+        // 首个增量到达即启动速率时钟：纯 thinking / 工具调用流可能全程
+        // 没有 TextDelta，若无时钟 tokens_per_second 会一直返回 None
+        if target.stream_started_at.is_none() {
+            target.stream_started_at = Some(std::time::Instant::now());
+        }
     }
 
     /// 累计 provider 上报的成本（L3，状态栏展示）。

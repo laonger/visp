@@ -2225,10 +2225,7 @@ fn test_usage_hidden_tab_accumulates_l2_l3() {
     // Unknown session → hidden tab
     app.apply_usage_info("unknown-sub", 70, 15, 1, 4, 2);
     // No visible tab created
-    assert!(app
-        .tab_bar
-        .find_index_by_session("unknown-sub")
-        .is_none());
+    assert!(app.tab_bar.find_index_by_session("unknown-sub").is_none());
     // L1: routed to hidden tab
     let hidden = app
         .tab_bar
@@ -2651,7 +2648,8 @@ fn test_assistant_code_block_wraps_to_width() {
         let w = styled_line_display_width(l);
         assert!(w <= width as usize, "行宽 {w} 超过渲染宽度 {width}");
     }
-    // 代码内容无丢失（去行尾补齐空格后拼接还原）
+    // 代码内容无丢失（去行尾补齐空格后拼接还原）。
+    // assistant 消息无边框渲染，代码按渲染宽度折行。
     let joined: String = cache
         .lines
         .iter()
@@ -2803,15 +2801,13 @@ fn test_tokens_per_second_estimation() {
     assert_eq!(tab.tokens_per_second(), None);
 
     // 400 chars / 4 ≈ 100 tokens，2s → 50.0
-    tab.stream_started_at =
-        Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+    tab.stream_started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
     let tps = tab.tokens_per_second().unwrap();
     assert!((tps - 50.0).abs() < 0.1, "got {tps}");
 
     // 空文本：None（elapsed 足够长，仅因无文本）
     tab.streaming_text.clear();
-    tab.stream_started_at =
-        Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+    tab.stream_started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
     assert_eq!(tab.tokens_per_second(), None);
 }
 
@@ -2895,8 +2891,7 @@ fn test_tokens_per_second_prefers_reported_output_tokens() {
 
     // 只有 provider 上报的增量、没有流式文本（纯工具调用/纯推理场景）
     tab.stream_output_tokens = 100;
-    tab.stream_started_at =
-        Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+    tab.stream_started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
     let tps = tab
         .tokens_per_second()
         .expect("有上报增量时应给出速率（不依赖 streaming_text）");
@@ -2909,10 +2904,81 @@ fn test_tokens_per_second_prefers_reported_output_tokens() {
     // 无上报增量时回落字符估算：400 chars / 4 = 100 tokens, 2s -> 50.0
     tab.stream_output_tokens = 0;
     tab.streaming_text = "a".repeat(400);
-    tab.stream_started_at =
-        Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+    tab.stream_started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
     let tps = tab.tokens_per_second().unwrap();
     assert!((tps - 50.0).abs() < 0.1, "got {tps}");
+}
+
+#[test]
+fn test_tokens_per_second_trivial_reported_value_falls_back_to_estimate() {
+    // Anthropic message_start 携带 output_tokens=1：若上报值短路，整个流
+    // 都会显示 1/elapsed 的近似冻结假速率。修复后应回落字符估算。
+    let mut tab = TabEntry::new("sid", "agent");
+    tab.stream_output_tokens = 1;
+    tab.streaming_text = "a".repeat(400);
+    tab.stream_started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+    // 400 chars / 4 = 100 tokens, 2s -> 50.0（而非 1/2s = 0.5）
+    let tps = tab.tokens_per_second().unwrap();
+    assert!((tps - 50.0).abs() < 0.1, "got {tps}");
+
+    // 上报值足够大时仍以上报值为准：max(100, 100_est) -> 上报值优先路径
+    tab.stream_output_tokens = 200;
+    let tps = tab.tokens_per_second().unwrap();
+    assert!((tps - 100.0).abs() < 0.1, "got {tps}");
+}
+
+#[test]
+fn test_tokens_per_second_counts_thinking_output() {
+    // 推理（thinking）阶段没有 TextDelta：以最后一条 Thinking 消息估算速率
+    let mut tab = TabEntry::new("sid", "agent");
+    tab.stream_started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+    assert_eq!(tab.tokens_per_second(), None);
+
+    // 最后一条消息是 Thinking：内容计入估算（[Thinking] 前缀剥离）
+    tab.push_chat_line(
+        LineType::Thinking,
+        format!("[Thinking] {}", "a".repeat(400)),
+        None,
+    );
+    let tps = tab.tokens_per_second().unwrap();
+    assert!((tps - 50.0).abs() < 0.1, "got {tps}");
+
+    // 最后一条消息不再是 Thinking（Thinking 已被后续消息取代）：不计入，
+    // 避免把已结算的 thinking 重复累加
+    tab.push_chat_line(LineType::Assistant, "answer".into(), None);
+    tab.streaming_text = "a".repeat(400);
+    // 仅按 streaming_text（400 chars）估算
+    let tps = tab.tokens_per_second().unwrap();
+    assert!((tps - 50.0).abs() < 0.1, "got {tps}");
+    tab.streaming_text.clear();
+    assert_eq!(tab.tokens_per_second(), None);
+}
+
+#[test]
+fn test_thinking_block_starts_rate_clock() {
+    // ThinkingBlock 到达即启动 stream_started_at（修复推理阶段 tps 一直 "--"）
+    let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
+    assert!(app.active_tab().stream_started_at.is_none());
+    app.route_frame(visp_proto::visp::ServerMessage {
+        payload: Some(visp_proto::visp::server_message::Payload::ThinkingBlock(
+            visp_proto::visp::ThinkingBlock {
+                thinking: "推理中...".into(),
+                signature: String::new(),
+                session_id: String::new(),
+            },
+        )),
+    });
+    assert!(app.active_tab().stream_started_at.is_some());
+    assert_eq!(app.active_tab().stream_output_tokens, 0);
+}
+
+#[test]
+fn test_usage_delta_starts_rate_clock() {
+    // UsageDelta 到达即启动 stream_started_at：纯工具调用流可能全程无 TextDelta
+    let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
+    app.apply_usage_delta("sid", 5);
+    assert!(app.active_tab().stream_started_at.is_some());
+    assert_eq!(app.active_tab().stream_output_tokens, 5);
 }
 
 #[test]
@@ -2936,4 +3002,226 @@ fn test_stream_output_tokens_reset_with_timer() {
     app.apply_usage_delta("sid", 9);
     app.active_tab_mut().flush_streaming();
     assert_eq!(app.active_tab().stream_output_tokens, 0);
+}
+
+// ── assistant 块：统计行拆分与格式（ui.md 对话栏设计） ──────────
+
+#[test]
+fn test_split_assistant_footer() {
+    let content = "Hello\n\n[12:00:00 | Tokens 1 in / 2 out on 50.0 t/s | Tools: 3]";
+    let (body, footer) = crate::app::split_assistant_footer(content);
+    assert_eq!(body, "Hello");
+    assert_eq!(
+        footer,
+        Some("[12:00:00 | Tokens 1 in / 2 out on 50.0 t/s | Tools: 3]")
+    );
+}
+
+#[test]
+fn test_split_assistant_footer_not_misdetected() {
+    // 正文以 [...] 结尾但无 "| Tokens" → 不拆分
+    let plain = "arr = [1, 2]\n\n[see docs]";
+    let (body, footer) = crate::app::split_assistant_footer(plain);
+    assert_eq!(body, plain);
+    assert!(footer.is_none());
+    // "]" 之后还有正文 → 不拆分
+    let trailing = "a\n\n[x | Tokens 1 in / 2 out on -- t/s | Tools: 0] more text";
+    let (body, footer) = crate::app::split_assistant_footer(trailing);
+    assert_eq!(body, trailing);
+    assert!(footer.is_none());
+}
+
+#[test]
+fn test_consume_pending_usage_footer_format() {
+    // ui.md 对话栏设计：`[time | Tokens in / out on tps t/s | Tools: n]`，无 Cache
+    let mut tab = TabEntry::new("s", "a");
+    tab.streaming_text = "answer".into();
+    tab.pending_usage = Some((100, 50, 3, 0, 0));
+    tab.consume_pending_usage();
+    let footer = tab.streaming_text.trim_start_matches("answer\n\n");
+    assert!(footer.starts_with('[') && footer.ends_with(']'), "{footer}");
+    assert!(footer.contains("| Tokens 100 in / 50 out on"), "{footer}");
+    assert!(footer.contains("| Tools: 3]"), "{footer}");
+    assert!(!footer.contains("Cache"), "新格式不含 Cache：{footer}");
+    assert!(tab.pending_usage.is_none());
+}
+
+#[test]
+fn test_consume_pending_usage_tps_placeholder() {
+    // 流计时器不存在时速率显示 "--"
+    let mut tab = TabEntry::new("s", "a");
+    tab.streaming_text = "answer".into();
+    tab.pending_usage = Some((10, 5, 0, 0, 0));
+    tab.consume_pending_usage();
+    assert!(
+        tab.streaming_text.contains("on -- t/s"),
+        "无速率应显示 --：{}",
+        tab.streaming_text
+    );
+}
+
+#[test]
+fn test_consume_pending_usage_final_stat_speed() {
+    // ui.md 对话栏设计：统计行速率为最终统计速度 = 结算输出 tokens / 总耗时，
+    // 与输入栏实时速率（stream_output_tokens 流式估算）是两个不同指标
+    let mut tab = TabEntry::new("s", "a");
+    tab.streaming_text = "answer".into();
+    tab.stream_started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+    tab.stream_output_tokens = 100; // 实时估算 ≈ 100/2 = 50
+    tab.pending_usage = Some((10, 5, 0, 0, 0)); // 结算输出仅 5
+    tab.stop_generating();
+    tab.consume_pending_usage();
+    let footer = tab.streaming_text.trim_start_matches("answer\n\n");
+    let tps: f64 = footer
+        .split(" on ")
+        .nth(1)
+        .and_then(|s| s.split(" t/s").next())
+        .and_then(|s| s.parse().ok())
+        .expect("统计行应含数值速率");
+    // 最终统计速度 = 5 / 2s ≈ 2.5，而非实时估算的 ≈50
+    assert!((2.0..=3.0).contains(&tps), "最终统计速度 {tps} 应接近 2.5");
+}
+
+#[test]
+fn test_stop_generating_freezes_elapsed_for_footer() {
+    // Bug 回归：实时路径 event.rs 渲染 Done 帧前先 stop_generating（清时钟），
+    // consume_pending_usage 渲染统计行时实时速率已不可得。
+    // stop_generating 应冻结总耗时，统计行按「结算输出 / 冻结耗时」计算最终统计速度。
+    let mut tab = TabEntry::new("s", "a");
+    tab.streaming_text = "answer".into();
+    tab.stream_started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+    tab.stream_output_tokens = 100;
+    tab.stop_generating();
+    // 时钟与增量已清空，实时速率不可得
+    assert!(tab.stream_started_at.is_none());
+    assert_eq!(tab.stream_output_tokens, 0);
+    assert!(tab.tokens_per_second().is_none());
+    // 冻结总耗时 ≈ 2s；冻结实时估算 ≈ 100/2 = 50（结算数据缺失时兜底）
+    let elapsed = tab
+        .last_stream_elapsed
+        .expect("stop_generating 应冻结总耗时");
+    assert!(
+        (1.9..=2.5).contains(&elapsed),
+        "冻结耗时 {elapsed} 应接近 2s"
+    );
+    let frozen = tab
+        .last_stream_tps
+        .expect("stop_generating 应冻结实时估算兜底");
+    assert!(
+        (48.0..=50.0).contains(&frozen),
+        "冻结估算 {frozen} 应接近 50"
+    );
+
+    // 统计行渲染（时钟已清）应显示最终统计速度（结算输出 / 冻结耗时），而非 "--"
+    tab.pending_usage = Some((10, 5, 0, 0, 0));
+    tab.consume_pending_usage();
+    assert!(
+        !tab.streaming_text.contains("on -- t/s"),
+        "统计行应显示最终统计速度而非 --：{}",
+        tab.streaming_text
+    );
+    let footer = tab.streaming_text.trim_start_matches("answer\n\n");
+    let tps: f64 = footer
+        .split(" on ")
+        .nth(1)
+        .and_then(|s| s.split(" t/s").next())
+        .and_then(|s| s.parse().ok())
+        .expect("统计行应含数值速率");
+    assert!(
+        (2.0..=3.0).contains(&tps),
+        "最终统计速度 {tps} 应接近 5/2=2.5"
+    );
+}
+
+#[test]
+fn test_final_token_speed_fallbacks() {
+    // 结算输出为 0（结算数据缺失）→ 退回流结束冻结的实时估算
+    let mut tab = TabEntry::new("s", "a");
+    tab.stream_started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+    tab.stream_output_tokens = 100;
+    tab.stop_generating();
+    let frozen = tab.final_token_speed(0).expect("应退回冻结估算");
+    assert!(
+        (48.0..=50.0).contains(&frozen),
+        "兜底估算 {frozen} 应接近 50"
+    );
+    // 有结算数据：ot / 冻结耗时（主指标）
+    let main = tab.final_token_speed(5).expect("应有最终统计速度");
+    assert!(
+        (2.0..=3.0).contains(&main),
+        "最终统计速度 {main} 应接近 2.5"
+    );
+    // 两者都不可得（历史回放）→ None，统计行显示 "--"
+    let replay = TabEntry::new("s", "a");
+    assert!(replay.final_token_speed(5).is_none());
+}
+
+#[test]
+fn test_final_stat_speed_for_fast_reply() {
+    // Bug 回归：快速回复（< 0.5s）时实时速率被防尖峰守卫拦为 None，
+    // 旧实现统计行随之显示 "--"；最终统计速度不受该守卫影响
+    let mut tab = TabEntry::new("s", "a");
+    tab.streaming_text = "ok".into();
+    tab.stream_started_at = Some(std::time::Instant::now() - std::time::Duration::from_millis(200));
+    tab.stop_generating();
+    assert!(
+        tab.last_stream_tps.is_none(),
+        "< 0.5s 时实时估算应被守卫拦为 None"
+    );
+    tab.pending_usage = Some((10, 30, 0, 0, 0));
+    tab.consume_pending_usage();
+    let footer = tab.streaming_text.trim_start_matches("ok\n\n");
+    let tps: f64 = footer
+        .split(" on ")
+        .nth(1)
+        .and_then(|s| s.split(" t/s").next())
+        .and_then(|s| s.parse().ok())
+        .expect("快速回复的统计行也应含数值速率");
+    // 30 tokens / 0.2s ≈ 150（允许少量调度延迟）
+    assert!(
+        (90.0..=160.0).contains(&tps),
+        "最终统计速度 {tps} 应接近 150"
+    );
+}
+
+#[test]
+fn test_flush_streaming_clears_frozen_tps() {
+    // 冻结速率不得跨轮泄漏：流状态重置时一并清除
+    let mut tab = TabEntry::new("s", "a");
+    tab.stream_started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+    tab.stream_output_tokens = 100;
+    tab.stop_generating();
+    assert!(tab.last_stream_tps.is_some());
+
+    tab.flush_streaming();
+    assert!(
+        tab.last_stream_tps.is_none(),
+        "flush_streaming 应清除冻结速率"
+    );
+    assert!(
+        tab.last_stream_elapsed.is_none(),
+        "flush_streaming 应清除冻结耗时"
+    );
+}
+
+#[test]
+fn test_set_generating_clears_frozen_tps() {
+    // set_generating（提交新请求 / 取消）也应清除冻结速率
+    let mut app = AppState::new("s".into(), "m".into(), "".into(), String::new());
+    let tab = app.active_tab_mut();
+    tab.stream_started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+    tab.stream_output_tokens = 100;
+    tab.stop_generating();
+    assert!(tab.last_stream_tps.is_some());
+    assert!(tab.last_stream_elapsed.is_some());
+
+    app.set_generating(false);
+    assert!(
+        app.active_tab().last_stream_tps.is_none(),
+        "set_generating 应清除冻结速率"
+    );
+    assert!(
+        app.active_tab().last_stream_elapsed.is_none(),
+        "set_generating 应清除冻结耗时"
+    );
 }

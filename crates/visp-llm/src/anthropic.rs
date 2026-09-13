@@ -1026,8 +1026,8 @@ fn byte_stream_to_chat_events(
                 let delta_out = output_tokens.saturating_sub(state.reported_output_tokens);
                 let delta_cc = cache_creation_input_tokens
                     .saturating_sub(state.reported_cache_creation_input_tokens);
-                let delta_cr = cache_read_input_tokens
-                    .saturating_sub(state.reported_cache_read_input_tokens);
+                let delta_cr =
+                    cache_read_input_tokens.saturating_sub(state.reported_cache_read_input_tokens);
                 // 已上报值只增不减（message_delta 只携带 output_tokens，其余字段为 0，
                 // 不应把已上报的 input/cache 值回退）
                 state.reported_input_tokens = state.reported_input_tokens.max(input_tokens);

@@ -563,9 +563,14 @@ fn test_render_generating_box_shows_tokens_per_second() {
         .collect();
 
     assert!(
-        lines.iter().any(|l| l.contains("Generating") && l.contains("tokens/s output")),
+        lines
+            .iter()
+            .any(|l| l.contains("Generating") && l.contains("tokens/s output")),
         "应有 Generating 状态框：{:?}",
-        lines.iter().filter(|l| l.contains("Generating")).collect::<Vec<_>>()
+        lines
+            .iter()
+            .filter(|l| l.contains("Generating"))
+            .collect::<Vec<_>>()
     );
     // 解析速率数值：elapsed 略大于 2s，速率应在 (48, 50] 区间
     let line = lines
@@ -580,8 +585,6 @@ fn test_render_generating_box_shows_tokens_per_second() {
         (48.0..=50.0).contains(&tps),
         "速率 {tps} 应接近 100 tokens / 2s = 50"
     );
-    // 输入栏高度至少 4 行（上下边框 + 空行 + 内容行）：边框应出现
-    assert!(lines.iter().any(|l| l.contains("└") && l.contains("┘")));
 }
 
 #[test]
@@ -605,6 +608,117 @@ fn test_render_generating_box_rate_pending_shows_placeholder() {
     assert!(
         lines.iter().any(|l| l.contains("-- tokens/s output")),
         "速率未就绪应显示 --：{:?}",
-        lines.iter().filter(|l| l.contains("Generating")).collect::<Vec<_>>()
+        lines
+            .iter()
+            .filter(|l| l.contains("Generating"))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_generating_input_area_same_height_as_idle() {
+    // 回归：推理时输入框曾塌缩为 1 行状态条。要求推理状态与输入状态
+    // 保持同一几何高度——占位内容行应渲染在同一屏幕行上
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+
+    let render_rows = |app: &mut AppState| -> Vec<String> {
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::ui::render(app, f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        buffer
+            .content()
+            .chunks(buffer.area().width as usize)
+            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .collect()
+    };
+
+    let idle_y = render_rows(&mut app)
+        .iter()
+        .position(|l| l.contains("Type your message..."))
+        .expect("idle 应有输入占位");
+
+    app.set_generating(true);
+    let gen_rows = render_rows(&mut app);
+    let gen_y = gen_rows
+        .iter()
+        .position(|l| l.contains("Generating"))
+        .expect("推理中应有 Generating 状态占位");
+    assert_eq!(
+        idle_y, gen_y,
+        "推理时输入框内容行位置应与输入状态一致（同一高度）"
+    );
+}
+
+// ── 对话栏：assistant 消息（无边框）+ 统计页脚 ──────────
+
+#[test]
+fn test_render_assistant_block_plain_and_footer() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.add_message(LineType::Assistant, "Hello world".into());
+    let footer_text = "[12:00:00 | Tokens 1234 in / 567 out on 50.0 t/s | Tools: 3]";
+    app.active_tab_mut().messages[0]
+        .content
+        .push_str(&format!("\n\n{footer_text}"));
+    app.active_tab_mut().messages[0].version += 1;
+
+    let backend = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::ui::render(&mut app, f)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let lines: Vec<String> = buffer
+        .content()
+        .chunks(buffer.area().width as usize)
+        .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+        .collect();
+
+    // 无边框设计：正文行不再有 │ / ┌ / └ 包裹
+    let body = lines
+        .iter()
+        .find(|l| l.contains("Hello world"))
+        .expect("应有正文行");
+    assert!(
+        !body.contains('│') && !body.contains('┌') && !body.contains('└'),
+        "正文行不应有边框：{body:?}"
+    );
+    // 统计页脚仍显示，且无边框
+    let footer_line = lines
+        .iter()
+        .find(|l| l.contains(footer_text))
+        .expect("应有统计页脚");
+    assert!(
+        !footer_line.contains('│') && !footer_line.contains('┌') && !footer_line.contains('└'),
+        "统计行不应有边框：{footer_line:?}"
+    );
+}
+
+#[test]
+fn test_render_assistant_block_without_footer_plain() {
+    // 无统计行（usage 未消费）时同样无边框，只是没有页脚
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.add_message(LineType::Assistant, "Just text".into());
+
+    let backend = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::ui::render(&mut app, f)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let lines: Vec<String> = buffer
+        .content()
+        .chunks(buffer.area().width as usize)
+        .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+        .collect();
+    let body = lines
+        .iter()
+        .find(|l| l.contains("Just text"))
+        .expect("应有正文行");
+    assert!(
+        !body.contains('│') && !body.contains('┌') && !body.contains('└'),
+        "正文行不应有边框：{body:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains("| Tokens")),
+        "无 usage 时不应有统计行"
     );
 }
