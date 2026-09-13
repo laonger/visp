@@ -97,7 +97,7 @@ fn test_format_status_tokens() {
     app.total_cache_read_input_tokens = 10000;
     assert_eq!(
         format_status_tokens(&app),
-        "Tokens: 1,234 input / 567 output | Cache: 89 create / 10,000 read"
+        "Tokens: 1.2k i / 0.6k o | Cache: 89 c / 10.0k r"
     );
 }
 
@@ -149,19 +149,22 @@ fn test_render_status_bar_two_rows() {
 
 #[test]
 fn test_format_number_compression() {
-    // 阈值以内：千位分隔符（“超过一万”指严格大于）
+    // 阈值以内原样显示（“超过 100”指严格大于）
     assert_eq!(format_number(0), "0");
-    assert_eq!(format_number(9_999), "9,999");
-    assert_eq!(format_number(10_000), "10,000");
-    // 超过一万 → k（两位小数）
-    assert_eq!(format_number(10_001), "10.00k");
-    assert_eq!(format_number(123_456), "123.46k");
-    // 超过一千万 → m
-    assert_eq!(format_number(10_000_001), "10.00m");
-    assert_eq!(format_number(12_345_678), "12.35m");
-    // 超过一百亿 → b
-    assert_eq!(format_number(10_000_000_001), "10.00b");
-    assert_eq!(format_number(987_654_321_098), "987.65b");
+    assert_eq!(format_number(89), "89");
+    assert_eq!(format_number(100), "100");
+    // 超过 100 → k（一位小数，形如 0.xk）
+    assert_eq!(format_number(101), "0.1k");
+    assert_eq!(format_number(567), "0.6k");
+    assert_eq!(format_number(10_001), "10.0k");
+    assert_eq!(format_number(56_789), "56.8k");
+    // 超过十万 → m
+    assert_eq!(format_number(100_001), "0.1m");
+    assert_eq!(format_number(123_456), "0.1m");
+    assert_eq!(format_number(12_345_678), "12.3m");
+    // 超过亿 → b
+    assert_eq!(format_number(100_000_001), "0.1b");
+    assert_eq!(format_number(987_654_321_098), "987.7b");
 }
 
 #[test]
@@ -173,7 +176,7 @@ fn test_format_status_tokens_compression() {
     app.total_cache_read_input_tokens = 10_000_001;
     assert_eq!(
         format_status_tokens(&app),
-        "Tokens: 123.46k input / 12.35m output | Cache: 89 create / 10.00m read"
+        "Tokens: 0.1m i / 12.3m o | Cache: 89 c / 10.0m r"
     );
 }
 

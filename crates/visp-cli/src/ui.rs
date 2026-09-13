@@ -17,31 +17,18 @@ use crate::app::{
 use crate::debug_log;
 
 /// 将 token 数值格式化（状态栏右侧统计）：
-/// 超过 1 万 → `10.xxk`，超过 1 千万 → `10.xxm`，超过 1 百亿 → `10.xxb`
-/// （均为两位小数）；阈值以内保持千位分隔符形式。
+/// 超过 100 → `0.xk`，超过十万 → `0.xm`，超过亿 → `0.xb`（均为一位小数，
+/// 取使商大于 0.1 的最大单位）；阈值以内原样显示。
 fn format_number(n: u64) -> String {
-    if n > 10_000_000_000 {
-        format!("{:.2}b", n as f64 / 1_000_000_000.0)
-    } else if n > 10_000_000 {
-        format!("{:.2}m", n as f64 / 1_000_000.0)
-    } else if n > 10_000 {
-        format!("{:.2}k", n as f64 / 1_000.0)
+    if n > 100_000_000 {
+        format!("{:.1}b", n as f64 / 1_000_000_000.0)
+    } else if n > 100_000 {
+        format!("{:.1}m", n as f64 / 1_000_000.0)
+    } else if n > 100 {
+        format!("{:.1}k", n as f64 / 1_000.0)
     } else {
-        format_thousands(n)
+        n.to_string()
     }
-}
-
-/// 千位分隔符形式，如 `1234567` → `1,234,567`
-fn format_thousands(n: u64) -> String {
-    let s = n.to_string();
-    let mut result = String::with_capacity(s.len() + s.len() / 3);
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i).is_multiple_of(3) {
-            result.push(',');
-        }
-        result.push(c);
-    }
-    result
 }
 
 use crate::theme;
@@ -1215,7 +1202,7 @@ fn format_status_left(session_id: &str, model_key: &str, generating: bool) -> St
 /// 格式化状态栏第 2 行右侧 token / cache 统计
 fn format_status_tokens(app: &AppState) -> String {
     let base = format!(
-        "Tokens: {} input / {} output | Cache: {} create / {} read",
+        "Tokens: {} i / {} o | Cache: {} c / {} r",
         format_number(app.total_input_tokens as u64),
         format_number(app.total_output_tokens as u64),
         format_number(app.total_cache_creation_input_tokens as u64),
