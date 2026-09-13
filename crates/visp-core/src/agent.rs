@@ -48,6 +48,15 @@ pub enum AgentEvent {
         tool_calls: u32,
         cache_creation_input_tokens: u32,
         cache_read_input_tokens: u32,
+        /// 本次请求的累计成本（provider 提供时才有值）
+        cost: Option<f64>,
+    },
+    /// 逐 chunk 的 token 增量（用于实时速率显示，不参与最终总量结算）
+    UsageDelta {
+        input_tokens: u32,
+        output_tokens: u32,
+        cache_creation_input_tokens: u32,
+        cache_read_input_tokens: u32,
     },
     /// 工具调用请求
     ToolCallRequest {
@@ -107,6 +116,15 @@ pub enum AgentMessage {
         input_tokens: u32,
         output_tokens: u32,
         tool_calls: u32,
+        cache_creation_input_tokens: u32,
+        cache_read_input_tokens: u32,
+        /// 本次请求的累计成本（provider 提供时才有值）
+        cost: Option<f64>,
+    },
+    /// 逐 chunk 的 token 增量（用于实时速率显示，不参与最终总量结算）
+    UsageDelta {
+        input_tokens: u32,
+        output_tokens: u32,
         cache_creation_input_tokens: u32,
         cache_read_input_tokens: u32,
     },
@@ -2044,6 +2062,7 @@ mod tests {
                 tool_calls: 0,
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
+                cost: None,
             },
             ChatEvent::Done,
         ]]));

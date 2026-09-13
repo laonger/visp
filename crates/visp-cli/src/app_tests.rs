@@ -1635,6 +1635,7 @@ fn make_usage_info_frame(
                 session_id: sid.into(),
                 cache_creation_input_tokens: cache_create,
                 cache_read_input_tokens: cache_read,
+                cost: 0.0,
             },
         )),
     }
@@ -2209,13 +2210,55 @@ fn test_e2e_token_l1_preserved_for_render_pending() {
     );
     // No Usage message added (render_pending appends to assistant text)
     assert!(app.tab_bar.tabs[1].messages.is_empty());
-    // Sub-agent tokens NOT accumulated to L2 (orchestrator forwards them separately)
+    // Sub-agent tokens accumulated to L2 (汇聚到"本次请求"，与设计文档一致)
+    assert_eq!(app.current_request_usage, (100, 200, 10, 20));
+    // L3 updated for sub-agent as well
+    assert_eq!(app.total_input_tokens, 100);
+    assert_eq!(app.total_output_tokens, 200);
+    assert_eq!(app.total_cache_creation_input_tokens, 10);
+    assert_eq!(app.total_cache_read_input_tokens, 20);
+}
+
+#[test]
+fn test_usage_hidden_tab_accumulates_l2_l3() {
+    let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
+    // Unknown session → hidden tab
+    app.apply_usage_info("unknown-sub", 70, 15, 1, 4, 2);
+    // No visible tab created
+    assert!(app
+        .tab_bar
+        .find_index_by_session("unknown-sub")
+        .is_none());
+    // L1: routed to hidden tab
+    let hidden = app
+        .tab_bar
+        .hidden_tabs
+        .iter()
+        .find(|t| t.session_id == "unknown-sub")
+        .expect("hidden tab should be created");
+    assert_eq!(hidden.pending_usage, Some((70, 15, 1, 4, 2)));
+    // L2/L3 accumulated
+    assert_eq!(app.current_request_usage, (70, 15, 4, 2));
+    assert_eq!(app.total_input_tokens, 70);
+}
+
+#[test]
+fn test_e2e_token_sub_usage_merges_into_l2_l3() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.tab_bar.insert_sub_agent("sub1", "agentA", false);
+    // main turn 1 → sub agent request (parallel) → main turn 2
+    app.apply_usage_info("main", 50, 80, 2, 5, 10);
+    app.apply_usage_info("sub1", 100, 200, 5, 10, 20);
+    app.apply_usage_info("main", 30, 40, 1, 3, 5);
+    // L2 = main + sub（input, output, cache_create, cache_read）
+    assert_eq!(app.current_request_usage, (180, 320, 18, 35));
+    // Done for main → L2 cleared, L3 keeps combined totals
+    app.apply_done_token_settlement("main");
     assert_eq!(app.current_request_usage, (0, 0, 0, 0));
-    // L3 NOT updated for sub-agent (orchestrator forwards via parent session_id)
-    assert_eq!(app.total_input_tokens, 0);
-    assert_eq!(app.total_output_tokens, 0);
-    assert_eq!(app.total_cache_creation_input_tokens, 0);
-    assert_eq!(app.total_cache_read_input_tokens, 0);
+    assert_eq!(app.total_input_tokens, 180);
+    assert_eq!(app.total_output_tokens, 320);
+    assert_eq!(app.total_cache_creation_input_tokens, 18);
+    assert_eq!(app.total_cache_read_input_tokens, 35);
 }
 
 #[test]
@@ -2706,4 +2749,104 @@ fn test_scrollbar_drag_monotonic_and_bounded() {
         assert!(s <= max_scroll, "映射结果不得超过最大滚动偏移");
         prev = s;
     }
+}
+
+// ════════════════════════════════════════════════════════════
+// 流式输出速率（ui.md 输入栏设计）
+// ════════════════════════════════════════════════════════════
+
+#[test]
+fn test_stream_timer_arms_on_text_delta_and_clears_on_done() {
+    let mut tab = TabEntry::new("sid", "agent");
+    assert!(tab.stream_started_at.is_none());
+
+    // 首个 TextDelta 启用计时器
+    tab.frames.push(td("Hello "));
+    tab.render_pending();
+    assert!(tab.stream_started_at.is_some());
+
+    // 后续 TextDelta 不重置计时器
+    let first = tab.stream_started_at.unwrap();
+    tab.frames.push(td("world"));
+    tab.render_pending();
+    assert_eq!(tab.stream_started_at, Some(first));
+
+    // Done 清除计时器
+    tab.frames.push(done_msg());
+    tab.render_pending();
+    assert!(tab.stream_started_at.is_none());
+    assert!(!tab.generating);
+}
+
+#[test]
+fn test_stream_timer_clears_on_error() {
+    let mut tab = TabEntry::new("sid", "agent");
+    tab.frames.push(td("partial"));
+    tab.render_pending();
+    assert!(tab.stream_started_at.is_some());
+
+    tab.frames.push(error_msg("abort", "cancelled"));
+    tab.render_pending();
+    assert!(tab.stream_started_at.is_none());
+    assert!(!tab.generating);
+}
+
+#[test]
+fn test_tokens_per_second_estimation() {
+    // 无流式输出：None
+    let mut tab = TabEntry::new("sid", "agent");
+    assert_eq!(tab.tokens_per_second(), None);
+
+    // 流刚开始（< 0.5s）：None（避免短暂速率尖峰）
+    tab.frames.push(td(&"a".repeat(400)));
+    tab.render_pending();
+    assert_eq!(tab.tokens_per_second(), None);
+
+    // 400 chars / 4 ≈ 100 tokens，2s → 50.0
+    tab.stream_started_at =
+        Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+    let tps = tab.tokens_per_second().unwrap();
+    assert!((tps - 50.0).abs() < 0.1, "got {tps}");
+
+    // 空文本：None（elapsed 足够长，仅因无文本）
+    tab.streaming_text.clear();
+    tab.stream_started_at =
+        Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+    assert_eq!(tab.tokens_per_second(), None);
+}
+
+#[test]
+fn test_stop_generating_and_set_generating_reset_timer() {
+    let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
+    app.set_generating(true);
+    app.append_streaming("hello");
+    app.active_tab_mut().stream_started_at = Some(std::time::Instant::now());
+    assert!(app.active_tab().stream_started_at.is_some());
+
+    // set_generating(false)（取消路径）重置计时器
+    app.set_generating(false);
+    assert!(app.active_tab().stream_started_at.is_none());
+
+    // 重新开始生成同样重置
+    app.active_tab_mut().stream_started_at = Some(std::time::Instant::now());
+    app.set_generating(true);
+    assert!(app.active_tab().stream_started_at.is_none());
+
+    // stop_generating 双清
+    app.active_tab_mut().stream_started_at = Some(std::time::Instant::now());
+    app.active_tab_mut().stop_generating();
+    assert!(!app.active_tab().generating);
+    assert!(app.active_tab().stream_started_at.is_none());
+}
+
+#[test]
+fn test_flush_streaming_resets_timer() {
+    let mut tab = TabEntry::new("sid", "agent");
+    tab.frames.push(td("chunk"));
+    tab.render_pending();
+    assert!(tab.stream_started_at.is_some());
+
+    tab.flush_streaming();
+    assert!(tab.stream_started_at.is_none());
+    assert!(tab.streaming_text.is_empty());
 }

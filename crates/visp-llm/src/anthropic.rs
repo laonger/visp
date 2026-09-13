@@ -866,6 +866,7 @@ fn byte_stream_to_chat_events(
                         tool_calls: 0,
                         cache_creation_input_tokens: state.cache_creation_input_tokens,
                         cache_read_input_tokens: state.cache_read_input_tokens,
+                        cost: None,
                     }),
                     state,
                 ));
@@ -1007,6 +1008,7 @@ fn byte_stream_to_chat_events(
                     tool_calls: 0,
                     cache_creation_input_tokens: state.cache_creation_input_tokens,
                     cache_read_input_tokens: state.cache_read_input_tokens,
+                    cost: None,
                 }
             }
 

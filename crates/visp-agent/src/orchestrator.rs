@@ -245,6 +245,9 @@ impl Orchestrator {
             AgentMessage::UsageInfo { .. } => {
                 // UsageInfo 已由 run_agent_loop 直接送达 CLI
             }
+            AgentMessage::UsageDelta { .. } => {
+                // 逐 chunk 增量同样由 run_agent_loop 直送 CLI，此处不重复转发
+            }
             AgentMessage::StatusUpdate(_) => {
                 // StatusUpdate 已由 run_agent_loop 直接送达 CLI
             }

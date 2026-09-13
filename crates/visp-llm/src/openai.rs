@@ -21,6 +21,61 @@ fn is_valid_json_args(s: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(s).is_ok()
 }
 
+/// 是否在请求体中携带 `stream_options.include_usage`（默认开启）。
+///
+/// provider 通过该字段在流末尾返回 token 用量；部分严格的网关/代理会因未知
+/// 字段返回 400（如 opencode zen 会插入非标准空 chunk），可通过 extra 关闭：
+/// `stream_options = "false"`。
+fn stream_include_usage(config: &LlmConfig) -> bool {
+    match config.extra.get("stream_options") {
+        None => true,
+        Some(v) if v.eq_ignore_ascii_case("true") => true,
+        Some(v) if v.eq_ignore_ascii_case("false") => false,
+        Some(v) => {
+            tracing::warn!(
+                value = %v,
+                "unknown extra `stream_options` value, falling back to true"
+            );
+            true
+        }
+    }
+}
+
+/// 流式 usage 的累加语义（extra `usage_mode`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UsageMode {
+    /// 每个 chunk 的 usage 是从请求开始累计的总量（OpenAI 规范），逐 chunk 差分。
+    Cumulative,
+    /// 每个 chunk 的 usage 是该 chunk 自身的增量，直接累加。
+    Delta,
+}
+
+/// 解析 extra `usage_mode`，缺省/未知值回退 `Cumulative`。
+fn parse_usage_mode(config: &LlmConfig) -> UsageMode {
+    match config.extra.get("usage_mode") {
+        None => UsageMode::Cumulative,
+        Some(v) if v.eq_ignore_ascii_case("cumulative") => UsageMode::Cumulative,
+        Some(v) if v.eq_ignore_ascii_case("delta") => UsageMode::Delta,
+        Some(v) => {
+            tracing::warn!(
+                value = %v,
+                "unknown extra `usage_mode` value, falling back to cumulative"
+            );
+            UsageMode::Cumulative
+        }
+    }
+}
+
+/// 解析 cost 字段：接受 JSON 数字或字符串形式的数字（opencode zen 用字符串）。
+fn parse_cost(v: Option<&serde_json::Value>) -> Option<f64> {
+    let parsed = match v? {
+        serde_json::Value::Number(n) => n.as_f64()?,
+        serde_json::Value::String(s) => s.trim().parse::<f64>().ok()?,
+        _ => return None,
+    };
+    parsed.is_finite().then_some(parsed)
+}
+
 /// 构建 OpenAI API 请求体
 pub fn build_openai_request(
     messages: &[Message],
@@ -35,8 +90,12 @@ pub fn build_openai_request(
         "max_tokens": config.max_tokens,
         "temperature": config.temperature,
         "stream": true,
-        "stream_options": {"include_usage": true},
     });
+
+    // stream_options.include_usage：让 provider 在流末尾返回 token 用量
+    if stream_include_usage(config) {
+        request["stream_options"] = serde_json::json!({"include_usage": true});
+    }
 
     // 添加工具定义（use_tool = false 时不携带）
     if config.use_tool && !tools.is_empty() {
@@ -326,12 +385,15 @@ pub(crate) enum OpenAiStreamEvent {
         index: usize,
         reason: Option<String>,
     },
-    /// token 用量
+    /// token 用量。
+    /// `cost` 来自部分网关（如 opencode zen）的 usage 对象或流末尾非标准帧
+    /// `{"choices":[],"cost":"0.0012"}`。
     Usage {
         input_tokens: u32,
         output_tokens: u32,
         cache_creation_input_tokens: u32,
         cache_read_input_tokens: u32,
+        cost: Option<f64>,
     },
     /// 流结束标记 `[DONE]`
     StreamEnd,
@@ -361,11 +423,16 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<Vec<OpenAiStreamEvent>
     let v: serde_json::Value = serde_json::from_str(data)
         .map_err(|e| LlmError::Stream(format!("parse openai data: {e}")))?;
 
-    // 检查 usage（跳过 "usage": null，部分 provider 在非最终 chunk 中发送 null）。
+    // usage 解析：token 用量在 `usage` 对象内（OpenAI 规范），cost 可能出现在
+    // usage 对象内，也可能以**帧顶层** `cost` 字段出现在非标准帧中
+    // （opencode zen 会在流末尾追加 `{"choices":[],"cost":"0"}`）。
     // 注意：OpenAI 官方约定只有最后一个 chunk 带 usage 且 choices 为空，但部分
-    // 兼容网关（如 opencode zen）在每个 chunk 都附带增量 usage。因此这里先解析
+    // 兼容网关（如 opencode zen）在每个 chunk 都附带 usage。因此这里先解析
     // 暂存，不让 usage 分支拦截同 chunk 中 delta 内容的解析。
+    // 注意 2：usage 的累加语义（累计总量 / 单 chunk 增量）由 `extra.usage_mode`
+    // 决定，在状态机中处理，这里只做字段提取。
     let mut usage_events: Vec<OpenAiStreamEvent> = Vec::new();
+    let mut cost = parse_cost(v.get("cost"));
     if let Some(usage) = v.get("usage").filter(|u| !u.is_null()) {
         let input_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
         let output_tokens = usage["completion_tokens"].as_u64().unwrap_or(0) as u32;
@@ -389,14 +456,27 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<Vec<OpenAiStreamEvent>
         } else {
             cache_read
         };
-        if input_tokens > 0 || output_tokens > 0 {
+        if cost.is_none() {
+            cost = parse_cost(usage.get("cost"));
+        }
+        if input_tokens > 0 || output_tokens > 0 || cost.is_some() {
             usage_events.push(OpenAiStreamEvent::Usage {
                 input_tokens,
                 output_tokens,
                 cache_creation_input_tokens: cache_creation,
                 cache_read_input_tokens: cache_read,
+                cost,
             });
         }
+    } else if let Some(c) = cost {
+        // 非标准尾帧：只有顶层 cost，没有 usage 对象
+        usage_events.push(OpenAiStreamEvent::Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            cost: Some(c),
+        });
     }
 
     // 解析 choices
@@ -556,12 +636,11 @@ fn truncate_for_log(s: &str, max_chars: usize) -> &str {
     }
 }
 
-/// 将 OpenAI SSE 字节流转换为 ChatEvent 流
+/// 将 OpenAI SSE 字节流转换为 ChatEvent 流（默认 usage 累计语义）
 ///
-/// OpenAI 的 SSE 格式简单：
-/// - 每条消息以 `data: ` 开头，空行分隔
-/// - 流结束标记为 `data: [DONE]`
-/// - 每个 data 行可能包含 usage、choices 中的 text delta 或 tool calls delta
+/// 仅供测试使用的便捷入口；生产路径请调用 [`byte_stream_to_chat_events_with_mode`]，
+/// 由 `extra.usage_mode` 决定 usage 累加语义。
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn byte_stream_to_chat_events(
     byte_stream: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
@@ -572,6 +651,39 @@ fn byte_stream_to_chat_events(
     langfuse_capture_output: bool,
     langfuse_capture_max_chars: usize,
     langfuse_redact_secrets: bool,
+) -> Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>> {
+    byte_stream_to_chat_events_with_mode(
+        byte_stream,
+        start_time,
+        span,
+        request_model,
+        project_path,
+        langfuse_capture_output,
+        langfuse_capture_max_chars,
+        langfuse_redact_secrets,
+        UsageMode::Cumulative,
+    )
+}
+
+/// 将 OpenAI SSE 字节流转换为 ChatEvent 流
+///
+/// OpenAI 的 SSE 格式简单：
+/// - 每条消息以 `data: ` 开头，空行分隔
+/// - 流结束标记为 `data: [DONE]`
+/// - 每个 data 行可能包含 usage、choices 中的 text delta 或 tool calls delta
+///
+/// `usage_mode` 决定 chunk 内 usage 的解释方式（累计总量 vs 单 chunk 增量）。
+#[allow(clippy::too_many_arguments)]
+fn byte_stream_to_chat_events_with_mode(
+    byte_stream: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+    start_time: std::time::Instant,
+    span: tracing::Span,
+    request_model: String,
+    project_path: String,
+    langfuse_capture_output: bool,
+    langfuse_capture_max_chars: usize,
+    langfuse_redact_secrets: bool,
+    usage_mode: UsageMode,
 ) -> Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>> {
     struct StreamState {
         stream: Pin<Box<dyn Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send>>,
@@ -594,6 +706,10 @@ fn byte_stream_to_chat_events(
         output_tokens: u32,
         cache_creation_input_tokens: u32,
         cache_read_input_tokens: u32,
+        /// usage 累加语义（累计总量 / 单 chunk 增量），来自 `extra.usage_mode`
+        usage_mode: UsageMode,
+        /// 累积成本（provider 提供时才有值，如 opencode zen 的 cost 字段）
+        cost: Option<f64>,
         /// 响应模型名称（从 chunk 顶层 model 字段提取）
         model: String,
         /// 请求时的模型名称（用于 response model 为空时的 fallback）
@@ -758,18 +874,73 @@ fn byte_stream_to_chat_events(
                 output_tokens,
                 cache_creation_input_tokens,
                 cache_read_input_tokens,
+                cost,
             } => {
-                if input_tokens > 0 {
-                    state.input_tokens = input_tokens;
+                // 依 usage_mode 解释本次 usage：cumulative 模式下是「从请求开始的
+                // 累计总量」，需与上一轮求差分；delta 模式下本身就是增量。
+                let (delta_in, delta_out, delta_cc, delta_cr) = match state.usage_mode {
+                    UsageMode::Cumulative => {
+                        let d = (
+                            input_tokens.saturating_sub(state.input_tokens),
+                            output_tokens.saturating_sub(state.output_tokens),
+                            cache_creation_input_tokens
+                                .saturating_sub(state.cache_creation_input_tokens),
+                            cache_read_input_tokens.saturating_sub(state.cache_read_input_tokens),
+                        );
+                        // 状态里保存累计值（可回退的场景也只在增大时覆盖）
+                        if input_tokens > 0 {
+                            state.input_tokens = input_tokens;
+                        }
+                        if output_tokens > 0 {
+                            state.output_tokens = output_tokens;
+                        }
+                        if cache_creation_input_tokens > 0 {
+                            state.cache_creation_input_tokens = cache_creation_input_tokens;
+                        }
+                        if cache_read_input_tokens > 0 {
+                            state.cache_read_input_tokens = cache_read_input_tokens;
+                        }
+                        d
+                    }
+                    UsageMode::Delta => {
+                        // 增量语义：累加到总量（修复此前「后值覆盖前值」导致
+                        // 增量型网关总量偏小的 bug）
+                        state.input_tokens = state.input_tokens.saturating_add(input_tokens);
+                        state.output_tokens = state.output_tokens.saturating_add(output_tokens);
+                        state.cache_creation_input_tokens = state
+                            .cache_creation_input_tokens
+                            .saturating_add(cache_creation_input_tokens);
+                        state.cache_read_input_tokens = state
+                            .cache_read_input_tokens
+                            .saturating_add(cache_read_input_tokens);
+                        (
+                            input_tokens,
+                            output_tokens,
+                            cache_creation_input_tokens,
+                            cache_read_input_tokens,
+                        )
+                    }
+                };
+
+                if let Some(c) = cost {
+                    state.cost = Some(match (state.usage_mode, state.cost) {
+                        // 累计语义：后到的值就是新的累计值
+                        (UsageMode::Cumulative, _) => c,
+                        // 增量语义：逐次累加
+                        (UsageMode::Delta, Some(prev)) => prev + c,
+                        (UsageMode::Delta, None) => c,
+                    });
                 }
-                if output_tokens > 0 {
-                    state.output_tokens = output_tokens;
-                }
-                if cache_creation_input_tokens > 0 {
-                    state.cache_creation_input_tokens = cache_creation_input_tokens;
-                }
-                if cache_read_input_tokens > 0 {
-                    state.cache_read_input_tokens = cache_read_input_tokens;
+
+                // 逐 chunk 上报增量（供 CLI 实时速率显示；最终总量仍以流末
+                // UsageInfo 为准，因此调用方不应把它累加进结算统计）
+                if delta_in > 0 || delta_out > 0 || delta_cc > 0 || delta_cr > 0 {
+                    return Some(ChatEvent::UsageDelta {
+                        input_tokens: delta_in,
+                        output_tokens: delta_out,
+                        cache_creation_input_tokens: delta_cc,
+                        cache_read_input_tokens: delta_cr,
+                    });
                 }
                 None
             }
@@ -796,6 +967,8 @@ fn byte_stream_to_chat_events(
         output_tokens: 0,
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 0,
+        usage_mode,
+        cost: None,
         model: String::new(),
         request_model,
         finish_reason: String::new(),
@@ -899,6 +1072,7 @@ fn byte_stream_to_chat_events(
                                 tool_calls: state.tool_call_count,
                                 cache_creation_input_tokens: state.cache_creation_input_tokens,
                                 cache_read_input_tokens: state.cache_read_input_tokens,
+                                cost: state.cost,
                             }),
                             state,
                         ));
@@ -922,6 +1096,9 @@ fn byte_stream_to_chat_events(
                         state
                             .span
                             .record("gen_ai.usage.output_tokens", state.output_tokens as i64);
+                        if let Some(cost) = state.cost {
+                            state.span.record("gen_ai.usage.cost", cost);
+                        }
                         // OpenAI 不写 cache 字段
                         if state.finish_reason == "length" {
                             state.span.record("visp.llm.token_limit_hit", true);
@@ -1334,7 +1511,7 @@ impl LlmProvider for OpenAiProvider {
                 .get("project_path")
                 .cloned()
                 .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().into_owned());
-            Ok(byte_stream_to_chat_events(
+            Ok(byte_stream_to_chat_events_with_mode(
                 byte_stream,
                 start_time,
                 span,
@@ -1343,6 +1520,7 @@ impl LlmProvider for OpenAiProvider {
                 config.langfuse_capture_output,
                 config.langfuse_capture_max_chars,
                 config.langfuse_redact_secrets,
+                parse_usage_mode(config),
             ))
         } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             span.in_scope(|| {

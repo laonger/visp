@@ -465,6 +465,7 @@ fn test_parse_usage_with_cache() {
             output_tokens,
             cache_creation_input_tokens,
             cache_read_input_tokens,
+            cost: _,
         } => {
             assert_eq!(*input_tokens, 100);
             assert_eq!(*output_tokens, 50);
@@ -1110,11 +1111,12 @@ async fn test_byte_stream_reasoning_only() {
     );
     let events = collect_events(vec![sse]).await;
 
-    // Expect: ThinkingBlock + UsageInfo + OutputMetadata + Done (no TextDelta)
+    // Expect: ThinkingBlock + UsageDelta + UsageInfo + OutputMetadata + Done
+    // (usage chunk 携带非零增量 -> 先发 UsageDelta 供实时速率展示)
     assert_eq!(
         events.len(),
-        4,
-        "expect ThinkingBlock + UsageInfo + OutputMetadata + Done"
+        5,
+        "expect ThinkingBlock + UsageDelta + UsageInfo + OutputMetadata + Done"
     );
     match &events[0] {
         ChatEvent::ThinkingBlock(block) => {
@@ -1123,9 +1125,77 @@ async fn test_byte_stream_reasoning_only() {
         }
         _ => panic!("expected ThinkingBlock, got {:?}", events[0]),
     }
-    assert!(matches!(&events[1], ChatEvent::UsageInfo { .. }));
-    assert!(matches!(&events[2], ChatEvent::OutputMetadata(_)));
-    assert!(matches!(&events[3], ChatEvent::Done));
+    match &events[1] {
+        ChatEvent::UsageDelta {
+            input_tokens,
+            output_tokens,
+            ..
+        } => {
+            assert_eq!(*input_tokens, 100);
+            assert_eq!(*output_tokens, 4096);
+        }
+        other => panic!("expected UsageDelta, got {other:?}"),
+    }
+    assert!(matches!(&events[2], ChatEvent::UsageInfo { .. }));
+    assert!(matches!(&events[3], ChatEvent::OutputMetadata(_)));
+    assert!(matches!(&events[4], ChatEvent::Done));
+}
+
+/// 逐 chunk 上报 UsageDelta，最终 UsageInfo 取流末的累计总量。
+#[tokio::test]
+async fn test_usage_delta_emitted_per_chunk_and_totals_settle() {
+    let text_chunk = serde_json::json!({
+        "id": "chatcmpl",
+        "object": "chat.completion.chunk",
+        "choices": [{ "index": 0, "delta": { "content": "hi" }, "finish_reason": null }]
+    });
+    let usage_1 = serde_json::json!({
+        "id": "chatcmpl",
+        "object": "chat.completion.chunk",
+        "choices": [],
+        "usage": { "prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110 }
+    });
+    let usage_2 = serde_json::json!({
+        "id": "chatcmpl",
+        "object": "chat.completion.chunk",
+        "choices": [],
+        "usage": { "prompt_tokens": 100, "completion_tokens": 30, "total_tokens": 130 }
+    });
+    let sse = format!(
+        "{}{}{}{}",
+        make_sse(&text_chunk),
+        make_sse(&usage_1),
+        make_sse(&usage_2),
+        sse_line("[DONE]"),
+    );
+    let events = collect_events(vec![sse]).await;
+
+    let deltas: Vec<(u32, u32)> = events
+        .iter()
+        .filter_map(|e| match e {
+            ChatEvent::UsageDelta {
+                input_tokens,
+                output_tokens,
+                ..
+            } => Some((*input_tokens, *output_tokens)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deltas,
+        vec![(100, 10), (0, 20)],
+        "每个 usage chunk 的增量（累计语义下求差分）"
+    );
+
+    let usage = events.iter().find_map(|e| match e {
+        ChatEvent::UsageInfo {
+            input_tokens,
+            output_tokens,
+            ..
+        } => Some((*input_tokens, *output_tokens)),
+        _ => None,
+    });
+    assert_eq!(usage, Some((100, 30)), "结算总量取流末累计值");
 }
 
 // --- UTF-8 跨 chunk 边界测试 ---

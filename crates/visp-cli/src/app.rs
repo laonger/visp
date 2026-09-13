@@ -340,6 +340,8 @@ pub struct TabEntry {
     pub rendered_up_to: usize,
     pub streaming_text: String,
     pub generating: bool,
+    /// 当前流式输出的起始时间（首个 TextDelta 到达时启用），用于估算输出速率
+    pub stream_started_at: Option<std::time::Instant>,
     pub pending_usage: Option<(u32, u32, u32, u32, u32)>,
     pub next_message_id: u64,
     pub scroll: usize,
@@ -360,6 +362,7 @@ impl TabEntry {
             rendered_up_to: 0,
             streaming_text: String::new(),
             generating: false,
+            stream_started_at: None,
             pending_usage: None,
             next_message_id: 0,
             scroll: 0,
@@ -421,11 +424,30 @@ impl TabEntry {
     }
 
     pub fn flush_streaming(&mut self) {
+        self.stream_started_at = None;
         if !self.streaming_text.is_empty() {
             let text = std::mem::take(&mut self.streaming_text);
             let lines = crate::image::split_image_markers(&text, LineType::Assistant);
             self.push_chat_lines(lines);
         }
+    }
+
+    /// 停止生成：清除 generating 标记与流式计时器
+    pub fn stop_generating(&mut self) {
+        self.generating = false;
+        self.stream_started_at = None;
+    }
+
+    /// 输出速率估算（ui.md 输入栏设计）：streaming_text 字符数 / 4 ≈ token 数，
+    /// 除以流起始经过的秒数。流刚开始（< 0.5s）或无流式文本时返回 None。
+    pub fn tokens_per_second(&self) -> Option<f64> {
+        let started = self.stream_started_at?;
+        let elapsed = started.elapsed().as_secs_f64();
+        if elapsed < 0.5 || self.streaming_text.is_empty() {
+            return None;
+        }
+        let chars = self.streaming_text.chars().count() as f64;
+        Some(chars / 4.0 / elapsed)
     }
 
     /// 消费 pending_usage，将 token 统计追加到最后一条 Assistant 消息或 streaming_text。
@@ -511,6 +533,9 @@ impl TabEntry {
             let msg = self.frames[self.rendered_up_to].clone();
             match msg.payload {
                 Some(server_message::Payload::TextDelta(delta)) => {
+                    if self.stream_started_at.is_none() {
+                        self.stream_started_at = Some(std::time::Instant::now());
+                    }
                     self.streaming_text.push_str(&delta.delta);
                 }
                 Some(server_message::Payload::ToolCall(tc)) => {
@@ -595,14 +620,14 @@ impl TabEntry {
                         format!("{}: {}", err.code, err.message),
                         None,
                     );
-                    self.generating = false;
+                    self.stop_generating();
                     self.status = AgentStatus::Error;
                 }
                 Some(server_message::Payload::Done(_)) => {
                     // 将 token 统计 + 时间戳追加到对话区
                     self.consume_pending_usage();
                     self.flush_streaming();
-                    self.generating = false;
+                    self.stop_generating();
                     if self.status == AgentStatus::Running {
                         self.status = AgentStatus::Done;
                     }
@@ -1240,6 +1265,7 @@ fn extract_session_and_agent(msg: &ServerMessage) -> (String, String) {
         Some(server_message::Payload::UserQuery(d)) => (d.session_id.clone(), String::new()),
         Some(server_message::Payload::ThinkingBlock(d)) => (d.session_id.clone(), String::new()),
         Some(server_message::Payload::UsageInfo(d)) => (d.session_id.clone(), String::new()),
+        Some(server_message::Payload::UsageDelta(d)) => (d.session_id.clone(), String::new()),
         Some(server_message::Payload::UserMessage(d)) => (d.session_id.clone(), String::new()),
         Some(server_message::Payload::ImageBlock(d)) => {
             (d.session_id.clone(), d.agent_name.clone())
@@ -1289,6 +1315,8 @@ pub struct AppState {
     pub total_output_tokens: u32,
     pub total_cache_creation_input_tokens: u32,
     pub total_cache_read_input_tokens: u32,
+    /// 当前 session 累计成本（provider 上报；0 表示未提供，不显示）
+    pub total_cost: f64,
     /// 鼠标文本选择状态（内容坐标）
     pub text_selection: crate::selection::TextSelection,
     /// 上一次复制是否成功（用于状态提示）
@@ -1378,6 +1406,7 @@ impl AppState {
             total_output_tokens: 0,
             total_cache_creation_input_tokens: 0,
             total_cache_read_input_tokens: 0,
+            total_cost: 0.0,
             text_selection: crate::selection::TextSelection::default(),
             last_copy_msg: None,
             pending_copy: false,
@@ -1599,7 +1628,10 @@ impl AppState {
 
     // --- 写入（操作型）---
     pub fn set_generating(&mut self, v: bool) {
-        self.active_tab_mut().generating = v;
+        let tab = self.active_tab_mut();
+        tab.generating = v;
+        // 重新开始生成或停止生成都重置流式计时器（提交新请求 / 取消 / 会话切换）
+        tab.stream_started_at = None;
     }
     pub fn clear_streaming(&mut self) {
         self.active_tab_mut().streaming_text.clear();
@@ -1766,11 +1798,12 @@ impl AppState {
         }
     }
 
-    /// Token 三层路由 — L1: tab.pending_usage, L2: current_request_usage
+    /// Token 三层路由 — L1: tab.pending_usage, L2: current_request_usage, L3: total_*_tokens
     ///
-    /// 按 session_id 路由 UsageInfo 到对应 tab 的 pending_usage（L1），
-    /// 同时累加到 current_request_usage（L2）。
-    /// 不直接修改 total_*_tokens（L3）——L3 由 Done 时 apply_done_token_settlement 处理。
+    /// 按 session_id 路由 UsageInfo 到对应 tab 的 pending_usage（L1）。
+    /// 所有 agent（default + sub）的 token 都同时累加到 L2 与 L3：
+    /// - L2: current_request_usage，主 session Done 时由 apply_done_token_settlement 清零
+    /// - L3: total_*_tokens，立即累加，状态栏即时显示
     pub fn apply_usage_info(
         &mut self,
         session_id: &str,
@@ -1782,36 +1815,39 @@ impl AppState {
     ) {
         let is_main = session_id.is_empty() || session_id == self.main_session_id;
 
-        // 按 session_id 路由：空 ID 或主 session -> default tab
+        // L1: 按 session_id 路由：空 ID 或主 session -> default tab
         // 子 agent 的 UsageInfo 路由到活跃 tab 或 hidden_tab，不自动创建活跃 tab
-        let idx = if is_main {
-            0
+        if is_main {
+            self.tab_bar.tabs[0].pending_usage =
+                Some((input, output, tool_calls, cache_create, cache_read));
         } else if let Some(i) = self.tab_bar.find_index_by_session(session_id) {
-            i
+            self.tab_bar.tabs[i].pending_usage =
+                Some((input, output, tool_calls, cache_create, cache_read));
         } else {
             // 路由到 hidden_tab
             let tab = self.tab_bar.find_or_create_hidden_tab(session_id, "agent");
             tab.pending_usage = Some((input, output, tool_calls, cache_create, cache_read));
-            return;
-        };
-        // L1: 写入 tab.pending_usage
-        self.tab_bar.tabs[idx].pending_usage =
-            Some((input, output, tool_calls, cache_create, cache_read));
+        }
 
-        // 仅主 session 的 UsageInfo 累加 L2/L3
-        // 子 agent 的 token 由 orchestrator 在子 agent 完成时
-        // 以父 session_id 发送合并的 UsageInfo，此处避免重复累加
-        if is_main {
-            // L2: 累加到 current_request_usage
-            self.current_request_usage.0 += input;
-            self.current_request_usage.1 += output;
-            self.current_request_usage.2 += cache_create;
-            self.current_request_usage.3 += cache_read;
-            // L3: 立即累加到 total tokens，状态栏即时显示
-            self.total_input_tokens += input;
-            self.total_output_tokens += output;
-            self.total_cache_creation_input_tokens += cache_create;
-            self.total_cache_read_input_tokens += cache_read;
+        // L2: 累加到 current_request_usage（sub agent 的 token 同样汇聚到"本次请求"）
+        self.current_request_usage.0 += input;
+        self.current_request_usage.1 += output;
+        self.current_request_usage.2 += cache_create;
+        self.current_request_usage.3 += cache_read;
+        // L3: 立即累加到 total tokens，状态栏即时显示
+        self.total_input_tokens += input;
+        self.total_output_tokens += output;
+        self.total_cache_creation_input_tokens += cache_create;
+        self.total_cache_read_input_tokens += cache_read;
+    }
+
+    /// 累计 provider 上报的成本（L3，状态栏展示）。
+    ///
+    /// `cost` 为本次 LLM 调用的成本；provider 未提供时不调用本方法（传入 0 亦无副作用）。
+    /// 与 token 一致，所有 agent（default + sub）的成本都汇聚到会话总计。
+    pub fn apply_usage_cost(&mut self, _session_id: &str, cost: f64) {
+        if cost > 0.0 {
+            self.total_cost += cost;
         }
     }
 
@@ -1867,6 +1903,7 @@ impl AppState {
         self.total_output_tokens = 0;
         self.total_cache_creation_input_tokens = 0;
         self.total_cache_read_input_tokens = 0;
+        self.total_cost = 0.0;
         self.current_request_usage = (0, 0, 0, 0);
         self.pending_new_session = false;
         self.pending_list_sessions = false;

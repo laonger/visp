@@ -991,6 +991,7 @@ fn handle_grpc_message(
                 ui.cache_creation_input_tokens,
                 ui.cache_read_input_tokens,
             );
+            app.apply_usage_cost(&ui.session_id, ui.cost);
         }
         Some(server_message::Payload::UserQuery(uq)) => {
             // 将已积累的 streaming text 刷入消息列表，使其走 markdown 渲染路径
@@ -1031,7 +1032,7 @@ fn handle_grpc_message(
                 app.tab_bar.find_index_by_session(&e.session_id)
             };
             if let Some(idx) = idx {
-                app.tab_bar.tabs[idx].generating = false;
+                app.tab_bar.tabs[idx].stop_generating();
                 // current_request_id 仅与主 session 相关
                 if is_main {
                     app.current_request_id = None;
@@ -1055,7 +1056,7 @@ fn handle_grpc_message(
                 app.tab_bar.find_index_by_session(&d.session_id)
             };
             if let Some(idx) = idx {
-                app.tab_bar.tabs[idx].generating = false;
+                app.tab_bar.tabs[idx].stop_generating();
                 app.apply_done_token_settlement(&d.session_id);
                 // current_request_id + ack 仅与主 session 相关
                 if is_main && let Some(rid) = app.current_request_id.take() {

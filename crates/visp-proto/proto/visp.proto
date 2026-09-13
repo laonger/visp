@@ -237,6 +237,7 @@ message ServerMessage {
         UserMessage user_message = 10;    // 回放时发送的用户消息
         ImageBlock image_block = 11;      // LLM 输出的图片
         ImageError image_error = 12;      // 图片处理失败
+        UsageDelta usage_delta = 13;      // LLM token 增量（实时速率展示）
     }
 }
 
@@ -332,6 +333,23 @@ message UsageInfo {
     // 本次请求中从缓存读取的 token 数。
     // 仅当 > 0 时更新。
     uint32 cache_read_input_tokens = 6;
+    // 本次 LLM 调用的成本（由 provider 上报，如 opencode zen 的 cost 字段）。
+    // 0 表示 provider 未提供；CLI 累计后显示在状态栏。
+    double cost = 7;
+}
+
+// LLM 流式响应的 token 增量（逐 chunk 上报，仅用于实时速率展示）。
+// 结算统计仍以 UsageInfo 为准：UsageDelta 不可与 UsageInfo 重复累加。
+message UsageDelta {
+    // 本次增量携带的输入 token 数。
+    uint32 input_tokens = 1;
+    // 本次增量携带的输出 token 数。
+    uint32 output_tokens = 2;
+    // 本次增量中写入缓存的 token 数。
+    uint32 cache_creation_input_tokens = 3;
+    // 本次增量中从缓存读取的 token 数。
+    uint32 cache_read_input_tokens = 4;
+    string session_id = 5;
 }
 
 // Agent loop 正常执行完毕。CLI 收到 Done 后发送 Ack 确认，

@@ -177,6 +177,15 @@ pub enum ChatEvent {
         tool_calls: u32,
         cache_creation_input_tokens: u32,
         cache_read_input_tokens: u32,
+        /// 本次请求的累计成本（provider 提供时才有值，如 opencode zen 的 cost 字段）
+        cost: Option<f64>,
+    },
+    /// 逐 chunk 的 token 增量（用于实时速率显示，不参与最终总量结算）
+    UsageDelta {
+        input_tokens: u32,
+        output_tokens: u32,
+        cache_creation_input_tokens: u32,
+        cache_read_input_tokens: u32,
     },
     /// LLM 响应完成时携带的 ProviderMetadata
     /// 由 provider 在响应全部接收完毕后发射，位于 UsageInfo 之后、Done 之前

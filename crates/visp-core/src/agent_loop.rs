@@ -51,10 +51,23 @@ fn event_to_msg(event: &AgentEvent) -> Option<AgentMessage> {
             tool_calls,
             cache_creation_input_tokens,
             cache_read_input_tokens,
+            cost,
         } => Some(AgentMessage::UsageInfo {
             input_tokens: *input_tokens,
             output_tokens: *output_tokens,
             tool_calls: *tool_calls,
+            cache_creation_input_tokens: *cache_creation_input_tokens,
+            cache_read_input_tokens: *cache_read_input_tokens,
+            cost: *cost,
+        }),
+        AgentEvent::UsageDelta {
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        } => Some(AgentMessage::UsageDelta {
+            input_tokens: *input_tokens,
+            output_tokens: *output_tokens,
             cache_creation_input_tokens: *cache_creation_input_tokens,
             cache_read_input_tokens: *cache_read_input_tokens,
         }),
@@ -394,6 +407,8 @@ struct StreamOutput {
     output_tokens: u32,
     cache_creation_input_tokens: u32,
     cache_read_input_tokens: u32,
+    /// provider 上报的本次调用成本（未提供为 None）
+    cost: Option<f64>,
     provider_metadata: Option<ProviderMetadata>,
 }
 
@@ -413,6 +428,7 @@ async fn collect_stream_events(
     let mut output_tokens: u32 = 0;
     let mut cache_creation_input_tokens: u32 = 0;
     let mut cache_read_input_tokens: u32 = 0;
+    let mut cost: Option<f64> = None;
     let mut pending_metadata: Option<ProviderMetadata> = None;
 
     tracing::info!(
@@ -486,11 +502,24 @@ async fn collect_stream_events(
                             AgentEvent::ThinkingBlock(block),
                         ).await.ok()?;
                     }
-                    Some(Ok(ChatEvent::UsageInfo { input_tokens: it, output_tokens: ot, cache_creation_input_tokens: ccit, cache_read_input_tokens: crit, .. })) => {
+                    Some(Ok(ChatEvent::UsageInfo { input_tokens: it, output_tokens: ot, cache_creation_input_tokens: ccit, cache_read_input_tokens: crit, cost: c, .. })) => {
                         input_tokens = it;
                         output_tokens = ot;
                         cache_creation_input_tokens = ccit;
                         cache_read_input_tokens = crit;
+                        cost = c;
+                    }
+                    Some(Ok(ChatEvent::UsageDelta { input_tokens: dit, output_tokens: dot, cache_creation_input_tokens: dccit, cache_read_input_tokens: dcrit })) => {
+                        // 逐 chunk 增量：立即转发用于实时速率显示，不累加进本地统计
+                        send_event(
+                            tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                            AgentEvent::UsageDelta {
+                                input_tokens: dit,
+                                output_tokens: dot,
+                                cache_creation_input_tokens: dccit,
+                                cache_read_input_tokens: dcrit,
+                            },
+                        ).await.ok()?;
                     }
                     Some(Ok(ChatEvent::ToolCall { id, name, arguments })) => {
                         tool_calls.push(ToolCallRequest { id, name, arguments });
@@ -554,6 +583,7 @@ async fn collect_stream_events(
         output_tokens,
         cache_creation_input_tokens,
         cache_read_input_tokens,
+        cost,
         provider_metadata: pending_metadata,
     })
 }
@@ -586,6 +616,7 @@ async fn handle_stream_result(
     let output_tokens = output.output_tokens;
     let cache_creation_input_tokens = output.cache_creation_input_tokens;
     let cache_read_input_tokens = output.cache_read_input_tokens;
+    let cost = output.cost;
     let provider_metadata = &output.provider_metadata;
 
     tracing::info!(
@@ -862,6 +893,7 @@ async fn handle_stream_result(
                 tool_calls: total_tool_calls,
                 cache_creation_input_tokens,
                 cache_read_input_tokens,
+                cost,
             },
         )
         .await?;
@@ -2192,6 +2224,7 @@ mod tests {
                     tool_calls: 0,
                     cache_creation_input_tokens: self.cache_write,
                     cache_read_input_tokens: self.cache_read,
+                    cost: None,
                 }),
                 Ok(ChatEvent::Done),
             ];
@@ -5488,6 +5521,7 @@ mod tests {
                     tool_calls: 0,
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
+                    cost: None,
                 },
                 ChatEvent::Done,
             ]]));

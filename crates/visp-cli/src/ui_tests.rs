@@ -539,3 +539,72 @@ fn test_find_or_restore_tab_not_found() {
     let mut tb = crate::app::TabBar::new("main".into());
     assert!(tb.find_or_restore_tab("nonexistent").is_none());
 }
+
+// ── 正在推理时的输入栏：Generating 状态框 ──────────
+
+#[test]
+fn test_render_generating_box_shows_tokens_per_second() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.set_generating(true);
+    // 流式文本 + 计时器：400 chars / 4 ≈ 100 tokens / 2s → ~50.0 tokens/s
+    app.append_streaming(&"a".repeat(400));
+    app.active_tab_mut().stream_started_at =
+        Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+
+    let backend = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::ui::render(&mut app, f)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let lines: Vec<String> = buffer
+        .content()
+        .chunks(buffer.area().width as usize)
+        .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+        .collect();
+
+    assert!(
+        lines.iter().any(|l| l.contains("Generating") && l.contains("tokens/s output")),
+        "应有 Generating 状态框：{:?}",
+        lines.iter().filter(|l| l.contains("Generating")).collect::<Vec<_>>()
+    );
+    // 解析速率数值：elapsed 略大于 2s，速率应在 (48, 50] 区间
+    let line = lines
+        .iter()
+        .find(|l| l.contains("tokens/s output"))
+        .expect("应有速率行");
+    let tps: f64 = line
+        .split_whitespace()
+        .find_map(|t| t.parse::<f64>().ok())
+        .expect("速率行应含数值");
+    assert!(
+        (48.0..=50.0).contains(&tps),
+        "速率 {tps} 应接近 100 tokens / 2s = 50"
+    );
+    // 输入栏高度至少 4 行（上下边框 + 空行 + 内容行）：边框应出现
+    assert!(lines.iter().any(|l| l.contains("└") && l.contains("┘")));
+}
+
+#[test]
+fn test_render_generating_box_rate_pending_shows_placeholder() {
+    // 流刚开始（< 0.5s）：速率显示 "--"
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.set_generating(true);
+    app.append_streaming(&"a".repeat(100));
+    app.active_tab_mut().stream_started_at = Some(std::time::Instant::now());
+
+    let backend = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::ui::render(&mut app, f)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let lines: Vec<String> = buffer
+        .content()
+        .chunks(buffer.area().width as usize)
+        .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+        .collect();
+    assert!(
+        lines.iter().any(|l| l.contains("-- tokens/s output")),
+        "速率未就绪应显示 --：{:?}",
+        lines.iter().filter(|l| l.contains("Generating")).collect::<Vec<_>>()
+    );
+}

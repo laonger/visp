@@ -776,6 +776,7 @@ impl CoderDaemon for CoderDaemonService {
                                                             cache_read_input_tokens: msg
                                                                 .actual_cache_read
                                                                 .unwrap_or(0),
+                                                            cost: msg.actual_cost.unwrap_or(0.0),
                                                             session_id: session_id.clone(),
                                                         },
                                                     ),
@@ -1248,6 +1249,7 @@ async fn replay_session_history(
                     let ui_msg = proto::ServerMessage {
                         payload: Some(proto::server_message::Payload::UsageInfo(
                             proto::UsageInfo {
+                                cost: 0.0,
                                 input_tokens,
                                 output_tokens: msg.actual_tokens_output.unwrap_or(0),
                                 tool_calls: msg.tool_call_count.unwrap_or(0),
@@ -1361,12 +1363,30 @@ fn agent_event_to_server_message(
             tool_calls,
             cache_creation_input_tokens,
             cache_read_input_tokens,
+            cost,
         } => proto::ServerMessage {
             payload: Some(proto::server_message::Payload::UsageInfo(
                 proto::UsageInfo {
                     input_tokens,
                     output_tokens,
                     tool_calls,
+                    cache_creation_input_tokens,
+                    cache_read_input_tokens,
+                    cost: cost.unwrap_or(0.0),
+                    session_id: sid,
+                },
+            )),
+        },
+        AgentEvent::UsageDelta {
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        } => proto::ServerMessage {
+            payload: Some(proto::server_message::Payload::UsageDelta(
+                proto::UsageDelta {
+                    input_tokens,
+                    output_tokens,
                     cache_creation_input_tokens,
                     cache_read_input_tokens,
                     session_id: sid,
@@ -2687,6 +2707,7 @@ mod tests {
                             let ui_msg = proto::ServerMessage {
                                 payload: Some(proto::server_message::Payload::UsageInfo(
                                     proto::UsageInfo {
+                                        cost: 0.0,
                                         input_tokens,
                                         output_tokens: msg.actual_tokens_output.unwrap_or(0),
                                         tool_calls: msg.tool_call_count.unwrap_or(0),

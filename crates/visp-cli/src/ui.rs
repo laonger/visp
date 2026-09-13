@@ -362,7 +362,15 @@ pub fn render(app: &mut AppState, f: &mut Frame) {
     let bg = Block::default().style(Style::default().bg(theme::BG));
     f.render_widget(Paragraph::new("").block(bg), f.area());
 
-    let input_area_height = calc_input_height(&app.textarea, area.width);
+    let input_area_height = {
+        let h = calc_input_height(&app.textarea, area.width);
+        // 正在推理时的输入栏为带边框的状态框（上边框 + 空行 + 内容行 + 下边框，至少 4 行）
+        if app.confirm.is_none() && app.generating() {
+            h.max(4)
+        } else {
+            h
+        }
+    };
     let confirm_height = app
         .confirm
         .as_ref()
@@ -1127,11 +1135,10 @@ fn render_input_area(app: &mut AppState, f: &mut Frame, area: Rect) {
         app.textarea.set_style(Style::default().fg(theme::INPUT_FG));
         app.textarea
             .set_placeholder_text("Type your custom input...");
-    } else if app.generating() {
-        app.textarea
-            .set_style(Style::default().fg(theme::INPUT_NOTICE_FG));
-        app.textarea
-            .set_placeholder_text(format!("[Generating {}]", app.spinner_glyph()));
+    } else if app.generating() && app.confirm.is_none() {
+        // 正在推理时的输入栏：Generating 状态框（ui.md 输入栏设计）
+        render_generating_box(app, f, input_area);
+        return;
     } else {
         app.textarea.set_style(Style::default().fg(theme::INPUT_FG));
         app.textarea.set_placeholder_text("Type your message...");
@@ -1183,6 +1190,34 @@ fn render_input_area(app: &mut AppState, f: &mut Frame, area: Rect) {
     f.render_widget(&app.textarea, input_area);
 }
 
+/// 正在推理时的输入栏（ui.md 输入栏设计）：
+/// 带边框的状态框，第一空行后显示 "Generating ... {{token_per_second}} tokens/s output"。
+/// 输出速率由流式文本估算（tokens_per_second），流刚开始（< 0.5s）时显示 "--"。
+fn render_generating_box(app: &AppState, f: &mut Frame, area: Rect) {
+    let tps = match app.active_tab().tokens_per_second() {
+        Some(v) => format!("{v:.1}"),
+        None => "--".to_string(),
+    };
+    let content = format!(
+        "  Generating {}  {tps} tokens/s output",
+        app.spinner_glyph()
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(SEP_FG))
+        .style(Style::default().bg(theme::INPUT_BG));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            content,
+            Style::default().fg(theme::INPUT_NOTICE_FG),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
 /// 将 model 字符串拆为 (provider, model_label)
 /// 期望格式为 "{provider}/{name}"，如 "Ollama/deepseek-v4-flash"
 /// 无分隔斜杠时 provider 为空字符串
@@ -1205,13 +1240,19 @@ fn format_status_left(session_id: &str, model_key: &str, generating: bool) -> St
 
 /// 格式化状态栏第 2 行右侧 token / cache 统计
 fn format_status_tokens(app: &AppState) -> String {
-    format!(
+    let base = format!(
         "Tokens: {} input / {} output | Cache: {} create / {} read",
         format_number(app.total_input_tokens as u64),
         format_number(app.total_output_tokens as u64),
         format_number(app.total_cache_creation_input_tokens as u64),
         format_number(app.total_cache_read_input_tokens as u64),
-    )
+    );
+    // 成本仅在 provider 上报过（> 0）时展示，避免未知成本时显示误导性的 $0
+    if app.total_cost > 0.0 {
+        format!("{base} | Cost: ${:.4}", app.total_cost)
+    } else {
+        base
+    }
 }
 
 /// 按显示宽度压缩 workdir 路径（状态栏第 2 行左侧）：
