@@ -116,6 +116,8 @@ pub struct DaemonConfig {
     pub tools: ToolsSection,
     #[serde(default = "default_agent_section")]
     pub agent: AgentSection,
+    #[serde(default = "default_notification_section")]
+    pub notification: NotificationSection,
     #[serde(default)]
     pub tool: HashMap<String, toml::Value>,
     #[serde(default)]
@@ -134,6 +136,7 @@ impl Default for DaemonConfig {
             llm: LlmSection::default(),
             tools: default_tools_section(),
             agent: default_agent_section(),
+            notification: default_notification_section(),
             tool: HashMap::new(),
             mcp: McpConfig::default(),
             storage: StorageSection::default(),
@@ -545,6 +548,53 @@ pub struct BuiltinAgentConfig {
     pub steps: Option<u32>,
 }
 
+/// 终端通知协议
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotificationProtocol {
+    /// 自动探测终端支持的通知协议（默认值由字段级 default 提供）
+    #[default]
+    Auto,
+    /// OSC 9（iTerm2 / Windows Terminal 等）
+    Osc9,
+    /// OSC 777（ConEmu 等）
+    Osc777,
+    /// Kitty 键盘协议通知（kitty 终端）
+    Kitty99,
+}
+
+/// 终端通知配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationSection {
+    /// 是否启用终端通知
+    #[serde(default = "default_notification_enabled")]
+    pub enabled: bool,
+    /// 任务完成时是否通知
+    #[serde(default = "default_notification_on_complete")]
+    pub on_complete: bool,
+    /// 等待用户输入时是否通知
+    #[serde(default = "default_notification_on_user_input")]
+    pub on_user_input: bool,
+    /// 通知协议（auto / osc9 / osc777 / kitty99）
+    #[serde(default = "default_notification_protocol")]
+    pub protocol: NotificationProtocol,
+    /// 同一会话内通知的最小间隔（秒），用于限流
+    #[serde(default = "default_notification_min_interval_secs")]
+    pub min_interval_secs: u64,
+}
+
+impl Default for NotificationSection {
+    fn default() -> Self {
+        Self {
+            enabled: default_notification_enabled(),
+            on_complete: default_notification_on_complete(),
+            on_user_input: default_notification_on_user_input(),
+            protocol: default_notification_protocol(),
+            min_interval_secs: default_notification_min_interval_secs(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StorageSection {
     #[serde(default = "default_storage_driver")]
@@ -950,6 +1000,32 @@ fn default_agent_section() -> AgentSection {
     }
 }
 
+fn default_notification_enabled() -> bool {
+    true
+}
+fn default_notification_on_complete() -> bool {
+    true
+}
+fn default_notification_on_user_input() -> bool {
+    true
+}
+fn default_notification_protocol() -> NotificationProtocol {
+    NotificationProtocol::Auto
+}
+fn default_notification_min_interval_secs() -> u64 {
+    3
+}
+
+fn default_notification_section() -> NotificationSection {
+    NotificationSection {
+        enabled: default_notification_enabled(),
+        on_complete: default_notification_on_complete(),
+        on_user_input: default_notification_on_user_input(),
+        protocol: default_notification_protocol(),
+        min_interval_secs: default_notification_min_interval_secs(),
+    }
+}
+
 fn default_config() -> DaemonConfig {
     DaemonConfig {
         daemon: default_daemon_section(),
@@ -963,6 +1039,7 @@ fn default_config() -> DaemonConfig {
         },
         tools: default_tools_section(),
         agent: default_agent_section(),
+        notification: default_notification_section(),
         tool: HashMap::new(),
         mcp: McpConfig::default(),
         storage: StorageSection {
@@ -4274,5 +4351,103 @@ mod tests_apply_config_update {
         assert_eq!(config.max_context_tokens, 128_000);
         assert!(config.langfuse_enabled);
         assert_eq!(config.langfuse_user_id.as_deref(), Some("user-1"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [notification] 通知配置段
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests_notification {
+    use super::*;
+
+    /// 1. 未配置 [notification] 段 → 全字段默认值
+    #[test]
+    fn notification_defaults_when_section_absent() {
+        let config: DaemonConfig = toml::from_str("").unwrap();
+        let n = &config.notification;
+        assert!(n.enabled);
+        assert!(n.on_complete);
+        assert!(n.on_user_input);
+        assert_eq!(n.protocol, NotificationProtocol::Auto);
+        assert_eq!(n.min_interval_secs, 3);
+    }
+
+    /// 2. enabled = false 显式解析生效，未写的字段仍取默认值
+    #[test]
+    fn notification_enabled_false() {
+        let config: DaemonConfig = toml::from_str("[notification]\nenabled = false\n").unwrap();
+        assert!(!config.notification.enabled);
+        assert!(config.notification.on_complete);
+        assert!(config.notification.on_user_input);
+    }
+
+    /// 3. protocol 四个取值均可解析为对应变体
+    #[test]
+    fn notification_protocol_all_values() {
+        for (raw, expected) in [
+            ("auto", NotificationProtocol::Auto),
+            ("osc9", NotificationProtocol::Osc9),
+            ("osc777", NotificationProtocol::Osc777),
+            ("kitty99", NotificationProtocol::Kitty99),
+        ] {
+            let toml_str = format!("[notification]\nprotocol = \"{}\"\n", raw);
+            let config: DaemonConfig = toml::from_str(&toml_str).unwrap();
+            assert_eq!(config.notification.protocol, expected, "protocol = {}", raw);
+        }
+    }
+
+    /// 4. 非法 protocol 值 → 反序列化失败
+    #[test]
+    fn notification_protocol_invalid() {
+        let result = toml::from_str::<DaemonConfig>("[notification]\nprotocol = \"osc123\"\n");
+        assert!(result.is_err(), "非法 protocol 值应当反序列化失败");
+    }
+
+    /// 5. on_complete / on_user_input 两开关独立生效
+    #[test]
+    fn notification_switches_independent() {
+        let config: DaemonConfig =
+            toml::from_str("[notification]\non_complete = false\non_user_input = true\n").unwrap();
+        assert!(!config.notification.on_complete);
+        assert!(config.notification.on_user_input);
+    }
+
+    /// 6. min_interval_secs = 0 合法（表示不限流）
+    #[test]
+    fn notification_zero_interval() {
+        let config: DaemonConfig =
+            toml::from_str("[notification]\nmin_interval_secs = 0\n").unwrap();
+        assert_eq!(config.notification.min_interval_secs, 0);
+    }
+
+    /// 7. DaemonConfig::default() 含通知段默认值
+    #[test]
+    fn notification_default_impl() {
+        let config = DaemonConfig::default();
+        assert!(config.notification.enabled);
+        assert!(config.notification.on_complete);
+        assert!(config.notification.on_user_input);
+        assert_eq!(config.notification.protocol, NotificationProtocol::Auto);
+        assert_eq!(config.notification.min_interval_secs, 3);
+    }
+
+    /// 8. Serialize → Deserialize 往返一致（save_config 路径不丢字段）
+    #[test]
+    fn notification_roundtrip() {
+        let section = NotificationSection {
+            enabled: false,
+            on_complete: true,
+            on_user_input: false,
+            protocol: NotificationProtocol::Kitty99,
+            min_interval_secs: 7,
+        };
+        let toml_str = toml::to_string(&section).unwrap();
+        let parsed: NotificationSection = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.enabled, section.enabled);
+        assert_eq!(parsed.on_complete, section.on_complete);
+        assert_eq!(parsed.on_user_input, section.on_user_input);
+        assert_eq!(parsed.protocol, section.protocol);
+        assert_eq!(parsed.min_interval_secs, section.min_interval_secs);
     }
 }
