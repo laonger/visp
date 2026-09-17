@@ -13,6 +13,11 @@
 //!
 //! 复用器拦截 OSC 时不做绕行，是否透传由复用器自身负责（如 tmux 的
 //! allow-passthrough）；已识别终端仍按 OSC 9/777/99 发送。
+//!
+//! # 职责边界
+//!
+//! 本模块只负责协议探测 / 序列编码 / 开关 / 节流；**不感知 session 归属**。
+//! 「仅主 session 通知」由挂接点（`event.rs` 的两处 Done / UserQuery 分支）判定。
 
 use std::time::{Duration, Instant};
 
@@ -336,20 +341,17 @@ impl NotifyEngine {
     }
 
     /// 事件入口。闸门链（计划文档 step 3b）：
-    /// `protocol.is_none()`（禁用短路）→ `enabled` → `!is_main`（会话过滤）→
-    /// 对应 kind 开关 → 节流（按 kind 独立计时）→ 编码（按探测协议）→
+    /// `protocol.is_none()`（禁用短路）→ `enabled` → 对应 kind 开关 →
+    /// 节流（按 kind 独立计时）→ 编码（按探测协议）→
     /// 仅在生成序列时更新 `last_sent`。
+    ///
+    /// **会话过滤（仅根 session）不属本模块职责**：由挂接点 `event.rs`
+    /// 判定主 session 后决定是否调用（2026-09-18 分层修正）。
     ///
     /// 文案（设计 §2.1）：标题固定 `visp`；正文由调用方提供（`Done` 传
     /// `event.rs` 的固定文案 `DONE_BODY`，`UserQuery` 传 `uq.message`），
     /// 此处统一按字符截断至 200（决策 D4）。
-    pub fn on_event(
-        &mut self,
-        kind: NotifyKind,
-        is_main: bool,
-        body: &str,
-        now: Instant,
-    ) -> Option<Vec<u8>> {
+    pub fn on_event(&mut self, kind: NotifyKind, body: &str, now: Instant) -> Option<Vec<u8>> {
         // 闸门 1：禁用短路。protocol 为 None（非 tty 或配置关闭）时整模块不工作。
         let protocol = self.protocol?;
         // enabled 防御性复查：`new()` 在 enabled=false 时已把 protocol 置 None，
@@ -357,11 +359,7 @@ impl NotifyEngine {
         if !self.enabled {
             return None;
         }
-        // 闸门 2：会话过滤——子 session 不通知。
-        if !is_main {
-            return None;
-        }
-        // 闸门 3：对应 kind 开关。
+        // 闸门 2：对应 kind 开关。
         let kind_enabled = match kind {
             NotifyKind::Done => self.on_complete,
             NotifyKind::UserQuery => self.on_user_input,
@@ -369,7 +367,7 @@ impl NotifyEngine {
         if !kind_enabled {
             return None;
         }
-        // 闸门 4：节流（按 kind 独立计时；min_interval == 0 表示不节流）。
+        // 闸门 3：节流（按 kind 独立计时；min_interval == 0 表示不节流）。
         if self.min_interval > Duration::ZERO
             && let Some(last) = self.last_sent[kind as usize]
             && now.saturating_duration_since(last) < self.min_interval

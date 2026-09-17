@@ -100,14 +100,8 @@ fn disabled_engine_returns_none() {
     let mut engine = NotifyEngine::disabled();
     assert_eq!(engine.selected_protocol(), None);
     let now = Instant::now();
-    assert_eq!(
-        engine.on_event(NotifyKind::Done, true, DONE_TEXT, now),
-        None
-    );
-    assert_eq!(
-        engine.on_event(NotifyKind::UserQuery, false, "query", now),
-        None
-    );
+    assert_eq!(engine.on_event(NotifyKind::Done, DONE_TEXT, now), None);
+    assert_eq!(engine.on_event(NotifyKind::UserQuery, "query", now), None);
 }
 
 #[test]
@@ -137,7 +131,7 @@ fn first_done_returns_osc_sequence() {
     let mut e = engine(Protocol::Osc9, Duration::from_secs(3));
     let t0 = Instant::now();
     assert_eq!(
-        e.on_event(NotifyKind::Done, true, DONE_TEXT, t0),
+        e.on_event(NotifyKind::Done, DONE_TEXT, t0),
         Some("\x1b]9;任务完成，等待输入\x1b\\".as_bytes().to_vec())
     );
 }
@@ -147,26 +141,16 @@ fn same_kind_within_interval_is_throttled() {
     let mut e = engine(Protocol::Osc9, Duration::from_secs(3));
     let t0 = Instant::now();
     assert_eq!(
-        e.on_event(NotifyKind::Done, true, DONE_TEXT, t0),
+        e.on_event(NotifyKind::Done, DONE_TEXT, t0),
         Some("\x1b]9;任务完成，等待输入\x1b\\".as_bytes().to_vec())
     );
     // 3s 内第二次 → 节流。
     assert_eq!(
-        e.on_event(
-            NotifyKind::Done,
-            true,
-            DONE_TEXT,
-            t0 + Duration::from_secs(1)
-        ),
+        e.on_event(NotifyKind::Done, DONE_TEXT, t0 + Duration::from_secs(1)),
         None
     );
     assert_eq!(
-        e.on_event(
-            NotifyKind::Done,
-            true,
-            DONE_TEXT,
-            t0 + Duration::from_secs(2)
-        ),
+        e.on_event(NotifyKind::Done, DONE_TEXT, t0 + Duration::from_secs(2)),
         None
     );
 }
@@ -176,17 +160,12 @@ fn same_kind_after_interval_sends_again() {
     let mut e = engine(Protocol::Osc9, Duration::from_secs(3));
     let t0 = Instant::now();
     assert_eq!(
-        e.on_event(NotifyKind::Done, true, DONE_TEXT, t0),
+        e.on_event(NotifyKind::Done, DONE_TEXT, t0),
         Some("\x1b]9;任务完成，等待输入\x1b\\".as_bytes().to_vec())
     );
     // 距上次 ≥3s → 再次发送。
     assert_eq!(
-        e.on_event(
-            NotifyKind::Done,
-            true,
-            DONE_TEXT,
-            t0 + Duration::from_secs(3)
-        ),
+        e.on_event(NotifyKind::Done, DONE_TEXT, t0 + Duration::from_secs(3)),
         Some("\x1b]9;任务完成，等待输入\x1b\\".as_bytes().to_vec())
     );
 }
@@ -196,12 +175,12 @@ fn kinds_throttle_independently() {
     let mut e = engine(Protocol::Osc9, Duration::from_secs(3));
     let t0 = Instant::now();
     assert_eq!(
-        e.on_event(NotifyKind::Done, true, DONE_TEXT, t0),
+        e.on_event(NotifyKind::Done, DONE_TEXT, t0),
         Some("\x1b]9;任务完成，等待输入\x1b\\".as_bytes().to_vec())
     );
     // Done 刚发送后立刻 UserQuery → 独立计时，仍发送。
     assert_eq!(
-        e.on_event(NotifyKind::UserQuery, true, "query", t0),
+        e.on_event(NotifyKind::UserQuery, "query", t0),
         Some(b"\x1b]9;query\x1b\\".to_vec())
     );
 }
@@ -212,24 +191,14 @@ fn zero_interval_never_throttles() {
     let t0 = Instant::now();
     for i in 0..3 {
         assert_eq!(
-            e.on_event(
-                NotifyKind::Done,
-                true,
-                DONE_TEXT,
-                t0 + Duration::from_secs(i)
-            ),
+            e.on_event(NotifyKind::Done, DONE_TEXT, t0 + Duration::from_secs(i)),
             Some("\x1b]9;任务完成，等待输入\x1b\\".as_bytes().to_vec())
         );
     }
 }
 
-#[test]
-fn sub_session_never_notifies() {
-    let mut e = engine(Protocol::Osc9, Duration::ZERO);
-    let t0 = Instant::now();
-    assert_eq!(e.on_event(NotifyKind::Done, false, "done", t0), None);
-    assert_eq!(e.on_event(NotifyKind::UserQuery, false, "query", t0), None);
-}
+// 会话过滤（仅根 session）不属 notify 职责；覆盖见 event_tests 的
+// test_done_hookup_skips_sub_session / test_user_query_hookup_skips_sub_session。
 
 #[test]
 fn disabled_config_returns_none() {
@@ -242,8 +211,8 @@ fn disabled_config_returns_none() {
         Duration::from_secs(3),
     );
     let t0 = Instant::now();
-    assert_eq!(e.on_event(NotifyKind::Done, true, DONE_TEXT, t0), None);
-    assert_eq!(e.on_event(NotifyKind::UserQuery, true, "query", t0), None);
+    assert_eq!(e.on_event(NotifyKind::Done, DONE_TEXT, t0), None);
+    assert_eq!(e.on_event(NotifyKind::UserQuery, "query", t0), None);
 }
 
 #[test]
@@ -257,9 +226,9 @@ fn on_complete_off_blocks_done_only() {
         Duration::from_secs(3),
     );
     let t0 = Instant::now();
-    assert_eq!(e.on_event(NotifyKind::Done, true, DONE_TEXT, t0), None);
+    assert_eq!(e.on_event(NotifyKind::Done, DONE_TEXT, t0), None);
     assert_eq!(
-        e.on_event(NotifyKind::UserQuery, true, "query", t0),
+        e.on_event(NotifyKind::UserQuery, "query", t0),
         Some(b"\x1b]9;query\x1b\\".to_vec())
     );
 }
@@ -275,9 +244,9 @@ fn on_user_input_off_blocks_user_query_only() {
         Duration::from_secs(3),
     );
     let t0 = Instant::now();
-    assert_eq!(e.on_event(NotifyKind::UserQuery, true, "query", t0), None);
+    assert_eq!(e.on_event(NotifyKind::UserQuery, "query", t0), None);
     assert_eq!(
-        e.on_event(NotifyKind::Done, true, DONE_TEXT, t0),
+        e.on_event(NotifyKind::Done, DONE_TEXT, t0),
         Some("\x1b]9;任务完成，等待输入\x1b\\".as_bytes().to_vec())
     );
 }
@@ -298,7 +267,7 @@ fn bel_fallback_engine_rings_bell() {
     let mut engine = engine(Protocol::Bel, Duration::ZERO);
     let t0 = Instant::now();
     assert_eq!(
-        engine.on_event(NotifyKind::Done, true, DONE_TEXT, t0),
+        engine.on_event(NotifyKind::Done, DONE_TEXT, t0),
         Some(vec![0x07])
     );
 }
@@ -328,7 +297,7 @@ fn user_query_body_truncated_to_200_chars() {
     let mut e = engine(Protocol::Osc9, Duration::ZERO);
     let t0 = Instant::now();
     let out = e
-        .on_event(NotifyKind::UserQuery, true, &"a".repeat(250), t0)
+        .on_event(NotifyKind::UserQuery, &"a".repeat(250), t0)
         .unwrap();
     assert_eq!(
         out,
@@ -338,7 +307,7 @@ fn user_query_body_truncated_to_200_chars() {
     );
     // 多字节字符按字符截断（200 字符 = 600 字节），不得按字节切断。
     let out = e
-        .on_event(NotifyKind::UserQuery, true, &"中".repeat(250), t0)
+        .on_event(NotifyKind::UserQuery, &"中".repeat(250), t0)
         .unwrap();
     assert_eq!(
         out,
@@ -353,16 +322,13 @@ fn empty_user_query_message_not_sent_and_not_recorded() {
     // 决策 D3：空 message → None，且不更新 last_sent（节流记录实际发送时刻）。
     let mut e = engine(Protocol::Osc9, Duration::from_secs(3));
     let t0 = Instant::now();
-    assert_eq!(e.on_event(NotifyKind::UserQuery, true, "", t0), None);
+    assert_eq!(e.on_event(NotifyKind::UserQuery, "", t0), None);
     assert_eq!(e.last_sent_at(NotifyKind::UserQuery), None);
     // 纯控制字符 message → 清洗后为空 → 同样不发送、不记录。
-    assert_eq!(
-        e.on_event(NotifyKind::UserQuery, true, "\x1b\x07\x01", t0),
-        None
-    );
+    assert_eq!(e.on_event(NotifyKind::UserQuery, "\x1b\x07\x01", t0), None);
     assert_eq!(e.last_sent_at(NotifyKind::UserQuery), None);
     // 空消息未占用节流窗口：同一时刻的正常消息仍可发送。
-    assert!(e.on_event(NotifyKind::UserQuery, true, "ok", t0).is_some());
+    assert!(e.on_event(NotifyKind::UserQuery, "ok", t0).is_some());
 }
 
 #[test]
@@ -370,7 +336,7 @@ fn done_uses_passed_body() {
     // 设计 §2.1：Done 固定文案由调用方提供（event.rs 的 `DONE_BODY`），引擎原样编码。
     let mut e = engine(Protocol::Osc9, Duration::ZERO);
     let t0 = Instant::now();
-    let out = e.on_event(NotifyKind::Done, true, DONE_TEXT, t0).unwrap();
+    let out = e.on_event(NotifyKind::Done, DONE_TEXT, t0).unwrap();
     assert_eq!(out, "\x1b]9;任务完成，等待输入\x1b\\".as_bytes().to_vec());
 }
 
@@ -381,17 +347,17 @@ fn engine_dispatches_by_selected_protocol() {
     let t0 = Instant::now();
     let mut e9 = engine(Protocol::Osc9, Duration::ZERO);
     assert_eq!(
-        e9.on_event(NotifyKind::UserQuery, true, "hi", t0),
+        e9.on_event(NotifyKind::UserQuery, "hi", t0),
         Some(b"\x1b]9;hi\x1b\\".to_vec())
     );
     let mut e777 = engine(Protocol::Osc777, Duration::ZERO);
     assert_eq!(
-        e777.on_event(NotifyKind::UserQuery, true, "hi", t0),
+        e777.on_event(NotifyKind::UserQuery, "hi", t0),
         Some(b"\x1b]777;notify;visp;hi\x1b\\".to_vec())
     );
     let mut e99 = engine(Protocol::Kitty99, Duration::ZERO);
     assert_eq!(
-        e99.on_event(NotifyKind::UserQuery, true, "hi", t0),
+        e99.on_event(NotifyKind::UserQuery, "hi", t0),
         Some(
             b"\x1b]99;i=1:d=0:p=title:f=dmlzcA==;visp\x1b\\\x1b]99;i=1:d=1:p=body;hi\x1b\\"
                 .to_vec()
@@ -399,7 +365,7 @@ fn engine_dispatches_by_selected_protocol() {
     );
     let mut ebel = engine(Protocol::Bel, Duration::ZERO);
     assert_eq!(
-        ebel.on_event(NotifyKind::UserQuery, true, "hi", t0),
+        ebel.on_event(NotifyKind::UserQuery, "hi", t0),
         Some(vec![0x07])
     );
 }

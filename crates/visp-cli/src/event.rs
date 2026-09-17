@@ -1013,14 +1013,16 @@ fn handle_grpc_message(
                 selected_index: 0,
                 other_active: false,
             });
-            // 终端通知：仅主 session 响铃（BEL；TUI 持有终端，只写控制字节）
+            // 终端通知：仅主 session 响铃（BEL；TUI 持有终端，只写控制字节）。
+            // 会话过滤在挂接点完成——notify 模块不感知 session。
             let is_main = uq.session_id.is_empty() || uq.session_id == app.main_session_id;
-            if let Some(bytes) = app.notify.on_event(
-                NotifyKind::UserQuery,
-                is_main,
-                &uq.message,
-                std::time::Instant::now(),
-            ) {
+            if is_main
+                && let Some(bytes) = app.notify.on_event(
+                    NotifyKind::UserQuery,
+                    &uq.message,
+                    std::time::Instant::now(),
+                )
+            {
                 crate::notify::write_to_stdout(&bytes);
             }
         }
@@ -1070,13 +1072,13 @@ fn handle_grpc_message(
             }
 
             // 终端通知：仅主 session 响铃（BEL）。必须位于 stale 守卫之后——
-            // Ctrl+C 造成的 stale Done 不应响铃。
-            if let Some(bytes) = app.notify.on_event(
-                NotifyKind::Done,
-                is_main,
-                DONE_BODY,
-                std::time::Instant::now(),
-            ) {
+            // Ctrl+C 造成的 stale Done 不应响铃。会话过滤在挂接点完成，
+            // notify 模块不感知 session。
+            if is_main
+                && let Some(bytes) =
+                    app.notify
+                        .on_event(NotifyKind::Done, DONE_BODY, std::time::Instant::now())
+            {
                 crate::notify::write_to_stdout(&bytes);
             }
 
