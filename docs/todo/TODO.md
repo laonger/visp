@@ -1,6 +1,6 @@
 # TODO & 已知限制
 
-> 最后更新：2026-06-14
+> 最后更新：2026-09-18
 > 基于真实代码状态核实，旧文档中 3 项「待实现」经确认已完成。
 
 ## Phase 完成状态
@@ -189,5 +189,35 @@ Agent 循环在等待 UserQuery 确认时 panic，mpsc sender 被 drop，daemon 
 `SymbolDetails.source` 基于 `line` 字段读文件取源码片段，MVP 截取前 500 字符。
 
 **后续方案**：使用 tree-sitter 的 node range 精确定位完整函数源码。
+
+---
+
+## 📋 终端通知：v1 不做项与未来扩展（notification）
+
+> 登记于计划 `docs/plans/visp-plan-notification.md` 步骤 6c；来源 `docs/design/notification.md` §5（不做项）与 §7（未来扩展）。
+
+### v1 不做项（设计已拍板，本期不实现）
+
+- **系统通知后端**（osascript / notify-rust）：v1 只走终端协议通道；未来可作为「协议不可用时的 fallback」扩展
+- **kitty OSC 99 高级特性**：点击动作、关闭回调、图标、进度
+- **kitty OSC 99 能力探测**（`a=q` 查询等待响应）：v1 用环境变量判定协议
+- **tmux `DCS tmux;` 包裹**：tmux 用户可自行开启 allow-passthrough
+- **终端聚焦检测、通知文案模板、点击跳转、通知历史**
+
+### 未来扩展（不在本期）
+
+- kitty OSC 99 能力探测（`a=q` 查询/响应），替代或校准环境变量探测
+- 系统通知 fallback 后端（协议不可用或复用器拦截场景）
+- tmux DCS 包裹、聚焦检测、通知文案带任务摘要
+
+### 已知限制
+
+#### 未识别终端回退 BEL 兜底（visp-cli — 已修订进设计正文，经用户拍板 2026-09-18）
+
+**问题**：rmux / tmux 等复用器可能拦截或丢弃 OSC 9/777/99 通知序列（rmux 的 `osc_notification` 为空实现），导致通知完全静默。
+
+**状态**：未识别终端（含 rmux / tmux 等复用器）统一回退 BEL（`0x07`）兜底——保响铃/🔔 提示，无文本横幅。**已修订进设计正文**：`docs/design/notification.md` §1「实现偏离说明（2026-09-18）」，原决策「未知终端盲发 OSC 9」作废。该兜底属事实上的复用器适配（不特殊识别某个复用器，通用「未识别 → BEL」）。已识别终端仍按 OSC 9/777/99 发送；复用器拦截 OSC 时不做绕行，是否透传由复用器自身负责（tmux 的 allow-passthrough、rmux 的透传实现）。
+
+**后续方案**：系统通知 fallback 后端（协议不可用或复用器拦截场景）。
 
 
