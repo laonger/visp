@@ -2,7 +2,7 @@ use super::*;
 use crate::app::AppState;
 use crate::notify::{NotifyEngine, NotifyKind};
 use std::time::Duration;
-use visp_proto::visp::{Done, Error, ServerMessage, UsageDelta, server_message};
+use visp_proto::visp::{Done, Error, ServerMessage, UsageDelta, UserQuery, server_message};
 
 fn make_done_msg(sid: &str) -> ServerMessage {
     ServerMessage {
@@ -219,5 +219,137 @@ fn test_done_hookup_skips_sub_session() {
     assert!(
         app.notify.last_sent_at(NotifyKind::Done).is_none(),
         "sub session Done must not ring"
+    );
+}
+
+fn make_user_query_msg(sid: &str, message: &str) -> ServerMessage {
+    ServerMessage {
+        payload: Some(server_message::Payload::UserQuery(UserQuery {
+            query_id: "q-1".into(),
+            message: message.into(),
+            session_id: sid.into(),
+            options: Vec::new(),
+            allow_other: false,
+        })),
+    }
+}
+
+// ── 通知挂接点（计划 5a）：stale Done 不响铃、enabled=false 不响铃 ──
+
+#[test]
+fn test_done_hookup_skips_stale_done() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.notify = NotifyEngine::new(true, None, true, true, true, Duration::ZERO);
+    let chat = ChatHandle::new_mock("main");
+
+    // 模拟 Ctrl+C 后的 stale 状态：主 session Done 应被跳过且不响铃
+    app.stale_done_expected = true;
+
+    handle_grpc_message(make_done_msg("main"), &mut app, &chat);
+
+    assert!(
+        app.notify.last_sent_at(NotifyKind::Done).is_none(),
+        "stale Done（Cancel 语义）不得触发通知"
+    );
+    assert!(
+        !app.stale_done_expected,
+        "stale_done_expected 应被主 session Done 清除"
+    );
+}
+
+#[test]
+fn test_done_hookup_respects_disabled_engine() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.notify = NotifyEngine::new(true, None, false, true, true, Duration::ZERO);
+    let chat = ChatHandle::new_mock("main");
+
+    handle_grpc_message(make_done_msg("main"), &mut app, &chat);
+
+    assert!(
+        app.notify.last_sent_at(NotifyKind::Done).is_none(),
+        "enabled=false 时主 session Done 不得触发通知"
+    );
+}
+
+// ── 通知挂接点（计划 5b）：UserQuery 仅主会话响铃，正文取 uq.message ──
+
+#[test]
+fn test_user_query_hookup_rings_for_main_session() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.notify = NotifyEngine::new(true, None, true, true, true, Duration::ZERO);
+    let chat = ChatHandle::new_mock("main");
+
+    handle_grpc_message(make_user_query_msg("main", "approve?"), &mut app, &chat);
+
+    assert!(
+        app.notify.last_sent_at(NotifyKind::UserQuery).is_some(),
+        "主 session 的 UserQuery 应触发通知"
+    );
+}
+
+#[test]
+fn test_user_query_hookup_rings_for_empty_session() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.notify = NotifyEngine::new(true, None, true, true, true, Duration::ZERO);
+    let chat = ChatHandle::new_mock("main");
+
+    handle_grpc_message(make_user_query_msg("", "approve?"), &mut app, &chat);
+
+    assert!(
+        app.notify.last_sent_at(NotifyKind::UserQuery).is_some(),
+        "session_id 为空的 UserQuery 应按主会话处理并触发通知"
+    );
+}
+
+#[test]
+fn test_user_query_hookup_skips_sub_session() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.notify = NotifyEngine::new(true, None, true, true, true, Duration::ZERO);
+    let chat = ChatHandle::new_mock("main");
+    app.tab_bar.insert_sub_agent("sub1", "agentA", false);
+
+    handle_grpc_message(make_user_query_msg("sub1", "approve?"), &mut app, &chat);
+
+    assert!(
+        app.notify.last_sent_at(NotifyKind::UserQuery).is_none(),
+        "子 session 的 UserQuery 不得触发通知"
+    );
+}
+
+#[test]
+fn test_user_query_hookup_still_builds_confirm_state() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.notify = NotifyEngine::new(true, None, true, true, true, Duration::ZERO);
+    let chat = ChatHandle::new_mock("main");
+
+    handle_grpc_message(make_user_query_msg("main", "approve?"), &mut app, &chat);
+
+    // 回归：通知挂接不得破坏 ConfirmState 构造
+    let confirm = app
+        .confirm
+        .as_ref()
+        .expect("UserQuery 应正常构造 ConfirmState");
+    assert_eq!(confirm.query_id, "q-1");
+    assert_eq!(confirm.message, "approve?");
+    assert!(confirm.options.is_empty());
+    assert_eq!(confirm.selected_index, 0);
+    assert!(!confirm.other_active);
+}
+
+#[test]
+fn test_user_query_hookup_uses_message_body() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.notify = NotifyEngine::new(true, None, true, true, true, Duration::ZERO);
+    let chat = ChatHandle::new_mock("main");
+
+    handle_grpc_message(
+        make_user_query_msg("main", "需要审批：执行 bash 命令"),
+        &mut app,
+        &chat,
+    );
+
+    assert!(
+        app.notify.last_sent_at(NotifyKind::UserQuery).is_some(),
+        "非空 uq.message 应作为通知正文发出"
     );
 }

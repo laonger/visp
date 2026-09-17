@@ -1015,10 +1015,12 @@ fn handle_grpc_message(
             });
             // 终端通知：仅主 session 响铃（BEL；TUI 持有终端，只写控制字节）
             let is_main = uq.session_id.is_empty() || uq.session_id == app.main_session_id;
-            if let Some(bytes) = app
-                .notify
-                .on_event(NotifyKind::UserQuery, is_main, &uq.message, std::time::Instant::now())
-            {
+            if let Some(bytes) = app.notify.on_event(
+                NotifyKind::UserQuery,
+                is_main,
+                &uq.message,
+                std::time::Instant::now(),
+            ) {
                 crate::notify::write_to_stdout(&bytes);
             }
         }
@@ -1069,10 +1071,12 @@ fn handle_grpc_message(
 
             // 终端通知：仅主 session 响铃（BEL）。必须位于 stale 守卫之后——
             // Ctrl+C 造成的 stale Done 不应响铃。
-            if let Some(bytes) = app
-                .notify
-                .on_event(NotifyKind::Done, is_main, DONE_BODY, std::time::Instant::now())
-            {
+            if let Some(bytes) = app.notify.on_event(
+                NotifyKind::Done,
+                is_main,
+                DONE_BODY,
+                std::time::Instant::now(),
+            ) {
                 crate::notify::write_to_stdout(&bytes);
             }
 

@@ -3225,3 +3225,35 @@ fn test_set_generating_clears_frozen_tps() {
         "set_generating 应清除冻结耗时"
     );
 }
+
+// ════════════════════════════════════════════════════════════
+// 通知引擎装配（计划 4a）：AppState::new 默认 disabled，注入后协议一致
+// ════════════════════════════════════════════════════════════
+
+#[test]
+fn test_app_state_notify_disabled_by_default() {
+    let app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
+    assert!(
+        app.notify.selected_protocol().is_none(),
+        "AppState::new 应构造 disabled 的 NotifyEngine（协议为 None）"
+    );
+}
+
+#[test]
+fn test_app_state_notify_injection_reflects_protocol() {
+    let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
+    // 模拟 event::run 的注入路径（决策 D7）：直接对 AppState 赋值
+    app.notify = NotifyEngine::new(
+        true,
+        Some(crate::notify::Protocol::Osc9),
+        true,
+        true,
+        true,
+        std::time::Duration::ZERO,
+    );
+    assert_eq!(
+        app.notify.selected_protocol(),
+        Some(crate::notify::Protocol::Osc9),
+        "注入的引擎应暴露与构造参数一致的协议"
+    );
+}
