@@ -47,15 +47,15 @@
 
 | 模块 | 职责 | 变更性质 |
 |---|---|---|
-| visp-cli（新模块 `notify/`） | 通知引擎：协议探测、序列编码、节流、会话过滤 | 新增 |
-| visp-cli `event.rs` | 在 Done / UserQuery 两个事件处理点挂接通知调用 | 小改 |
+| visp-cli（新模块 `notify/`） | 通知引擎：协议探测、序列编码、开关与节流 | 新增 |
+| visp-cli `event.rs` | 在 Done / UserQuery 两个事件处理点挂接通知调用；**会话过滤（仅根 session）在挂接点完成** | 小改 |
 | visp-config | `DaemonConfig` 新增 `[notification]` 配置段 | 小改 |
 
 不做新 crate：通知逻辑只被 visp-cli 消费，先以模块形式落地，未来 daemon 需要时再抽 crate。
 
 ### 2.1 notify 模块（visp-cli 内）
 
-四个内部组件：
+三个内部组件：
 
 - **探测器（Detector）**：启动时运行一次。前置守卫：`stdout().is_tty()` 不满足（管道/重定向运行）时整模块禁用；通过后依据环境变量判定协议，产出单一选定协议
   - 已知终端映射表（依据已核实支持矩阵）：`KITTY_WINDOW_ID`/`TERM=xterm-kitty` → OSC 99；`TERM_PROGRAM=WezTerm` 等 777 系终端 → OSC 777；`TERM_PROGRAM=ghostty`/`iTerm.app` → OSC 9
@@ -63,7 +63,8 @@
   - 用户配置可强制覆盖探测结果
 - **编码器（Encoder）**：按选定协议生成转义序列字节串。纯函数、无 IO，便于单测。正文/标题中的控制字符（ESC、BEL、C0/C1）按各协议规范转义
 - **节流器**：事件分两类（Done / UserQuery），按类独立计时，同类最小间隔内（默认 3s）不重复发。UserQuery 连续多步审批的高频触发即被压制
-- **会话过滤**：Done 与 UserQuery 一视同仁，仅根 session 触发。判别复用现有模式：`session_id.is_empty() || session_id == app.main_session_id`（event.rs Error/Done 分支同款）。子 agent 的完成与审批均不通知。UserQuery proto 自带 session_id（visp.proto:187），现 handler 未读取，挂接时补读即可
+
+会话过滤（仅根 session）不属 notify 内部组件，见 §2.2 挂接点。
 
 通知文案（v1 固定，不做模板）：
 
@@ -80,9 +81,10 @@
 
 ### 2.2 挂接点（visp-cli/event.rs）
 
-- **回合完成**：`Payload::Done` 处理分支（event.rs:1046）。⚠️ 必须挂在 `stale_done_expected` 提前 return 分支（紧随其后，主 session Cancel 产生的 Done）**之后**——否则用户取消任务也会弹「完成」通知
-- **需要用户输入**：`Payload::UserQuery` 处理分支（event.rs:1000），补读 `uq.session_id` 做根会话判别（proto 已有该字段，现 handler 未读取）
-- 两处统一在分支末尾调用 `notify::on_event(kind, body)`，依次通过会话过滤 → 开关 → 节流
+- **回合完成**：`Payload::Done` 处理分支（event.rs:1065）。⚠️ 必须挂在 `stale_done_expected` 提前 return 分支（紧随其后，主 session Cancel 产生的 Done）**之后**——否则用户取消任务也会弹「完成」通知
+- **需要用户输入**：`Payload::UserQuery` 处理分支（event.rs:1006），读 `uq.session_id` 做根会话判别（proto 字段 visp.proto:187，实现中已启用）
+- 挂接点先做会话过滤：`is_main = session_id.is_empty() || session_id == app.main_session_id`（与 Error/Done 分支同款判别；UserQuery 的 session_id 见 visp.proto:187），仅在 `is_main` 为真时调用 `notify::on_event(kind, body)`
+- notify 内部只做 开关 → 节流 → 编码，不感知 session；子 agent 的完成与审批一律不通知（过滤在挂接点）
 
 ### 2.3 配置（visp-config）
 
@@ -148,9 +150,9 @@
 3. kitty 环境下走 OSC 99，标题+正文正确显示
 4. `protocol = "osc777"` 强制指定时按 777 编码
 5. `[notification] enabled = false` 完全静默；on_complete / on_user_input 可独立开关
-6. 子 agent 会话的完成与审批请求均不触发（UserQuery/Done 统一会话过滤）
+6. 子 agent 会话的完成与审批请求均不触发（挂接点统一会话过滤，notify 不感知 session）
 7. 连续多个审批请求只发一条（节流）
-8. 单测覆盖：Detector 映射表与 is_tty 守卫、三种 Encoder 的序列正确性（含控制字符转义）、节流器（按类独立计时）、会话过滤
+8. 单测覆盖：Detector 映射表与 is_tty 守卫、三种 Encoder 的序列正确性（含控制字符转义）、节流器（按类独立计时）、会话过滤（挂接点层，见 event_tests）
 9. stdout 重定向到文件时无任何转义序列泄漏（is_tty 守卫生效）
 10. 主 session 取消（Cancel）不触发「完成」通知（stale_done_expected 路径避让生效）
 11. 未识别终端（含 rmux / tmux 复用器）下，任务完成与审批请求仍可感知（BEL 响铃/🔔；§1「实现偏离说明」的偏离行为）
