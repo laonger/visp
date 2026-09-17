@@ -247,17 +247,26 @@ fn test_fill_missing_reasoning_ignores_other_roles() {
     let result = build_openai_messages_with_policy(&msgs, ReasoningEchoPolicy::FillMissing);
     assert_eq!(result[0]["role"], "system");
     assert!(
-        !result[0].as_object().unwrap().contains_key("reasoning_content"),
+        !result[0]
+            .as_object()
+            .unwrap()
+            .contains_key("reasoning_content"),
         "system 消息不应被补 reasoning_content"
     );
     assert_eq!(result[1]["role"], "user");
     assert!(
-        !result[1].as_object().unwrap().contains_key("reasoning_content"),
+        !result[1]
+            .as_object()
+            .unwrap()
+            .contains_key("reasoning_content"),
         "user 消息不应被补 reasoning_content"
     );
     assert_eq!(result[4]["role"], "tool");
     assert!(
-        !result[4].as_object().unwrap().contains_key("reasoning_content"),
+        !result[4]
+            .as_object()
+            .unwrap()
+            .contains_key("reasoning_content"),
         "tool 消息不应被补 reasoning_content"
     );
     // assistant 角色（含 tool_call 消息）应补齐
@@ -299,12 +308,8 @@ fn test_build_openai_request_with_policy_fill_missing() {
         with_reasoning,
     ];
     let config = LlmConfig::default();
-    let request = build_openai_request_with_policy(
-        &msgs,
-        &[],
-        &config,
-        ReasoningEchoPolicy::FillMissing,
-    );
+    let request =
+        build_openai_request_with_policy(&msgs, &[], &config, ReasoningEchoPolicy::FillMissing);
     let messages = request["messages"].as_array().unwrap();
     assert_eq!(messages[1]["reasoning_content"], "");
     assert_eq!(messages[2]["reasoning_content"], "思考文本");
