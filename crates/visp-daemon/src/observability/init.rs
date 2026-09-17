@@ -11,6 +11,7 @@ use std::sync::Arc;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing_opentelemetry::OpenTelemetryLayer;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::prelude::*;
 
@@ -56,6 +57,19 @@ fn log_dir_is_writable(dir: &Path) -> bool {
     }
 }
 
+/// Build the fmt-layer filter from `log_level`.
+///
+/// A bare `LevelFilter` would admit the OpenTelemetry SDK's internal DEBUG
+/// events (target `opentelemetry_sdk`, e.g. `BatchSpanProcessor.
+/// ExportingDueToTimer`, emitted once per scheduled export tick) into the
+/// JSON log file whenever `log_level` is `debug`.  Capping that target at
+/// WARN keeps the SDK's real diagnostics (export failures, etc.) while
+/// silencing the per-tick noise.
+fn fmt_layer_filter(log_level: &str) -> EnvFilter {
+    let base = LevelFilter::from_str(log_level).unwrap_or(LevelFilter::INFO);
+    EnvFilter::new(format!("{base},opentelemetry_sdk=warn"))
+}
+
 /// Initialise the tracing subscriber stack from configuration.
 ///
 /// Assembly order: EnvFilter → ParentLinkLayer → MetricsLayer → fmt layer.
@@ -84,7 +98,7 @@ pub fn init_observability(cfg: &ObservabilityConfig, log_level: &str) -> Observa
 
     // 1. Per-layer level filters: fmt layer (file/stdout) uses `log_level`;
     //    OTel export + metrics use `cfg.level` (observability.level).
-    let log_filter = LevelFilter::from_str(log_level).unwrap_or(LevelFilter::INFO);
+    let log_filter = fmt_layer_filter(log_level);
     let otel_filter = LevelFilter::from_str(&cfg.level).unwrap_or(LevelFilter::INFO);
 
     // 2. Always create layers (lightweight noops when unused).
@@ -223,7 +237,7 @@ where
     }
 
     // Per-layer level filters: fmt layer uses `log_level`, OTel + metrics use cfg.level.
-    let log_filter = LevelFilter::from_str(log_level).unwrap_or(LevelFilter::INFO);
+    let log_filter = fmt_layer_filter(log_level);
     let otel_filter = LevelFilter::from_str(&cfg.level).unwrap_or(LevelFilter::INFO);
     let parent_link = if cfg.otlp.enabled {
         ParentLinkLayer::with_otel_mode(true)
@@ -319,7 +333,7 @@ where
     }
 
     // Per-layer level filters: fmt layer uses `log_level`, OTel + metrics use cfg.level.
-    let log_filter = LevelFilter::from_str(log_level).unwrap_or(LevelFilter::INFO);
+    let log_filter = fmt_layer_filter(log_level);
     let otel_filter = LevelFilter::from_str(&cfg.level).unwrap_or(LevelFilter::INFO);
     let parent_link = if cfg.otlp.enabled {
         ParentLinkLayer::with_otel_mode(true)
@@ -404,7 +418,7 @@ where
     }
 
     // Per-layer level filters: fmt layer uses `log_level`, OTel + metrics use cfg.level.
-    let log_filter = LevelFilter::from_str(log_level).unwrap_or(LevelFilter::INFO);
+    let log_filter = fmt_layer_filter(log_level);
     let otel_filter = LevelFilter::from_str(&cfg.level).unwrap_or(LevelFilter::INFO);
     let parent_link = if cfg.otlp.enabled {
         ParentLinkLayer::with_otel_mode(true)
@@ -533,7 +547,7 @@ mod tests {
         log_level: &str,
         cfg: &ObservabilityConfig,
     ) -> tracing::subscriber::DefaultGuard {
-        let log_filter = LevelFilter::from_str(log_level).unwrap_or(LevelFilter::INFO);
+        let log_filter = fmt_layer_filter(log_level);
         let otel_filter = LevelFilter::from_str(&cfg.level).unwrap_or(LevelFilter::INFO);
 
         let parent_link = ParentLinkLayer::new();
@@ -762,6 +776,47 @@ mod tests {
             "expected at least 2 events (debug + error), got {} lines: {:?}",
             line_count,
             output
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Red + Green: OTel SDK internal debug noise is capped at WARN
+    // ------------------------------------------------------------------
+
+    /// The OpenTelemetry SDK emits a DEBUG event with target
+    /// `opentelemetry_sdk` (e.g. `BatchSpanProcessor.ExportingDueToTimer`)
+    /// on every scheduled export tick.  The fmt-layer filter must cap that
+    /// target at WARN so these events never reach the log file, while
+    /// app-target debug events still pass.
+    #[test]
+    #[serial]
+    fn test_fmt_filter_caps_opentelemetry_sdk_at_warn() {
+        let writer = TestVecWriter::new();
+        let cfg = ObservabilityConfig {
+            enabled: true,
+            format: "json".into(),
+            parent_link: false,
+            metrics_summary: false,
+            log_file: None,
+            ..Default::default()
+        };
+        let _guard = make_test_subscriber(writer.clone(), "debug", &cfg);
+
+        tracing::debug!(
+            target: "opentelemetry_sdk",
+            name = "BatchSpanProcessor.ExportingDueToTimer",
+            "sdk internal noise"
+        );
+        tracing::debug!(target: "visp_daemon", "app debug stays visible");
+
+        let output = writer.into_string();
+        assert!(
+            !output.contains("ExportingDueToTimer"),
+            "opentelemetry_sdk internal debug event must be filtered out, got: {output}"
+        );
+        assert!(
+            output.contains("app debug stays visible"),
+            "app-target debug events must still pass the fmt filter, got: {output}"
         );
     }
 
