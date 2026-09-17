@@ -1,5 +1,7 @@
 use super::*;
 use crate::app::AppState;
+use crate::notify::{NotifyEngine, NotifyKind};
+use std::time::Duration;
 use visp_proto::visp::{Done, Error, ServerMessage, UsageDelta, server_message};
 
 fn make_done_msg(sid: &str) -> ServerMessage {
@@ -187,4 +189,35 @@ fn test_usage_delta_is_applied_to_stream_rate() {
     assert_eq!(app.tab_bar.tabs[0].stream_output_tokens, 20);
     assert_eq!(app.total_output_tokens, 0, "实时增量不得计入结算总量");
     assert!(app.active_tab().pending_usage.is_none());
+}
+
+// ── 通知挂接点（Wave 2）：Done 分支在 stale 守卫之后触发 BEL ──────────
+
+#[test]
+fn test_done_hookup_rings_for_main_session() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.notify = NotifyEngine::new(true, None, true, true, true, Duration::ZERO);
+    let chat = ChatHandle::new_mock("main");
+
+    handle_grpc_message(make_done_msg("main"), &mut app, &chat);
+
+    assert!(
+        app.notify.last_sent_at(NotifyKind::Done).is_some(),
+        "main session Done should trigger a notification"
+    );
+}
+
+#[test]
+fn test_done_hookup_skips_sub_session() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.notify = NotifyEngine::new(true, None, true, true, true, Duration::ZERO);
+    let chat = ChatHandle::new_mock("main");
+    app.tab_bar.insert_sub_agent("sub1", "agentA", false);
+
+    handle_grpc_message(make_done_msg("sub1"), &mut app, &chat);
+
+    assert!(
+        app.notify.last_sent_at(NotifyKind::Done).is_none(),
+        "sub session Done must not ring"
+    );
 }

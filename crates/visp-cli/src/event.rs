@@ -22,6 +22,7 @@ macro_rules! debug_log {
 
 use crate::app::{AppState, ConfirmState, LineType, TabCompletionState};
 use crate::client::{ChatHandle, VispClient};
+use crate::notify::{NotifyEngine, NotifyKind};
 use crate::ui::render;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use std::io::{self, Write};
@@ -85,6 +86,7 @@ pub async fn run(
     project_path: &str,
     available_models: Vec<String>,
     model_keys: Vec<String>,
+    notification: NotifyEngine,
 ) -> io::Result<()> {
     if let Ok((_w, _h)) = crossterm::terminal::size() {
         debug_log!("session start: {_w}x{_h}, model={model}");
@@ -104,6 +106,7 @@ pub async fn run(
     );
     app.available_models = available_models;
     app.model_keys = model_keys;
+    app.notify = notification;
 
     // exit 信号：键盘线程检测到 Ctrl+D 时通知主循环无条件退出
     let (exit_tx, mut exit_rx) = tokio::sync::watch::channel(false);
@@ -973,6 +976,9 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
     false
 }
 
+/// Done 通知的固定文案（BEL 编码忽略 body，仅作语义占位；OSC 编码时使用）。
+const DONE_BODY: &str = "任务完成，等待输入";
+
 fn handle_grpc_message(
     msg: visp_proto::visp::ServerMessage,
     app: &mut AppState,
@@ -1007,6 +1013,14 @@ fn handle_grpc_message(
                 selected_index: 0,
                 other_active: false,
             });
+            // 终端通知：仅主 session 响铃（BEL；TUI 持有终端，只写控制字节）
+            let is_main = uq.session_id.is_empty() || uq.session_id == app.main_session_id;
+            if let Some(bytes) = app
+                .notify
+                .on_event(NotifyKind::UserQuery, is_main, &uq.message, std::time::Instant::now())
+            {
+                crate::notify::write_to_stdout(&bytes);
+            }
         }
         Some(server_message::Payload::StatusUpdate(su)) => {
             // 加载 session 历史中的用户输入到 input_history（↑↓ 翻找历史提问）
@@ -1051,6 +1065,15 @@ fn handle_grpc_message(
             if is_main && app.stale_done_expected {
                 app.stale_done_expected = false;
                 return;
+            }
+
+            // 终端通知：仅主 session 响铃（BEL）。必须位于 stale 守卫之后——
+            // Ctrl+C 造成的 stale Done 不应响铃。
+            if let Some(bytes) = app
+                .notify
+                .on_event(NotifyKind::Done, is_main, DONE_BODY, std::time::Instant::now())
+            {
+                crate::notify::write_to_stdout(&bytes);
             }
 
             // 按 session_id 定位 tab 并设置 generating = false

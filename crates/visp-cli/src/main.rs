@@ -11,6 +11,7 @@ mod ui;
 
 use clap::Parser;
 use client::VispClient;
+use crossterm::tty::IsTty;
 use visp_proto::visp::LlmConfig as ProtoLlmConfig;
 
 #[derive(Parser)]
@@ -41,6 +42,35 @@ struct Cli {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    // ── 加载配置（通知等可选功能；失败不阻断启动）──────────────────
+    let config = match visp_config::load_config(None) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Warning: failed to load config, using defaults: {e}");
+            visp_config::DaemonConfig::default()
+        }
+    };
+    let notification = config.notification;
+    // 协议 override 目前只影响 selected_protocol() 的可观测值；BEL 编码与协议无关。
+    let protocol_override = match notification.protocol {
+        visp_config::NotificationProtocol::Auto => None,
+        visp_config::NotificationProtocol::Osc9 => Some(notify::Protocol::Osc9),
+        visp_config::NotificationProtocol::Osc777 => Some(notify::Protocol::Osc777),
+        visp_config::NotificationProtocol::Kitty99 => Some(notify::Protocol::Kitty99),
+    };
+    let notify_engine = notify::NotifyEngine::new(
+        std::io::stdout().is_tty(),
+        protocol_override,
+        notification.enabled,
+        notification.on_complete,
+        notification.on_user_input,
+        std::time::Duration::from_secs(notification.min_interval_secs),
+    );
+    tracing::debug!(
+        "notification engine: protocol={:?}",
+        notify_engine.selected_protocol()
+    );
 
     let mut client = match VispClient::connect(&cli.addr).await {
         Ok(c) => c,
@@ -199,6 +229,7 @@ async fn main() {
         session.project_path.as_str(),
         session.available_models.clone(),
         session.model_keys.clone(),
+        notify_engine,
     )
     .await
     {

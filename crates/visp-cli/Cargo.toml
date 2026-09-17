@@ -27,3 +27,4 @@ ratatui-image = { version = "11", default-features = false, features = ["crosste
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 reqwest = { workspace = true }
 unicode-width = "0.2"
+tracing.workspace = true

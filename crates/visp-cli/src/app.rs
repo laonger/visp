@@ -12,6 +12,7 @@ use std::path::Path;
 use unicode_width::UnicodeWidthChar;
 
 use crate::image::{ImageHeightInfo, ImageMetrics, ImageState};
+use crate::notify::NotifyEngine;
 use crate::theme;
 use visp_proto::visp::{ServerMessage, server_message};
 
@@ -1449,6 +1450,8 @@ pub struct AppState {
     pub available_models: Vec<String>,
     /// 可用的模型 lookup key 列表
     pub model_keys: Vec<String>,
+    /// 终端通知引擎（由 `event::run` 注入；`AppState::new` 时为 disabled）
+    pub notify: NotifyEngine,
     /// 用户输入了 /model（无参），主循环需要获取模型列表并显示选择器
     pub pending_model_select: bool,
     /// 模型选择器弹出面板（/model 无参触发）
@@ -1525,6 +1528,7 @@ impl AppState {
             session_select: None,
             available_models: Vec::new(),
             model_keys: Vec::new(),
+            notify: NotifyEngine::disabled(),
             pending_model_select: false,
             model_select: None,
             project_path,
