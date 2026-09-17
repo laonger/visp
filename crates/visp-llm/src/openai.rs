@@ -76,13 +76,84 @@ fn parse_cost(v: Option<&serde_json::Value>) -> Option<f64> {
     parsed.is_finite().then_some(parsed)
 }
 
+/// 回传历史时的 reasoning 一致性策略。
+///
+/// 部分网关（如 opencode zen 的 Console Go）在 thinking 模式下要求历史中
+/// assistant 消息的 `reasoning_content` 保持一致：要么全部携带、要么全部缺失，
+/// 否则间歇性返回 400。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningEchoPolicy {
+    /// 现行为：assistant 消息按原样透传（有 reasoning_content 就带，没有就不带）。
+    Passthrough,
+    /// 补齐策略：若同批请求中至少一条 assistant 消息带 `reasoning_content`，
+    /// 则为所有缺失该字段的 assistant 消息补 `"reasoning_content": ""`；
+    /// 若整批 assistant 都没有该字段，则一条都不加。
+    FillMissing,
+}
+
+/// 判断 400 响应是否为 reasoning_content 回传一致性错误。
+///
+/// 命中特征：响应体同时包含 `reasoning_content` 与 `must be passed back`
+/// （大小写不敏感、包含匹配即可）。
+fn is_reasoning_echo_error(status: u16, body: &str) -> bool {
+    if status != 400 {
+        return false;
+    }
+    let lower = body.to_lowercase();
+    lower.contains("reasoning_content") && lower.contains("must be passed back")
+}
+
+/// 移除所有 assistant 消息的 `reasoning_content` 键（原地修改，不 clone Message）。
+fn strip_reasoning_content(messages: &mut [serde_json::Value]) {
+    for m in messages.iter_mut() {
+        if m.get("role").and_then(|r| r.as_str()) == Some("assistant")
+            && let Some(obj) = m.as_object_mut()
+        {
+            obj.remove("reasoning_content");
+        }
+    }
+}
+
+/// FillMissing 策略的收尾 pass：若至少一条 assistant 消息带 `reasoning_content`，
+/// 则为所有缺失该字段的 assistant 消息补空字符串；否则一条都不加。
+/// 只影响 assistant 消息，不触碰 system/user/tool。
+fn fill_missing_reasoning(messages: &mut [serde_json::Value]) {
+    let has_reasoning = messages.iter().any(|m| {
+        m.get("role").and_then(|r| r.as_str()) == Some("assistant")
+            && m.get("reasoning_content").is_some()
+    });
+    if !has_reasoning {
+        return;
+    }
+    for m in messages.iter_mut() {
+        if m.get("role").and_then(|r| r.as_str()) == Some("assistant")
+            && m.get("reasoning_content").is_none()
+        {
+            m["reasoning_content"] = serde_json::Value::String(String::new());
+        }
+    }
+}
+
 /// 构建 OpenAI API 请求体
 pub fn build_openai_request(
     messages: &[Message],
     tools: &[ToolDefinition],
     config: &LlmConfig,
 ) -> serde_json::Value {
-    let openai_messages = build_openai_messages(messages);
+    build_openai_request_with_policy(messages, tools, config, ReasoningEchoPolicy::Passthrough)
+}
+
+/// 按 reasoning 回传策略构建 OpenAI API 请求体。
+///
+/// 等价于 [`build_openai_request`] + [`build_openai_messages_with_policy`]，
+/// 其余字段（model/tools/stream/stream_options/temperature/max_tokens 等）不受策略影响。
+pub fn build_openai_request_with_policy(
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    config: &LlmConfig,
+    policy: ReasoningEchoPolicy,
+) -> serde_json::Value {
+    let openai_messages = build_openai_messages_with_policy(messages, policy);
 
     let mut request = serde_json::json!({
         "model": config.model,
@@ -225,7 +296,29 @@ pub fn build_openai_headers(api_key: &str) -> reqwest::header::HeaderMap {
 /// - User 消息 content 为字符串
 /// - Assistant 消息可包含 content、tool_calls 和 extra_blocks 中的扩展字段
 ///   （如 thinking，部分 OpenAI 兼容模型支持）
+///
+/// 等价于 [`build_openai_messages_with_policy`] 使用 [`ReasoningEchoPolicy::Passthrough`]。
 pub fn build_openai_messages(messages: &[Message]) -> Vec<serde_json::Value> {
+    build_openai_messages_with_policy(messages, ReasoningEchoPolicy::Passthrough)
+}
+
+/// 按 reasoning 回传策略构建 OpenAI Chat API 消息格式。
+///
+/// [`ReasoningEchoPolicy::FillMissing`] 会在收尾 pass 中补齐缺失的
+/// `reasoning_content`（详见策略定义），其余行为与 Passthrough 完全一致。
+pub fn build_openai_messages_with_policy(
+    messages: &[Message],
+    policy: ReasoningEchoPolicy,
+) -> Vec<serde_json::Value> {
+    let mut result = build_openai_messages_raw(messages);
+    if policy == ReasoningEchoPolicy::FillMissing {
+        fill_missing_reasoning(&mut result);
+    }
+    result
+}
+
+/// 基础消息构建（不含 reasoning 补齐策略）。
+fn build_openai_messages_raw(messages: &[Message]) -> Vec<serde_json::Value> {
     let mut result: Vec<serde_json::Value> = Vec::new();
 
     for msg in messages {
@@ -1223,6 +1316,8 @@ pub struct OpenAiProvider {
     /// 附加请求头（如 opencode 网关的 x-opencode-session），随每个请求发送。
     /// 值中的 {session} 占位符会被 LlmConfig.session_id 替换。
     extra_headers: Vec<(String, String)>,
+    /// 回传历史时的 reasoning 一致性策略（默认 Passthrough）。
+    reasoning_policy: ReasoningEchoPolicy,
 }
 
 impl OpenAiProvider {
@@ -1232,6 +1327,7 @@ impl OpenAiProvider {
             api_url: "https://api.openai.com".to_string(),
             client: build_client(),
             extra_headers: Vec::new(),
+            reasoning_policy: ReasoningEchoPolicy::Passthrough,
         }
     }
 
@@ -1241,6 +1337,7 @@ impl OpenAiProvider {
             api_url: base_url,
             client: build_client(),
             extra_headers: Vec::new(),
+            reasoning_policy: ReasoningEchoPolicy::Passthrough,
         }
     }
 
@@ -1249,6 +1346,17 @@ impl OpenAiProvider {
     pub fn with_extra_headers(mut self, headers: Vec<(String, String)>) -> Self {
         self.extra_headers = headers;
         self
+    }
+
+    /// 设置回传历史时的 reasoning 一致性策略（默认 Passthrough）。
+    pub fn with_reasoning_policy(mut self, policy: ReasoningEchoPolicy) -> Self {
+        self.reasoning_policy = policy;
+        self
+    }
+
+    /// 当前 reasoning 回传策略（只读访问器）。
+    pub fn reasoning_policy(&self) -> ReasoningEchoPolicy {
+        self.reasoning_policy
     }
 
     /// 将 extra_headers 应用到请求头，`{session}` 占位符替换为 config.session_id。
@@ -1464,7 +1572,7 @@ impl LlmProvider for OpenAiProvider {
         } else {
             format!("{base}/v1/chat/completions")
         };
-        let body = build_openai_request(messages, tools, config);
+        let mut body = build_openai_request_with_policy(messages, tools, config, self.reasoning_policy);
         let mut headers = build_openai_headers(&self.api_key);
         self.apply_extra_headers(&mut headers, config);
         let capture_enabled = config.langfuse_capture_input || config.langfuse_capture_output;
@@ -1496,13 +1604,54 @@ impl LlmProvider for OpenAiProvider {
         tracing::debug!(url = %url, model = %config.model, "OpenAI request");
         let start_time = std::time::Instant::now();
         let send_fut = self.client.post(&url).headers(headers).json(&body).send();
-        let response = tokio::select! {
+        let mut response = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(LlmError::Cancelled),
             resp = send_fut => resp.map_err(|e| LlmError::Network(e.to_string()))?,
         };
 
-        let status = response.status();
+        let mut status = response.status();
+        // 400 reasoning_content 回传一致性错误（如 opencode zen Console Go 的
+        // "must be passed back"）：降级重试一次——剥离所有 assistant 消息的
+        // reasoning_content 后重发（不再应用 FillMissing）。只允许一次，用局部
+        // bool 标记，禁止递归/循环。
+        let mut degraded = false;
+        if status == reqwest::StatusCode::BAD_REQUEST {
+            let body_text = response.text().await.unwrap_or_default();
+            if is_reasoning_echo_error(status.as_u16(), &body_text) {
+                degraded = true;
+                tracing::warn!(
+                    model = %config.model,
+                    session_id = ?config.session_id,
+                    error = %body_text,
+                    "400 reasoning_content echo error, retrying once with reasoning_content stripped"
+                );
+                // 降级请求体：移除所有 assistant 消息的 reasoning_content，其余字段不变
+                if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                    strip_reasoning_content(messages);
+                }
+                let mut retry_headers = build_openai_headers(&self.api_key);
+                self.apply_extra_headers(&mut retry_headers, config);
+                let send_fut = self.client.post(&url).headers(retry_headers).json(&body).send();
+                response = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Err(LlmError::Cancelled),
+                    resp = send_fut => resp.map_err(|e| LlmError::Network(e.to_string()))?,
+                };
+                status = response.status();
+            } else {
+                // 非匹配 400：沿用统一错误分支的行为（发 gen_ai.client.error 观测事件 +
+                // 同样的错误值），避免因提前 return 丢事件、与改动前行为不一致。
+                span.in_scope(|| {
+                    tracing::error!(target: "gen_ai.client.error", error_type = "api_error", status = status.as_u16(), degraded, "API error");
+                });
+                return Err(LlmError::Api {
+                    status: status.as_u16(),
+                    message: body_text,
+                });
+            }
+        }
+
         if status.is_success() {
             let byte_stream = response.bytes_stream();
             // 图片保存目录：优先取 config.extra 的 project_path，缺省用系统临时目录
@@ -1537,7 +1686,7 @@ impl LlmProvider for OpenAiProvider {
             Err(LlmError::Auth(body_text))
         } else {
             span.in_scope(|| {
-                tracing::error!(target: "gen_ai.client.error", error_type = "api_error", status = status.as_u16(), "API error");
+                tracing::error!(target: "gen_ai.client.error", error_type = "api_error", status = status.as_u16(), degraded, "API error");
             });
             let body_text = response.text().await.unwrap_or_default();
             Err(LlmError::Api {

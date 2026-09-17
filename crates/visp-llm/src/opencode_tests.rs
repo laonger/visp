@@ -40,3 +40,14 @@ fn test_provider_declares_opencode_session_header() {
     let p = OpencodeProvider::new("sk-test".to_string(), None);
     let _ = p;
 }
+
+#[test]
+fn test_provider_uses_fill_missing_reasoning_policy() {
+    // opencode zen 网关（Console Go）在 thinking 模式下要求历史中 assistant 消息的
+    // reasoning_content 保持一致，因此 OpencodeProvider 必须使用 FillMissing 策略。
+    let p = OpencodeProvider::new("sk-test".to_string(), None);
+    assert_eq!(
+        p.openai.reasoning_policy(),
+        crate::openai::ReasoningEchoPolicy::FillMissing
+    );
+}

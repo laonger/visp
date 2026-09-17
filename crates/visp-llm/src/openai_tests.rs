@@ -172,6 +172,202 @@ fn test_build_messages_thinking_only_without_blocks() {
     assert!(assistant.get("reasoning_content").is_none());
 }
 
+// --- ReasoningEchoPolicy 测试 ---
+
+#[test]
+fn test_fill_missing_reasoning_mixed_history() {
+    // 混合历史：1 条带 reasoning + 18 条不带（对应真实重放中 19 条 assistant
+    // 的混合历史）。FillMissing 后 19/19 全带 reasoning_content，缺失者补 ""，
+    // 原有 reasoning 文本不被覆盖。
+    let mut msgs: Vec<Message> = Vec::new();
+    msgs.push(Message::user("你好"));
+    for i in 0..18 {
+        msgs.push(Message::assistant(format!("无 reasoning 的回复 {i}")));
+    }
+    let mut with_reasoning = Message::assistant("带 reasoning 的回复");
+    with_reasoning.extra_blocks = Some(vec![serde_json::json!({
+        "type": "thinking",
+        "thinking": "原始思考文本",
+    })]);
+    msgs.push(with_reasoning);
+
+    let result = build_openai_messages_with_policy(&msgs, ReasoningEchoPolicy::FillMissing);
+    assert_eq!(result.len(), 20); // 1 user + 19 assistant
+    // 19 条 assistant 消息全部带 reasoning_content
+    for (i, m) in result.iter().enumerate().skip(1) {
+        assert_eq!(m["role"], "assistant");
+        assert!(
+            m.get("reasoning_content").is_some(),
+            "assistant 消息 {i} 应补齐 reasoning_content"
+        );
+    }
+    // 缺失者补 ""，原有 reasoning 文本不被覆盖
+    for m in result.iter().take(19).skip(1) {
+        assert_eq!(m["reasoning_content"], "");
+    }
+    assert_eq!(result[19]["reasoning_content"], "原始思考文本");
+}
+
+#[test]
+fn test_fill_missing_reasoning_none_present() {
+    // 整批 assistant 都没有 reasoning_content → 一条都不新增该字段
+    let msgs = vec![
+        Message::user("你好"),
+        Message::assistant("回复一"),
+        Message::assistant("回复二"),
+    ];
+    let result = build_openai_messages_with_policy(&msgs, ReasoningEchoPolicy::FillMissing);
+    for m in &result {
+        assert!(
+            !m.as_object().unwrap().contains_key("reasoning_content"),
+            "不应新增 reasoning_content: {m}"
+        );
+    }
+}
+
+#[test]
+fn test_fill_missing_reasoning_ignores_other_roles() {
+    // system/user/tool 消息不被动（即使存在带 reasoning 的 assistant）
+    let mut with_reasoning = Message::assistant("带 reasoning 的回复");
+    with_reasoning.extra_blocks = Some(vec![serde_json::json!({
+        "type": "thinking",
+        "thinking": "思考",
+    })]);
+    let msgs = vec![
+        Message::system("你是助手"),
+        Message::user("你好"),
+        with_reasoning,
+        Message::tool_call(vec![ToolCallRequest {
+            id: "call_1".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+        }]),
+        Message::tool("文件内容", "call_1"),
+    ];
+    let result = build_openai_messages_with_policy(&msgs, ReasoningEchoPolicy::FillMissing);
+    assert_eq!(result[0]["role"], "system");
+    assert!(
+        !result[0].as_object().unwrap().contains_key("reasoning_content"),
+        "system 消息不应被补 reasoning_content"
+    );
+    assert_eq!(result[1]["role"], "user");
+    assert!(
+        !result[1].as_object().unwrap().contains_key("reasoning_content"),
+        "user 消息不应被补 reasoning_content"
+    );
+    assert_eq!(result[4]["role"], "tool");
+    assert!(
+        !result[4].as_object().unwrap().contains_key("reasoning_content"),
+        "tool 消息不应被补 reasoning_content"
+    );
+    // assistant 角色（含 tool_call 消息）应补齐
+    assert_eq!(result[2]["reasoning_content"], "思考");
+    assert_eq!(result[3]["role"], "assistant");
+    assert_eq!(result[3]["reasoning_content"], "");
+}
+
+#[test]
+fn test_build_messages_passthrough_mixed_history() {
+    // Passthrough（默认 build_openai_messages）：混合历史输出与改动前一致，
+    // 缺失 reasoning_content 的 assistant 消息仍无该字段
+    let mut with_reasoning = Message::assistant("带 reasoning 的回复");
+    with_reasoning.extra_blocks = Some(vec![serde_json::json!({
+        "type": "thinking",
+        "thinking": "思考文本",
+    })]);
+    let msgs = vec![
+        Message::user("你好"),
+        Message::assistant("无 reasoning 的回复"),
+        with_reasoning,
+    ];
+    let result = build_openai_messages(&msgs);
+    assert!(result[1].get("reasoning_content").is_none());
+    assert_eq!(result[2]["reasoning_content"], "思考文本");
+}
+
+#[test]
+fn test_build_openai_request_with_policy_fill_missing() {
+    // build_openai_request_with_policy(..., FillMissing) 正确透传到 messages
+    let mut with_reasoning = Message::assistant("带 reasoning 的回复");
+    with_reasoning.extra_blocks = Some(vec![serde_json::json!({
+        "type": "thinking",
+        "thinking": "思考文本",
+    })]);
+    let msgs = vec![
+        Message::user("你好"),
+        Message::assistant("无 reasoning 的回复"),
+        with_reasoning,
+    ];
+    let config = LlmConfig::default();
+    let request = build_openai_request_with_policy(
+        &msgs,
+        &[],
+        &config,
+        ReasoningEchoPolicy::FillMissing,
+    );
+    let messages = request["messages"].as_array().unwrap();
+    assert_eq!(messages[1]["reasoning_content"], "");
+    assert_eq!(messages[2]["reasoning_content"], "思考文本");
+    // 其余请求字段不受策略影响
+    assert_eq!(request["model"], config.model);
+    assert!(request["stream"].as_bool().unwrap());
+}
+
+#[test]
+fn test_is_reasoning_echo_error() {
+    // 命中真实上游报文样例 → true
+    let real = r#"{"error":{"type":"invalid_request_error","code":"invalid_request_error","message":"Error from provider (Console Go): Upstream request failed: [invalid_request_error] The `reasoning_content` in the thinking mode must be passed back to the API."}}"#;
+    assert!(is_reasoning_echo_error(400, real));
+    // 大小写不敏感
+    assert!(is_reasoning_echo_error(400, &real.to_uppercase()));
+    // 400 但其它报文 → false
+    assert!(!is_reasoning_echo_error(
+        400,
+        r#"{"error":{"message":"bad request"}}"#
+    ));
+    // 只含其中一个关键词 → false
+    assert!(!is_reasoning_echo_error(400, "reasoning_content missing"));
+    assert!(!is_reasoning_echo_error(400, "must be passed back"));
+    // 200 / 其它状态码 → false
+    assert!(!is_reasoning_echo_error(200, real));
+    assert!(!is_reasoning_echo_error(500, real));
+}
+
+#[test]
+fn test_strip_reasoning_content() {
+    // 移除所有 assistant 消息的 reasoning_content，其它字段与消息顺序不变
+    let mut messages = vec![
+        serde_json::json!({"role": "system", "content": "sys"}),
+        serde_json::json!({"role": "user", "content": "hi"}),
+        serde_json::json!({"role": "assistant", "content": "a", "reasoning_content": "思考"}),
+        serde_json::json!({"role": "assistant", "content": "b"}),
+        serde_json::json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{"id": "call_1", "type": "function"}],
+            "reasoning_content": "思考2"
+        }),
+        serde_json::json!({"role": "tool", "tool_call_id": "call_1", "content": "res"}),
+    ];
+    strip_reasoning_content(&mut messages);
+    // 所有 reasoning_content 被移除
+    for m in &messages {
+        assert!(
+            !m.as_object().unwrap().contains_key("reasoning_content"),
+            "reasoning_content 应被移除: {m}"
+        );
+    }
+    // 其它字段与顺序不变
+    assert_eq!(messages.len(), 6);
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[0]["content"], "sys");
+    assert_eq!(messages[2]["content"], "a");
+    assert_eq!(messages[3]["content"], "b");
+    assert_eq!(messages[4]["tool_calls"][0]["id"], "call_1");
+    assert_eq!(messages[5]["role"], "tool");
+    assert_eq!(messages[5]["content"], "res");
+}
+
 #[test]
 fn test_extra_blocks_does_not_overwrite_reserved_fields() {
     let msgs = vec![

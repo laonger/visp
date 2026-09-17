@@ -14,7 +14,7 @@ use visp_core::error::LlmError;
 use visp_core::message::{Message, ToolDefinition};
 use visp_core::provider::{ChatEvent, LlmProvider};
 
-use crate::openai::OpenAiProvider;
+use crate::openai::{OpenAiProvider, ReasoningEchoPolicy};
 
 /// opencode zen 默认 base_url。
 /// 结尾非版本段（vN），OpenAiProvider 会自动拼接 `/v1/chat/completions`。
@@ -30,10 +30,14 @@ impl OpencodeProvider {
     pub fn new(api_key: String, base_url: Option<String>) -> Self {
         let base = base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
         Self {
-            openai: OpenAiProvider::with_base_url(api_key, base).with_extra_headers(vec![(
-                "x-opencode-session".to_string(),
-                "{session}".to_string(),
-            )]),
+            openai: OpenAiProvider::with_base_url(api_key, base)
+                .with_extra_headers(vec![(
+                    "x-opencode-session".to_string(),
+                    "{session}".to_string(),
+                )])
+                // opencode zen 网关（Console Go）在 thinking 模式下要求历史中
+                // assistant 消息的 reasoning_content 保持一致，否则间歇性 400。
+                .with_reasoning_policy(ReasoningEchoPolicy::FillMissing),
         }
     }
 }
