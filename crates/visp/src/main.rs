@@ -47,7 +47,7 @@ async fn main() {
 
     // Resolve sibling binary paths (same dir as launcher for cargo run, or PATH)
     let daemon_bin = resolve_bin("visp-daemon");
-    let cli_bin = resolve_bin("visp-cli");
+    let cli_bin = resolve_bin("visp-tui");
 
     // 1. Create log directory
     let log_dir = visp_config::path::log_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -125,7 +125,7 @@ async fn main() {
 
     // 6. Build CLI args
     let mut cli_args = vec![
-        "visp-cli".to_string(),
+        "visp-tui".to_string(),
         "--addr".to_string(),
         addr.clone(),
         "-p".to_string(),
@@ -156,7 +156,7 @@ async fn main() {
         Ok(child) => child,
         Err(e) => {
             eprintln!("[visp] Failed to start CLI: {e}");
-            eprintln!("[visp] Make sure 'visp-cli' is installed.");
+            eprintln!("[visp] Make sure 'visp-tui' is installed.");
             kill_daemon(&mut daemon).await;
             std::process::exit(1);
         }

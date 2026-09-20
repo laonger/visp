@@ -49,7 +49,7 @@ jobs:
           mkdir -p visp-${{ matrix.target }}
           cp target/${{ matrix.target }}/release/visp        visp-${{ matrix.target }}/
           cp target/${{ matrix.target }}/release/visp-daemon visp-${{ matrix.target }}/
-          cp target/${{ matrix.target }}/release/visp-cli    visp-${{ matrix.target }}/
+          cp target/${{ matrix.target }}/release/visp-tui    visp-${{ matrix.target }}/
           tar czf visp-${{ matrix.target }}.tar.gz visp-${{ matrix.target }}
 
       - name: Upload artifacts

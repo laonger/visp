@@ -49,7 +49,7 @@ visp 采用 **前后端分离的 daemon 架构**，核心决策是让后端（Da
 
 **Daemon（`visp-daemon`）** - 核心服务进程，常驻后台。负责 Multi-Agent 编排（Orchestrator）、LLM 调用、工具执行、CodeGraph、会话管理、上下文裁剪、规则引擎、Skills、可观测性等全部 AI 能力。这是唯一直接使用 AI 模型和系统资源的进程。
 
-**CLI（`visp-cli`）** — TUI 前端（ratatui），通过 gRPC 连接 Daemon，提供聊天界面、审批弹窗、命令系统（`/model`、`/init` 等）。CLI 是默认前端，gRPC 接口同样可被 VSCode 插件、Web 界面等其他前端复用。
+**CLI（`visp-tui`）** — TUI 前端（ratatui），通过 gRPC 连接 Daemon，提供聊天界面、审批弹窗、命令系统（`/model`、`/init` 等）。CLI 是默认前端，gRPC 接口同样可被 VSCode 插件、Web 界面等其他前端复用。
 
 ## Crate 列表
 
@@ -67,7 +67,7 @@ visp 采用 **前后端分离的 daemon 架构**，核心决策是让后端（Da
 | [visp-codegraph](crates/visp-codegraph/) | 代码图谱引擎 — tree-sitter + SQLite | [README](crates/visp-codegraph/README.md) |
 | [visp-context](crates/visp-context/) | 上下文裁剪器 — token 预算 + 轮次剪枝 + 工具输出压缩 | [README](crates/visp-context/README.md) |
 | [visp-daemon](crates/visp-daemon/) | gRPC 服务端 — 组装所有模块 | [README](crates/visp-daemon/README.md) |
-| [visp-cli](crates/visp-cli/) | TUI 客户端 — ratatui 终端界面 | [README](crates/visp-cli/README.md) |
+| [visp-tui](crates/visp-tui/) | TUI 客户端 — ratatui 终端界面 | [README](crates/visp-tui/README.md) |
 | [visp-mcp](crates/visp-mcp/) | MCP 客户端 — 连接外部 MCP 服务器获取动态工具 | [README](crates/visp-mcp/README.md) |
 
 ## 核心特性
@@ -212,7 +212,7 @@ Sub-Agent 委托时自动创建独立 Tab，实时展示每个 Agent 的运行�
 | Linux x86_64 | `visp-x86_64-unknown-linux-gnu.tar.gz` |
 | macOS ARM | `visp-aarch64-apple-darwin.tar.gz` |
 
-解压后包含 `visp`（启动器）、`visp-daemon`（后台服务）、`visp-cli`（终端界面）三个二进制文件，可直接运行。
+解压后包含 `visp`（启动器）、`visp-daemon`（后台服务）、`visp-tui`（终端界面）三个二进制文件，可直接运行。
 
 ### 编译
 
@@ -315,7 +315,7 @@ cargo build --release
 
 # 手动分别启动（调试用）
 ./target/release/visp-daemon              # 终端 1
-./target/release/visp-cli -p /path        # 终端 2
+./target/release/visp-tui -p /path        # 终端 2
 
 # 恢复 Session（支持 short-id 前缀匹配）
 ./target/release/visp -p /path -s <session-id-or-prefix>

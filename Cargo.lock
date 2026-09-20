@@ -4752,34 +4752,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "visp-cli"
-version = "0.5.1"
-dependencies = [
- "chrono",
- "clap",
- "crossterm 0.28.1",
- "futures",
- "image",
- "prost 0.13.5",
- "ratatui 0.30.1",
- "ratatui-image",
- "ratatui-markdown",
- "ratatui-textarea",
- "regex",
- "reqwest",
- "serde_json",
- "syntect",
- "tokio",
- "tokio-stream",
- "tonic 0.13.1",
- "tracing",
- "unicode-width 0.2.0",
- "visp-command",
- "visp-config",
- "visp-proto",
-]
-
-[[package]]
 name = "visp-codegraph"
 version = "0.5.1"
 dependencies = [
@@ -4968,6 +4940,34 @@ dependencies = [
  "visp-codegraph",
  "visp-config",
  "visp-core",
+]
+
+[[package]]
+name = "visp-tui"
+version = "0.5.1"
+dependencies = [
+ "chrono",
+ "clap",
+ "crossterm 0.28.1",
+ "futures",
+ "image",
+ "prost 0.13.5",
+ "ratatui 0.30.1",
+ "ratatui-image",
+ "ratatui-markdown",
+ "ratatui-textarea",
+ "regex",
+ "reqwest",
+ "serde_json",
+ "syntect",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.13.1",
+ "tracing",
+ "unicode-width 0.2.0",
+ "visp-command",
+ "visp-config",
+ "visp-proto",
 ]
 
 [[package]]

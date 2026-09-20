@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-/// 写入 /tmp/visp-cli-debug.log，用于诊断 textarea 折行/粘贴等问题。
+/// 写入 /tmp/visp-tui-debug.log，用于诊断 textarea 折行/粘贴等问题。
 /// 不在生产环境启用，无性能影响（为空时直接返回）。
 #[macro_export]
 macro_rules! debug_log {
@@ -11,7 +11,7 @@ macro_rules! debug_log {
             let _ = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/tmp/visp-cli-debug.log")
+                .open("/tmp/visp-tui-debug.log")
                 .and_then(|mut f| {
                     let ts = chrono::Local::now().format("%H:%M:%S%.3f");
                     writeln!(f, "[{ts}] {}", format!($($arg)*))

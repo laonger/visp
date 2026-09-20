@@ -1,4 +1,4 @@
-# visp-cli — TUI 客户端
+# visp-tui — TUI 客户端
 
 基于 ratatui 的终端界面客户端，通过 gRPC 连接 daemon 提供交互式对话体验。
 
@@ -16,5 +16,5 @@
 ## 测试
 
 ```bash
-cargo test -p visp-cli
+cargo test -p visp-tui
 ```
