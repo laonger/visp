@@ -5369,6 +5369,7 @@ version = "0.5.3"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
+ "chrono",
  "clap",
  "futures",
  "prost 0.13.5",

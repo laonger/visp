@@ -9,6 +9,7 @@ description = "visp ACP agent — 以 ACP over stdio 接入 Zed 等兼容客户�
 [dependencies]
 agent-client-protocol = "2.2"
 anyhow.workspace = true
+chrono.workspace = true
 clap = { version = "4", features = ["derive"] }
 futures.workspace = true
 prost.workspace = true
