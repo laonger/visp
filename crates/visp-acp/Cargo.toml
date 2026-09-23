@@ -17,6 +17,7 @@ tokio-util.workspace = true
 tonic.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+visp-config = { path = "../visp-config" }
 visp-proto = { path = "../visp-proto" }
 
 [dev-dependencies]
