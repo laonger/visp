@@ -10,10 +10,14 @@ description = "visp ACP agent — 以 ACP over stdio 接入 Zed 等兼容客户�
 agent-client-protocol = "2.2"
 anyhow.workspace = true
 clap = { version = "4", features = ["derive"] }
+futures.workspace = true
+prost.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tonic.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+visp-proto = { path = "../visp-proto" }
 
 [dev-dependencies]
 serde_json.workspace = true
