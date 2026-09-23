@@ -9,9 +9,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{anyhow, bail};
 use futures::StreamExt;
 use tokio::sync::mpsc;
+use tonic::transport::Channel;
 use visp_proto::visp::client_message;
 use visp_proto::visp::coder_daemon_client::CoderDaemonClient;
-use visp_proto::visp::{Ack, Cancel, ClientMessage, ServerMessage, UserInput, UserResponse};
+use visp_proto::visp::{
+    Ack, Cancel, ClientMessage, CreateSessionRequest, ServerMessage, UserInput, UserResponse,
+};
 
 /// 进程内 Chat 流占用标记(与 daemon 的 V1 单流约束对齐)。
 static CHAT_STREAM_TAKEN: AtomicBool = AtomicBool::new(false);
@@ -20,6 +23,13 @@ static CHAT_STREAM_TAKEN: AtomicBool = AtomicBool::new(false);
 #[derive(Clone)]
 pub struct Outbound {
     tx: mpsc::Sender<ClientMessage>,
+}
+
+impl Outbound {
+    /// crate 内组装辅助(事件泵经 `AgentState` 共享出站端)。
+    pub(crate) fn from_tx(tx: mpsc::Sender<ClientMessage>) -> Self {
+        Self { tx }
+    }
 }
 
 impl Outbound {
@@ -85,10 +95,11 @@ impl Outbound {
     }
 }
 
-/// 一条 Chat 流的会话句柄:出站 sender + 入站接收端。
+/// 一条 Chat 流的会话句柄:出站 sender + 入站接收端 + 一元 RPC client。
 pub struct GrpcSession {
     pub outbound: Outbound,
     inbound: mpsc::Receiver<ServerMessage>,
+    client: CoderDaemonClient<Channel>,
 }
 
 impl GrpcSession {
@@ -141,6 +152,7 @@ impl GrpcSession {
         Ok(Self {
             outbound: Outbound { tx },
             inbound,
+            client: client.clone(),
         })
     }
 
@@ -156,9 +168,35 @@ impl std::fmt::Debug for GrpcSession {
     }
 }
 
-impl Drop for GrpcSession {
-    fn drop(&mut self) {
+impl GrpcSession {
+    /// 消费会话,拆出事件泵所需部件(出站 / 入站 / 一元 RPC client)。
+    ///
+    /// Chat 流占用标记随之释放;进程内单流由组装层(`AgentState`)保证。
+    pub fn into_parts(
+        self,
+    ) -> (
+        Outbound,
+        mpsc::Receiver<ServerMessage>,
+        CoderDaemonClient<Channel>,
+    ) {
         CHAT_STREAM_TAKEN.store(false, Ordering::SeqCst);
+        (self.outbound, self.inbound, self.client)
+    }
+
+    /// 一元 RPC:创建 visp 会话,返回 session id(§6.3 session/new)。
+    pub async fn create_session(
+        client: &CoderDaemonClient<Channel>,
+        project_path: &str,
+    ) -> anyhow::Result<String> {
+        let mut client = client.clone();
+        let resp = client
+            .create_session(CreateSessionRequest {
+                project_path: project_path.into(),
+                config: None,
+            })
+            .await
+            .map_err(|e| anyhow!("create session: {e}"))?;
+        Ok(resp.into_inner().session_id)
     }
 }
 
@@ -272,7 +310,10 @@ mod tests {
             &self,
             _request: Request<CreateSessionRequest>,
         ) -> Result<Response<Session>, Status> {
-            Err(Status::unimplemented("stub"))
+            Ok(Response::new(Session {
+                session_id: "visp-new".into(),
+                ..Default::default()
+            }))
         }
         async fn list_sessions(
             &self,
@@ -421,9 +462,9 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn second_connect_is_rejected_and_drop_releases() {
+    async fn second_connect_is_rejected() {
         let (addr, _requests) = spawn_stub(vec![]).await;
-        let _session = GrpcSession::connect(&addr).await.unwrap();
+        let session = GrpcSession::connect(&addr).await.unwrap();
 
         let second = GrpcSession::connect(&addr).await;
         let err = second.unwrap_err();
@@ -431,10 +472,17 @@ mod tests {
             err.to_string().contains("already established"),
             "第二次建流应被拒(V1), got: {err}"
         );
+        // V1 进程级单流:无 Drop 释放语义,单例由组装层(AgentState)保证;
+        // serial 序列中显式释放,避免污染后续用例
+        drop(session.into_parts());
+    }
 
-        drop(_session);
-        // Drop 释放后可重新建流(daemon 重启重连场景)
-        let again = GrpcSession::connect(&addr).await;
-        assert!(again.is_ok());
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn create_session_via_unary_rpc() {
+        let (addr, _requests) = spawn_stub(vec![]).await;
+        let (_ob, _inbound, client) = GrpcSession::connect(&addr).await.unwrap().into_parts();
+        let id = GrpcSession::create_session(&client, "/tmp").await.unwrap();
+        assert_eq!(id, "visp-new");
     }
 }

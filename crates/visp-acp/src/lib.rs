@@ -6,21 +6,20 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
-use agent_client_protocol::schema::v1::{
-    AgentCapabilities, Implementation, InitializeRequest, InitializeResponse,
-};
-use agent_client_protocol::{Agent, ConnectTo, Stdio, on_receive_request};
 use clap::Parser;
 
-/// 自拉起模式的端口探测基准地址。
-pub const DEFAULT_LISTEN_ADDR: &str = "[::1]:50051";
-
+pub mod agent;
 pub mod approval;
 pub mod grpc;
 pub mod sessions;
 pub mod supervisor;
 pub mod translate;
+
+/// 自拉起模式的端口探测基准地址。
+pub const DEFAULT_LISTEN_ADDR: &str = "[::1]:50051";
 
 /// visp-acp 命令行参数。
 #[derive(Parser, Debug)]
@@ -61,45 +60,53 @@ pub fn init_tracing() {
         .init();
 }
 
-/// visp-acp 主流程：stderr 日志 → ACP 事件循环（stdio）。
+/// visp-acp 主流程(§6.1):daemon 获取 → ACP 事件循环 → 按模式退出收尾。
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
-    tracing::info!(
-        project = %cli.project.display(),
-        addr = ?cli.addr,
-        config_dir = ?cli.config_dir,
-        shutdown_on_exit = cli.shutdown_on_exit,
-        "visp-acp starting (skeleton)"
-    );
-    run_agent(Stdio::new()).await
-}
+    use agent_client_protocol::Stdio;
 
-/// ACP agent 事件循环：处理 client→agent 请求。
-///
-/// M1 冒烟阶段仅注册 `initialize`；未注册的请求由 SDK 回 `Method not found`，
-/// 且 SDK 内置 v1 守卫保证 `initialize` 必须是首条请求。
-pub async fn run_agent<T>(transport: T) -> anyhow::Result<()>
-where
-    T: ConnectTo<Agent>,
-{
-    Agent
-        .builder()
-        .name("visp-acp")
-        .on_receive_request(
-            async move |req: InitializeRequest, responder, _cx| {
-                responder.respond(initialize_response(req))
-            },
-            on_receive_request!(),
+    // 1. daemon 获取:`--addr` 直连(受 V1 约束)或自拉起(默认,§4.3)
+    let (addr, launch_mode, mut child) = match cli.addr {
+        Some(addr) => (addr.to_string(), supervisor::LaunchMode::Attached, None),
+        None => {
+            let addr = supervisor::find_available_addr(supervisor::DEFAULT_LISTEN_ADDR)?;
+            let log_path = supervisor::daemon_log_path()?;
+            tracing::info!(%addr, log = %log_path.display(), "starting daemon");
+            let daemon_bin = supervisor::resolve_bin("visp-daemon");
+            let mut child = supervisor::spawn_daemon(
+                &daemon_bin,
+                &[],
+                &addr,
+                &log_path,
+                cli.config_dir.as_deref(),
+            )
+            .await?;
+            // health check 期间监控子进程存活(TOCTOU 防御,§6.1 步骤 3)
+            if let Err(e) =
+                supervisor::wait_for_health_ready(&mut child, &addr, Duration::from_secs(15)).await
+            {
+                supervisor::kill(&mut child).await?;
+                return Err(e);
+            }
+            (addr, supervisor::LaunchMode::Spawned, Some(child))
+        }
+    };
+
+    // 2. ACP agent 事件循环(stdout 仅协议消息)
+    let session = crate::grpc::GrpcSession::connect(&addr).await?;
+    let (outbound, inbound, client) = session.into_parts();
+    let state = Arc::new(agent::AgentState::new(outbound, inbound, client));
+    let result = agent::run_agent(Stdio::new(), state).await;
+
+    // 3. 退出收尾:自拉起发 Shutdown(超时强杀);直连默认不动(§6.1 步骤 6)
+    if let Some(child) = child.as_mut() {
+        supervisor::exit_daemon(
+            Some(child),
+            &addr,
+            supervisor::shutdown_policy(launch_mode, cli.shutdown_on_exit),
         )
-        .connect_to(transport)
-        .await
-        .map_err(|e| anyhow::anyhow!("ACP connection error: {e}"))
-}
-
-/// `initialize` 应答：协议版本回显 + M1 capabilities + 空 authMethods + agentInfo。
-fn initialize_response(req: InitializeRequest) -> InitializeResponse {
-    InitializeResponse::new(req.protocol_version)
-        .agent_capabilities(AgentCapabilities::new())
-        .agent_info(Implementation::new("visp", env!("CARGO_PKG_VERSION")))
+        .await?;
+    }
+    result
 }
 
 #[cfg(test)]

@@ -17,8 +17,13 @@ fn spawn_agent() -> (
     // SDK 的 ByteStreams 用 futures 的 AsyncRead/AsyncWrite,需 compat 桥接 tokio half
     use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
     let (incoming, outgoing) = tokio::io::split(agent_side);
+    let state = visp_acp::agent::AgentState::new_unconnected();
     let handle = tokio::spawn(async move {
-        visp_acp::run_agent(ByteStreams::new(outgoing.compat_write(), incoming.compat())).await
+        visp_acp::agent::run_agent(
+            ByteStreams::new(outgoing.compat_write(), incoming.compat()),
+            state,
+        )
+        .await
     });
     (test_side, handle)
 }
