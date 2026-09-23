@@ -187,11 +187,6 @@ impl LineClient {
         self.writer.write_all(b"\n").await.unwrap();
     }
 
-    async fn send_raw(&mut self, msg: &str) {
-        self.writer.write_all(msg.as_bytes()).await.unwrap();
-        self.writer.write_all(b"\n").await.unwrap();
-    }
-
     /// 读一行:返回 (method, id, 整帧)。每行都必须是合法 JSON(stdout 纪律)。
     async fn recv_any(&mut self) -> (Option<String>, Option<u64>, Value) {
         let mut line = String::new();
