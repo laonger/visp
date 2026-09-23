@@ -1863,6 +1863,20 @@ pub async fn run_agent_loop(
                         biased;
                         _ = ctx.cancel_token.cancelled() => {
                             tracing::info!(session_id = %sid, "agent cancelled while waiting for user query");
+                            // 与 setup/retry/流式取消路径对齐：必须发收尾事件并落盘会话状态
+                            let _ = send_event(
+                                &tx,
+                                &sm,
+                                &sid,
+                                &ctx.global_tx,
+                                &ctx.session_id,
+                                AgentEvent::Error {
+                                    code: AgentErrorCode::Cancelled,
+                                    message: "agent cancelled".into(),
+                                },
+                            )
+                            .await;
+                            let _ = sm.finish_loop(&sid, SessionStatus::Error);
                             return;
                         }
                         r = response_rx.recv() => r.unwrap_or_default(),
@@ -3736,6 +3750,117 @@ mod tests {
             captured_events.iter().any(|e| e == "visp.agent.cancelled"),
             "expected visp.agent.cancelled event, got: {:?}",
             *captured_events
+        );
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn test_agent_run_emits_cancelled_event_during_user_query() {
+        let (spans, events) = setup_tracing();
+        let _guard = make_guard(&spans, &events);
+
+        use crate::rules::RuleEngine;
+        use crate::session::InMemorySessionStore;
+        use crate::tool_registry::ToolRegistry;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
+        let cancel_token = ctx.cancel_token.clone();
+
+        // Provider 发出带 [USER_QUERY] 标记的文本（带 options → LLM 提问路径），
+        // loop 将进入 UserQuery 等待分支（select!）
+        let marker_text = "[USER_QUERY]\n选择哪个方案?\n- 方案 A\n- 方案 B[/USER_QUERY]";
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![vec![
+            ChatEvent::TextDelta(marker_text.into()),
+            ChatEvent::Done,
+        ]]));
+        let rule_engine = StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap());
+        let registry = ToolRegistry::new();
+        let config = AgentConfig::default();
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(64);
+
+        let session_mgr_clone = session_mgr.clone();
+        let handle = tokio::spawn(async move {
+            run_agent_loop(
+                provider,
+                StdArc::new(registry),
+                rule_engine,
+                session_mgr_clone,
+                ctx,
+                &config,
+                Message::user("hello"),
+                tx,
+            )
+            .await;
+        });
+
+        // 等待 loop 发出 UserQuery 事件（进入 select! 等待）
+        let mut respond = None;
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await {
+                Ok(Some(AgentEvent::UserQuery { respond: r, .. })) => {
+                    respond = Some(r);
+                    break;
+                }
+                Ok(Some(AgentEvent::TextDelta(_))) => {
+                    eprintln!("[diag] event: TextDelta");
+                }
+                Ok(Some(AgentEvent::StatusUpdate(s))) => {
+                    eprintln!("[diag] event: StatusUpdate({s})");
+                }
+                Ok(Some(AgentEvent::Error { code, message })) => {
+                    eprintln!("[diag] event: Error({code:?}, {message})");
+                }
+                Ok(Some(AgentEvent::Done)) => {
+                    eprintln!("[diag] event: Done");
+                }
+                Ok(Some(_)) => {
+                    eprintln!("[diag] event: <other variant>");
+                }
+                Ok(None) => {
+                    let _ = handle.await; // 若 task panic,此处会打印 panic 位置
+                    panic!("run_agent_loop ended before emitting UserQuery");
+                }
+                Err(_) => panic!("timeout waiting for UserQuery"),
+            }
+        }
+        // 持有 respond 不回填，确保 loop 停在 UserQuery 等待中
+        let _respond = respond;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // 提问等待中取消
+        cancel_token.cancel();
+
+        // 断言 1：run_agent_loop 应发出 Error{Cancelled} 收尾事件
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("should receive Error event within 2s after cancel")
+            .expect("channel should stay open");
+        assert!(
+            matches!(
+                ev,
+                AgentEvent::Error {
+                    code: AgentErrorCode::Cancelled,
+                    ..
+                }
+            ),
+            "expected Error{{Cancelled}} after cancel during user query"
+        );
+
+        // 断言 2：会话状态应为 Error（finish_loop 被调用）
+        handle.await.expect("run_agent_loop task should not panic");
+        let s = session_mgr.get(&sid).unwrap();
+        assert_eq!(
+            s.status,
+            SessionStatus::Error,
+            "expected session status Error after cancel during user query"
         );
     }
 
