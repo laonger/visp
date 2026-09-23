@@ -1,0 +1,15 @@
+[package]
+name = "visp-acp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "visp ACP agent — 以 ACP over stdio 接入 Zed 等兼容客户端"
+
+[dependencies]
+agent-client-protocol = "2.2"
+anyhow.workspace = true
+clap = { version = "4", features = ["derive"] }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

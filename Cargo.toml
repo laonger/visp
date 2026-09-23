@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/visp", "crates/visp-agent",
     "crates/visp-tui",
+    "crates/visp-acp",
     "crates/visp-codegraph",
     "crates/visp-command",
     "crates/visp-config",
