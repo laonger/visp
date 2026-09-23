@@ -7,6 +7,10 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use agent_client_protocol::schema::v1::{
+    AgentCapabilities, Implementation, InitializeRequest, InitializeResponse,
+};
+use agent_client_protocol::{Agent, ConnectTo, Stdio, on_receive_request};
 use clap::Parser;
 
 /// 自拉起模式的端口探测基准地址。
@@ -51,8 +55,8 @@ pub fn init_tracing() {
         .init();
 }
 
-/// visp-acp 主流程(Wave 2+:daemon 编排 → ACP 事件循环)。
-pub fn run(cli: Cli) -> anyhow::Result<()> {
+/// visp-acp 主流程：stderr 日志 → ACP 事件循环（stdio）。
+pub async fn run(cli: Cli) -> anyhow::Result<()> {
     tracing::info!(
         project = %cli.project.display(),
         addr = ?cli.addr,
@@ -60,7 +64,36 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         shutdown_on_exit = cli.shutdown_on_exit,
         "visp-acp starting (skeleton)"
     );
-    Ok(())
+    run_agent(Stdio::new()).await
+}
+
+/// ACP agent 事件循环：处理 client→agent 请求。
+///
+/// M1 冒烟阶段仅注册 `initialize`；未注册的请求由 SDK 回 `Method not found`，
+/// 且 SDK 内置 v1 守卫保证 `initialize` 必须是首条请求。
+pub async fn run_agent<T>(transport: T) -> anyhow::Result<()>
+where
+    T: ConnectTo<Agent>,
+{
+    Agent
+        .builder()
+        .name("visp-acp")
+        .on_receive_request(
+            async move |req: InitializeRequest, responder, _cx| {
+                responder.respond(initialize_response(req))
+            },
+            on_receive_request!(),
+        )
+        .connect_to(transport)
+        .await
+        .map_err(|e| anyhow::anyhow!("ACP connection error: {e}"))
+}
+
+/// `initialize` 应答：协议版本回显 + M1 capabilities + 空 authMethods + agentInfo。
+fn initialize_response(req: InitializeRequest) -> InitializeResponse {
+    InitializeResponse::new(req.protocol_version)
+        .agent_capabilities(AgentCapabilities::new())
+        .agent_info(Implementation::new("visp", env!("CARGO_PKG_VERSION")))
 }
 
 #[cfg(test)]

@@ -1,7 +1,8 @@
 use clap::Parser;
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let cli = visp_acp::Cli::parse();
     visp_acp::init_tracing();
-    visp_acp::run(cli)
+    visp_acp::run(cli).await
 }

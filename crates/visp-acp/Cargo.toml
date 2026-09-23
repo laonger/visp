@@ -11,5 +11,9 @@ agent-client-protocol = "2.2"
 anyhow.workspace = true
 clap = { version = "4", features = ["derive"] }
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
