@@ -17,6 +17,7 @@ use clap::Parser;
 pub const DEFAULT_LISTEN_ADDR: &str = "[::1]:50051";
 
 pub mod grpc;
+pub mod sessions;
 pub mod supervisor;
 pub mod translate;
 
