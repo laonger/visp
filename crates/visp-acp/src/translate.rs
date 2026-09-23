@@ -161,7 +161,7 @@ fn text_chunk(text: &str, message_id: MessageId) -> ContentChunk {
 }
 
 /// 工具名 → ACP kind(§7.4;visp 工具名以 TODO 登记列表为准)。
-fn tool_kind(name: &str) -> ToolKind {
+pub(crate) fn tool_kind(name: &str) -> ToolKind {
     match name {
         "read_file" => ToolKind::Read,
         "grep" | "glob" => ToolKind::Search,

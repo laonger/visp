@@ -16,6 +16,7 @@ use clap::Parser;
 /// 自拉起模式的端口探测基准地址。
 pub const DEFAULT_LISTEN_ADDR: &str = "[::1]:50051";
 
+pub mod approval;
 pub mod grpc;
 pub mod sessions;
 pub mod supervisor;

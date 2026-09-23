@@ -257,7 +257,7 @@ mod tests {
 
     #[test]
     fn late_events_without_inflight_are_dropped() {
-        let mut r = SessionRegistry::new();
+        let r = SessionRegistry::new();
         // 兜底收尾后迟到的父 Done
         assert!(matches!(route(done("visp-1"), &r), Route::Drop));
         // 迟到的子事件

@@ -3,7 +3,7 @@
 //! 用内存 duplex 管道替代 stdio 驱动 agent,可精确断言「流上每行均为合法 JSON」
 //! (ACP stdout 纪律)。
 
-use agent_client_protocol::{Agent, ByteStreams};
+use agent_client_protocol::ByteStreams;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const INIT_REQUEST: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}"#;
