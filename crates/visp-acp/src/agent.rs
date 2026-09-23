@@ -44,6 +44,8 @@ pub struct AgentState {
     registry: tokio::sync::Mutex<SessionRegistry>,
     /// cancel 请求时刻(兜底计时起点;None = 无待收尾取消)
     cancel_requested_at: tokio::sync::Mutex<Option<Instant>>,
+    /// 当前 turn 的取消令牌(session/cancel 时触发,唤醒审批/提问等待)
+    cancel_token: tokio::sync::Mutex<Option<tokio_util::sync::CancellationToken>>,
     /// client 是否支持 `elicitation.form`(initialize 时记录,§7.5)
     supports_elicitation_form: AtomicBool,
     request_seq: AtomicU64,
@@ -61,6 +63,7 @@ impl AgentState {
             client: tokio::sync::Mutex::new(client),
             registry: tokio::sync::Mutex::new(SessionRegistry::new()),
             cancel_requested_at: tokio::sync::Mutex::new(None),
+            cancel_token: tokio::sync::Mutex::new(None),
             supports_elicitation_form: AtomicBool::new(false),
             request_seq: AtomicU64::new(1),
         }
@@ -101,7 +104,12 @@ impl AgentState {
     }
 
     async fn handle_cancel(&self, notif: &CancelNotification) {
+        // 触发取消令牌(唤醒审批/提问等待,SentRequest drop 自动 $/cancel_request)+
         // 兜底计时起点;daemon 侧对未运行 session 天然 no-op
+        let token = self.cancel_token.lock().await.clone();
+        if let Some(t) = token {
+            t.cancel();
+        }
         *self.cancel_requested_at.lock().await = Some(Instant::now());
         if let Err(e) = self
             .outbound
@@ -134,13 +142,17 @@ impl AgentState {
             .send_user_input(&visp_sid, &text, &request_id)
             .await
             .map_err(|e| internal_error(e.to_string()))?;
-        // 新 turn 开始:清残留兜底计时
+        // 新 turn:新的取消令牌
+        let token = tokio_util::sync::CancellationToken::new();
+        *self.cancel_token.lock().await = Some(token.clone());
         *self.cancel_requested_at.lock().await = None;
 
         let state = self.clone();
         let task_cx = cx.clone();
-        cx.spawn(async move { prompt_task(state, acp_sid, visp_sid, responder, task_cx).await })
-            .map_err(|e| internal_error(e.to_string()))
+        cx.spawn(
+            async move { prompt_task(state, acp_sid, visp_sid, responder, task_cx, token).await },
+        )
+        .map_err(|e| internal_error(e.to_string()))
     }
 }
 
@@ -180,6 +192,7 @@ async fn prompt_task(
     visp_sid: String,
     responder: Responder<PromptResponse>,
     cx: ConnectionTo<Client>,
+    token: tokio_util::sync::CancellationToken,
 ) -> Result<(), AcpError> {
     let mut ctx = TranslateCtx::new(&visp_sid);
     loop {
@@ -190,7 +203,8 @@ async fn prompt_task(
         };
         match inbound_msg {
             Ok(Some(msg)) => {
-                if let Some(reason) = dispatch(msg, &state, &mut ctx, &acp_sid, &cx).await? {
+                if let Some(reason) = dispatch(msg, &state, &mut ctx, &acp_sid, &cx, &token).await?
+                {
                     state.registry.lock().await.end_prompt(&visp_sid);
                     return responder.respond(PromptResponse::new(reason));
                 }
@@ -223,6 +237,7 @@ async fn dispatch(
     ctx: &mut TranslateCtx,
     acp_sid: &SessionId,
     cx: &ConnectionTo<Client>,
+    token: &tokio_util::sync::CancellationToken,
 ) -> Result<Option<StopReason>, AcpError> {
     // 归属路由:UserQuery 旁路进桥接(§8.4 特例);无在途的迟到事件丢弃
     let msg = match route(msg, &*state.registry.lock().await) {
@@ -254,18 +269,23 @@ async fn dispatch(
                     approval::synthetic_tool_call(&q),
                     approval::permission_options(),
                 );
-                let resp = cx
-                    .send_request(req)
-                    .block_task()
-                    .await
-                    .map_err(|e| internal_error(e.to_string()))?;
-                let idx = match resp.outcome {
-                    RequestPermissionOutcome::Selected(sel) => {
-                        approval::map_selected_option(sel.option_id.0.to_string().as_str())
-                    }
-                    RequestPermissionOutcome::Cancelled => -1,
-                    // non_exhaustive:未知结果一律 deny(§6.5「其余任何值一律 deny」)
-                    _ => -1,
+                let sent = cx.send_request(req);
+                let idx = tokio::select! {
+                    biased;
+                    // 取消:SentRequest drop 自动发 $/cancel_request;daemon 侧将
+                    // pending UserQuery 置 -1(V5),无需回填,继续等 Error{Cancelled}
+                    _ = token.cancelled() => continue,
+                    resp = sent.block_task() => match resp {
+                        Ok(r) => match r.outcome {
+                            RequestPermissionOutcome::Selected(sel) => {
+                                approval::map_selected_option(sel.option_id.0.to_string().as_str())
+                            }
+                            RequestPermissionOutcome::Cancelled => -1,
+                            // non_exhaustive:未知结果一律 deny(§6.5「其余任何值一律 deny」)
+                            _ => -1,
+                        },
+                        Err(_) => -1,
+                    },
                 };
                 state
                     .outbound
@@ -284,19 +304,24 @@ async fn dispatch(
                             approval::question_schema(&q),
                         ));
                         let req = CreateElicitationRequest::new(mode, q.message.clone());
-                        let resp = cx
-                            .send_request(req)
-                            .block_task()
-                            .await
-                            .map_err(|e| internal_error(e.to_string()))?;
-                        let (idx, text) = match resp.action {
-                            ElicitationAction::Accept(a) => match a.content {
-                                Some(content) => {
-                                    approval::map_elicitation_accept(&content, &q.options)
-                                }
-                                None => approval::map_elicitation_reject(),
+                        let sent = cx.send_request(req);
+                        let (idx, text) = tokio::select! {
+                            biased;
+                            // 取消:SentRequest drop 自动 $/cancel_request;不回填,
+                            // 继续 等 Error{Cancelled}(阻断 1 场景的正确收尾)
+                            _ = token.cancelled() => continue,
+                            resp = sent.block_task() => match resp {
+                                Ok(r) => match r.action {
+                                    ElicitationAction::Accept(a) => match a.content {
+                                        Some(content) => {
+                                            approval::map_elicitation_accept(&content, &q.options)
+                                        }
+                                        None => approval::map_elicitation_reject(),
+                                    },
+                                    _ => approval::map_elicitation_reject(),
+                                },
+                                Err(_) => approval::map_elicitation_reject(),
                             },
-                            _ => approval::map_elicitation_reject(),
                         };
                         state
                             .outbound

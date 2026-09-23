@@ -458,6 +458,8 @@ mod tests {
             second.payload,
             Some(visp_proto::visp::server_message::Payload::StatusUpdate(_))
         ));
+        // 释放占用标记(serial 序列中的后续用例依赖)
+        drop(session.into_parts());
     }
 
     #[tokio::test]
