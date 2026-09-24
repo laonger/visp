@@ -9,3 +9,4 @@
 pub mod config;
 pub mod observability;
 pub mod reload;
+pub mod watch;
