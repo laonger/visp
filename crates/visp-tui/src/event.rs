@@ -22,6 +22,10 @@ macro_rules! debug_log {
 
 use crate::app::{AppState, ConfirmState, LineType, TabCompletionState};
 use crate::client::{ChatHandle, VispClient};
+use crate::connection::{
+    ConnEvent, ConnState, LiveConnection, ReconnectSuccess, Recovered, backoff_delay, recover,
+    transition,
+};
 use crate::notify::{NotifyEngine, NotifyKind};
 use crate::ui::render;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
@@ -82,7 +86,8 @@ pub async fn run(
     mut chat_handle: ChatHandle,
     model: String,
     model_key: String,
-    client: &mut VispClient,
+    mut client: VispClient,
+    addr: String,
     project_path: &str,
     available_models: Vec<String>,
     model_keys: Vec<String>,
@@ -147,6 +152,12 @@ pub async fn run(
     // Points spinner 动画 tick：generating 期间每 140ms 推进一帧
     let mut spinner_tick = tokio::time::interval(std::time::Duration::from_millis(140));
 
+    // 重连通道：后台恢复任务把新 client/Chat 流送回主循环（设计 §5.9）。
+    let (reconnect_tx, mut reconnect_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Result<ReconnectSuccess, String>>();
+    let mut reconnect_pending = false;
+    let mut next_retry_at: Option<tokio::time::Instant> = None;
+
     loop {
         tokio::select! {
             event = key_rx.recv() => {
@@ -155,10 +166,14 @@ pub async fn run(
                     None => break,
                 }
             }
-            msg = chat_handle.recv() => {
+            msg = chat_handle.recv(), if app.connection_state.is_connected() => {
                 match msg {
                     Some(msg) => handle_grpc_message(msg, &mut app, &chat_handle),
-                    None => { app.should_quit = true; }
+                    None => {
+                        // 断线检测入口①：流干净关闭。不再退出，交状态机进入重连。
+                        on_disconnect(&mut app, DisconnectReason::StreamClosed);
+                        next_retry_at = Some(tokio::time::Instant::now() + backoff_delay(0));
+                    }
                 }
             }
             _ = exit_rx.changed() => {
@@ -176,6 +191,55 @@ pub async fn run(
             Some(()) = app.image_ready_rx.recv() => {
                 // 网络图片下载完成，重新渲染以显示图片
                 app.needs_render = true;
+            }
+            // 退避到期：后台发起一次重连恢复（exit 通道保持活跃）
+            _ = tokio::time::sleep_until(next_retry_at.unwrap_or_else(tokio::time::Instant::now)),
+                if app.connection_state.is_reconnecting() && !reconnect_pending && next_retry_at.is_some() =>
+            {
+                reconnect_pending = true;
+                next_retry_at = None;
+                let tx = reconnect_tx.clone();
+                let addr = addr.clone();
+                let sid = app.main_session_id.clone();
+                tokio::spawn(async move {
+                    let mut conn = LiveConnection::new(addr, sid);
+                    let result = match recover(&mut conn).await {
+                        Ok(recovered) => {
+                            let (client, chat) = conn.into_parts();
+                            Ok(ReconnectSuccess { client, chat, recovered })
+                        }
+                        Err(e) => Err(e),
+                    };
+                    let _ = tx.send(result);
+                });
+            }
+            // 重连结果：成功换用新 client/流并恢复；失败按退避继续重试（无限重试）
+            Some(result) = reconnect_rx.recv(), if reconnect_pending => {
+                reconnect_pending = false;
+                match result {
+                    Ok(success) => {
+                        client = success.client;
+                        chat_handle = success.chat;
+                        let (state, _) = transition(app.connection_state, ConnEvent::Reconnected);
+                        app.connection_state = state;
+                        apply_recovery(&mut app, success.recovered);
+                    }
+                    Err(e) => {
+                        let (state, _) =
+                            transition(app.connection_state, ConnEvent::ReconnectFailed);
+                        let attempt = match state {
+                            ConnState::Reconnecting { attempt } => attempt,
+                            ConnState::Connected => 0,
+                        };
+                        app.connection_state = state;
+                        app.add_message(
+                            LineType::Status,
+                            format!("重连失败（第 {attempt} 次）：{e}"),
+                        );
+                        next_retry_at =
+                            Some(tokio::time::Instant::now() + backoff_delay(attempt));
+                    }
+                }
             }
         }
         if app.should_quit {
@@ -355,6 +419,67 @@ fn apply_reload_results(
         }
     }
     app.pending_reload = false;
+}
+
+/// 断线检测入口（设计 §5.9）：两个入口（流干净关闭 / idle 探测失败）汇聚同一状态机。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DisconnectReason {
+    /// 下行流干净关闭（`recv()` 返回 None）。
+    StreamClosed,
+    /// idle 心跳看门狗的探测失败/超时。
+    WatchdogProbeFailed,
+}
+
+/// 清理主 tab 的本地 streaming 残留。
+///
+/// 重建流后不得残留上一轮 `streaming_text`/`generating`/`pending_usage` 与计时器；
+/// `frames`/`rendered_up_to` 等 per-tab 不变量由多 tab 恢复清理（后续子步骤）负责。
+fn clear_main_streaming_residue(app: &mut AppState) {
+    let tab = &mut app.tab_bar.tabs[0];
+    tab.streaming_text.clear();
+    tab.generating = false;
+    tab.stream_started_at = None;
+    tab.stream_output_tokens = 0;
+    tab.pending_usage = None;
+    tab.last_stream_tps = None;
+    tab.last_stream_elapsed = None;
+    app.current_request_id = None;
+    app.stale_done_expected = false;
+}
+
+/// 断线：统一迁移至 `Reconnecting` 并给出用户可见提示。
+///
+/// 不按 generating 状态豁免——断线检测在此已完成，统一进入重连。
+fn on_disconnect(app: &mut AppState, reason: DisconnectReason) {
+    let was_generating = app.tab_bar.tabs[0].generating;
+    clear_main_streaming_residue(app);
+    app.connection_state = ConnState::Reconnecting { attempt: 0 };
+    if was_generating {
+        // daemon 端 agent loop 不因 Chat 断开而取消，但 TUI 已无法接收后续帧——
+        // 明确告知生成已终止，要求用户重新输入（设计 §5.9 决策 5）。
+        app.add_message(LineType::Error, "连接中断，生成已终止".into());
+    } else {
+        let label = match reason {
+            DisconnectReason::StreamClosed => "Daemon disconnected",
+            DisconnectReason::WatchdogProbeFailed => "Daemon unresponsive",
+        };
+        app.add_message(LineType::Status, format!("{label} — reconnecting…"));
+    }
+    app.needs_render = true;
+}
+
+/// 重连恢复完成后的本地收尾：刷新模型列表、清理 streaming 残留、迁回 `Connected`。
+///
+/// 模型列表为空（`get_session` 刷新失败，非致命）时保留旧列表，不覆盖为空白。
+fn apply_recovery(app: &mut AppState, recovered: Recovered) {
+    if !recovered.available_models.is_empty() {
+        app.available_models = recovered.available_models;
+        app.model_keys = recovered.model_keys;
+    }
+    clear_main_streaming_residue(app);
+    app.connection_state = ConnState::Connected;
+    app.add_message(LineType::Status, "连接已恢复，正在回放会话历史…".into());
+    app.needs_render = true;
 }
 
 fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHandle) -> bool {
@@ -689,6 +814,12 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
 
             // F2 已在键盘线程处理，此处不再需要
             if app.generating() {
+                return false;
+            }
+            // 重连期间：Enter 提交提示未连接，不发送不清空（设计 §5.9）。
+            if !app.connection_state.is_connected() && key.code == KeyCode::Enter {
+                app.add_message(LineType::Error, "未连接到 daemon，稍后自动重连".into());
+                app.needs_render = true;
                 return false;
             }
             if key.code == KeyCode::Enter {

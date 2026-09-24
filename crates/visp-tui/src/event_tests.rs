@@ -1,10 +1,12 @@
 use super::*;
 use crate::app::{AppState, LineType};
+use crate::connection::{ConnState, Recovered};
 use crate::notify::{NotifyEngine, NotifyKind};
 use crossterm::event::{Event, KeyCode, KeyEvent};
 use std::time::Duration;
 use visp_proto::visp::{
-    Done, Error, ServerMessage, UsageDelta, UserQuery, reload_config_response, server_message,
+    Done, Error, ServerMessage, UsageDelta, UserMessage, UserQuery, reload_config_response,
+    server_message,
 };
 
 fn make_done_msg(sid: &str) -> ServerMessage {
@@ -463,4 +465,173 @@ fn test_reload_rpc_error_reports_without_retry() {
         .collect();
     assert_eq!(errors.len(), 1, "只应报一条错误，不得自动重试");
     assert!(errors[0].content.contains("daemon unreachable"));
+}
+
+// ── 重连状态机接线（计划 7b）────────────────────────────────
+
+fn make_user_message(sid: &str, content: &str) -> ServerMessage {
+    ServerMessage {
+        payload: Some(server_message::Payload::UserMessage(UserMessage {
+            content: content.into(),
+            session_id: sid.into(),
+        })),
+    }
+}
+
+/// 7b-1：recv()==None 不再退出，而是进入 Reconnecting（方向翻转）。
+#[test]
+fn test_stream_close_enters_reconnecting_not_quit() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+
+    on_disconnect(&mut app, DisconnectReason::StreamClosed);
+
+    assert!(!app.should_quit, "断线不得直接退出");
+    assert_eq!(
+        app.connection_state,
+        ConnState::Reconnecting { attempt: 0 },
+        "干净关闭应进入 Reconnecting"
+    );
+    assert!(
+        app.messages()
+            .iter()
+            .any(|m| matches!(m.line_type, LineType::Status) && m.content.contains("reconnecting")),
+        "状态行应提示正在重连"
+    );
+}
+
+/// 7b-2：重连成功 → send_join 回放帧渲染进主 tab。
+#[test]
+fn test_recovery_replay_renders_into_main_tab() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    let chat = ChatHandle::new_mock("main");
+
+    apply_recovery(&mut app, Recovered::default());
+    assert_eq!(app.connection_state, ConnState::Connected);
+
+    // 新流经由 send_join 回放的历史帧
+    handle_grpc_message(make_user_message("main", "历史回放内容"), &mut app, &chat);
+
+    assert!(
+        app.tab_bar.tabs[0]
+            .messages
+            .iter()
+            .any(|m| matches!(m.line_type, LineType::User) && m.content.contains("历史回放内容")),
+        "回放帧应渲染进主 tab"
+    );
+}
+
+/// 7b-3：get_session 刷新 available_models / model_keys。
+#[test]
+fn test_recovery_refreshes_models() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.available_models = vec!["old".into()];
+
+    apply_recovery(
+        &mut app,
+        Recovered {
+            available_models: vec!["gpt-new".into()],
+            model_keys: vec!["gpt-new-key".into()],
+        },
+    );
+
+    assert_eq!(app.available_models, vec!["gpt-new".to_string()]);
+    assert_eq!(app.model_keys, vec!["gpt-new-key".to_string()]);
+}
+
+/// 7b-4：重建流后本地 streaming 残留清零。
+#[test]
+fn test_recovery_clears_streaming_residue() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    {
+        let tab = &mut app.tab_bar.tabs[0];
+        tab.streaming_text = "残留文本".into();
+        tab.generating = true;
+        tab.stream_started_at = Some(std::time::Instant::now());
+        tab.stream_output_tokens = 42;
+        tab.pending_usage = Some((1, 2, 3, 4, 5));
+        tab.last_stream_tps = Some(1.0);
+        tab.last_stream_elapsed = Some(2.0);
+    }
+    app.current_request_id = Some("rid".into());
+
+    apply_recovery(&mut app, Recovered::default());
+
+    let tab = &app.tab_bar.tabs[0];
+    assert!(tab.streaming_text.is_empty(), "streaming_text 应清零");
+    assert!(!tab.generating, "generating 应复位");
+    assert!(tab.stream_started_at.is_none());
+    assert_eq!(tab.stream_output_tokens, 0);
+    assert!(tab.pending_usage.is_none(), "pending_usage 应清零");
+    assert!(tab.last_stream_tps.is_none());
+    assert!(tab.last_stream_elapsed.is_none());
+    assert!(app.current_request_id.is_none());
+}
+
+/// 7b-5：重连期间 Enter 提交 → 提示不发送不清空；重连成功后可正常发送。
+#[test]
+fn test_input_blocked_while_reconnecting() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    let mut chat = ChatHandle::new_mock("main");
+    app.connection_state = ConnState::Reconnecting { attempt: 0 };
+    app.textarea = AppState::new_textarea();
+    app.textarea.insert_str("hello daemon");
+
+    handle_key_event(
+        Event::Key(KeyEvent::from(KeyCode::Enter)),
+        &mut app,
+        &mut chat,
+    );
+
+    assert!(
+        app.messages().iter().any(
+            |m| matches!(m.line_type, LineType::Error) && m.content.contains("未连接到 daemon")
+        ),
+        "重连期间 Enter 应提示未连接"
+    );
+    assert_eq!(
+        app.textarea.lines().join("\n"),
+        "hello daemon",
+        "重连期间输入不得被清空"
+    );
+    assert!(!app.generating(), "重连期间不得发送（generating 不应置位）");
+}
+
+#[tokio::test]
+async fn test_input_works_after_reconnected() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    let mut chat = ChatHandle::new_mock("main");
+    app.connection_state = ConnState::Connected;
+    app.textarea = AppState::new_textarea();
+    app.textarea.insert_str("hello daemon");
+
+    handle_key_event(
+        Event::Key(KeyEvent::from(KeyCode::Enter)),
+        &mut app,
+        &mut chat,
+    );
+
+    assert!(app.generating(), "连接正常时应发送输入");
+    assert!(
+        app.textarea.lines().join("\n").is_empty(),
+        "发送后应清空输入"
+    );
+}
+
+/// 7b-6：断线时正在 generating → 显示「连接中断，生成已终止」。
+#[test]
+fn test_generation_interrupted_hint_on_disconnect() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.tab_bar.tabs[0].generating = true;
+    app.tab_bar.tabs[0].streaming_text = "半截输出".into();
+
+    on_disconnect(&mut app, DisconnectReason::StreamClosed);
+
+    assert!(!app.tab_bar.tabs[0].generating, "断线应终止本地 generating");
+    assert!(
+        app.messages()
+            .iter()
+            .any(|m| matches!(m.line_type, LineType::Error)
+                && m.content.contains("连接中断，生成已终止")),
+        "断线时正在生成应提示生成已终止"
+    );
 }

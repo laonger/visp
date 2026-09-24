@@ -11,6 +11,7 @@ use ratatui_textarea::WrapMode;
 use std::path::Path;
 use unicode_width::UnicodeWidthChar;
 
+use crate::connection::ConnState;
 use crate::image::{ImageHeightInfo, ImageMetrics, ImageState};
 use crate::notify::NotifyEngine;
 use crate::theme;
@@ -1415,6 +1416,9 @@ pub struct AppState {
     pub model_key: String,
     pub session_id: String,
     pub should_quit: bool,
+    /// 连接状态机当前状态（设计 §5.9，逻辑集中在 event loop）。
+    /// 重连期间用于输入保护（Enter 提示不发送）与状态提示。
+    pub connection_state: ConnState,
     /// 当前 session 累计 token 数（input + output），用于状态栏显示
     pub total_input_tokens: u32,
     pub total_output_tokens: u32,
@@ -1511,6 +1515,7 @@ impl AppState {
             model_key,
             session_id,
             should_quit: false,
+            connection_state: ConnState::Connected,
             total_input_tokens: 0,
             total_output_tokens: 0,
             total_cache_creation_input_tokens: 0,
