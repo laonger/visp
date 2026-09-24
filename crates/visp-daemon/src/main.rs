@@ -601,7 +601,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         model_configs,
         tool_registry,
         rule_engine,
-        reload_core,
+        reload_core.clone(),
         session_mgr,
         agent_config,
         Arc::new(config.clone()),
@@ -621,6 +621,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     })?;
 
+    // 9.5. 挂载自动文件监听（设计 §5.6 生命周期）：service 组装完成后、gRPC server
+    //      启动前。开关由 daemon.toml 的 [daemon].filewatcher 控制，重启生效
+    //      （设计 §7 决策 12）；关闭即自动热重载的唯一回滚入口（设计 §9）。
+    let global_config_dir = visp_config::path::global_config_dir();
+    let file_watcher = visp_daemon::watch::start_file_watcher(
+        config.daemon.filewatcher,
+        &cwd,
+        global_config_dir.as_deref(),
+        Arc::new(visp_daemon::watch::CoreReloadExecutor::new(
+            reload_core.clone(),
+        )),
+    )
+    .await;
+
     // 10. Start gRPC server
     let addr = config.daemon.listen_addr.clone();
     let server_handle = tokio::spawn(async move {
@@ -632,6 +646,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 11. Wait for Ctrl+C
     tokio::signal::ctrl_c().await?;
     tracing::info!("shutdown signal received, stopping server");
+
+    // 先停 watcher：关闭路径上不再有 reload 触发（设计 §5.6 生命周期）。
+    // stop 为尽力而为（abort 后台任务 + drop notify watcher），不阻断后续 shutdown。
+    if let Some(watcher) = file_watcher {
+        watcher.stop();
+    }
 
     // Gracefully shut down MCP connections before aborting the server
     mcp_shutdown.shutdown_all().await;

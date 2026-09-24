@@ -257,3 +257,49 @@ fn global_root_children_dispatch_by_subdir() {
     // 顶层其他文件（daemon.toml 等）不命中。
     assert_eq!(plan.classify(&global.join("daemon.toml")), None);
 }
+
+/// 记录调用次数的假体执行器（工厂门控测试用，不触碰真实资产）。
+#[derive(Default)]
+struct CountingExecutor {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl ReloadExecutor for CountingExecutor {
+    async fn reload_domains(&self, _domains: &[ReloadDomain]) -> Vec<ReloadItem> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Vec::new()
+    }
+}
+
+/// 步骤 6d：开关关闭 → 工厂返回「未创建」，不构造 notify watcher、不起后台任务。
+#[tokio::test]
+async fn filewatcher_factory_disabled_returns_none() {
+    let project = TempDir::new().unwrap();
+    let executor = Arc::new(CountingExecutor::default());
+
+    let watcher = start_file_watcher(false, project.path(), None, executor.clone()).await;
+
+    assert!(watcher.is_none(), "开关关闭时不应创建 watcher");
+    // 返回 None 即未构造 FileWatcher（notify watcher 与后台任务唯一创建点在
+    // FileWatcher::start），假体执行器在整个窗口内零调用。
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        executor.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "关闭时不应有任何自动重载调用"
+    );
+}
+
+/// 步骤 6d：开关开启 → 工厂按监听计划创建 watcher（门控对照，证明关闭分支非恒真）。
+#[tokio::test]
+async fn filewatcher_factory_enabled_creates_watcher() {
+    let project = TempDir::new().unwrap();
+    fs::create_dir_all(project.path().join(".visp/agents")).unwrap();
+    let executor = Arc::new(CountingExecutor::default());
+
+    let watcher = start_file_watcher(true, project.path(), None, executor).await;
+
+    assert!(watcher.is_some(), "开关开启时应创建 watcher");
+    watcher.unwrap().stop();
+}

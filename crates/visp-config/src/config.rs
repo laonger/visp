@@ -151,6 +151,10 @@ pub struct DaemonSection {
     pub listen_addr: String,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    /// 自动文件监听热重载开关（设计 §7 决策 12）。默认开启；关闭后退回纯显式
+    /// `/reload` 形态。daemon.toml 不热重载，故该开关重启生效。
+    #[serde(default = "default_filewatcher")]
+    pub filewatcher: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -758,6 +762,9 @@ fn default_listen_addr() -> String {
 fn default_log_level() -> String {
     "info".into()
 }
+fn default_filewatcher() -> bool {
+    true
+}
 fn default_bash_timeout() -> u64 {
     120
 }
@@ -976,6 +983,7 @@ fn default_daemon_section() -> DaemonSection {
     DaemonSection {
         listen_addr: default_listen_addr(),
         log_level: default_log_level(),
+        filewatcher: default_filewatcher(),
     }
 }
 
@@ -4449,5 +4457,27 @@ mod tests_notification {
         assert_eq!(parsed.on_user_input, section.on_user_input);
         assert_eq!(parsed.protocol, section.protocol);
         assert_eq!(parsed.min_interval_secs, section.min_interval_secs);
+    }
+}
+
+#[cfg(test)]
+mod tests_daemon_filewatcher {
+    use super::*;
+
+    /// 1. 配置缺省 → 自动文件监听开关默认开启（设计 §7 决策 12）。
+    #[test]
+    fn filewatcher_defaults_enabled() {
+        let config: DaemonConfig = toml::from_str("").unwrap();
+        assert!(config.daemon.filewatcher);
+        assert!(default_config().daemon.filewatcher);
+    }
+
+    /// 2. 显式置 false → 解析为关闭；未写的其他 daemon 字段仍取默认值。
+    #[test]
+    fn filewatcher_explicit_false() {
+        let config: DaemonConfig = toml::from_str("[daemon]\nfilewatcher = false\n").unwrap();
+        assert!(!config.daemon.filewatcher);
+        assert_eq!(config.daemon.listen_addr, default_listen_addr());
+        assert_eq!(config.daemon.log_level, default_log_level());
     }
 }

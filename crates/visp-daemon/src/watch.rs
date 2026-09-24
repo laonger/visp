@@ -344,6 +344,36 @@ impl FileWatcher {
     }
 }
 
+/// 文件监听工厂入口（步骤 6d）。
+///
+/// 开关关闭时返回 `None`——**不构造 notify watcher、不起后台任务**，自动热重载
+/// 整体失效、退回纯显式 `/reload` 形态（设计 §7 决策 12、§9 唯一回滚入口）。
+///
+/// 开启时按 [`WatchPlan::build`] 构建监听计划并创建 [`FileWatcher`]，执行器由
+/// 调用方注入（生产路径传 [`CoreReloadExecutor`]，其委托共享 [`ReloadCore`]，
+/// 通知句柄已含于核心的下行通道）。notify watcher 构造失败降级为 `None` + warn，
+/// 不阻断 daemon 启动。
+pub async fn start_file_watcher(
+    enabled: bool,
+    project: &Path,
+    global_config: Option<&Path>,
+    executor: Arc<dyn ReloadExecutor>,
+) -> Option<FileWatcher> {
+    if !enabled {
+        tracing::info!("自动文件监听已关闭（daemon.toml [daemon].filewatcher = false）");
+        return None;
+    }
+
+    let plan = Arc::new(WatchPlan::build(project, global_config));
+    match FileWatcher::start(plan, executor, DEBOUNCE).await {
+        Ok(watcher) => Some(watcher),
+        Err(error) => {
+            tracing::warn!(%error, "文件监听启动失败，自动热重载不可用");
+            None
+        }
+    }
+}
+
 /// 后台任务：窗口重置式 debounce + 补挂校准 + 领域重载。
 async fn run_loop(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Vec<ReloadDomain>>,
