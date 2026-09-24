@@ -42,6 +42,11 @@ pub enum Command {
     NewSession,
     /// `/list` — list all sessions.
     ListSessions,
+    /// `/reload` — reload filesystem assets declared reloadable.
+    ///
+    /// Actioned by the CLI via a unary RPC; never handled as daemon
+    /// `UserInput` text.
+    Reload,
     /// `/sessions <id>` — switch to a session by short-id.
     SwitchSession {
         /// Target session short-id.
@@ -171,6 +176,14 @@ pub fn parse(text: &str) -> Command {
         return Command::ListSessions;
     }
 
+    // `/reload`
+    if let Some(rest) = text.strip_prefix("/reload") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return Command::Reload;
+        }
+        return Command::None; // e.g. `/reloadxxx`
+    }
+
     // `/sessions <id>`
     if let Some(rest) = text.strip_prefix("/sessions") {
         if rest.is_empty() {
@@ -244,6 +257,10 @@ pub fn resolve(cmd: &Command, project_path: &Path) -> Result<CommandAction, Stri
         // never reach the daemon as UserInput text.  `resolve()`
         // still validates arguments for consistency.
         Command::NewSession | Command::ListSessions => Ok(CommandAction::None),
+
+        // `/reload` is a non-text command: the CLI executes it via a
+        // unary RPC, so the daemon text path has nothing to do.
+        Command::Reload => Ok(CommandAction::None),
 
         Command::SwitchSession { target } => {
             if target.is_empty() {
@@ -465,6 +482,19 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_reload() {
+        assert_eq!(parse("/reload"), Command::Reload);
+        assert_eq!(parse("  /reload  "), Command::Reload);
+    }
+
+    #[test]
+    fn test_parse_reload_prefix_no_match() {
+        // 回归 /init、/init-agent 的边界写法：前缀之后必须结束或空白
+        assert_eq!(parse("/reloadxxx"), Command::None);
+        assert_eq!(parse("/reloader"), Command::None);
+    }
+
+    #[test]
     fn test_parse_empty_string() {
         assert_eq!(parse(""), Command::None);
     }
@@ -510,6 +540,21 @@ mod tests {
     fn test_resolve_new_session() {
         let result = resolve(&Command::NewSession, Path::new("/tmp")).unwrap();
         assert!(matches!(result, CommandAction::None));
+    }
+
+    #[test]
+    fn test_resolve_reload() {
+        // Reload 与 NewSession 同类：非 daemon 文本命令，实际动作由 TUI 走 unary RPC。
+        let result = resolve(&Command::Reload, Path::new("/tmp")).unwrap();
+        assert!(matches!(result, CommandAction::None));
+
+        let new_session = resolve(&Command::NewSession, Path::new("/tmp")).unwrap();
+        let reload = resolve(&Command::Reload, Path::new("/tmp")).unwrap();
+        assert_eq!(
+            std::mem::discriminant(&reload),
+            std::mem::discriminant(&new_session),
+            "Reload 应与 NewSession 同属非 daemon 文本命令"
+        );
     }
 
     #[test]
