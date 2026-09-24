@@ -15,63 +15,140 @@ pub struct RuleSet {
 
 #[derive(Debug)]
 pub struct RuleEngine {
+    /// 构造时保存的项目路径，重载时据此重走完全相同的扫描。
+    project_path: PathBuf,
+    /// 全局 AGENTS.md 路径（构造时解析；重载复用，保证扫描逻辑等价）。
+    global_agents_md: Option<PathBuf>,
+    /// 全局 rules 目录（构造时解析；重载复用，保证扫描逻辑等价）。
+    global_rules_dir: Option<PathBuf>,
     rules: Arc<RwLock<RuleSet>>,
+}
+
+/// RuleEngine 重载结果（变化守卫素材）。
+///
+/// `ruleset.content` 即消费端实际使用的整体拼接串，调用方可据此做等值比较。
+#[derive(Debug, Clone)]
+pub struct ReloadResult {
+    /// 重扫得到的完整 RuleSet。
+    pub ruleset: RuleSet,
+    /// 新拼接内容是否与重载前不同；为 `false` 时未写回，旧状态原样保留。
+    pub changed: bool,
 }
 
 impl RuleEngine {
     pub fn new(project_path: &Path) -> std::io::Result<Self> {
-        let mut files = Vec::new();
+        Self::with_global_sources(
+            project_path,
+            crate::path::global_agents_md(),
+            crate::path::rules_dir_global(),
+        )
+    }
 
-        // 1. AGENTS.md from project directory upward to root (closest first)
-        for md in discover_agents_md(project_path) {
-            if let Ok(content) = std::fs::read_to_string(&md) {
-                let header = format!("Instructions from: {}", md.display());
-                files.push(RuleFile {
-                    path: md,
-                    content: format!("{header}\n{content}"),
-                });
-            }
-        }
-
-        // 2. Global AGENTS.md: ~/.config/visp/AGENTS.md
-        if let Some(global_agents) = crate::path::global_agents_md()
-            && global_agents.is_file()
-            && let Ok(content) = std::fs::read_to_string(&global_agents)
-        {
-            let header = format!("Instructions from: {}", global_agents.display());
-            files.push(RuleFile {
-                path: global_agents,
-                content: format!("{header}\n{content}"),
-            });
-        }
-
-        // 3. Project rules: .visp/rules/
-        let project_rules = crate::path::rules_dir_project(project_path);
-        if project_rules.is_dir() {
-            collect_rules(&project_rules, &mut files)?;
-        }
-
-        // 4. Global rules: ~/.config/visp/rules/
-        if let Some(global_rules) = crate::path::rules_dir_global()
-            && global_rules.is_dir()
-        {
-            collect_rules(&global_rules, &mut files)?;
-        }
-
-        let content = files
-            .iter()
-            .map(|f| f.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
+    /// 使用显式全局来源构造（测试隔离钩子，参照 `load_skills` 的注入模式）。
+    ///
+    /// 生产路径由 [`RuleEngine::new`] 传入 `path` 模块解析出的全局路径；
+    /// 测试可传入临时目录或 `None` 以避免读取真实 `~/.config/visp`。
+    fn with_global_sources(
+        project_path: &Path,
+        global_agents_md: Option<PathBuf>,
+        global_rules_dir: Option<PathBuf>,
+    ) -> std::io::Result<Self> {
+        let ruleset = build_ruleset(
+            project_path,
+            global_agents_md.as_deref(),
+            global_rules_dir.as_deref(),
+        )?;
 
         Ok(RuleEngine {
-            rules: Arc::new(RwLock::new(RuleSet { content, files })),
+            project_path: project_path.to_path_buf(),
+            global_agents_md,
+            global_rules_dir,
+            rules: Arc::new(RwLock::new(ruleset)),
+        })
+    }
+
+    /// 重载：重走与构造完全相同的扫描，成功后整体替换当前 RuleSet。
+    ///
+    /// 失败语义：构建阶段任何 IO 错误（如某规则文件暂时不可读）→ 放弃本次
+    /// 写回、保留旧 RuleSet，并返回错误；绝不把「好状态」变成「空状态」。
+    pub fn reload(&self) -> std::io::Result<ReloadResult> {
+        let new_ruleset = build_ruleset(
+            &self.project_path,
+            self.global_agents_md.as_deref(),
+            self.global_rules_dir.as_deref(),
+        )?;
+
+        let mut guard = self.rules.write().unwrap();
+        let changed = guard.content != new_ruleset.content;
+        if changed {
+            *guard = new_ruleset.clone();
+        }
+
+        Ok(ReloadResult {
+            ruleset: new_ruleset,
+            changed,
         })
     }
 
     pub fn get_active_rules(&self) -> String {
         self.rules.read().unwrap().content.clone()
     }
+}
+
+/// 执行完整扫描并组装 RuleSet（构造与重载共用的唯一扫描逻辑）。
+///
+/// 顺序：祖先 AGENTS.md（近先远后）→ 全局 AGENTS.md → 项目 `.visp/rules/`
+/// → 全局 rules 目录。任何 IO 错误向上传播，调用方据此放弃写回、保留旧状态。
+fn build_ruleset(
+    project_path: &Path,
+    global_agents_md: Option<&Path>,
+    global_rules_dir: Option<&Path>,
+) -> std::io::Result<RuleSet> {
+    let mut files = Vec::new();
+
+    // 1. AGENTS.md from project directory upward to root (closest first)
+    for md in discover_agents_md(project_path) {
+        if let Ok(content) = std::fs::read_to_string(&md) {
+            let header = format!("Instructions from: {}", md.display());
+            files.push(RuleFile {
+                path: md,
+                content: format!("{header}\n{content}"),
+            });
+        }
+    }
+
+    // 2. Global AGENTS.md: ~/.config/visp/AGENTS.md
+    if let Some(global_agents) = global_agents_md
+        && global_agents.is_file()
+        && let Ok(content) = std::fs::read_to_string(global_agents)
+    {
+        let header = format!("Instructions from: {}", global_agents.display());
+        files.push(RuleFile {
+            path: global_agents.to_path_buf(),
+            content: format!("{header}\n{content}"),
+        });
+    }
+
+    // 3. Project rules: .visp/rules/
+    let project_rules = crate::path::rules_dir_project(project_path);
+    if project_rules.is_dir() {
+        collect_rules(&project_rules, &mut files)?;
+    }
+
+    // 4. Global rules: ~/.config/visp/rules/
+    if let Some(global_rules) = global_rules_dir
+        && global_rules.is_dir()
+    {
+        collect_rules(global_rules, &mut files)?;
+    }
+
+    let content = files
+        .iter()
+        .map(|f| f.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    Ok(RuleSet { content, files })
 }
 
 /// 从 project_path 向上遍历到根目录，寻找所有 AGENTS.md 文件。
@@ -367,5 +444,104 @@ mod tests {
         let sub_pos = rules.find("Subdir instructions").unwrap();
         let root_pos = rules.find("Root instructions").unwrap();
         assert!(sub_pos < root_pos);
+    }
+
+    /// 构造一个不读取真实全局配置目录的引擎（测试隔离：显式注入空的全局来源）。
+    fn isolated_engine(project_path: &Path) -> RuleEngine {
+        RuleEngine::with_global_sources(project_path, None, None).unwrap()
+    }
+
+    // ---- 步骤 2a：RuleEngine 重载 ----
+
+    #[test]
+    fn test_reload_applies_new_content() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("AGENTS.md"), "<Role>旧角色</Role>").unwrap();
+
+        let engine = isolated_engine(dir.path());
+        assert!(engine.get_active_rules().contains("旧角色"));
+
+        fs::write(dir.path().join("AGENTS.md"), "<Role>新角色</Role>").unwrap();
+        let result = engine.reload().unwrap();
+
+        assert!(result.changed);
+        assert!(result.ruleset.content.contains("新角色"));
+        let rules = engine.get_active_rules();
+        assert!(rules.contains("新角色"));
+        assert!(!rules.contains("旧角色"));
+    }
+
+    #[test]
+    fn test_reload_discovers_ancestor_agents_md_in_order() {
+        // project/subdir 与 project 各有一个 AGENTS.md，重扫按「近先远后」拼接
+        let tmp = tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let subdir = project.join("subdir");
+        fs::create_dir_all(&subdir).unwrap();
+        fs::write(project.join("AGENTS.md"), "上级指令").unwrap();
+        fs::write(subdir.join("AGENTS.md"), "项目指令").unwrap();
+
+        let engine = isolated_engine(&subdir);
+        let result = engine.reload().unwrap();
+        let rules = &result.ruleset.content;
+
+        let near = rules.find("项目指令").unwrap();
+        let far = rules.find("上级指令").unwrap();
+        assert!(near < far, "近的 AGENTS.md 应先于远的");
+    }
+
+    #[test]
+    fn test_reload_io_failure_keeps_old_state() {
+        let dir = tempdir().unwrap();
+        let rules_dir = dir.path().join(".visp").join("rules");
+        fs::create_dir_all(&rules_dir).unwrap();
+        fs::write(rules_dir.join("good.md"), "alwaysApply: true\n# 旧规则").unwrap();
+
+        let engine = isolated_engine(dir.path());
+        let before = engine.get_active_rules();
+        assert!(before.contains("# 旧规则"));
+
+        // 用目录冒充 .md 文件：collect_rules 读取该条目必然 IO 失败
+        fs::create_dir_all(rules_dir.join("zzz.md")).unwrap();
+
+        let result = engine.reload();
+        assert!(result.is_err(), "构建阶段 IO 失败应返回错误");
+        assert_eq!(
+            engine.get_active_rules(),
+            before,
+            "失败时必须保留旧 RuleSet，不得清空"
+        );
+    }
+
+    #[test]
+    fn test_reload_missing_rules_dir_is_tolerated() {
+        let dir = tempdir().unwrap();
+        // 无 .visp/rules 目录
+        let engine = isolated_engine(dir.path());
+
+        let result = engine.reload().unwrap();
+
+        assert_eq!(result.ruleset.files.len(), 0);
+        assert!(result.ruleset.content.is_empty());
+        assert!(engine.get_active_rules().is_empty());
+    }
+
+    #[test]
+    fn test_reload_exposes_concatenated_content_for_guard() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("AGENTS.md"), "守卫素材 A").unwrap();
+
+        let engine = isolated_engine(dir.path());
+        let first = engine.reload().unwrap();
+        assert!(first.ruleset.content.contains("守卫素材 A"));
+        assert_eq!(first.ruleset.content, engine.get_active_rules());
+
+        fs::write(dir.path().join("AGENTS.md"), "守卫素材 B").unwrap();
+        let second = engine.reload().unwrap();
+
+        assert!(second.changed, "内容变化应被守卫素材检出");
+        assert!(second.ruleset.content.contains("守卫素材 B"));
+        assert_ne!(first.ruleset.content, second.ruleset.content);
+        assert_eq!(second.ruleset.content, engine.get_active_rules());
     }
 }
