@@ -17,6 +17,13 @@ pub struct BuiltinAgentOverride {
     pub steps: Option<u32>,
 }
 
+/// `load_agents` 的加载统计（reload 核心上报「跳过数」所需，设计 §5.3/§8）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentLoadStats {
+    /// 因解析失败被跳过的 agent 文件数。
+    pub skipped: usize,
+}
+
 /// Load agent definitions from agent directories.
 /// Falls back to built-in agents if no files exist.
 ///
@@ -26,6 +33,18 @@ pub struct BuiltinAgentOverride {
 /// `overrides` 来自 daemon.toml 的 `[[agent.builtin]]` 配置，
 /// 在内置 agent 注册之后、文件 agent 加载之前应用。
 pub fn load_agents(agent_dirs: &[&Path], overrides: &[BuiltinAgentOverride]) -> AgentRegistry {
+    load_agents_with_stats(agent_dirs, overrides).0
+}
+
+/// 与 [`load_agents`] 相同，但额外返回加载统计（跳过数）。
+///
+/// 保留 [`load_agents`] 签名不变以兼容既有调用点；reload 核心据此上报
+/// 「成功，跳过 N 个非法文件」。
+pub fn load_agents_with_stats(
+    agent_dirs: &[&Path],
+    overrides: &[BuiltinAgentOverride],
+) -> (AgentRegistry, AgentLoadStats) {
+    let mut stats = AgentLoadStats::default();
     let mut registry = AgentRegistry::new();
 
     // Register built-in agents (lowest priority — file-loaded can overwrite)
@@ -93,6 +112,7 @@ pub fn load_agents(agent_dirs: &[&Path], overrides: &[BuiltinAgentOverride]) -> 
                             }
                         }
                         Err(e) => {
+                            stats.skipped += 1;
                             tracing::warn!(
                                 path = %path.display(),
                                 error = %e,
@@ -105,7 +125,7 @@ pub fn load_agents(agent_dirs: &[&Path], overrides: &[BuiltinAgentOverride]) -> 
         }
     }
 
-    registry
+    (registry, stats)
 }
 
 /// Parse a single agent `.md` file into an `AgentDefinition`.
