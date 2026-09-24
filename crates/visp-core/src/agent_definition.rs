@@ -28,7 +28,7 @@ pub struct PermissionRule {
 }
 
 /// Agent 静态定义
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AgentDefinition {
     pub name: String,
     pub description: String,
@@ -345,5 +345,80 @@ mod tests {
             check_permission("unknown_tool", &serde_json::json!({}), &rules),
             PermissionDecision::Allowed
         );
+    }
+
+    // ── AgentDefinition equality（reload 变化守卫的等值基础） ─────────────
+
+    fn base_definition() -> AgentDefinition {
+        AgentDefinition {
+            name: "coder".to_string(),
+            description: "a coding agent".to_string(),
+            mode: AgentMode::Primary,
+            model: Some("gpt-4".to_string()),
+            temperature: Some(0.2),
+            steps: Some(30),
+            permission: vec![PermissionRule {
+                permission: "edit".into(),
+                pattern: "*".into(),
+                action: PermissionAction::Allow,
+            }],
+            allowed_sub_agents: vec!["fixer".to_string()],
+            system_prompt: "you are a coder".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_agent_definition_equality_identical() {
+        assert_eq!(base_definition(), base_definition());
+    }
+
+    #[test]
+    fn test_agent_definition_inequality_on_permission() {
+        let mut other = base_definition();
+        other.permission = vec![PermissionRule {
+            permission: "edit".into(),
+            pattern: "*".into(),
+            action: PermissionAction::Deny,
+        }];
+        assert_ne!(base_definition(), other);
+    }
+
+    #[test]
+    fn test_agent_definition_inequality_on_system_prompt() {
+        let mut other = base_definition();
+        other.system_prompt = "you are a different coder".to_string();
+        assert_ne!(base_definition(), other);
+    }
+
+    #[test]
+    fn test_agent_definition_inequality_on_optional_fields() {
+        let mut without_model = base_definition();
+        without_model.model = None;
+        assert_ne!(base_definition(), without_model);
+
+        let mut without_temperature = base_definition();
+        without_temperature.temperature = None;
+        assert_ne!(base_definition(), without_temperature);
+
+        let mut without_steps = base_definition();
+        without_steps.steps = None;
+        assert_ne!(base_definition(), without_steps);
+    }
+
+    #[test]
+    fn test_agent_definition_permission_order_sensitive() {
+        let rule = |permission: &str| PermissionRule {
+            permission: permission.into(),
+            pattern: "*".into(),
+            action: PermissionAction::Allow,
+        };
+
+        let mut forward = base_definition();
+        forward.permission = vec![rule("bash"), rule("edit")];
+
+        let mut reversed = base_definition();
+        reversed.permission = vec![rule("edit"), rule("bash")];
+
+        assert_ne!(forward, reversed);
     }
 }
