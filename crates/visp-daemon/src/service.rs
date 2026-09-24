@@ -1049,6 +1049,18 @@ impl CoderDaemon for CoderDaemonService {
         }))
     }
 
+    // 编译占位：ReloadConfig proto RPC 在步骤 1a 已生成，服务端 trait 需要
+    // 该方法才能编译；真正的 handler 在步骤 4a 接入共享 reload 核心时实现。
+    // 步骤 2b 不引入任何重载行为，故此处保持未实现。
+    async fn reload_config(
+        &self,
+        _request: Request<proto::ReloadConfigRequest>,
+    ) -> Result<Response<proto::ReloadConfigResponse>, Status> {
+        Err(Status::unimplemented(
+            "ReloadConfig handler is wired in a later step",
+        ))
+    }
+
     async fn shutdown(
         &self,
         _request: Request<proto::ShutdownRequest>,

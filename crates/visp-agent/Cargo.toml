@@ -12,6 +12,7 @@ visp-tools = { path = "../visp-tools" }
 visp-config = { path = "../visp-config" }
 tokio.workspace = true
 tokio-util = "0.7"
+arc-swap.workspace = true
 futures.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["registry"] }

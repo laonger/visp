@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing;
@@ -154,7 +155,7 @@ pub struct Orchestrator {
 
     // ── 共享依赖 ─────────────────────────────────────────────
     session_mgr: Arc<SessionManager>,
-    agent_registry: Arc<AgentRegistry>,
+    agent_registry: Arc<ArcSwap<AgentRegistry>>,
     tool_registry: Arc<ToolRegistry>,
     rule_engine: Arc<RuleEngine>,
     agent_config: AgentConfig,
@@ -173,7 +174,7 @@ impl Orchestrator {
         grpc_rx: mpsc::Receiver<ClientMessage>,
         grpc_tx: mpsc::Sender<AgentEventFrame>,
         session_mgr: Arc<SessionManager>,
-        agent_registry: Arc<AgentRegistry>,
+        agent_registry: Arc<ArcSwap<AgentRegistry>>,
         tool_registry: Arc<ToolRegistry>,
         rule_engine: Arc<RuleEngine>,
         agent_config: AgentConfig,
@@ -390,9 +391,13 @@ impl Orchestrator {
         let (clean_text, images) = Message::extract_images(user_message);
         let has_images = !images.is_empty();
 
+        // 流程入口取一次 registry 快照并全程复用：Vision 路由查表与
+        // subagent 列表渲染必须基于同一版本，避免中途 reload 替换造成撕裂。
+        let registry = self.agent_registry.load_full();
+
         // If images are present, route to vision agent to avoid non-multimodal LLM errors
         let agent_def = if has_images {
-            match self.agent_registry.get("vision") {
+            match registry.get("vision") {
                 Some(vision_def) => {
                     tracing::info!(session_id, "images detected, routing to vision agent");
                     vision_def.clone()
@@ -402,7 +407,7 @@ impl Orchestrator {
                         session_id,
                         "images detected but vision agent not found, falling back to main agent"
                     );
-                    match self.agent_registry.get(&agent_name) {
+                    match registry.get(&agent_name) {
                         Some(a) => a.clone(),
                         None => {
                             tracing::error!(agent_name, "agent definition not found");
@@ -412,7 +417,7 @@ impl Orchestrator {
                 }
             }
         } else {
-            match self.agent_registry.get(&agent_name) {
+            match registry.get(&agent_name) {
                 Some(a) => a.clone(),
                 None => {
                     tracing::error!(agent_name, "agent definition not found");
@@ -436,7 +441,7 @@ impl Orchestrator {
 
         // Append dynamic sub-agent delegation guidelines (skip for vision agent)
         if !has_images {
-            let subagent_prompt = build_subagent_prompt(&self.agent_registry);
+            let subagent_prompt = build_subagent_prompt(&registry);
             if !subagent_prompt.is_empty()
                 && let Err(e) = self
                     .session_mgr
@@ -591,6 +596,10 @@ impl Orchestrator {
         trace_context: Option<visp_core::TraceContext>,
         response_tx: Option<tokio::sync::oneshot::Sender<String>>,
     ) {
+        // 流程入口取一次 registry 快照：subagent 定义查表与父 agent 权限继承
+        // 共享同一版本，避免中途 reload 替换造成两处不一致。
+        let registry = self.agent_registry.load_full();
+
         // 1. Depth check
         let depth = self.active_agents.compute_depth(parent_session_id);
         if depth >= self.agent_config.max_depth {
@@ -627,7 +636,7 @@ impl Orchestrator {
         }
 
         // 2. Look up agent definition
-        let agent_def = match self.agent_registry.get(subagent_type) {
+        let agent_def = match registry.get(subagent_type) {
             Some(a) => a.clone(),
             None => {
                 tracing::error!(subagent_type, "subagent definition not found");
@@ -651,7 +660,7 @@ impl Orchestrator {
         };
 
         // 4. Merge permissions: parent session deny → parent agent deny → subagent rules
-        let parent_agent_def = self.agent_registry.get(&parent_session.agent_name);
+        let parent_agent_def = registry.get(&parent_session.agent_name);
         let parent_agent_permission = parent_agent_def
             .map(|a| a.permission.as_slice())
             .unwrap_or(&[]);

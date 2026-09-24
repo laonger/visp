@@ -35,7 +35,7 @@ fn make_orchestrator() -> (
 
     let store: Box<dyn visp_core::session::SessionStore> = Box::new(InMemorySessionStore::new());
     let session_mgr = Arc::new(SessionManager::new(store));
-    let agent_registry = Arc::new(AgentRegistry::new());
+    let agent_registry = Arc::new(ArcSwap::from_pointee(AgentRegistry::new()));
     let tool_registry = Arc::new(ToolRegistry::new());
     let rule_engine = Arc::new(RuleEngine::new(&PathBuf::from(".")).unwrap());
     let agent_config = AgentConfig::default();
@@ -296,7 +296,7 @@ async fn test_subagent_applies_agent_model_override() {
             system_prompt: String::new(),
         })
         .ok();
-    let agent_registry = Arc::new(agent_registry);
+    let agent_registry = Arc::new(ArcSwap::from_pointee(agent_registry));
 
     let tool_registry = Arc::new(ToolRegistry::new());
     let rule_engine = Arc::new(RuleEngine::new(&PathBuf::from(".")).unwrap());
@@ -437,7 +437,7 @@ async fn test_subagent_inherits_parent_config_when_no_model_override() {
             system_prompt: String::new(),
         })
         .ok();
-    let agent_registry = Arc::new(agent_registry);
+    let agent_registry = Arc::new(ArcSwap::from_pointee(agent_registry));
 
     let tool_registry = Arc::new(ToolRegistry::new());
     let rule_engine = Arc::new(RuleEngine::new(&PathBuf::from(".")).unwrap());
@@ -537,7 +537,7 @@ async fn test_main_agent_respects_user_model_switch() {
             system_prompt: String::new(),
         })
         .ok();
-    let agent_registry = Arc::new(agent_registry);
+    let agent_registry = Arc::new(ArcSwap::from_pointee(agent_registry));
 
     let tool_registry = Arc::new(ToolRegistry::new());
     let rule_engine = Arc::new(RuleEngine::new(&PathBuf::from(".")).unwrap());
@@ -994,7 +994,7 @@ fn make_orchestrator_for_spawn_with_config(
             system_prompt: String::new(),
         })
         .ok();
-    let agent_registry = Arc::new(agent_registry);
+    let agent_registry = Arc::new(ArcSwap::from_pointee(agent_registry));
 
     let tool_registry = Arc::new(ToolRegistry::new());
     let rule_engine = Arc::new(RuleEngine::new(&PathBuf::from(".")).unwrap());
@@ -2985,4 +2985,129 @@ async fn test_spawn_sub_agent_falls_back_to_parent_images() {
         "fallback should forward the parent session's images"
     );
     assert_eq!(first.images[0].path, "/tmp/parent-img.png");
+}
+
+// ── 步骤 2b：AgentRegistry 持有方式改 ArcSwap 的目标语义测试 ─────────
+
+/// 构造单个 subagent 定义（供 registry 替换测试复用）
+fn make_registry_agent(name: &str, description: &str) -> AgentDefinition {
+    AgentDefinition {
+        name: name.to_string(),
+        description: description.to_string(),
+        mode: visp_core::agent_definition::AgentMode::Subagent,
+        model: None,
+        temperature: None,
+        steps: None,
+        permission: vec![],
+        allowed_sub_agents: Vec::new(),
+        system_prompt: String::new(),
+    }
+}
+
+/// 用例 1：替换 registry 快照后，下一次 spawn 查表使用新定义。
+#[tokio::test]
+async fn test_agent_registry_swap_takes_effect_on_next_spawn() {
+    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+
+    // 初始 registry（来自 helper）仅含 "default"；替换为含 "late_added" 的新快照。
+    let mut new_registry = AgentRegistry::new();
+    new_registry
+        .register(make_registry_agent(
+            "late_added",
+            "added after construction",
+        ))
+        .unwrap();
+    orch.agent_registry.store(Arc::new(new_registry));
+
+    let envelope = Envelope {
+        session_id: parent_id.clone(),
+        message: AgentMessage::SpawnRequest {
+            call_id: "call-swap-effect".to_string(),
+            subagent_type: "late_added".to_string(),
+            description: "task".to_string(),
+            prompt: "task".to_string(),
+            task_id: None,
+            trace_context: None,
+            response_tx: None,
+        },
+        trace_context: None,
+    };
+    orch.handle_agent_message(envelope).await;
+
+    let sessions = orch.session_mgr.list().unwrap();
+    assert!(
+        sessions
+            .iter()
+            .any(|s| s.agent_name == "late_added" && s.parent_id == Some(parent_id.clone())),
+        "spawn 应使用替换后的 registry 快照，创建 late_added 子会话"
+    );
+}
+
+/// 用例 2：同一主流程内多次查表共享同一次快照，中途替换不发生撕裂。
+#[test]
+fn test_agent_registry_single_snapshot_shared_within_flow() {
+    let (orch, _global_tx, _client_tx, _grpc_rx) = make_orchestrator();
+
+    let mut old_registry = AgentRegistry::new();
+    old_registry
+        .register(make_registry_agent("vision", "old-vision"))
+        .unwrap();
+    orch.agent_registry.store(Arc::new(old_registry));
+
+    // 流程入口取一次快照（对应 start_main_agent 的 load_full）
+    let snapshot = orch.agent_registry.load_full();
+
+    // 流程中途发生替换（等价于另一个 reload 流程 store）
+    let mut new_registry = AgentRegistry::new();
+    new_registry
+        .register(make_registry_agent("vision", "new-vision"))
+        .unwrap();
+    orch.agent_registry.store(Arc::new(new_registry));
+
+    // 同一快照内的两处查表看到一致（旧）内容，不撕裂
+    let first = snapshot
+        .get("vision")
+        .expect("snapshot should contain vision");
+    let second = snapshot
+        .get("vision")
+        .expect("snapshot should contain vision");
+    assert_eq!(first.description, "old-vision");
+    assert_eq!(second.description, "old-vision");
+
+    // 而新的流程入口会看到新快照
+    assert_eq!(
+        orch.agent_registry
+            .load_full()
+            .get("vision")
+            .expect("new snapshot should contain vision")
+            .description,
+        "new-vision"
+    );
+}
+
+/// 用例 3：快照 clone 出的定义值可跨 await 使用（不持有 Guard/借用）。
+#[tokio::test]
+async fn test_agent_definition_clone_from_snapshot_survives_across_await() {
+    let (orch, _global_tx, _client_tx, _grpc_rx) = make_orchestrator();
+
+    let mut registry = AgentRegistry::new();
+    registry
+        .register(make_registry_agent("vision", "original"))
+        .unwrap();
+    orch.agent_registry.store(Arc::new(registry));
+
+    // 从快照 clone 出定义值后即释放快照
+    let definition = orch
+        .agent_registry
+        .load_full()
+        .get("vision")
+        .expect("vision should exist")
+        .clone();
+
+    // 替换并跨 await 使用 clone 出的值
+    orch.agent_registry.store(Arc::new(AgentRegistry::new()));
+    tokio::task::yield_now().await;
+
+    assert_eq!(definition.name, "vision");
+    assert_eq!(definition.description, "original");
 }

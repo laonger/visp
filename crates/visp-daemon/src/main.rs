@@ -3,6 +3,7 @@ mod observability;
 mod server;
 mod service;
 
+use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -543,9 +544,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent_dirs.push(project_agents_dir);
     }
     let agent_dir_refs: Vec<&Path> = agent_dirs.iter().map(|p| p.as_path()).collect();
-    let agent_registry = Arc::new(visp_agent::agent_loader::load_agents(
-        &agent_dir_refs,
-        &builtin_overrides,
+    let agent_registry = Arc::new(ArcSwap::from_pointee(
+        visp_agent::agent_loader::load_agents(&agent_dir_refs, &builtin_overrides),
     ));
 
     // 8.7. Create orchestration channels
@@ -556,7 +556,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (client_tx, client_rx) = mpsc::channel(64);
 
     // 8.7.5. Register agent tools from AgentRegistry (skip in single-agent mode)
-    register_agent_tools(&tool_registry, &agent_registry, Some(&global_tx))
+    let agent_registry_snapshot = agent_registry.load_full();
+    register_agent_tools(&tool_registry, &agent_registry_snapshot, Some(&global_tx))
         .map_err(|e| format!("register agent tools: {e}"))?;
 
     // 8.8. Create and start Orchestrator
