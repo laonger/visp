@@ -57,6 +57,9 @@ pub struct ReloadCore {
     global_tx: Option<mpsc::Sender<Envelope>>,
     /// daemon 启动时的 project root（skills 重扫复用，不临时取 cwd）。
     project_root: PathBuf,
+    /// 最近一次生效的 skills listing（变化守卫素材，设计 §5.2/§7 决策 13）。
+    /// 重载执行受 [`ReloadCore::lock`] 串行化，此锁仅作内部可变状态。
+    skills_listing: std::sync::Mutex<String>,
     /// 显式与自动路径共用的异步互斥量（设计 §7 决策 9）。
     lock: tokio::sync::Mutex<()>,
 }
@@ -70,6 +73,7 @@ impl ReloadCore {
         global_tx: Option<mpsc::Sender<Envelope>>,
         project_root: PathBuf,
     ) -> Self {
+        let skills_listing = visp_core::session::load_skills(&project_root);
         Self {
             rule_engine,
             tool_registry,
@@ -77,6 +81,7 @@ impl ReloadCore {
             builtin_overrides,
             global_tx,
             project_root,
+            skills_listing: std::sync::Mutex::new(skills_listing),
             lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -110,9 +115,11 @@ impl ReloadCore {
         }
     }
 
-    /// rules：调用 `RuleEngine::reload()`（构建-替换语义已在内部实现）。
+    /// rules：调用 `RuleEngine::reload()`，并消费其返回的 `changed` 作为守卫
+    /// （不重复比较拼接串，见计划备注 12）。
     fn reload_rules(&self) -> ReloadItem {
         match self.rule_engine.reload() {
+            Ok(result) if !result.changed => no_change_item(ReloadDomain::Rules),
             Ok(result) => {
                 let files = result.ruleset.files.len();
                 ReloadItem {
@@ -131,8 +138,18 @@ impl ReloadCore {
         }
     }
 
-    /// skills：重建 `SkillTool` 实例，经 `ToolRegistry::update` 同名替换。
+    /// skills：重扫 listing，与上次生效的 listing 等值则跳过；
+    /// 有变化才重建 `SkillTool` 实例并 `ToolRegistry::update` 同名替换。
     fn reload_skills(&self) -> ReloadItem {
+        let listing = visp_core::session::load_skills(&self.project_root);
+        {
+            let mut previous = self.skills_listing.lock().unwrap();
+            if *previous == listing {
+                return no_change_item(ReloadDomain::Skills);
+            }
+            *previous = listing;
+        }
+
         let tool: Arc<dyn visp_core::tool::Tool> = Arc::new(SkillTool::new(&self.project_root));
         match self.tool_registry.update("skill", tool) {
             Ok(()) => ReloadItem {
@@ -150,16 +167,22 @@ impl ReloadCore {
         }
     }
 
-    /// agents：重算 agent 目录 → `load_agents` → 整体 `store` 替换。
+    /// agents：重算 agent 目录 → `load_agents` → 与旧 registry 全 9 字段等值比较；
+    /// 有变化才整体 `store` 替换。
     fn reload_agents(&self) -> ReloadItem {
+        let previous = self.agent_registry.load_full();
         let agent_dirs = collect_agent_dirs(&self.project_root);
         let dir_refs: Vec<&Path> = agent_dirs.iter().map(PathBuf::as_path).collect();
         let (registry, stats) = load_agents_with_stats(&dir_refs, &self.builtin_overrides);
-        let count = registry.list().len();
 
+        if registries_equal(&previous, &registry) {
+            return no_change_item(ReloadDomain::Agents);
+        }
+
+        let changes = agent_change_count(&previous, &registry);
         self.agent_registry.store(Arc::new(registry));
 
-        let mut message = format!("{count} 个 agent");
+        let mut message = format!("{changes} 个 agent 变更");
         if stats.skipped > 0 {
             message.push_str(&format!("，跳过 {} 个非法文件", stats.skipped));
         }
@@ -171,9 +194,49 @@ impl ReloadCore {
             domain: ReloadDomain::Agents,
             success: true,
             message,
-            changes: count,
+            changes,
         }
     }
+}
+
+/// 无变化领域的统一结果（守卫拦下，未发生替换）。
+fn no_change_item(domain: ReloadDomain) -> ReloadItem {
+    ReloadItem {
+        domain,
+        success: true,
+        message: "无变更".to_string(),
+        changes: 0,
+    }
+}
+
+/// 两个 registry 的「定义集合」是否相等：name → 完整 `AgentDefinition` 全字段等值。
+///
+/// 复用 1b 补充的 `PartialEq`，覆盖全部 9 个字段（含 permission / system_prompt）。
+fn registries_equal(a: &AgentRegistry, b: &AgentRegistry) -> bool {
+    let a_agents = a.list();
+    if a_agents.len() != b.list().len() {
+        return false;
+    }
+    a_agents
+        .iter()
+        .all(|agent| b.get(&agent.name) == Some(*agent))
+}
+
+/// 统计定义集合的实际变更条目数（新增 + 修改 + 删除）。
+fn agent_change_count(old: &AgentRegistry, new: &AgentRegistry) -> usize {
+    let mut count = 0;
+    for agent in old.list() {
+        match new.get(&agent.name) {
+            Some(other) if other == agent => {}
+            _ => count += 1, // 修改或删除
+        }
+    }
+    for agent in new.list() {
+        if old.get(&agent.name).is_none() {
+            count += 1; // 新增
+        }
+    }
+    count
 }
 
 /// system-prompt.md 的确认回执：无操作，仅确认「仅对新 session 生效」的 L1 语义。

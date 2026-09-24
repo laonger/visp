@@ -92,12 +92,19 @@ fn write_valid_agent(dir: &Path, file: &str, name: &str, mode: &str) {
     .unwrap();
 }
 
+fn write_agent_content(dir: &Path, file: &str, content: &str) {
+    fs::create_dir_all(dir).unwrap();
+    fs::write(dir.join(file), content).unwrap();
+}
+
 #[tokio::test]
 #[serial]
 async fn rules_item_reports_success_and_stats() {
     let env = IsolatedEnv::new();
-    fs::write(env.project().join("AGENTS.md"), "<Role>reload rules</Role>").unwrap();
     let handles = make_core(&env, false);
+
+    // 核心构造后新增 AGENTS.md，重载应判为有变化并给出统计。
+    fs::write(env.project().join("AGENTS.md"), "<Role>reload rules</Role>").unwrap();
 
     let items = handles.core.reload_domains(&[ReloadDomain::Rules]).await;
 
@@ -233,4 +240,168 @@ async fn concurrent_reloads_serialize_and_return_full_results() {
     assert_eq!(b.len(), 4);
     assert!(a.iter().all(|item| item.success));
     assert!(b.iter().all(|item| item.success));
+}
+
+// ── 步骤 3b：三领域变化守卫 ─────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn rules_no_change_guard_reports_unchanged() {
+    let env = IsolatedEnv::new();
+    fs::write(env.project().join("AGENTS.md"), "rules").unwrap();
+    let handles = make_core(&env, false);
+
+    let items = handles.core.reload_domains(&[ReloadDomain::Rules]).await;
+
+    assert!(items[0].success);
+    assert!(
+        items[0].message.contains("无变更"),
+        "message: {}",
+        items[0].message
+    );
+    assert_eq!(items[0].changes, 0);
+}
+
+#[tokio::test]
+#[serial]
+async fn skills_no_change_guard_reports_unchanged() {
+    let env = IsolatedEnv::new();
+    let handles = make_core(&env, false);
+
+    let items = handles.core.reload_domains(&[ReloadDomain::Skills]).await;
+
+    assert!(items[0].success);
+    assert!(
+        items[0].message.contains("无变更"),
+        "message: {}",
+        items[0].message
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn agents_no_change_guard_reports_unchanged() {
+    let env = IsolatedEnv::new();
+    let handles = make_core(&env, true);
+
+    let items = handles.core.reload_domains(&[ReloadDomain::Agents]).await;
+
+    assert!(items[0].success);
+    assert!(
+        items[0].message.contains("无变更"),
+        "message: {}",
+        items[0].message
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn agents_permission_only_change_is_detected() {
+    let env = IsolatedEnv::new();
+    let handles = make_core(&env, true);
+    let agents_dir = env.project().join(".visp/agents");
+
+    write_agent_content(
+        &agents_dir,
+        "reviewer.md",
+        "---\nname: reviewer\nmode: subagent\npermission: allow read_file *\n---\nbody\n",
+    );
+    // 首次重载建立基线（新增 reviewer）。
+    let baseline = handles.core.reload_domains(&[ReloadDomain::Agents]).await;
+    assert!(!baseline[0].message.contains("无变更"));
+
+    // 仅改 permission（不动 name/description）。
+    write_agent_content(
+        &agents_dir,
+        "reviewer.md",
+        "---\nname: reviewer\nmode: subagent\npermission: deny edit_file *\n---\nbody\n",
+    );
+    let items = handles.core.reload_domains(&[ReloadDomain::Agents]).await;
+
+    assert!(
+        !items[0].message.contains("无变更"),
+        "仅 permission 变化必须判为有变化：{}",
+        items[0].message
+    );
+    let snapshot = handles.agent_registry.load();
+    let reviewer = snapshot.get("reviewer").unwrap();
+    assert_eq!(reviewer.permission.len(), 1);
+    assert_eq!(
+        reviewer.permission[0].action,
+        visp_core::agent_definition::PermissionAction::Deny
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn agents_system_prompt_only_change_is_detected() {
+    let env = IsolatedEnv::new();
+    let handles = make_core(&env, true);
+    let agents_dir = env.project().join(".visp/agents");
+
+    write_agent_content(
+        &agents_dir,
+        "reviewer.md",
+        "---\nname: reviewer\nmode: subagent\n---\n旧系统提示词\n",
+    );
+    let baseline = handles.core.reload_domains(&[ReloadDomain::Agents]).await;
+    assert!(!baseline[0].message.contains("无变更"));
+
+    // 仅改 system_prompt 正文。
+    write_agent_content(
+        &agents_dir,
+        "reviewer.md",
+        "---\nname: reviewer\nmode: subagent\n---\n新系统提示词\n",
+    );
+    let items = handles.core.reload_domains(&[ReloadDomain::Agents]).await;
+
+    assert!(
+        !items[0].message.contains("无变更"),
+        "仅 system_prompt 变化必须判为有变化：{}",
+        items[0].message
+    );
+    let snapshot = handles.agent_registry.load();
+    assert!(
+        snapshot
+            .get("reviewer")
+            .unwrap()
+            .system_prompt
+            .contains("新系统提示词")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn no_change_avoids_swap_side_effects() {
+    let env = IsolatedEnv::new();
+    fs::write(env.project().join("AGENTS.md"), "rules").unwrap();
+    let handles = make_core(&env, false);
+
+    let agent_before = handles.agent_registry.load_full();
+    let skill_before = handles.tool_registry.get("skill").unwrap();
+    let rules_before = handles.core.rule_engine.get_active_rules();
+
+    let items = handles.core.reload_all().await;
+
+    // rules/skills/agents 三领域均无变化（system_prompt 恒成功回执）。
+    for item in items.iter().take(3) {
+        assert!(
+            item.message.contains("无变更"),
+            "领域 {:?} 应判无变更：{}",
+            item.domain,
+            item.message
+        );
+    }
+
+    let agent_after = handles.agent_registry.load_full();
+    let skill_after = handles.tool_registry.get("skill").unwrap();
+    assert!(
+        Arc::ptr_eq(&agent_before, &agent_after),
+        "无变化不得 store ArcSwap（守卫须在替换之前）"
+    );
+    assert!(
+        Arc::ptr_eq(&skill_before, &skill_after),
+        "无变化不得替换 skill 工具"
+    );
+    assert_eq!(rules_before, handles.core.rule_engine.get_active_rules());
 }
