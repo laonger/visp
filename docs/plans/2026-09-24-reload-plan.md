@@ -618,3 +618,7 @@ Wave8 (全部完成后):   8a
 10. **提交纪律**：每子步骤一个 commit，红绿分明的测试先行可从 diff 历史审计；任何子步骤发现设计偏差（如某消费点实际形态与设计不符），停下更新设计文档后再继续，不带病推进。
 11. **proto RPC 与 server trait 的编译期耦合（实施中发现，2b 上报）**：1a 落地 `ReloadConfig` RPC 后，tonic 生成的 server trait 即**强制要求** `reload_config` 方法，导致 `visp-daemon` 在 4a 实现之前无法编译。实际处理：2b 在 `service.rs` 加了一个返回 `unimplemented` 的**占位方法**（无任何行为），4a 落真实 handler 时替换。后续若再新增 RPC，需注意此编译期耦合（或调整步骤顺序）。
 12. **2a 的 rules 守卫落位（2a 上报）**：`RuleEngine::reload` 内部实现「无变化不写回」并返回 `changed`；**3b 的 rules 守卫据此消费 `changed`**，不重复比较。
+13. **agents 跳过计数需要新 API（3a 上报）**：`visp-agent::agent_loader` 原 `load_agents` 不暴露「非法文件跳过数」。3a **附加式**新增 `AgentLoadStats` + `load_agents_with_stats`（`load_agents` 签名与行为不变，改为委托），供 reload 核心上报跳过数。
+14. **`global_tx` 实为门控而非通道（3c 上报）**：启动路径的 `register_agent_tools` 仅在 `global_tx.is_some()` 时直接 `ToolRegistry::register`，不发送通道消息；对账沿用同一路径。设计 §5.5 原「经 global_tx 通道注册」措辞已订正。
+15. **测试隔离方式（3a 上报）**：`RuleEngine` 的全局来源注入钩子为 visp-config 私有、`SkillTool::new` 无注入点，故 daemon 侧 reload 测试采用 `VISP_CONFIG_DIR` 指向临时目录 + `#[serial]`（仓库既有做法），而非字面所述的「内部注入目录参数钩子」。
+16. **reload 核心的构造与注入落位**：核心（`ReloadCore`）的构造与注入 `CoderDaemonService` 属 **4a** 的工作（3a 只交付模块本身）。4a 需在 main.rs 装配处构建核心并注入 service，替换 2b 留下的 `unimplemented` 占位。

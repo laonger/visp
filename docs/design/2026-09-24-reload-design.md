@@ -225,7 +225,7 @@ v2 将 reload 处理器放在 service 层。v3 因自动路径需要从 watcher 
   1. 三个重载目标的引用：`Arc<RuleEngine>`、`Arc<ToolRegistry>`、`ArcSwap<AgentRegistry>`。
   2. **`builtin_overrides` 的 clone**：启动时构建一次（含 `[[agent.builtin]]` 配置，以及 `llm.image_generation_model`/`vision_model` 到 painter/vision 内置 agent 的 wire 产物，`main.rs:504-532`），是 `load_agents` 的必要参数（`agent_loader.rs:28`）。daemon.toml 不热重载，故其内容在 daemon 生命周期内静态，持有 clone 即可。
   3. **agent_dirs 每次重载时重算**：全局/项目 agents 目录的存在性检查（`main.rs:534-544`）**不可缓存启动时结果**——缓存会导致「运行中创建 agents 目录」的场景（§5.6 的补挂链所覆盖）不被拾取。每次重载重新收集目录列表。
-  4. **`global_tx` 的 clone**：对账注册新 agent 工具时需要事件通道（`main.rs:552` 创建、`main.rs:559` 启动注册即传入同一通道），否则新增 subagent 的工具注册无法完成。
+  4. **`global_tx` 的 clone**：作为「多 agent 模式」的**门控**（`main.rs:552` 创建、`main.rs:559` 启动注册时传入）。**实施核实（3c）**：启动路径的 `register_agent_tools` 仅在 `global_tx.is_some()` 时**直接调用 `ToolRegistry::register`**，并不真正发送通道消息；对账因此沿用同一路径（`global_tx` 仅作门控、注册为直接调用，与启动逐字一致）。设计原文「经 `global_tx` 通道注册」措辞不准确，以此为准。
 - **内部流程（两入口共享）**：依序执行 5.1 → 5.2 → 5.3 的重载入口，逐项收集结果；单项失败不阻断后续项；各步骤打 tracing 日志（含变更统计）。
 - **变化守卫在核心内部执行**（见 §7 决策 13）：无变化的领域跳过替换（避免无谓的 ArcSwap store / 写锁获取），结果中标注「无变更」。
 - 显式入口额外产出 system_prompt 回执；自动入口不触碰 L1。
