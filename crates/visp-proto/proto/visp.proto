@@ -466,6 +466,39 @@ message ShutdownRequest {
     bool force = 1;
 }
 
+// 重载配置请求。当前为空消息（不预留选择性重载字段，YAGNI）。
+message ReloadConfigRequest {}
+
+// 重载配置响应。逐条目报告四类文件系统资产的 reload 结果。
+message ReloadConfigResponse {
+    // 单个资产类别的重载结果。
+    message Item {
+        // 资产类别："rules" / "skills" / "agents" / "system_prompt"。
+        string category = 1;
+
+        // 该类别是否重载成功。
+        bool success = 2;
+
+        // 结果消息：成功时为统计摘要，失败时为失败原因。
+        string message = 3;
+
+        // 新增条目数。
+        uint32 added = 4;
+
+        // 修改条目数。
+        uint32 modified = 5;
+
+        // 删除条目数。
+        uint32 deleted = 6;
+
+        // 跳过条目数（如解析失败的 agent 文件）。
+        uint32 skipped = 7;
+    }
+
+    // 逐条目结果列表（rules / skills / agents / system_prompt）。
+    repeated Item results = 1;
+}
+
 // ============ Service ============
 service CoderDaemon {
     // Session 管理：创建、列举、删除、查询
@@ -484,7 +517,10 @@ service CoderDaemon {
     rpc SearchSymbols(SearchSymbolsRequest) returns (SearchSymbolsResponse);
     rpc GetSymbolDetails(GetSymbolDetailsRequest) returns (SymbolDetails);
 
-    // Daemon 控制：健康检查和关闭
+    // Daemon 控制：健康检查、关闭和配置重载
     rpc HealthCheck(google.protobuf.Empty) returns (HealthStatus);
     rpc Shutdown(ShutdownRequest) returns (google.protobuf.Empty);
+    // 显式 /reload：重载 rules/skills/agents 并回执 system_prompt，逐项返回结果。
+    // 部分失败不返回 gRPC error，而是正常响应中带逐项失败信息。
+    rpc ReloadConfig(ReloadConfigRequest) returns (ReloadConfigResponse);
 }
