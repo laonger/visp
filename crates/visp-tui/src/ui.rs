@@ -1148,6 +1148,7 @@ fn render_input_area(app: &mut AppState, f: &mut Frame, area: Rect) {
                 "/list",
                 "/model",
                 "/new",
+                "/reload",
                 "/sessions",
                 "/temp",
             ];
@@ -1338,6 +1339,7 @@ fn render_help_popup(f: &mut Frame, area: Rect) {
         ("/list", "List all sessions"),
         ("/sessions <id>", "Switch to a session by short-id"),
         ("/new", "Start a new session"),
+        ("/reload", "Reload filesystem assets (rules/skills/agents)"),
         ("/temp <n>", "Set temperature (0.0–1.0)"),
         ("/model <m>", "Switch model"),
         ("/init", "Initialize session with system prompt"),
@@ -1385,6 +1387,22 @@ fn render_help_popup(f: &mut Frame, area: Rect) {
             Span::styled(*desc, Style::default().fg(theme::HELP_DESC_FG)),
         ]));
     }
+
+    // 热重载边界说明：AGENTS.md/rules、skills、agents 保存自动生效；
+    // daemon.toml 变更需重启 daemon（设计 §5.8）
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " Note: AGENTS.md/rules, skills, agents",
+        Style::default().fg(theme::HELP_DESC_FG),
+    )));
+    lines.push(Line::from(Span::styled(
+        " auto-reload on save; daemon.toml changes",
+        Style::default().fg(theme::HELP_DESC_FG),
+    )));
+    lines.push(Line::from(Span::styled(
+        " require a daemon restart",
+        Style::default().fg(theme::HELP_DESC_FG),
+    )));
 
     lines.push(Line::from(""));
     lines.push(Line::from(""));

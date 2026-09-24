@@ -8,8 +8,8 @@ use tonic::transport::Channel;
 
 use visp_proto::visp::{
     Ack, Cancel, ClientMessage, ConfigUpdate, CreateSessionRequest, GetSessionRequest, JoinSession,
-    LlmConfig, ServerMessage, Session, UserInput, UserResponse, client_message,
-    coder_daemon_client::CoderDaemonClient,
+    LlmConfig, ReloadConfigRequest, ServerMessage, Session, UserInput, UserResponse,
+    client_message, coder_daemon_client::CoderDaemonClient,
 };
 
 pub struct VispClient {
@@ -77,6 +77,21 @@ impl VispClient {
             .await
             .map_err(|e| format!("list sessions: {}", e))?;
         Ok(resp.into_inner().sessions)
+    }
+
+    /// 调用 `ReloadConfig` unary RPC，返回逐条目结果。
+    ///
+    /// 失败（daemon 不可达等）返回 `Err`，由调用方提示——`/reload` 是用户
+    /// 显式动作，不自动重试（设计 §5.9）。
+    pub async fn reload_config(
+        &mut self,
+    ) -> Result<Vec<visp_proto::visp::reload_config_response::Item>, String> {
+        let resp = self
+            .client
+            .reload_config(ReloadConfigRequest {})
+            .await
+            .map_err(|e| format!("reload config: {}", e))?;
+        Ok(resp.into_inner().results)
     }
 
     pub async fn chat(&mut self, session_id: &str) -> Result<ChatHandle, String> {

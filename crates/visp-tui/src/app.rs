@@ -1442,6 +1442,8 @@ pub struct AppState {
     pub pending_list_sessions: bool,
     /// 用户输入了 /sessions <id>，主循环需要切换到目标 session
     pub pending_switch_session: Option<String>,
+    /// 用户输入了 /reload，主循环需要调用 ReloadConfig unary RPC
+    pub pending_reload: bool,
     /// 是否显示帮助弹窗
     pub show_help: bool,
     /// session 选择器弹出面板（/list 或 /sessions 无参触发）
@@ -1524,6 +1526,7 @@ impl AppState {
             pending_new_session: false,
             pending_list_sessions: false,
             pending_switch_session: None,
+            pending_reload: false,
             show_help: false,
             session_select: None,
             available_models: Vec::new(),

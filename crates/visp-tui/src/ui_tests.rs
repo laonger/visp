@@ -725,3 +725,52 @@ fn test_render_assistant_block_without_footer_plain() {
         "无 usage 时不应有统计行"
     );
 }
+
+// ── 命令清单硬编码同步（计划 5a）────────────────────────────
+
+fn render_lines(app: &mut AppState, width: u16, height: u16) -> Vec<String> {
+    let backend = ratatui::backend::TestBackend::new(width, height);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|f| crate::ui::render(app, f)).unwrap();
+    let buffer = terminal.backend().buffer();
+    buffer
+        .content()
+        .chunks(buffer.area().width as usize)
+        .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+        .collect()
+}
+
+/// 5a-4：输入提示列表与帮助弹窗均含 /reload，且帮助文案含 daemon.toml 说明。
+#[test]
+fn test_reload_listed_in_hint_and_help_with_daemon_note() {
+    // 输入框键入 "/" → 命令提示行列出 /reload
+    // （提示为单行拼接，宽度需足够容纳全部命令，故用 120 列渲染）
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.textarea.insert_str("/");
+    let hint_lines = render_lines(&mut app, 120, 24);
+    assert!(
+        hint_lines.iter().any(|l| l.contains("/reload")),
+        "输入提示列表应含 /reload：{:?}",
+        hint_lines
+            .iter()
+            .filter(|l| l.contains('/'))
+            .collect::<Vec<_>>()
+    );
+
+    // 帮助弹窗：命令表含 /reload，且注明 daemon.toml 需重启
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.show_help = true;
+    let help_lines = render_lines(&mut app, 100, 40);
+    assert!(
+        help_lines.iter().any(|l| l.contains("/reload")),
+        "帮助弹窗命令表应含 /reload"
+    );
+    assert!(
+        help_lines.iter().any(|l| l.contains("daemon.toml")),
+        "帮助弹窗应注明 daemon.toml 变更需重启 daemon：{:?}",
+        help_lines
+            .iter()
+            .filter(|l| l.contains("daemon"))
+            .collect::<Vec<_>>()
+    );
+}

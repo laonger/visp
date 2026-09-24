@@ -1,8 +1,11 @@
 use super::*;
-use crate::app::AppState;
+use crate::app::{AppState, LineType};
 use crate::notify::{NotifyEngine, NotifyKind};
+use crossterm::event::{Event, KeyCode, KeyEvent};
 use std::time::Duration;
-use visp_proto::visp::{Done, Error, ServerMessage, UsageDelta, UserQuery, server_message};
+use visp_proto::visp::{
+    Done, Error, ServerMessage, UsageDelta, UserQuery, reload_config_response, server_message,
+};
 
 fn make_done_msg(sid: &str) -> ServerMessage {
     ServerMessage {
@@ -352,4 +355,112 @@ fn test_user_query_hookup_uses_message_body() {
         app.notify.last_sent_at(NotifyKind::UserQuery).is_some(),
         "非空 uq.message 应作为通知正文发出"
     );
+}
+
+// ── /reload 命令接入（计划 5a）──────────────────────────────
+
+fn make_reload_item(category: &str, success: bool, message: &str) -> reload_config_response::Item {
+    reload_config_response::Item {
+        category: category.into(),
+        success,
+        message: message.into(),
+        added: 0,
+        modified: 0,
+        deleted: 0,
+        skipped: 0,
+    }
+}
+
+/// 5a-1：`/reload` 置 pending 标志并在状态行提示 Reloading。
+#[test]
+fn test_reload_command_sets_pending_and_status() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    let mut chat = ChatHandle::new_mock("main");
+
+    crate::command::handle("/reload", &mut app, &mut chat);
+
+    assert!(app.pending_reload, "/reload 应置 pending_reload 标志");
+    assert!(
+        app.messages()
+            .iter()
+            .any(|m| matches!(m.line_type, LineType::Status) && m.content.contains("Reloading")),
+        "状态行应提示 Reloading"
+    );
+}
+
+/// 5a-2：逐项结果渲染——成功用 Status、失败用 Error，并清除标志。
+#[test]
+fn test_reload_results_render_per_item_styles() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.pending_reload = true;
+
+    let items = vec![
+        make_reload_item("rules", true, "3 files"),
+        make_reload_item("agents", false, "bad file"),
+    ];
+    apply_reload_results(&mut app, Ok(items));
+
+    assert!(!app.pending_reload, "结果渲染后应清除 pending_reload 标志");
+    assert!(
+        app.messages()
+            .iter()
+            .any(|m| matches!(m.line_type, LineType::Status)
+                && m.content.contains("rules")
+                && m.content.contains("3 files")),
+        "成功条目应以 Status 样式渲染"
+    );
+    assert!(
+        app.messages()
+            .iter()
+            .any(|m| matches!(m.line_type, LineType::Error)
+                && m.content.contains("agents")
+                && m.content.contains("bad file")),
+        "失败条目应以 Error 样式渲染"
+    );
+}
+
+/// 5a-3：Tab 补全清单含 /reload。
+#[test]
+fn test_tab_completion_lists_reload() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    let mut chat = ChatHandle::new_mock("main");
+    app.textarea = AppState::new_textarea();
+    app.textarea.insert_str("/");
+
+    handle_key_event(
+        Event::Key(KeyEvent::from(KeyCode::Tab)),
+        &mut app,
+        &mut chat,
+    );
+
+    let tc = app
+        .tab_completion
+        .as_ref()
+        .expect("输入 / 后按 Tab 应产生补全候选");
+    assert!(
+        tc.matches.iter().any(|c| c == "/reload"),
+        "补全清单应含 /reload：{:?}",
+        tc.matches
+    );
+}
+
+/// 5a-5：断线期调用报错提示、无自动重试（单条错误 + 标志清除）。
+#[test]
+fn test_reload_rpc_error_reports_without_retry() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.pending_reload = true;
+
+    apply_reload_results(&mut app, Err("daemon unreachable".into()));
+
+    assert!(
+        !app.pending_reload,
+        "失败后应清除 pending_reload（不自动重试）"
+    );
+    let errors: Vec<_> = app
+        .messages()
+        .iter()
+        .filter(|m| matches!(m.line_type, LineType::Error))
+        .collect();
+    assert_eq!(errors.len(), 1, "只应报一条错误，不得自动重试");
+    assert!(errors[0].content.contains("daemon unreachable"));
 }

@@ -81,6 +81,12 @@ pub fn handle(text: &str, app: &mut AppState, chat_handle: &mut ChatHandle) {
             app.pending_switch_session = Some(target);
         }
 
+        // -- Daemon RPC (unary ReloadConfig) --------------------
+        visp_command::Command::Reload => {
+            app.add_message(LineType::Status, "Reloading...".into());
+            app.pending_reload = true;
+        }
+
         // -- Config commands (ConfigUpdate / UI picker) ----------
         visp_command::Command::SetTemperature { raw } => {
             match visp_command::resolve(

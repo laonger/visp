@@ -26,7 +26,7 @@ use crate::notify::{NotifyEngine, NotifyKind};
 use crate::ui::render;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use std::io::{self, Write};
-use visp_proto::visp::{LlmConfig, server_message};
+use visp_proto::visp::{LlmConfig, reload_config_response, server_message};
 
 /// 将一段文本插入到 textarea 中（模拟逐字输入）
 /// 注意：`\n` 必须映射为 `Key::Enter`，否则 ratatui_textarea 会丢弃换行符前的内容
@@ -290,6 +290,12 @@ pub async fn run(
             }
         }
 
+        // 处理 /reload 命令：调用 ReloadConfig unary RPC 并逐项渲染结果
+        if app.pending_reload {
+            let result = client.reload_config().await;
+            apply_reload_results(&mut app, result);
+        }
+
         // 当复制提示显示时，保持渲染以自动清除提示
         if app.last_copy_time.is_some() {
             app.needs_render = true;
@@ -317,6 +323,38 @@ pub async fn run(
 
     ratatui::restore();
     Ok(())
+}
+
+/// 将 `/reload` 的逐项结果渲染进当前激活 tab。
+///
+/// 成功条目用 Status 样式、失败条目用 Error 样式；RPC 失败（如 daemon
+/// 不可达）只报一条错误、不重试——`/reload` 是用户显式动作，重试语义由
+/// 用户决定（设计 §5.9）。无论成败都清除 `pending_reload` 标志。
+fn apply_reload_results(
+    app: &mut AppState,
+    result: Result<Vec<reload_config_response::Item>, String>,
+) {
+    match result {
+        Ok(items) => {
+            for item in items {
+                let line_type = if item.success {
+                    LineType::Status
+                } else {
+                    LineType::Error
+                };
+                let text = format!("{}: {}", item.category, item.message);
+                app.active_tab_mut().push_chat_line(line_type, text, None);
+            }
+        }
+        Err(e) => {
+            app.active_tab_mut().push_chat_line(
+                LineType::Error,
+                format!("Reload failed: {e}"),
+                None,
+            );
+        }
+    }
+    app.pending_reload = false;
 }
 
 fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHandle) -> bool {
@@ -697,6 +735,7 @@ fn handle_key_event(event: Event, app: &mut AppState, chat_handle: &mut ChatHand
                             "/init-skill ",
                             "/list",
                             "/model ",
+                            "/reload",
                             "/sessions ",
                             "/temp ",
                         ];
