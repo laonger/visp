@@ -102,11 +102,12 @@ mod tests {
             T::ResponseBody: tonic::codegen::Body<Data = tonic::codegen::Bytes> + Send + 'static,
             <T::ResponseBody as tonic::codegen::Body>::Error: Into<tonic::codegen::StdError> + Send,
         {
-            let _ = client.reload_config(visp::ReloadConfigRequest {});
+            let future = client.reload_config(visp::ReloadConfigRequest {});
+            drop(future);
         }
 
-        // 占位断言：真正的验证发生在上述两个内部函数的编译期类型检查。
-        assert!(true);
+        // 真正的验证发生在上述两个内部函数的编译期类型检查；
+        // 运行时无需断言（避免 always-true 断言）。
     }
 
     /// oneof 回归：ClientMessage / ServerMessage 的 oneof 变体集合与改动前一致（防误动）。
