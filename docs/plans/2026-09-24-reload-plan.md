@@ -622,3 +622,5 @@ Wave8 (全部完成后):   8a
 14. **`global_tx` 实为门控而非通道（3c 上报）**：启动路径的 `register_agent_tools` 仅在 `global_tx.is_some()` 时直接 `ToolRegistry::register`，不发送通道消息；对账沿用同一路径。设计 §5.5 原「经 global_tx 通道注册」措辞已订正。
 15. **测试隔离方式（3a 上报）**：`RuleEngine` 的全局来源注入钩子为 visp-config 私有、`SkillTool::new` 无注入点，故 daemon 侧 reload 测试采用 `VISP_CONFIG_DIR` 指向临时目录 + `#[serial]`（仓库既有做法），而非字面所述的「内部注入目录参数钩子」。
 16. **reload 核心的构造与注入落位**：核心（`ReloadCore`）的构造与注入 `CoderDaemonService` 属 **4a** 的工作（3a 只交付模块本身）。4a 需在 main.rs 装配处构建核心并注入 service，替换 2b 留下的 `unimplemented` 占位。
+17. **变更计数的粒度不一致（4a 上报，已知限制）**：proto `ReloadConfigResponse.Item`（1a 落地，依设计 §3）含 4 个细分计数 `added/modified/deleted/skipped`，但核心 `ReloadItem` 只暴露**聚合** `changes: usize`。4a 的映射将聚合值写入 `modified`、其余置 0，统计摘要由 `message` 文本承载。**对用户可见行为无影响**（TUI 展示 `message` 文本，不展示细分计数）。若后续 TUI 需要逐细分展示，再扩展 `ReloadItem`（届时同步改 reload.rs 与测试）。
+18. **4b 引入的中间态（预期内）**：`Command::Reload` 使 `visp-tui/src/command.rs` 的穷尽 match 变为 non-exhaustive，**workspace 级构建在 5a 落地前会失败**；5a 补齐 `Reload` 分支即修复。执行期间只跑受影响 crate 的质量门，不做 workspace 级构建。
