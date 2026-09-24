@@ -23,8 +23,8 @@ macro_rules! debug_log {
 use crate::app::{AppState, ConfirmState, LineType, TabCompletionState};
 use crate::client::{ChatHandle, VispClient};
 use crate::connection::{
-    ConnEvent, ConnState, LiveConnection, ReconnectSuccess, Recovered, backoff_delay, recover,
-    transition,
+    ConnEvent, ConnState, IDLE_TIMEOUT, IdleClock, LiveConnection, ReconnectSuccess, Recovered,
+    backoff_delay, probe_with_timeout, recover, transition,
 };
 use crate::notify::{NotifyEngine, NotifyKind};
 use crate::ui::render;
@@ -158,6 +158,12 @@ pub async fn run(
     let mut reconnect_pending = false;
     let mut next_retry_at: Option<tokio::time::Instant> = None;
 
+    // idle 看门狗：空闲到期发起独立 unary 探测（不按 generating 豁免，设计 §7 决策 14）。
+    let (probe_tx, mut probe_rx) = tokio::sync::mpsc::unbounded_channel::<Result<bool, String>>();
+    let mut probe_pending = false;
+    let mut idle_clock = IdleClock::new(std::time::Instant::now());
+    let mut idle_deadline = tokio::time::Instant::now() + IDLE_TIMEOUT;
+
     loop {
         tokio::select! {
             event = key_rx.recv() => {
@@ -168,7 +174,12 @@ pub async fn run(
             }
             msg = chat_handle.recv(), if app.connection_state.is_connected() => {
                 match msg {
-                    Some(msg) => handle_grpc_message(msg, &mut app, &chat_handle),
+                    Some(msg) => {
+                        // 任何 Chat 流帧到达即重置 idle 计时（看门狗只在空闲连接上活动）。
+                        idle_clock.on_frame(std::time::Instant::now());
+                        idle_deadline = tokio::time::Instant::now() + IDLE_TIMEOUT;
+                        handle_grpc_message(msg, &mut app, &chat_handle);
+                    }
                     None => {
                         // 断线检测入口①：流干净关闭。不再退出，交状态机进入重连。
                         on_disconnect(&mut app, DisconnectReason::StreamClosed);
@@ -191,6 +202,40 @@ pub async fn run(
             Some(()) = app.image_ready_rx.recv() => {
                 // 网络图片下载完成，重新渲染以显示图片
                 app.needs_render = true;
+            }
+            // 断线检测入口②：idle 到期发起独立健康探测（后台执行，带 5s 超时）
+            _ = tokio::time::sleep_until(idle_deadline),
+                if app.connection_state.is_connected() && !probe_pending =>
+            {
+                probe_pending = true;
+                let mut probe = client.probe_client();
+                let tx = probe_tx.clone();
+                tokio::spawn(async move {
+                    let result = probe_with_timeout(async move {
+                        probe
+                            .health_check(())
+                            .await
+                            .map(|r| r.into_inner().alive)
+                            .map_err(|e| format!("health probe: {e}"))
+                    })
+                    .await;
+                    let _ = tx.send(result);
+                });
+            }
+            // 探测结果：成功重置 idle 计时；失败/超时进入重连（单一探测、无宽限）
+            Some(result) = probe_rx.recv(), if probe_pending => {
+                probe_pending = false;
+                let alive = matches!(result, Ok(true));
+                match apply_probe_result(&mut app, alive) {
+                    ProbeOutcome::Reset => {
+                        idle_clock.reset(std::time::Instant::now());
+                        idle_deadline = tokio::time::Instant::now() + IDLE_TIMEOUT;
+                    }
+                    ProbeOutcome::Reconnect => {
+                        next_retry_at = Some(tokio::time::Instant::now() + backoff_delay(0));
+                    }
+                    ProbeOutcome::Ignored => {}
+                }
             }
             // 退避到期：后台发起一次重连恢复（exit 通道保持活跃）
             _ = tokio::time::sleep_until(next_retry_at.unwrap_or_else(tokio::time::Instant::now)),
@@ -223,6 +268,9 @@ pub async fn run(
                         let (state, _) = transition(app.connection_state, ConnEvent::Reconnected);
                         app.connection_state = state;
                         apply_recovery(&mut app, success.recovered);
+                        // 重连成功后 idle 计时归零，进入下一周期
+                        idle_clock.reset(std::time::Instant::now());
+                        idle_deadline = tokio::time::Instant::now() + IDLE_TIMEOUT;
                     }
                     Err(e) => {
                         let (state, _) =
@@ -428,6 +476,35 @@ pub(crate) enum DisconnectReason {
     StreamClosed,
     /// idle 心跳看门狗的探测失败/超时。
     WatchdogProbeFailed,
+}
+
+/// 看门狗探测结果的处置结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProbeOutcome {
+    /// 探测成功：重置 idle 计时，继续下一周期（不迁移状态）。
+    Reset,
+    /// 探测失败/超时：进入重连。
+    Reconnect,
+    /// 陈旧结果（已不在 Connected 态），忽略。
+    Ignored,
+}
+
+/// 将一次健康探测结果交状态机判定（设计 §7 决策 14）。
+///
+/// 单一探测语义：成功即重置、失败即重连，**无宽限、无累计**。
+fn apply_probe_result(app: &mut AppState, alive: bool) -> ProbeOutcome {
+    if !app.connection_state.is_connected() {
+        // 重连期间到达的陈旧探测结果不得触发任何迁移（负向防回潮）。
+        return ProbeOutcome::Ignored;
+    }
+    if alive {
+        let (state, _) = transition(app.connection_state, ConnEvent::ProbeSuccess);
+        app.connection_state = state;
+        ProbeOutcome::Reset
+    } else {
+        on_disconnect(app, DisconnectReason::WatchdogProbeFailed);
+        ProbeOutcome::Reconnect
+    }
 }
 
 /// 清理主 tab 的本地 streaming 残留。

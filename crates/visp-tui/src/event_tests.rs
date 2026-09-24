@@ -635,3 +635,52 @@ fn test_generation_interrupted_hint_on_disconnect() {
         "断线时正在生成应提示生成已终止"
     );
 }
+
+// ── idle 看门狗接线（计划 7c）────────────────────────────────
+
+/// 7c-2：探测失败/超时 → 进入 Reconnecting（看门狗入口）。
+#[test]
+fn test_watchdog_probe_failure_enters_reconnecting() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+
+    let outcome = apply_probe_result(&mut app, false);
+
+    assert_eq!(outcome, ProbeOutcome::Reconnect);
+    assert_eq!(app.connection_state, ConnState::Reconnecting { attempt: 0 });
+    assert!(
+        app.messages()
+            .iter()
+            .any(|m| matches!(m.line_type, LineType::Status)
+                && m.content.contains("Daemon unresponsive")),
+        "探测失败应提示 daemon 无响应并进入重连"
+    );
+}
+
+/// 7c-3：探测成功 → 重置 idle 计时、不迁移状态（周期探测稳态）。
+#[test]
+fn test_watchdog_probe_success_resets_without_migration() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+
+    let outcome = apply_probe_result(&mut app, true);
+
+    assert_eq!(outcome, ProbeOutcome::Reset);
+    assert_eq!(
+        app.connection_state,
+        ConnState::Connected,
+        "探测成功不得重建"
+    );
+}
+
+/// 7c 负向：重连期间到达的陈旧探测结果被忽略（不产生第三路径）。
+#[test]
+fn test_watchdog_stale_probe_result_ignored() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.connection_state = ConnState::Reconnecting { attempt: 3 };
+
+    assert_eq!(apply_probe_result(&mut app, true), ProbeOutcome::Ignored);
+    assert_eq!(
+        app.connection_state,
+        ConnState::Reconnecting { attempt: 3 },
+        "重连期间的陈旧探测成功不得迁回 Connected"
+    );
+}
