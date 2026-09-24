@@ -395,6 +395,27 @@ impl TabEntry {
         entry
     }
 
+    /// 重连恢复清理：复位单 tab 的全部本地渲染/流式状态（设计 §5.9）。
+    ///
+    /// `frames`/`rendered_up_to` 是 `render_pending` 依赖的未渲染队列与游标
+    /// 不变量，必须一并复位；`messages` 也在此清空——主 session 的历史由随后
+    /// `send_join` 的权威回放重建，保留旧消息会与回放内容重复。
+    pub fn reset_after_reconnect(&mut self) {
+        self.frames.clear();
+        self.rendered_up_to = 0;
+        self.streaming_text.clear();
+        self.stream_started_at = None;
+        self.stream_output_tokens = 0;
+        self.pending_usage = None;
+        self.last_stream_tps = None;
+        self.last_stream_elapsed = None;
+        self.generating = false;
+        // 本地已渲染历史交由权威回放重建
+        self.messages.clear();
+        self.next_message_id = 0;
+        self.scroll = 0;
+    }
+
     /// Returns the streaming text with incomplete image markers truncated.
     /// If there's an incomplete `<image: ...` marker at the end (no closing `>`),
     /// the text is truncated to before the `<image:` prefix.
@@ -976,6 +997,17 @@ impl TabBar {
         self.tabs[self.active].render_pending();
         self.ensure_active_visible(self.last_term_width);
         true
+    }
+
+    /// 重连恢复：丢弃全部 subagent tab（活跃与 hidden），**不写入回收站**。
+    ///
+    /// subagent 历史为纯内存态、不可恢复；写入 `closed_tabs` 会让用户经
+    /// AgentCall 按钮恢复出一个空 tab。主 tab（index 0）保留。
+    pub fn discard_subagent_tabs(&mut self) {
+        self.tabs.truncate(1);
+        self.hidden_tabs.clear();
+        self.active = 0;
+        self.page_start = 0;
     }
 
     /// 查找或恢复子 agent tab。
@@ -2024,6 +2056,32 @@ impl AppState {
         // ── sub tab Done ──
         // pending_usage 由 TabEntry::render_pending 在 Done 帧处理时消费，
         // 此处不做任何处理
+    }
+
+    /// 重连成功后的多 tab 恢复清理（设计 §5.9）。
+    ///
+    /// - 主 tab 保留，其历史由随后 `send_join` 的权威回放重建；
+    /// - subagent tab（活跃与 hidden）直接丢弃，**不写入 `closed_tabs` 回收站**
+    ///   ——其历史纯内存态、不可恢复，入回收站会让用户经 AgentCall 按钮
+    ///   恢复出一个空 tab；
+    /// - 遍历复位 per-tab 状态（含未渲染队列与游标不变量 `frames`/`rendered_up_to`）；
+    /// - 对话区提示子 agent 标签页已关闭。
+    pub fn cleanup_after_reconnect(&mut self) {
+        // 1. 丢弃 subagent tab（复刻关闭逻辑但跳过回收站写入）
+        self.tab_bar.discard_subagent_tabs();
+        // 2. 遍历复位剩余 tab（主 tab）的本地渲染/流式状态
+        for tab in &mut self.tab_bar.tabs {
+            tab.reset_after_reconnect();
+        }
+        // 3. app 级缓存与请求态复位
+        self.message_caches.clear();
+        self.current_request_id = None;
+        self.stale_done_expected = false;
+        // 4. 恢复提示（设计 §5.9 文案）
+        self.add_message(
+            LineType::Status,
+            "连接已恢复；子 agent 标签页已关闭（其历史不可恢复）".into(),
+        );
     }
 
     /// 重置为新 session 的状态（保留 textarea 内容）

@@ -3257,3 +3257,108 @@ fn test_app_state_notify_injection_reflects_protocol() {
         "注入的引擎应暴露与构造参数一致的协议"
     );
 }
+
+// ════════════════════════════════════════════════════════════
+// Wave 7 / 7d: 重连后的多 tab 恢复清理
+// ════════════════════════════════════════════════════════════
+
+/// 7d-1：subagent tab 直接丢弃，且不写入 `closed_tabs` 回收站。
+#[test]
+fn test_reconnect_cleanup_drops_subagent_tabs_without_closed_tabs() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
+    app.tab_bar.insert_sub_agent("sub-2", "agentB", false);
+    app.tab_bar.active = 2;
+    // 未打开的 subagent tab（hidden）同属纯内存态，也应丢弃
+    app.route_frame(make_text_delta_frame("hidden-1", "agentC", "x"));
+    assert_eq!(app.tab_bar.hidden_tabs.len(), 1);
+
+    app.cleanup_after_reconnect();
+
+    assert_eq!(app.tab_bar.tabs.len(), 1, "仅主 tab 存活");
+    assert!(app.tab_bar.tabs[0].is_main);
+    assert_eq!(app.tab_bar.active, 0, "活跃指针回到主 tab");
+    assert!(app.tab_bar.hidden_tabs.is_empty(), "hidden 子 tab 也应丢弃");
+    assert!(
+        app.tab_bar.closed_tabs.is_empty(),
+        "不得写入 closed_tabs 回收站"
+    );
+}
+
+/// 7d-2：per-tab 字段遍历复位（9 个字段，含未渲染队列与游标）。
+#[test]
+fn test_reconnect_cleanup_resets_per_tab_state() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    {
+        let tab = &mut app.tab_bar.tabs[0];
+        tab.frames
+            .push(make_text_delta_frame("main", "", "partial"));
+        tab.rendered_up_to = 0;
+        tab.streaming_text = "残留".into();
+        tab.stream_started_at = Some(std::time::Instant::now());
+        tab.stream_output_tokens = 7;
+        tab.pending_usage = Some((1, 2, 3, 4, 5));
+        tab.last_stream_tps = Some(9.0);
+        tab.last_stream_elapsed = Some(1.5);
+        tab.generating = true;
+    }
+
+    app.cleanup_after_reconnect();
+
+    for tab in &app.tab_bar.tabs {
+        assert!(tab.frames.is_empty(), "frames 应复位");
+        assert_eq!(tab.rendered_up_to, 0, "rendered_up_to 应复位");
+        assert!(tab.streaming_text.is_empty(), "streaming_text 应复位");
+        assert!(tab.stream_started_at.is_none(), "stream_started_at 应复位");
+        assert_eq!(tab.stream_output_tokens, 0, "stream_output_tokens 应复位");
+        assert!(tab.pending_usage.is_none(), "pending_usage 应复位");
+        assert!(tab.last_stream_tps.is_none(), "last_stream_tps 应复位");
+        assert!(
+            tab.last_stream_elapsed.is_none(),
+            "last_stream_elapsed 应复位"
+        );
+        assert!(!tab.generating, "generating 应复位");
+    }
+}
+
+/// 7d-3：主 tab 保留；随后 daemon 权威回放完整重建历史且不与断线残留重复。
+#[test]
+fn test_reconnect_cleanup_keeps_main_tab_and_replays_history() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
+    // 断线前主 tab 已有本地历史；回放会重建，故清理须一并清空避免叠加
+    app.route_frame(make_status_update_frame("main", "", "历史行"));
+
+    app.cleanup_after_reconnect();
+
+    assert_eq!(app.tab_bar.tabs.len(), 1, "仅主 session tab 存活");
+    assert!(app.tab_bar.tabs[0].is_main);
+    assert_eq!(app.tab_bar.tabs[0].session_id, "main", "主 session 不变");
+
+    // send_join 回放同一段历史 → 恰好一次
+    app.route_frame(make_status_update_frame("main", "", "历史行"));
+    let occurrences = app.tab_bar.tabs[0]
+        .messages
+        .iter()
+        .filter(|m| m.content.contains("历史行"))
+        .count();
+    assert_eq!(occurrences, 1, "回放重建历史且不与断线残留重复");
+}
+
+/// 7d-4：对话区出现恢复提示（子 agent 标签页已关闭）。
+#[test]
+fn test_reconnect_cleanup_emits_subagent_closed_notice() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
+
+    app.cleanup_after_reconnect();
+
+    assert!(
+        app.messages().iter().any(|m| {
+            m.line_type == LineType::Status
+                && m.content
+                    .contains("子 agent 标签页已关闭（其历史不可恢复）")
+        }),
+        "应提示子 agent 标签页已关闭"
+    );
+}

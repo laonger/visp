@@ -507,10 +507,11 @@ fn apply_probe_result(app: &mut AppState, alive: bool) -> ProbeOutcome {
     }
 }
 
-/// 清理主 tab 的本地 streaming 残留。
+/// 清理主 tab 的本地 streaming 残留（断线入口使用）。
 ///
-/// 重建流后不得残留上一轮 `streaming_text`/`generating`/`pending_usage` 与计时器；
-/// `frames`/`rendered_up_to` 等 per-tab 不变量由多 tab 恢复清理（后续子步骤）负责。
+/// 断线后不得残留上一轮 `streaming_text`/`generating`/`pending_usage` 与计时器；
+/// `frames`/`rendered_up_to` 等 per-tab 不变量在重连恢复时由
+/// [`AppState::cleanup_after_reconnect`] 统一复位。
 fn clear_main_streaming_residue(app: &mut AppState) {
     let tab = &mut app.tab_bar.tabs[0];
     tab.streaming_text.clear();
@@ -545,7 +546,7 @@ fn on_disconnect(app: &mut AppState, reason: DisconnectReason) {
     app.needs_render = true;
 }
 
-/// 重连恢复完成后的本地收尾：刷新模型列表、清理 streaming 残留、迁回 `Connected`。
+/// 重连恢复完成后的本地收尾：刷新模型列表、多 tab 恢复清理、迁回 `Connected`。
 ///
 /// 模型列表为空（`get_session` 刷新失败，非致命）时保留旧列表，不覆盖为空白。
 fn apply_recovery(app: &mut AppState, recovered: Recovered) {
@@ -553,9 +554,9 @@ fn apply_recovery(app: &mut AppState, recovered: Recovered) {
         app.available_models = recovered.available_models;
         app.model_keys = recovered.model_keys;
     }
-    clear_main_streaming_residue(app);
+    // 丢弃 subagent tab、遍历复位 per-tab 状态并给出恢复提示（设计 §5.9）
+    app.cleanup_after_reconnect();
     app.connection_state = ConnState::Connected;
-    app.add_message(LineType::Status, "连接已恢复，正在回放会话历史…".into());
     app.needs_render = true;
 }
 
