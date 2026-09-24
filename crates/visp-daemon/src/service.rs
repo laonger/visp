@@ -20,6 +20,7 @@ use visp_core::{
     tool::ToolContext,
     tool_registry::ToolRegistry,
 };
+use visp_daemon::reload::{ReloadCore, ReloadDomain, ReloadItem};
 use visp_mcp::manager::McpManager;
 use visp_proto::visp::{self as proto, coder_daemon_server::CoderDaemon};
 
@@ -109,8 +110,9 @@ pub struct CoderDaemonService {
     #[allow(dead_code)]
     provider: Arc<StdRwLock<Arc<dyn LlmProvider>>>,
     tool_registry: Arc<ToolRegistry>,
-    #[allow(dead_code)]
     rule_engine: Arc<RuleEngine>,
+    /// 共享 reload 核心（显式 `/reload` 入口；自动监听路径复用同一实例）。
+    reload_core: Arc<ReloadCore>,
     session_mgr: Arc<SessionManager>,
     #[allow(dead_code)]
     agent_config: AgentConfig,
@@ -152,7 +154,8 @@ impl CoderDaemonService {
     pub fn new(
         model_configs: Vec<LlmModelConfig>,
         tool_registry: Arc<ToolRegistry>,
-        #[allow(dead_code)] rule_engine: Arc<RuleEngine>,
+        rule_engine: Arc<RuleEngine>,
+        reload_core: Arc<ReloadCore>,
         session_mgr: Arc<SessionManager>,
         #[allow(dead_code)] agent_config: AgentConfig,
         daemon_config: Arc<DaemonConfig>,
@@ -225,6 +228,7 @@ impl CoderDaemonService {
             provider: Arc::new(StdRwLock::new(initial_provider)),
             tool_registry,
             rule_engine,
+            reload_core,
             session_mgr,
             agent_config,
             start_time: Instant::now(),
@@ -1049,16 +1053,27 @@ impl CoderDaemon for CoderDaemonService {
         }))
     }
 
-    // 编译占位：ReloadConfig proto RPC 在步骤 1a 已生成，服务端 trait 需要
-    // 该方法才能编译；真正的 handler 在步骤 4a 接入共享 reload 核心时实现。
-    // 步骤 2b 不引入任何重载行为，故此处保持未实现。
+    /// 显式 `/reload`：调用共享 reload 核心的显式入口（rules/skills/agents +
+    /// system_prompt 回执），把逐项结果映射为 proto 响应。
+    ///
+    /// 部分成功是常态：含失败条目时仍返回正常响应（设计 §3）。核心显式入口不
+    /// 返回 `Result`，本 handler 不存在可上报的不可恢复异常，故不产生 gRPC error。
     async fn reload_config(
         &self,
         _request: Request<proto::ReloadConfigRequest>,
     ) -> Result<Response<proto::ReloadConfigResponse>, Status> {
-        Err(Status::unimplemented(
-            "ReloadConfig handler is wired in a later step",
-        ))
+        let items = self.reload_core.reload_all().await;
+
+        // `rule_engine` 由 reload 核心持有同一 `Arc` 完成实际重载；此处读取以记录
+        // 重载后生效的规则规模（可观测性），并确保该字段在生产路径被真实使用。
+        tracing::debug!(
+            active_rules_bytes = self.rule_engine.get_active_rules().len(),
+            "reload_config applied"
+        );
+
+        Ok(Response::new(proto::ReloadConfigResponse {
+            results: items.iter().map(reload_item_to_proto).collect(),
+        }))
     }
 
     async fn shutdown(
@@ -1489,6 +1504,35 @@ fn agent_event_to_server_message(
     }
 }
 
+// ── 步骤 4a：reload 结果到 proto 的单向映射 ─────────────────────────────
+
+/// 核心逐项结果 → proto 条目（步骤 4a 的单向映射）。
+///
+/// `ReloadItem.changes` 是核心内部聚合的变更条目数；proto 的计数位按类别细分
+/// （新增/修改/删除/跳过），核心未暴露该细分，故统一写入 `modified`，其余计数
+/// 位保留 0。消息文本已包含统计摘要，细分为后续按需扩展点。
+fn reload_item_to_proto(item: &ReloadItem) -> proto::reload_config_response::Item {
+    proto::reload_config_response::Item {
+        category: reload_domain_category(item.domain).to_string(),
+        success: item.success,
+        message: item.message.clone(),
+        added: 0,
+        modified: item.changes as u32,
+        deleted: 0,
+        skipped: 0,
+    }
+}
+
+/// 领域 → proto 类别字符串（`rules` / `skills` / `agents` / `system_prompt`）。
+fn reload_domain_category(domain: ReloadDomain) -> &'static str {
+    match domain {
+        ReloadDomain::Rules => "rules",
+        ReloadDomain::Skills => "skills",
+        ReloadDomain::Agents => "agents",
+        ReloadDomain::SystemPrompt => "system_prompt",
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1506,9 +1550,43 @@ mod tests {
     use visp_core::session::SessionStore;
     use visp_llm::mock::MockProvider;
 
+    use arc_swap::ArcSwap;
+    use serial_test::serial;
+    use tempfile::TempDir;
+    use visp_tools::skill::SkillTool;
+
     // ── Helpers ─────────────────────────────────────────────────────────────
 
-    fn make_service(mgr: StdArc<SessionManager>) -> CoderDaemonService {
+    /// 构造测试用 ReloadCore 及其共享的 RuleEngine（project 为临时目录）。
+    fn build_reload_core(project: &Path) -> (Arc<RuleEngine>, Arc<ReloadCore>) {
+        let rule_engine = Arc::new(RuleEngine::new(project).unwrap());
+        let tool_registry = Arc::new(ToolRegistry::new());
+        tool_registry
+            .register(Arc::new(SkillTool::new(project)))
+            .unwrap();
+        let initial = visp_agent::agent_loader::load_agents(&[], &[]);
+        let agent_registry = Arc::new(ArcSwap::from_pointee(initial));
+        let core = Arc::new(ReloadCore::new(
+            rule_engine.clone(),
+            tool_registry,
+            agent_registry,
+            Vec::new(),
+            None,
+            project.to_path_buf(),
+        ));
+        (rule_engine, core)
+    }
+
+    /// 非重载测试使用的轻量核心（project 固定 `/tmp`）。
+    fn tmp_reload_core() -> Arc<ReloadCore> {
+        build_reload_core(Path::new("/tmp")).1
+    }
+
+    fn make_service_with_core(
+        mgr: StdArc<SessionManager>,
+        rule_engine: Arc<RuleEngine>,
+        reload_core: Arc<ReloadCore>,
+    ) -> CoderDaemonService {
         let (cancel_tx, _cancel_rx) = mpsc::channel(16);
         let (_grpc_tx, orchestrator_grpc_rx) = mpsc::channel(256);
         let (client_tx, _client_rx) = mpsc::channel(64);
@@ -1517,7 +1595,8 @@ mod tests {
                 Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>
             )),
             tool_registry: Arc::new(ToolRegistry::new()),
-            rule_engine: Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap()),
+            rule_engine,
+            reload_core,
             session_mgr: mgr,
             agent_config: AgentConfig::default(),
             start_time: Instant::now(),
@@ -1532,6 +1611,46 @@ mod tests {
             cancel_tx,
             orchestrator_grpc_rx: std::sync::Mutex::new(Some(orchestrator_grpc_rx)),
             client_tx,
+        }
+    }
+
+    fn make_service(mgr: StdArc<SessionManager>) -> CoderDaemonService {
+        let (rule_engine, reload_core) = build_reload_core(Path::new("/tmp"));
+        make_service_with_core(mgr, rule_engine, reload_core)
+    }
+
+    /// 隔离全局配置的测试环境：`VISP_CONFIG_DIR` → 临时空目录，drop 时还原。
+    /// 与 `reload_tests.rs` 同构，避免读取真实 `~/.config/visp`。
+    struct IsolatedEnv {
+        _config: TempDir,
+        project: TempDir,
+        prev_config_dir: Option<String>,
+    }
+
+    impl IsolatedEnv {
+        fn new() -> Self {
+            let config = TempDir::new().unwrap();
+            let project = TempDir::new().unwrap();
+            let prev_config_dir = std::env::var("VISP_CONFIG_DIR").ok();
+            unsafe { std::env::set_var("VISP_CONFIG_DIR", config.path()) };
+            Self {
+                _config: config,
+                project,
+                prev_config_dir,
+            }
+        }
+
+        fn project(&self) -> &Path {
+            self.project.path()
+        }
+    }
+
+    impl Drop for IsolatedEnv {
+        fn drop(&mut self) {
+            match &self.prev_config_dir {
+                Some(value) => unsafe { std::env::set_var("VISP_CONFIG_DIR", value) },
+                None => unsafe { std::env::remove_var("VISP_CONFIG_DIR") },
+            }
         }
     }
 
@@ -1786,6 +1905,7 @@ mod tests {
             )),
             tool_registry: Arc::new(ToolRegistry::new()),
             rule_engine: Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap()),
+            reload_core: tmp_reload_core(),
             session_mgr: mgr.clone(),
             agent_config: AgentConfig::default(),
             start_time: Instant::now(),
@@ -1836,6 +1956,7 @@ mod tests {
             )),
             tool_registry: Arc::new(ToolRegistry::new()),
             rule_engine: Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap()),
+            reload_core: tmp_reload_core(),
             session_mgr: mgr.clone(),
             agent_config: AgentConfig::default(),
             start_time: Instant::now(),
@@ -1905,6 +2026,7 @@ mod tests {
             )),
             tool_registry: Arc::new(ToolRegistry::new()),
             rule_engine: Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap()),
+            reload_core: tmp_reload_core(),
             session_mgr: mgr.clone(),
             agent_config: AgentConfig::default(),
             start_time: Instant::now(),
@@ -1978,6 +2100,7 @@ mod tests {
             )),
             tool_registry: Arc::new(ToolRegistry::new()),
             rule_engine: Arc::new(RuleEngine::new(Path::new("/tmp")).unwrap()),
+            reload_core: tmp_reload_core(),
             session_mgr: mgr.clone(),
             agent_config: AgentConfig::default(),
             start_time: Instant::now(),
@@ -3647,5 +3770,141 @@ mod tests {
             .collect();
         assert!(child_text.contains("from A"), "child-a text should appear");
         assert!(child_text.contains("from B"), "child-b text should appear");
+    }
+
+    // ── 步骤 4a：ReloadConfig gRPC handler ──────────────────────────────────
+
+    /// 用例 1：handler 调核心显式入口 → 逐项结果完整映射为 ReloadConfigResponse。
+    #[tokio::test]
+    #[serial]
+    async fn reload_config_maps_core_results_to_response() {
+        let env = IsolatedEnv::new();
+        let (rule_engine, reload_core) = build_reload_core(env.project());
+        // 核心构造后新增 AGENTS.md，重载应判为 rules 有变化。
+        std::fs::write(env.project().join("AGENTS.md"), "<Role>mapped</Role>").unwrap();
+
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let service = make_service_with_core(mgr, rule_engine, reload_core);
+
+        let response = service
+            .reload_config(tonic::Request::new(proto::ReloadConfigRequest {}))
+            .await
+            .expect("显式入口不应产生 gRPC error")
+            .into_inner();
+
+        assert_eq!(response.results.len(), 4, "显式入口应回四类条目");
+        let categories: Vec<&str> = response
+            .results
+            .iter()
+            .map(|item| item.category.as_str())
+            .collect();
+        assert_eq!(
+            categories,
+            vec!["rules", "skills", "agents", "system_prompt"]
+        );
+        assert!(
+            response.results.iter().all(|item| item.success),
+            "items: {:?}",
+            response.results
+        );
+
+        let rules = &response.results[0];
+        assert!(
+            rules.message.contains("1 个规则文件"),
+            "message: {}",
+            rules.message
+        );
+        assert_eq!(rules.modified, 1, "聚合变更数应写入计数位");
+    }
+
+    /// 用例 2：含失败条目时仍为正常响应（不走 gRPC status error，设计 §3）。
+    #[tokio::test]
+    #[serial]
+    async fn reload_config_partial_failure_returns_ok_response() {
+        let env = IsolatedEnv::new();
+        let (rule_engine, reload_core) = build_reload_core(env.project());
+        // 用目录冒充 `.md` 规则文件 → rules 重载 IO 失败，其余领域仍应成功。
+        let rules_dir = env.project().join(".visp/rules");
+        std::fs::create_dir_all(rules_dir.join("zzz.md")).unwrap();
+
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let service = make_service_with_core(mgr, rule_engine, reload_core);
+
+        let response = service
+            .reload_config(tonic::Request::new(proto::ReloadConfigRequest {}))
+            .await
+            .expect("部分成功必须是正常响应，而非 gRPC error")
+            .into_inner();
+
+        let rules = &response.results[0];
+        assert!(!rules.success, "rules 条目应报失败：{rules:?}");
+        assert!(
+            rules.message.contains("重载失败"),
+            "message: {}",
+            rules.message
+        );
+        assert_eq!(rules.modified, 0);
+        assert!(
+            response.results[1..].iter().all(|item| item.success),
+            "单项失败不得作废其余领域：{:?}",
+            response.results
+        );
+    }
+
+    /// 用例 3：system_prompt 回执透传（恒成功的第四条目）。
+    #[tokio::test]
+    #[serial]
+    async fn reload_config_passes_through_system_prompt_receipt() {
+        let env = IsolatedEnv::new();
+        let (rule_engine, reload_core) = build_reload_core(env.project());
+
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let service = make_service_with_core(mgr, rule_engine, reload_core);
+
+        let response = service
+            .reload_config(tonic::Request::new(proto::ReloadConfigRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let receipt = response
+            .results
+            .iter()
+            .find(|item| item.category == "system_prompt")
+            .expect("响应应含 system_prompt 条目");
+        assert!(receipt.success, "system_prompt 条目恒成功");
+        assert!(
+            receipt.message.contains("新 session"),
+            "message: {}",
+            receipt.message
+        );
+        assert_eq!(receipt.modified, 0);
+    }
+
+    /// 用例 4（运行时部分）：service.rule_engine 与核心共享同一 Arc，
+    /// 重载后该字段可观察到新规则内容。`#[allow(dead_code)]` 的移除由
+    /// `cargo clippy -p visp-daemon -- -D warnings` 质量门保证。
+    #[tokio::test]
+    #[serial]
+    async fn reload_config_engine_field_reflects_reloaded_rules() {
+        let env = IsolatedEnv::new();
+        let (rule_engine, reload_core) = build_reload_core(env.project());
+        std::fs::write(env.project().join("AGENTS.md"), "<Role>field-wired</Role>").unwrap();
+
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let service = make_service_with_core(mgr, rule_engine, reload_core);
+
+        let _ = service
+            .reload_config(tonic::Request::new(proto::ReloadConfigRequest {}))
+            .await
+            .unwrap();
+
+        assert!(
+            service
+                .rule_engine
+                .get_active_rules()
+                .contains("field-wired"),
+            "service.rule_engine 应指向核心重载的同一引擎"
+        );
     }
 }

@@ -580,12 +580,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         orchestrator.run().await;
     });
 
+    // 8.9. 共享 reload 核心：显式 `/reload` 与后续自动文件监听复用同一实例
+    //      （设计 §5.5；project root 固定为启动时 cwd，agent 目录每次重载重算）。
+    let reload_core = Arc::new(visp_daemon::reload::ReloadCore::new(
+        rule_engine.clone(),
+        tool_registry.clone(),
+        agent_registry.clone(),
+        builtin_overrides.clone(),
+        Some(global_tx.clone()),
+        cwd.clone(),
+    ));
+
     // 9. Assemble service
     let mcp_shutdown = mcp_manager.clone();
     let service = CoderDaemonService::new(
         model_configs,
         tool_registry,
         rule_engine,
+        reload_core,
         session_mgr,
         agent_config,
         Arc::new(config.clone()),
