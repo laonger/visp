@@ -616,3 +616,5 @@ Wave8 (全部完成后):   8a
 8. **单连接架构约束**：daemon 端 Chat 下行 rx 被 take 一次，通知发送天然 best-effort（6c 的测试已覆盖通道不可用路径）；重载核心与通知解耦，通知失败不影响 reload 结果。
 9. **执行环境**：仓库已配置 codegraph MCP——执行 agent 可用 codegraph 定位符号与消费点（尤其 2b 的 6 处消费点核对），比 grep 更快；若未初始化索引，先 `codegraph init`。
 10. **提交纪律**：每子步骤一个 commit，红绿分明的测试先行可从 diff 历史审计；任何子步骤发现设计偏差（如某消费点实际形态与设计不符），停下更新设计文档后再继续，不带病推进。
+11. **proto RPC 与 server trait 的编译期耦合（实施中发现，2b 上报）**：1a 落地 `ReloadConfig` RPC 后，tonic 生成的 server trait 即**强制要求** `reload_config` 方法，导致 `visp-daemon` 在 4a 实现之前无法编译。实际处理：2b 在 `service.rs` 加了一个返回 `unimplemented` 的**占位方法**（无任何行为），4a 落真实 handler 时替换。后续若再新增 RPC，需注意此编译期耦合（或调整步骤顺序）。
+12. **2a 的 rules 守卫落位（2a 上报）**：`RuleEngine::reload` 内部实现「无变化不写回」并返回 `changed`；**3b 的 rules 守卫据此消费 `changed`**，不重复比较。

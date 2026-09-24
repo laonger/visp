@@ -196,6 +196,8 @@ visp daemon 启动时一次性装配四类「文件系统来源」的运行时�
 
 **读侧消费点（v2 已核，如实评估）**：`orchestrator.rs` 有 6 处消费点（约 395/405/415/439/630/654）。改造方式是**单次流程入口处取一次 Arc 快照并复用**（arc-swap 用 `load_full()` 得到 `Arc<AgentRegistry>`；`load()` 返回的 Guard 非 Send，不可跨 await 持有）。跨 await 的消费仅限从快照 clone 出来的定义值（现有模式即如此），不持借用或 Guard 跨 await。
 
+> **实施订正（2b 落地时核实）**：6 处消费点经 grep 核实确为 6 处，但本节原「`start_main_agent` 内部 395 与 415 必须共享同一次 load」的举例不准确——改造前 L395（vision 查表）与 L415（agent_name 查表）位于 `if has_images` 的**互斥分支**，同一流程内不会同时执行；真正会连续执行的是无图片路径下的 L415（agent_name）与 L439（`build_subagent_prompt` 的 subagent 列表）。实施改为「**每个流程入口**（`start_main_agent` / `spawn_sub_agent`）**各取一次 `load_full()` 快照并全程复用**」，覆盖全部 6 处的任意组合，语义比原举例更严。已实现。
+
 **关键关联点——已注册 agent 工具的对账同步**：重载 registry 后必须同步 ToolRegistry 中的 agent 工具。对账算法（说明性，v2 保留）：
 
 1. 取替换前、替换后的 subagent 快照（name → description）。
