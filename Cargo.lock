@@ -4841,6 +4841,7 @@ dependencies = [
  "async-trait",
  "dashmap",
  "futures",
+ "notify",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

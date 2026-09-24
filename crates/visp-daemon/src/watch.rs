@@ -7,9 +7,20 @@
 //!
 //! 计划构建与事件匹配不触碰任何全局状态，测试用 tempdir 构造存在性组合即可覆盖。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 
-use crate::reload::ReloadDomain;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
+
+use crate::reload::{ReloadCore, ReloadDomain, ReloadItem};
+
+/// 自动重载的默认 debounce 窗口（设计 §7 决策 9）。
+///
+/// 足以合并编辑器原子写的多事件与「Save All」多文件风暴，同时低于人类的
+/// 感知阈值。测试注入更短的窗口，不睡真实 200ms 的整数倍。
+pub const DEBOUNCE: Duration = Duration::from_millis(200);
 
 /// 监听计划（设计 §5.6 九行表）：路径全集 + 每路径监听模式 + 过滤规则 + 领域映射。
 ///
@@ -240,6 +251,167 @@ fn ancestors_inclusive(path: &Path) -> Vec<PathBuf> {
         current = dir.parent();
     }
     ancestors
+}
+
+/// 领域重载执行器抽象（设计 §5.6 事件处理管线第 3 步）。
+///
+/// 真实实现 [`CoreReloadExecutor`] 委托 [`ReloadCore::reload_domains`]；
+/// 测试注入假体记录调用，避免依赖真实资产。
+#[async_trait::async_trait]
+pub trait ReloadExecutor: Send + Sync + 'static {
+    /// 重载给定领域子集，返回逐项结果。
+    async fn reload_domains(&self, domains: &[ReloadDomain]) -> Vec<ReloadItem>;
+}
+
+/// 委托共享 reload 核心的真实执行器。
+pub struct CoreReloadExecutor {
+    core: Arc<ReloadCore>,
+}
+
+impl CoreReloadExecutor {
+    pub fn new(core: Arc<ReloadCore>) -> Self {
+        Self { core }
+    }
+}
+
+#[async_trait::async_trait]
+impl ReloadExecutor for CoreReloadExecutor {
+    async fn reload_domains(&self, domains: &[ReloadDomain]) -> Vec<ReloadItem> {
+        self.core.reload_domains(domains).await
+    }
+}
+
+/// 文件监听运行时（步骤 6b）。
+///
+/// 多路径挂载 [`WatchPlan`] → 回调线程过滤 → 后台任务按领域 debounce →
+/// 补挂缺目录 → 调用 [`ReloadExecutor`]。`stop` 中止后台任务并 drop watcher。
+pub struct FileWatcher {
+    watcher: Arc<StdMutex<RecommendedWatcher>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl FileWatcher {
+    /// 启动监听。
+    ///
+    /// 初始挂载计划中已存在的目录；个别挂载失败（如祖先层权限不足）降级为
+    /// 跳过 + warn，不阻断启动（设计 §5.6）。缺目录由运行中补挂链覆盖。
+    pub async fn start(
+        plan: Arc<WatchPlan>,
+        executor: Arc<dyn ReloadExecutor>,
+        debounce: Duration,
+    ) -> Result<Self, notify::Error> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<ReloadDomain>>();
+
+        let callback_plan = plan.clone();
+        let watcher =
+            notify::recommended_watcher(move |result: Result<notify::Event, notify::Error>| {
+                let Ok(event) = result else {
+                    return;
+                };
+                for path in event.paths {
+                    if let Some(classification) = callback_plan.classify(&path) {
+                        let _ = tx.send(classification.domains);
+                    }
+                }
+            })?;
+        let watcher = Arc::new(StdMutex::new(watcher));
+
+        let mut mounted: HashSet<PathBuf> = HashSet::new();
+        for entry in &plan.entries {
+            if !entry.dir.exists() {
+                continue;
+            }
+            if mount(&watcher, &entry.dir, entry.recursive).is_ok() {
+                mounted.insert(entry.dir.clone());
+            } else {
+                tracing::warn!(dir = %entry.dir.display(), "文件监听挂载失败，跳过该目录");
+            }
+        }
+
+        let task_watcher = watcher.clone();
+        let task_plan = plan.clone();
+        let task = tokio::spawn(async move {
+            run_loop(rx, task_watcher, task_plan, executor, debounce, mounted).await;
+        });
+
+        Ok(Self { watcher, task })
+    }
+
+    /// 停止监听：中止后台任务并释放 notify watcher。
+    pub fn stop(self) {
+        self.task.abort();
+        drop(self.watcher);
+    }
+}
+
+/// 后台任务：窗口重置式 debounce + 补挂校准 + 领域重载。
+async fn run_loop(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<Vec<ReloadDomain>>,
+    watcher: Arc<StdMutex<RecommendedWatcher>>,
+    plan: Arc<WatchPlan>,
+    executor: Arc<dyn ReloadExecutor>,
+    debounce: Duration,
+    mut mounted: HashSet<PathBuf>,
+) {
+    while let Some(first) = rx.recv().await {
+        let mut domains = first;
+
+        // 开窗：首个事件起算，窗口内每来事件重置计时、合并领域（按领域聚合）。
+        let sleep = tokio::time::sleep(debounce);
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                biased;
+                Some(more) = rx.recv() => {
+                    for domain in more {
+                        if !domains.contains(&domain) {
+                            domains.push(domain);
+                        }
+                    }
+                    sleep.as_mut().reset(tokio::time::Instant::now() + debounce);
+                }
+                _ = &mut sleep => break,
+            }
+        }
+
+        // 补挂校准：新出现的目录立刻挂载，并补该领域一次重扫标记
+        // （kqueue 递归监听竞态兜底，设计 §5.6 缓解一）；已删除目录移出集合，
+        // 使重建时可再次补挂且不重复挂载（缓解二）。
+        for entry in &plan.entries {
+            if entry.dir.exists() {
+                if !mounted.contains(&entry.dir)
+                    && mount(&watcher, &entry.dir, entry.recursive).is_ok()
+                {
+                    mounted.insert(entry.dir.clone());
+                    for domain in &entry.rescan_domains {
+                        if !domains.contains(domain) {
+                            domains.push(*domain);
+                        }
+                    }
+                }
+            } else {
+                mounted.remove(&entry.dir);
+            }
+        }
+
+        if !domains.is_empty() {
+            executor.reload_domains(&domains).await;
+        }
+    }
+}
+
+/// 以指定模式挂载单个目录。
+fn mount(
+    watcher: &StdMutex<RecommendedWatcher>,
+    dir: &Path,
+    recursive: bool,
+) -> Result<(), notify::Error> {
+    let mode = if recursive {
+        RecursiveMode::Recursive
+    } else {
+        RecursiveMode::NonRecursive
+    };
+    watcher.lock().unwrap().watch(dir, mode)
 }
 
 #[cfg(test)]
