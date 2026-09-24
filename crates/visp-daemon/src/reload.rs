@@ -121,12 +121,27 @@ impl ReloadCore {
     }
 
     /// 两入口共享的重载执行：取互斥量、按规范化顺序逐领域执行。
+    ///
+    /// 每个领域产出结果后打一条带变更统计的 tracing 日志（设计 §5.5），
+    /// 便于 `RUST_LOG` 排障与观测。
     async fn execute_domains(&self, domains: &[ReloadDomain]) -> Vec<ReloadItem> {
         let _guard = self.lock.lock().await;
-        canonical_order(domains)
+        let ordered = canonical_order(domains);
+        tracing::debug!(requested = ?ordered, "开始热重载");
+        let items: Vec<ReloadItem> = ordered
             .into_iter()
             .map(|domain| self.reload_one(domain))
-            .collect()
+            .collect();
+        for item in &items {
+            tracing::info!(
+                domain = ?item.domain,
+                success = item.success,
+                changes = item.changes,
+                message = %item.message,
+                "热重载结果"
+            );
+        }
+        items
     }
 
     /// 自动入口完成后的 best-effort 通知（设计 §7 决策 11）。
@@ -137,6 +152,7 @@ impl ReloadCore {
         let Some(message) = build_notification(items) else {
             return;
         };
+        tracing::debug!(%message, "构建热重载通知");
         let Some(downlink) = &self.downlink else {
             return;
         };
