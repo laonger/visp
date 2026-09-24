@@ -15,7 +15,7 @@ use arc_swap::ArcSwap;
 use tokio::sync::mpsc;
 
 use visp_agent::agent_loader::{BuiltinAgentOverride, load_agents_with_stats};
-use visp_core::agent::{AgentTool, Envelope};
+use visp_core::agent::{AgentEvent, AgentEventFrame, AgentTool, Envelope};
 use visp_core::agent_registry::AgentRegistry;
 use visp_core::rules::RuleEngine;
 use visp_core::tool_registry::ToolRegistry;
@@ -61,6 +61,9 @@ pub struct ReloadCore {
     /// 最近一次生效的 skills listing（变化守卫素材，设计 §5.2/§7 决策 13）。
     /// 重载执行受 [`ReloadCore::lock`] 串行化，此锁仅作内部可变状态。
     skills_listing: std::sync::Mutex<String>,
+    /// Chat 下行通道（`AgentEventFrame`，Chat 流下行帧的唯一来源）。
+    /// 自动入口完成后 best-effort 推送汇总通知（设计 §5.5/§7 决策 11）。
+    downlink: Option<mpsc::Sender<AgentEventFrame>>,
     /// 显式与自动路径共用的异步互斥量（设计 §7 决策 9）。
     lock: tokio::sync::Mutex<()>,
 }
@@ -83,13 +86,25 @@ impl ReloadCore {
             global_tx,
             project_root,
             skills_listing: std::sync::Mutex::new(skills_listing),
+            downlink: None,
             lock: tokio::sync::Mutex::new(()),
         }
     }
 
+    /// 注入 Chat 下行通道，供自动入口 best-effort 推送热重载通知。
+    ///
+    /// 通道身份：`AgentEventFrame` 下行帧的唯一来源（daemon 装配处
+    /// `orchestrator_grpc_tx`），与 `global_tx`（agent 工具事件通道）不同。
+    pub fn with_downlink(mut self, downlink: mpsc::Sender<AgentEventFrame>) -> Self {
+        self.downlink = Some(downlink);
+        self
+    }
+
     /// 显式入口：四类全跑（system_prompt 仅确认回执）。
+    ///
+    /// 显式路径把逐项结果直接返回给 gRPC handler 渲染，**不**推送自动通知。
     pub async fn reload_all(&self) -> Vec<ReloadItem> {
-        self.reload_domains(&[
+        self.execute_domains(&[
             ReloadDomain::Rules,
             ReloadDomain::Skills,
             ReloadDomain::Agents,
@@ -98,13 +113,41 @@ impl ReloadCore {
         .await
     }
 
-    /// 自动入口雏形：只重载入参命中的领域子集。
+    /// 自动入口：只重载入参命中的领域子集，完成后推送至多一条汇总通知。
     pub async fn reload_domains(&self, domains: &[ReloadDomain]) -> Vec<ReloadItem> {
+        let items = self.execute_domains(domains).await;
+        self.notify(&items);
+        items
+    }
+
+    /// 两入口共享的重载执行：取互斥量、按规范化顺序逐领域执行。
+    async fn execute_domains(&self, domains: &[ReloadDomain]) -> Vec<ReloadItem> {
         let _guard = self.lock.lock().await;
         canonical_order(domains)
             .into_iter()
             .map(|domain| self.reload_one(domain))
             .collect()
+    }
+
+    /// 自动入口完成后的 best-effort 通知（设计 §7 决策 11）。
+    ///
+    /// 至多一条：有变更→汇总；失败→错误性质提示；全部无变化→静默。
+    /// 通道未注入 / 已关闭 / 已满均静默丢弃，不影响 reload 结果。
+    fn notify(&self, items: &[ReloadItem]) {
+        let Some(message) = build_notification(items) else {
+            return;
+        };
+        let Some(downlink) = &self.downlink else {
+            return;
+        };
+        let frame = AgentEventFrame {
+            event: AgentEvent::StatusUpdate(message),
+            session_id: String::new(),
+            agent_name: String::new(),
+            parent_session_id: None,
+            parent_session_name: None,
+        };
+        let _ = downlink.try_send(frame);
     }
 
     fn reload_one(&self, domain: ReloadDomain) -> ReloadItem {
@@ -278,6 +321,51 @@ fn no_change_item(domain: ReloadDomain) -> ReloadItem {
         success: true,
         message: "无变更".to_string(),
         changes: 0,
+    }
+}
+
+/// 构造自动入口的至多一条汇总通知文案（设计 §7 决策 11）。
+///
+/// - 存在失败领域 → 错误性质汇总（含失败原因）；
+/// - 否则存在变更领域 → 「已热重载」汇总（含各领域变更数）；
+/// - 全部无变化 → `None`（静默）。
+fn build_notification(items: &[ReloadItem]) -> Option<String> {
+    let changed: Vec<&ReloadItem> = items
+        .iter()
+        .filter(|item| item.success && item.changes > 0)
+        .collect();
+    let failed: Vec<&ReloadItem> = items.iter().filter(|item| !item.success).collect();
+    if changed.is_empty() && failed.is_empty() {
+        return None;
+    }
+
+    let mut parts = Vec::new();
+    if !changed.is_empty() {
+        let detail = changed
+            .iter()
+            .map(|item| format!("{}（{} 变更）", domain_label(item.domain), item.changes))
+            .collect::<Vec<_>>()
+            .join("、");
+        parts.push(format!("已热重载：{detail}"));
+    }
+    if !failed.is_empty() {
+        let detail = failed
+            .iter()
+            .map(|item| format!("{}：{}", domain_label(item.domain), item.message))
+            .collect::<Vec<_>>()
+            .join("；");
+        parts.push(format!("失败：{detail}"));
+    }
+    Some(parts.join("；"))
+}
+
+/// 领域在通知文案中的稳定短名。
+fn domain_label(domain: ReloadDomain) -> &'static str {
+    match domain {
+        ReloadDomain::Rules => "rules",
+        ReloadDomain::Skills => "skills",
+        ReloadDomain::Agents => "agents",
+        ReloadDomain::SystemPrompt => "system_prompt",
     }
 }
 

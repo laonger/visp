@@ -52,6 +52,15 @@ struct TestHandles {
 }
 
 fn make_core(env: &IsolatedEnv, multi_agent: bool) -> TestHandles {
+    make_core_with_downlink(env, multi_agent, None)
+}
+
+/// 可注入 Chat 下行通道的核心构造（步骤 6c 通知测试用）。
+fn make_core_with_downlink(
+    env: &IsolatedEnv,
+    multi_agent: bool,
+    downlink: Option<mpsc::Sender<AgentEventFrame>>,
+) -> TestHandles {
     let project = env.project();
     let rule_engine = Arc::new(RuleEngine::new(project).unwrap());
 
@@ -81,17 +90,20 @@ fn make_core(env: &IsolatedEnv, multi_agent: bool) -> TestHandles {
     let (tx, _rx) = mpsc::channel(16);
     let global_tx = if multi_agent { Some(tx) } else { None };
 
-    let core = Arc::new(ReloadCore::new(
+    let mut core = ReloadCore::new(
         rule_engine,
         tool_registry.clone(),
         agent_registry.clone(),
         overrides,
         global_tx,
         project.to_path_buf(),
-    ));
+    );
+    if let Some(downlink) = downlink {
+        core = core.with_downlink(downlink);
+    }
 
     TestHandles {
-        core,
+        core: Arc::new(core),
         tool_registry,
         agent_registry,
     }
@@ -589,4 +601,85 @@ async fn tool_set_matches_subagent_set_after_reconcile() {
         handles.tool_registry.get("alpha").is_none(),
         "已删除的 agent 工具必须移除"
     );
+}
+
+// ── 步骤 6c：自动重载通知推送 ───────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn auto_change_pushes_single_summary_with_empty_session_id() {
+    let env = IsolatedEnv::new();
+    let (tx, mut rx) = mpsc::channel::<AgentEventFrame>(8);
+    let handles = make_core_with_downlink(&env, false, Some(tx));
+
+    fs::write(env.project().join("AGENTS.md"), "auto reload").unwrap();
+    let items = handles.core.reload_domains(&[ReloadDomain::Rules]).await;
+    assert!(items[0].changes > 0, "应有变更：{:?}", items[0]);
+
+    let frame = rx.try_recv().expect("有变更应推送一条汇总通知");
+    assert_eq!(frame.session_id, "", "session_id 必须为空以路由主 tab");
+    match frame.event {
+        AgentEvent::StatusUpdate(message) => {
+            assert!(message.contains("已热重载"), "message: {message}");
+            assert!(message.contains("rules"), "message: {message}");
+        }
+        _ => panic!("应为 StatusUpdate 帧"),
+    }
+    assert!(rx.try_recv().is_err(), "一次自动重载至多推送一条通知");
+}
+
+#[tokio::test]
+#[serial]
+async fn no_change_is_silent() {
+    let env = IsolatedEnv::new();
+    let (tx, mut rx) = mpsc::channel::<AgentEventFrame>(8);
+    let handles = make_core_with_downlink(&env, false, Some(tx));
+
+    let items = handles.core.reload_domains(&[ReloadDomain::Rules]).await;
+    assert_eq!(items[0].changes, 0, "无 AGENTS.md 应判无变更");
+    assert!(rx.try_recv().is_err(), "全部无变化应静默");
+}
+
+#[tokio::test]
+#[serial]
+async fn failure_pushes_error_status() {
+    let env = IsolatedEnv::new();
+    let (tx, mut rx) = mpsc::channel::<AgentEventFrame>(8);
+    let handles = make_core_with_downlink(&env, true, Some(tx));
+
+    // 与核心工具 "skill" 大小写不敏感撞名 → agents 领域整体失败。
+    write_valid_agent(
+        &env.project().join(".visp/agents"),
+        "skill-agent.md",
+        "Skill",
+        "subagent",
+    );
+    let items = handles.core.reload_domains(&[ReloadDomain::Agents]).await;
+    assert!(!items[0].success, "撞名应使 agents 失败：{:?}", items[0]);
+
+    let frame = rx.try_recv().expect("失败应推送一条错误性质通知");
+    assert_eq!(frame.session_id, "");
+    match frame.event {
+        AgentEvent::StatusUpdate(message) => {
+            assert!(message.contains("失败"), "message: {message}");
+        }
+        _ => panic!("应为 StatusUpdate 帧"),
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn downlink_unavailable_does_not_panic() {
+    let env = IsolatedEnv::new();
+    let (tx, rx) = mpsc::channel::<AgentEventFrame>(8);
+    // 接收端已关闭：best-effort 发送失败应被静默容忍。
+    drop(rx);
+    let handles = make_core_with_downlink(&env, false, Some(tx));
+
+    fs::write(env.project().join("AGENTS.md"), "auto reload").unwrap();
+    let items = handles.core.reload_domains(&[ReloadDomain::Rules]).await;
+
+    assert_eq!(items.len(), 1);
+    assert!(items[0].success);
+    assert_eq!(items[0].changes, 1, "reload 结果不受通道不可用影响");
 }
