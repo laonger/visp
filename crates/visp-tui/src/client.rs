@@ -41,6 +41,13 @@ impl VispClient {
         Ok(resp.into_inner().alive)
     }
 
+    /// 克隆底层 gRPC Channel，构造一个与 Chat 流**共享同一 HTTP/2 连接**的探头
+    /// 客户端——看门狗探测必须复用同一连接（设计 §5.9/决策 14：TCP 半开时探测
+    /// 必然同样失败）。探测在后台任务中执行，主循环不阻塞。
+    pub fn probe_client(&self) -> CoderDaemonClient<Channel> {
+        self.client.clone()
+    }
+
     pub async fn create_session(
         &mut self,
         project_path: &str,

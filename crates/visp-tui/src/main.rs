@@ -1,6 +1,7 @@
 mod app;
 mod client;
 mod command;
+mod connection;
 mod event;
 mod image;
 mod notify;
