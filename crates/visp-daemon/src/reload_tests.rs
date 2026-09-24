@@ -1,4 +1,4 @@
-//! reload 核心测试（步骤 3a）。
+//! reload 核心测试（步骤 3a/3b/3c）。
 //!
 //! 隔离策略沿用 visp-config 既有做法：显式把 `VISP_CONFIG_DIR` 指向临时空目录，
 //! 避免读取真实 `~/.config/visp`；测试统一标 `#[serial]`，防止 env 全局态互踩。
@@ -62,6 +62,20 @@ fn make_core(env: &IsolatedEnv, multi_agent: bool) -> TestHandles {
 
     let overrides: Vec<BuiltinAgentOverride> = Vec::new();
     let initial = visp_agent::agent_loader::load_agents(&[], &overrides);
+
+    // 复刻 daemon 启动时的装配（main.rs 8.7.5）：多 agent 模式下把初始
+    // subagent 集合注册为工具，使对账基线一致。
+    if multi_agent {
+        for agent in initial.list_subagents() {
+            tool_registry
+                .register(Arc::new(AgentTool::new(
+                    agent.name.clone(),
+                    agent.description.clone(),
+                )))
+                .unwrap();
+        }
+    }
+
     let agent_registry = Arc::new(ArcSwap::from_pointee(initial));
 
     let (tx, _rx) = mpsc::channel(16);
@@ -404,4 +418,175 @@ async fn no_change_avoids_swap_side_effects() {
         "无变化不得替换 skill 工具"
     );
     assert_eq!(rules_before, handles.core.rule_engine.get_active_rules());
+}
+
+// ── 步骤 3c：agent 工具对账 ─────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn removed_agent_removes_tool() {
+    let env = IsolatedEnv::new();
+    let handles = make_core(&env, true);
+    let agents_dir = env.project().join(".visp/agents");
+
+    write_valid_agent(&agents_dir, "reviewer.md", "reviewer", "subagent");
+    handles.core.reload_domains(&[ReloadDomain::Agents]).await;
+    assert!(handles.tool_registry.get("reviewer").is_some());
+
+    fs::remove_file(agents_dir.join("reviewer.md")).unwrap();
+    let items = handles.core.reload_domains(&[ReloadDomain::Agents]).await;
+
+    assert!(items[0].success, "items: {:?}", items[0]);
+    assert!(
+        handles.tool_registry.get("reviewer").is_none(),
+        "仅旧集合有的 agent 工具应被移除"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn added_agent_registers_tool() {
+    let env = IsolatedEnv::new();
+    let handles = make_core(&env, true);
+
+    write_valid_agent(
+        &env.project().join(".visp/agents"),
+        "reviewer.md",
+        "reviewer",
+        "subagent",
+    );
+    let items = handles.core.reload_domains(&[ReloadDomain::Agents]).await;
+
+    assert!(items[0].success, "items: {:?}", items[0]);
+    let tool = handles
+        .tool_registry
+        .get("reviewer")
+        .expect("新增 agent 应注册为工具");
+    assert_eq!(tool.name(), "reviewer");
+}
+
+#[tokio::test]
+#[serial]
+async fn name_collision_fails_isolated() {
+    let env = IsolatedEnv::new();
+    let handles = make_core(&env, true);
+    let agents_dir = env.project().join(".visp/agents");
+
+    // 与核心工具 "skill" 大小写不敏感撞名。
+    write_valid_agent(&agents_dir, "skill-agent.md", "Skill", "subagent");
+    // 另一个正常 agent，验证对账不被撞名阻断。
+    write_valid_agent(&agents_dir, "reviewer.md", "reviewer", "subagent");
+
+    let items = handles.core.reload_domains(&[ReloadDomain::Agents]).await;
+
+    assert!(
+        !items[0].success,
+        "撞名应使 agents 条目失败：{:?}",
+        items[0]
+    );
+    assert!(
+        items[0].message.contains("注册 agent 工具 'Skill' 失败"),
+        "message: {}",
+        items[0].message
+    );
+    assert!(
+        handles.tool_registry.get("reviewer").is_some(),
+        "其余对账应继续完成"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn description_change_replaces_tool() {
+    let env = IsolatedEnv::new();
+    let handles = make_core(&env, true);
+    let agents_dir = env.project().join(".visp/agents");
+
+    write_agent_content(
+        &agents_dir,
+        "reviewer.md",
+        "---\nname: reviewer\ndescription: 旧描述\nmode: subagent\n---\nbody\n",
+    );
+    handles.core.reload_domains(&[ReloadDomain::Agents]).await;
+    assert_eq!(
+        handles.tool_registry.get("reviewer").unwrap().description(),
+        "旧描述"
+    );
+
+    write_agent_content(
+        &agents_dir,
+        "reviewer.md",
+        "---\nname: reviewer\ndescription: 新描述\nmode: subagent\n---\nbody\n",
+    );
+    let items = handles.core.reload_domains(&[ReloadDomain::Agents]).await;
+
+    assert!(items[0].success, "items: {:?}", items[0]);
+    assert_eq!(
+        handles.tool_registry.get("reviewer").unwrap().description(),
+        "新描述",
+        "description 变化应对同名工具做替换"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn mode_switch_to_primary_removes_tool() {
+    let env = IsolatedEnv::new();
+    let handles = make_core(&env, true);
+    let agents_dir = env.project().join(".visp/agents");
+
+    write_valid_agent(&agents_dir, "reviewer.md", "reviewer", "subagent");
+    handles.core.reload_domains(&[ReloadDomain::Agents]).await;
+    assert!(handles.tool_registry.get("reviewer").is_some());
+
+    // Subagent → Primary：表现为「旧有新无」。
+    write_valid_agent(&agents_dir, "reviewer.md", "reviewer", "primary");
+    let items = handles.core.reload_domains(&[ReloadDomain::Agents]).await;
+
+    assert!(items[0].success, "items: {:?}", items[0]);
+    assert!(
+        handles.tool_registry.get("reviewer").is_none(),
+        "mode 改为 Primary 后不应再保留 agent 工具"
+    );
+    assert!(handles.agent_registry.load().get("reviewer").is_some());
+}
+
+#[tokio::test]
+#[serial]
+async fn tool_set_matches_subagent_set_after_reconcile() {
+    let env = IsolatedEnv::new();
+    let handles = make_core(&env, true);
+    let agents_dir = env.project().join(".visp/agents");
+
+    write_valid_agent(&agents_dir, "alpha.md", "alpha", "subagent");
+    write_agent_content(
+        &agents_dir,
+        "beta.md",
+        "---\nname: beta\ndescription: beta 原描述\nmode: subagent\n---\nbody\n",
+    );
+    handles.core.reload_domains(&[ReloadDomain::Agents]).await;
+
+    // 一次重载内完成：删除 alpha、改 beta 描述、新增 gamma。
+    fs::remove_file(agents_dir.join("alpha.md")).unwrap();
+    write_agent_content(
+        &agents_dir,
+        "beta.md",
+        "---\nname: beta\ndescription: beta 新描述\nmode: subagent\n---\nbody\n",
+    );
+    write_valid_agent(&agents_dir, "gamma.md", "gamma", "all");
+    let items = handles.core.reload_domains(&[ReloadDomain::Agents]).await;
+
+    assert!(items[0].success, "items: {:?}", items[0]);
+    let snapshot = handles.agent_registry.load();
+    for agent in snapshot.list_subagents() {
+        assert!(
+            handles.tool_registry.get(&agent.name).is_some(),
+            "subagent '{}' 应有对应工具",
+            agent.name
+        );
+    }
+    assert!(
+        handles.tool_registry.get("alpha").is_none(),
+        "已删除的 agent 工具必须移除"
+    );
 }

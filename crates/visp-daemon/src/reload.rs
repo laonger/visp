@@ -7,6 +7,7 @@
 //! 本模块只产出核心内部的逐项结果，不实现 gRPC handler（步骤 4a）与通知
 //! 推送（步骤 6c），也不触碰任何 session 状态。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -14,7 +15,7 @@ use arc_swap::ArcSwap;
 use tokio::sync::mpsc;
 
 use visp_agent::agent_loader::{BuiltinAgentOverride, load_agents_with_stats};
-use visp_core::agent::Envelope;
+use visp_core::agent::{AgentTool, Envelope};
 use visp_core::agent_registry::AgentRegistry;
 use visp_core::rules::RuleEngine;
 use visp_core::tool_registry::ToolRegistry;
@@ -168,7 +169,7 @@ impl ReloadCore {
     }
 
     /// agents：重算 agent 目录 → `load_agents` → 与旧 registry 全 9 字段等值比较；
-    /// 有变化才整体 `store` 替换。
+    /// 有变化才整体 `store` 替换，并在替换后对账 agent 工具。
     fn reload_agents(&self) -> ReloadItem {
         let previous = self.agent_registry.load_full();
         let agent_dirs = collect_agent_dirs(&self.project_root);
@@ -180,7 +181,16 @@ impl ReloadCore {
         }
 
         let changes = agent_change_count(&previous, &registry);
+        let old_tools = subagent_tool_map(&previous);
+        let new_tools = subagent_tool_map(&registry);
+
         self.agent_registry.store(Arc::new(registry));
+
+        let failures = if self.global_tx.is_some() {
+            self.reconcile_agent_tools(&old_tools, &new_tools)
+        } else {
+            Vec::new()
+        };
 
         let mut message = format!("{changes} 个 agent 变更");
         if stats.skipped > 0 {
@@ -188,15 +198,77 @@ impl ReloadCore {
         }
         if self.global_tx.is_none() {
             message.push_str("（单 agent 模式，不注册 agent 工具）");
+        } else if !failures.is_empty() {
+            message.push_str(&format!(
+                "，{} 个 agent 工具对账失败：{}",
+                failures.len(),
+                failures.join("；")
+            ));
         }
 
         ReloadItem {
             domain: ReloadDomain::Agents,
-            success: true,
+            success: failures.is_empty(),
             message,
             changes,
         }
     }
+
+    /// agent 工具对账（设计 §5.3 五分支），返回失败明细。
+    ///
+    /// ① 仅旧集合有 → 移除；② 仅新集合有 → 注册；③ 与现存工具重名
+    /// （`ToolRegistry` 内部大小写不敏感）→ 由 `register` 报错并计入失败，
+    /// 不阻断其余对账；④ 两边都有但 description 变化 → 同名替换；
+    /// ⑤ Subagent/All → Primary 表现为「旧有新无」→ 走 ① 移除。
+    fn reconcile_agent_tools(
+        &self,
+        old: &HashMap<String, String>,
+        new: &HashMap<String, String>,
+    ) -> Vec<String> {
+        let mut failures = Vec::new();
+
+        for name in old.keys() {
+            if !new.contains_key(name)
+                && let Err(error) = self.tool_registry.remove(name)
+            {
+                failures.push(format!("移除 agent 工具 '{name}' 失败：{error}"));
+            }
+        }
+
+        for (name, description) in new {
+            match old.get(name) {
+                Some(old_description) if old_description != description => {
+                    let tool = arc_agent_tool(name, description);
+                    if let Err(error) = self.tool_registry.update(name, tool) {
+                        failures.push(format!("替换 agent 工具 '{name}' 失败：{error}"));
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    let tool = arc_agent_tool(name, description);
+                    if let Err(error) = self.tool_registry.register(tool) {
+                        failures.push(format!("注册 agent 工具 '{name}' 失败：{error}"));
+                    }
+                }
+            }
+        }
+
+        failures
+    }
+}
+
+/// 构造 AgentTool（对账注册 / 替换共用）。
+fn arc_agent_tool(name: &str, description: &str) -> Arc<dyn visp_core::tool::Tool> {
+    Arc::new(AgentTool::new(name.to_string(), description.to_string()))
+}
+
+/// subagent 集合的 name → description 快照（对账输入）。
+fn subagent_tool_map(registry: &AgentRegistry) -> HashMap<String, String> {
+    registry
+        .list_subagents()
+        .iter()
+        .map(|agent| (agent.name.clone(), agent.description.clone()))
+        .collect()
 }
 
 /// 无变化领域的统一结果（守卫拦下，未发生替换）。
