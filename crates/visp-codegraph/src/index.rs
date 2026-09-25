@@ -182,8 +182,8 @@ impl Indexer {
 
         match event {
             FileEvent::Created | FileEvent::Modified => {
-                // Remove old data
-                self.store.delete_by_file(&rel_path)?;
+                // Remove old data（symbols / edges / imports / exports / files）。
+                self.store.delete_file_data(&rel_path)?;
 
                 // Parse the file
                 let content = std::fs::read_to_string(file_path)?;
@@ -235,8 +235,8 @@ impl Indexer {
                 resolve_cross_file_edges(&self.store)?;
             }
             FileEvent::Removed => {
-                self.store.delete_by_file(&rel_path)?;
-                self.store.delete_file_record(&rel_path)?;
+                // 彻底删除旧路径的全部索引痕迹（重命名旧路径不再遗留 dangling 行）。
+                self.store.delete_file_data(&rel_path)?;
             }
         }
 

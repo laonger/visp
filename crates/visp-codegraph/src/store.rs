@@ -10,6 +10,16 @@ pub struct ScoredSymbol {
     pub score: f64,
 }
 
+/// 测试辅助：单个路径在各索引表中的行数（重命名残留专项回归用）。
+#[cfg(test)]
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct FileRowCounts {
+    pub(crate) symbols: i64,
+    pub(crate) imports: i64,
+    pub(crate) exports: i64,
+    pub(crate) files: i64,
+}
+
 /// Sanitize a user query string into a safe FTS5 query.
 /// Escapes special chars, removes boolean operators, and uses prefix matching.
 pub fn sanitize_fts_query(query: &str) -> String {
@@ -154,6 +164,44 @@ impl Store {
             "DELETE FROM symbols WHERE file_path = ?1",
             rusqlite::params![path],
         )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 删除某文件在索引中的全部痕迹：symbols / edges / imports / exports / files。
+    ///
+    /// 迁移到 `visp-fs` 后按 §4.6「删除(旧) + 创建(新)」语义，重命名的旧路径
+    /// 必须彻底清理（仅 `delete_by_file` 会遗留 imports / exports / files 行）。
+    /// 对被清理符号作为**目标**的跨文件边，恢复为「未解析」（保留 `target_name`），
+    /// 以免留下 `target_id`/`target_name` 均为 NULL 的悬空边；待后续
+    /// `resolve_cross_file_edges` 重新解析到新路径。
+    pub fn delete_file_data(&self, path: &str) -> rusqlite::Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE edges
+             SET target_name = (SELECT name FROM symbols WHERE id = edges.target_id),
+                 target_id = NULL
+             WHERE target_id IN (SELECT id FROM symbols WHERE file_path = ?1)",
+            rusqlite::params![path],
+        )?;
+        tx.execute(
+            "DELETE FROM edges WHERE source_id IN (SELECT id FROM symbols WHERE file_path = ?1)",
+            rusqlite::params![path],
+        )?;
+        tx.execute(
+            "DELETE FROM symbols WHERE file_path = ?1",
+            rusqlite::params![path],
+        )?;
+        tx.execute(
+            "DELETE FROM imports WHERE file_path = ?1",
+            rusqlite::params![path],
+        )?;
+        tx.execute(
+            "DELETE FROM exports WHERE file_path = ?1",
+            rusqlite::params![path],
+        )?;
+        tx.execute("DELETE FROM files WHERE path = ?1", rusqlite::params![path])?;
         tx.commit()?;
         Ok(())
     }
@@ -378,6 +426,34 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM files WHERE path = ?1", rusqlite::params![path])?;
         Ok(())
+    }
+
+    /// 测试辅助：某路径在 symbols / imports / exports / files 中的行数。
+    #[cfg(test)]
+    pub(crate) fn count_file_rows(&self, path: &str) -> FileRowCounts {
+        let conn = self.conn.lock().unwrap();
+        let count = |sql: &str| -> i64 {
+            conn.query_row(sql, rusqlite::params![path], |row| row.get(0))
+                .unwrap_or(0)
+        };
+        FileRowCounts {
+            symbols: count("SELECT count(*) FROM symbols WHERE file_path = ?1"),
+            imports: count("SELECT count(*) FROM imports WHERE file_path = ?1"),
+            exports: count("SELECT count(*) FROM exports WHERE file_path = ?1"),
+            files: count("SELECT count(*) FROM files WHERE path = ?1"),
+        }
+    }
+
+    /// 测试辅助：`target_id` 与 `target_name` 均为 NULL 的悬空边数量。
+    #[cfg(test)]
+    pub(crate) fn count_dangling_edges(&self) -> i64 {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT count(*) FROM edges WHERE target_id IS NULL AND target_name IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0)
     }
 
     pub fn get_symbol(&self, id: u64) -> rusqlite::Result<Option<Symbol>> {
