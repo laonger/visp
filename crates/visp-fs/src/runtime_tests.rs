@@ -5,7 +5,8 @@
 //! 关键前提：验收文件的**在监听启动之前已存在**（否则 kqueue 目录 diff 会自动补挂，
 //! 让缺陷实现也通过——虚假覆盖）。
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tempfile::tempdir;
@@ -344,4 +345,256 @@ fn adapt_access_and_other_are_ignored() {
         .is_empty()
     );
     assert!(adapt(&notify_event(EventKind::Other, &["/p/a.md"])).is_empty());
+}
+
+// ── 细则单测（计划 2b；假体注入，后端无关） ──────────────────────────
+
+/// 假体挂载后端：记录调用并可按路径注入失败，避免依赖真实 notify 与 OS 权限。
+#[derive(Default)]
+struct FakeBackend {
+    /// 注入 watch 失败的路径集合。
+    fail_watch: HashSet<PathBuf>,
+    /// unwatch 是否一律报 `watch_not_found`（细则 1）。
+    watch_not_found_on_unwatch: bool,
+    /// 已发生的 watch 调用。
+    watch_calls: Vec<(PathBuf, MountKind)>,
+    /// 已发生的 unwatch 调用。
+    unwatch_calls: Vec<PathBuf>,
+}
+
+impl MountBackend for FakeBackend {
+    fn watch(&mut self, path: &Path, kind: MountKind) -> Result<(), notify::Error> {
+        self.watch_calls.push((path.to_path_buf(), kind));
+        if self.fail_watch.contains(path) {
+            Err(notify::Error::generic("injected watch failure"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn unwatch(&mut self, path: &Path, _kind: MountKind) -> Result<(), notify::Error> {
+        self.unwatch_calls.push(path.to_path_buf());
+        if self.watch_not_found_on_unwatch {
+            Err(notify::Error::watch_not_found())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// 以假体后端构造 Core，存在性由内存集合注入。
+fn fake_core(
+    targets: Vec<WatchTarget>,
+    exists: HashSet<PathBuf>,
+) -> Core<FakeBackend, impl Fn(&Path) -> bool> {
+    Core::new(targets, FakeBackend::default(), move |path: &Path| {
+        exists.contains(path)
+    })
+}
+
+/// 2b#1 原子替换后仍可感知（细则 2a 的直接验收）。
+#[tokio::test]
+async fn atomic_replace_then_in_place_edit_is_still_observed() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("AGENTS.md");
+    std::fs::write(&file, "v1").unwrap(); // 启动前已存在且已监听
+
+    let target = direct(dir.path(), vec![Include::FileName("AGENTS.md".into())], &[]);
+    let (watcher, mut rx) = start(vec![target]).await.unwrap();
+
+    // 原子替换：tmp + rename 覆盖同名已监听路径。
+    let tmp = dir.path().join("AGENTS.md.tmp");
+    std::fs::write(&tmp, "v2").unwrap();
+    std::fs::rename(&tmp, &file).unwrap();
+
+    // kqueue 目录 diff 不会补发 Create，须由细则 2a 的存在性探测恢复。
+    assert!(
+        wait_event(&mut rx, Duration::from_secs(5), |m| is_event(
+            m,
+            &file,
+            EventType::Created
+        ))
+        .await,
+        "原子替换应由细则 2a 恢复并投递创建事件"
+    );
+
+    // 再原地覆写 → 仍收到「修改」。
+    std::fs::write(&file, "v3").unwrap();
+    assert!(
+        wait_event(&mut rx, Duration::from_secs(5), |m| is_event(
+            m,
+            &file,
+            EventType::Modified
+        ))
+        .await,
+        "原子替换后原地覆写仍须可感知"
+    );
+    watcher.stop();
+}
+
+/// 2b#2 细则 1：`watch_not_found` 忽略。
+#[test]
+fn watch_not_found_is_recognized_and_ignored() {
+    assert!(is_watch_not_found(&notify::Error::watch_not_found()));
+    assert!(!is_watch_not_found(&notify::Error::generic("other")));
+
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.md");
+    std::fs::write(&file, "x").unwrap();
+    let target = direct(dir.path(), vec![Include::Extension("md".into())], &[]);
+    let mut core = fake_core(
+        vec![target],
+        [dir.path().to_path_buf()].into_iter().collect(),
+    );
+    // 二次卸载报 watch_not_found：不得中断重挂。
+    core.backend.watch_not_found_on_unwatch = true;
+    core.files.insert(file.clone());
+    core.process(RawEvent::Create(file.clone()));
+
+    assert!(
+        core.files.contains(&file),
+        "watch_not_found 应被忽略且重挂成功"
+    );
+}
+
+/// 2b#3 幂等重挂：已挂路径的 Create 无条件「先卸后挂」，状态不重复、不丢失。
+#[test]
+fn remount_of_mounted_path_is_idempotent() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.md");
+    std::fs::write(&file, "x").unwrap();
+    let target = direct(dir.path(), vec![Include::Extension("md".into())], &[]);
+    let mut core = fake_core(
+        vec![target],
+        [dir.path().to_path_buf()].into_iter().collect(),
+    );
+
+    core.process(RawEvent::Create(file.clone()));
+    core.process(RawEvent::Create(file.clone()));
+
+    assert_eq!(core.files.len(), 1, "监听集合不得重复");
+    assert!(core.files.contains(&file));
+    assert_eq!(
+        core.backend.watch_calls.len(),
+        2,
+        "每次 Create 均无条件重挂（不得因已在集合而跳过）"
+    );
+    assert!(
+        core.backend.unwatch_calls.contains(&file),
+        "重挂须先卸载（Windows 上重复 watch 会泄漏句柄）"
+    );
+}
+
+/// 2b#4 细则 4：单文件级失败不污染集合，且可被后续 Create 恢复。
+#[test]
+fn single_file_mount_failure_does_not_pollute_and_recovers() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.md");
+    std::fs::write(&file, "x").unwrap();
+    let target = direct(dir.path(), vec![Include::Extension("md".into())], &[]);
+    let mut core = fake_core(
+        vec![target],
+        [dir.path().to_path_buf()].into_iter().collect(),
+    );
+
+    core.backend.fail_watch.insert(file.clone());
+    core.process(RawEvent::Create(file.clone()));
+    assert!(!core.files.contains(&file), "单文件级失败不得入集合");
+
+    // 后续 Create 恢复。
+    core.backend.fail_watch.remove(&file);
+    core.process(RawEvent::Create(file.clone()));
+    assert!(core.files.contains(&file), "后续 Create 应恢复监听");
+}
+
+/// 2b#5 细则 5：根 / 最近祖先级失败 → 显式上报降级 + 有界重试。
+#[test]
+fn root_level_mount_failure_reports_degradation_with_bounded_retry() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let target = direct(&root, vec![], &[]);
+    let mut core = fake_core(vec![target], [root.clone()].into_iter().collect());
+    core.backend.fail_watch.insert(root.clone());
+
+    let messages = core.reconcile();
+    assert_eq!(
+        messages,
+        vec![WatchMessage::Degraded(DegradeReason::MountFailed {
+            path: root.clone(),
+            attempts: MAX_MOUNT_ATTEMPTS,
+        })],
+        "根级失败必须显式上报，不得静默"
+    );
+    assert_eq!(
+        core.backend.watch_calls.len(),
+        MAX_MOUNT_ATTEMPTS,
+        "重试须有界"
+    );
+    assert!(core.dirs.is_empty());
+
+    // 去重：状态未变化时不重复上报。
+    assert!(core.reconcile().is_empty());
+}
+
+/// 2b#5 细则 5：无任何可挂载祖先 → 终止并上报「不可挂载」。
+#[test]
+fn unmountable_target_reports_once_and_does_not_mount() {
+    let target = direct(Path::new("/nowhere/watched"), vec![], &[]);
+    let mut core = fake_core(vec![target], HashSet::new());
+
+    let messages = core.reconcile();
+    assert_eq!(
+        messages,
+        vec![WatchMessage::Degraded(DegradeReason::Unmountable {
+            root: PathBuf::from("/nowhere/watched"),
+        })]
+    );
+    assert!(core.backend.watch_calls.is_empty(), "不可挂载不应尝试挂载");
+    assert!(core.reconcile().is_empty(), "去重后不再重复上报");
+}
+
+/// 2b#6 细则 2b（防御性）：Create 先 / Remove 后不得拆掉刚挂的 watch。
+#[test]
+fn out_of_order_create_then_remove_keeps_watch() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.md");
+    std::fs::write(&file, "x").unwrap();
+    let target = direct(dir.path(), vec![Include::Extension("md".into())], &[]);
+    let exists: HashSet<PathBuf> = [dir.path().to_path_buf(), file.clone()]
+        .into_iter()
+        .collect();
+    let mut core = fake_core(vec![target], exists);
+
+    // 「Create 先到」：挂上。
+    core.files.insert(file.clone());
+    core.process(RawEvent::Create(file.clone()));
+    assert!(core.files.contains(&file));
+
+    // 「Remove 后到」但路径仍存在（原子替换语义）：视为重挂而非拆除。
+    core.process(RawEvent::Remove(file.clone()));
+    assert!(
+        core.files.contains(&file),
+        "乱序 Remove 不得拆掉刚挂的 watch（防御性）"
+    );
+}
+
+/// 2b#7 细则 3：不依赖 notify `Vnode::Link` 内部重挂。
+#[test]
+fn kqueue_link_modify_does_not_remount_dirs() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let target = direct(&root, vec![], &[]);
+    let mut core = fake_core(vec![target], [root.clone()].into_iter().collect());
+    core.dirs.insert(root.clone(), MountKind::DirShallow);
+
+    // kqueue Link 被适配为 Modify(Any) 且路径为已直接挂载目录 → 抑制且不触发目录重挂。
+    let before = core.backend.watch_calls.len();
+    let messages = core.process(RawEvent::Modify(root.clone()));
+    assert!(messages.is_empty(), "已挂载目录的条目级 Modify 应被抑制");
+    assert_eq!(core.backend.watch_calls.len(), before, "不得触发目录重挂");
+
+    // 文件 Modify 同样不触发任何目录重挂。
+    let file = dir.path().join("a.md");
+    core.process(RawEvent::Modify(file));
+    assert_eq!(core.backend.watch_calls.len(), before);
 }

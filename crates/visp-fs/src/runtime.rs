@@ -20,6 +20,9 @@ use crate::degrade::{MountTarget, resolve_degradation};
 use crate::normalize::{EventType, RawEvent, normalize};
 use crate::target::{WatchMode, WatchTarget};
 
+/// 根 / 最近祖先级挂载失败的有界重试次数（设计 §4.3 细则 5）。
+pub(crate) const MAX_MOUNT_ATTEMPTS: usize = 3;
+
 /// 投递给消费者的文件事件（路径 + 类型）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileEvent {
@@ -36,6 +39,25 @@ pub enum WatchMessage {
     Event(FileEvent),
     /// 缺目录补挂后的重扫信号（G5）；消费者幂等处理。
     Rescan,
+    /// 根 / 最近祖先级挂载失败或不可挂载的**显式降级上报**（细则 5，不静默）。
+    Degraded(DegradeReason),
+}
+
+/// 降级原因（设计 §4.3 细则 5）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DegradeReason {
+    /// 目标根 / 最近存在祖先挂载失败（资源耗尽 / 权限），已做有界重试。
+    MountFailed {
+        /// 挂载失败路径。
+        path: PathBuf,
+        /// 已尝试次数。
+        attempts: usize,
+    },
+    /// 无任何可挂载祖先：自动监听对该目标不可用。
+    Unmountable {
+        /// 目标根。
+        root: PathBuf,
+    },
 }
 
 /// 挂载类型：目录递归 / 目录非递归 / 文件级。
@@ -109,6 +131,11 @@ pub fn adapt(event: &NotifyEvent) -> Vec<RawEvent> {
     out
 }
 
+/// `watch_not_found` 判定（细则 1：notify 在文件被删时已自动移除 watch，二次卸载须忽略）。
+pub(crate) fn is_watch_not_found(error: &notify::Error) -> bool {
+    matches!(error.kind, notify::ErrorKind::WatchNotFound)
+}
+
 /// 生产挂载后端：包装共享的 notify watcher。
 struct NotifyBackend {
     watcher: Arc<StdMutex<RecommendedWatcher>>,
@@ -138,6 +165,8 @@ struct Core<B, E> {
     dirs: HashMap<PathBuf, MountKind>,
     /// 已挂载的文件级路径。
     files: HashSet<PathBuf>,
+    /// 已上报降级的路径（去重；成功恢复后移除，允许再次上报）。
+    degraded: HashSet<PathBuf>,
     /// 已知「根已直接挂载」的目标根，用于 G5 重扫信号去重。
     known_direct: HashSet<PathBuf>,
     /// 首次 reconcile（启动挂载）不计重扫信号。
@@ -152,6 +181,7 @@ impl<B: MountBackend, E: Fn(&Path) -> bool> Core<B, E> {
             exists,
             dirs: HashMap::new(),
             files: HashSet::new(),
+            degraded: HashSet::new(),
             known_direct: HashSet::new(),
             initialized: false,
         }
@@ -179,11 +209,29 @@ impl<B: MountBackend, E: Fn(&Path) -> bool> Core<B, E> {
         self.files.contains(path) || (self.is_direct_child_scope(path) && path.is_file())
     }
 
-    /// 处理单个后端原始事件：归一化 + 必要重挂 + 过滤投递。
+    /// 处理单个后端原始事件：细则 2a 探测 + 归一化 + 必要重挂 + 过滤投递。
     fn process(&mut self, raw: RawEvent) -> Vec<WatchMessage> {
         let mut messages = Vec::new();
+
+        // 细则 2a（必需主路径）：Remove 命中**仍存在**的路径 ⇒ 覆盖同名已监听路径的
+        // 原子替换（tmp+rename）⇒ 立即重挂 + 投递「创建」。kqueue 的目录 diff 不会
+        // 补发 Create（该路径仍在 watch 集合内），故这是 kqueue 原子替换的必需恢复路径。
+        if let RawEvent::Remove(path) = &raw
+            && (self.exists)(path)
+            && self.is_remount_target(path)
+        {
+            self.remount_file(path);
+            if self.matches_any(path) {
+                messages.push(WatchMessage::Event(FileEvent {
+                    path: path.clone(),
+                    kind: EventType::Created,
+                }));
+            }
+            return messages;
+        }
+
         for (path, kind) in normalize(&raw, &self.dir_path_set()) {
-            // Create / Rename（新名）涉及的直接子文件：无条件「先卸后挂」（幂等）。
+            // Create / Rename（新名）涉及的直接子文件：无条件「先卸后挂」（幂等；细则 1/3）。
             if kind == EventType::Created && self.is_remount_target(&path) {
                 self.remount_file(&path);
             }
@@ -195,8 +243,17 @@ impl<B: MountBackend, E: Fn(&Path) -> bool> Core<B, E> {
     }
 
     /// 对单个文件无条件「先卸后挂」（幂等；幂等目标是不产生重复状态而非跳过重挂）。
+    /// 对单个文件无条件「先卸后挂」：幂等目标是**不产生重复状态**，而非跳过必要重挂。
+    ///
+    /// 细则 1：卸载报 `watch_not_found` 忽略（notify 已自动移除）；
+    /// 细则 4：单文件级挂载失败 → 忽略 + 不入集合 + warn（待后续 Create 恢复）。
     fn remount_file(&mut self, path: &Path) {
-        let _ = self.backend.unwatch(path, MountKind::File);
+        if let Err(error) = self.backend.unwatch(path, MountKind::File) {
+            // 细则 1：`watch_not_found` 为常态（notify 已自动移除），静默忽略。
+            if !is_watch_not_found(&error) {
+                tracing::debug!(path = %path.display(), %error, "卸载文件监听失败（忽略）");
+            }
+        }
         match self.backend.watch(path, MountKind::File) {
             Ok(()) => {
                 self.files.insert(path.to_path_buf());
@@ -226,8 +283,14 @@ impl<B: MountBackend, E: Fn(&Path) -> bool> Core<B, E> {
                 MountTarget::Fallback { ancestor, .. } => {
                     merge_dir(&mut desired, ancestor, MountKind::DirShallow);
                 }
-                // 无任何可挂载祖先：2b 起显式降级上报；2a 阶段跳过。
-                MountTarget::Unmountable => {}
+                // 细则 5：无任何可挂载祖先 ⇒ 终止并显式上报「自动监听不可用」。
+                MountTarget::Unmountable => {
+                    if self.degraded.insert(target.root.clone()) {
+                        messages.push(WatchMessage::Degraded(DegradeReason::Unmountable {
+                            root: target.root.clone(),
+                        }));
+                    }
+                }
             }
         }
 
@@ -256,12 +319,20 @@ impl<B: MountBackend, E: Fn(&Path) -> bool> Core<B, E> {
                 let _ = self.backend.unwatch(&path, old);
                 self.dirs.remove(&path);
             }
-            match self.backend.watch(&path, kind) {
+            match self.mount_dir_with_retry(&path, kind) {
                 Ok(()) => {
-                    self.dirs.insert(path, kind);
+                    self.dirs.insert(path.clone(), kind);
+                    // 挂载成功即视为恢复，允许未来再次上报降级。
+                    self.degraded.remove(&path);
                 }
-                Err(error) => {
-                    tracing::warn!(path = %path.display(), %error, "目录监听挂载失败");
+                Err(attempts) => {
+                    // 细则 5：根 / 最近祖先级失败 ⇒ 显式上报降级（不静默）+ 有界重试。
+                    if self.degraded.insert(path.clone()) {
+                        messages.push(WatchMessage::Degraded(DegradeReason::MountFailed {
+                            path,
+                            attempts,
+                        }));
+                    }
                 }
             }
         }
@@ -313,6 +384,17 @@ impl<B: MountBackend, E: Fn(&Path) -> bool> Core<B, E> {
         self.known_direct = now_direct;
 
         messages
+    }
+
+    /// 有界重试挂载目录（细则 5）；返回最终尝试次数作为 `Err`。
+    fn mount_dir_with_retry(&mut self, path: &Path, kind: MountKind) -> Result<(), usize> {
+        for attempt in 0..MAX_MOUNT_ATTEMPTS {
+            if self.backend.watch(path, kind).is_ok() {
+                return Ok(());
+            }
+            tracing::warn!(path = %path.display(), attempt = attempt + 1, "目录监听挂载失败，重试");
+        }
+        Err(MAX_MOUNT_ATTEMPTS)
     }
 
     /// 直接子级目标下当前存在的匹配文件集合。
