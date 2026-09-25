@@ -60,6 +60,23 @@ pub enum DegradeReason {
     },
 }
 
+/// 对外可见的监听状态快照（生命周期收敛 / 无句柄泄漏的可观测面）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WatcherStatus {
+    /// 当前已直接挂载的目录。
+    pub dirs: Vec<PathBuf>,
+    /// 当前已挂载的文件级路径。
+    pub files: Vec<PathBuf>,
+    /// 成功发生的目录挂载次数。
+    pub dir_mounts: usize,
+    /// 成功发生的目录卸载次数。
+    pub dir_unmounts: usize,
+    /// 成功发生的文件挂载次数。
+    pub file_mounts: usize,
+    /// 成功发生的文件卸载次数。
+    pub file_unmounts: usize,
+}
+
 /// 挂载类型：目录递归 / 目录非递归 / 文件级。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MountKind {
@@ -136,21 +153,39 @@ pub(crate) fn is_watch_not_found(error: &notify::Error) -> bool {
     matches!(error.kind, notify::ErrorKind::WatchNotFound)
 }
 
-/// 生产挂载后端：包装共享的 notify watcher。
+/// 生产挂载后端：包装共享的 notify watcher，并累计挂载/卸载次数。
 struct NotifyBackend {
     watcher: Arc<StdMutex<RecommendedWatcher>>,
+    status: Arc<StdMutex<WatcherStatus>>,
 }
 
 impl MountBackend for NotifyBackend {
     fn watch(&mut self, path: &Path, kind: MountKind) -> Result<(), notify::Error> {
-        self.watcher
+        let result = self
+            .watcher
             .lock()
             .unwrap()
-            .watch(path, kind.recursive_mode())
+            .watch(path, kind.recursive_mode());
+        if result.is_ok() {
+            let mut status = self.status.lock().unwrap();
+            match kind {
+                MountKind::File => status.file_mounts += 1,
+                _ => status.dir_mounts += 1,
+            }
+        }
+        result
     }
 
-    fn unwatch(&mut self, path: &Path, _kind: MountKind) -> Result<(), notify::Error> {
-        self.watcher.lock().unwrap().unwatch(path)
+    fn unwatch(&mut self, path: &Path, kind: MountKind) -> Result<(), notify::Error> {
+        let result = self.watcher.lock().unwrap().unwatch(path);
+        if result.is_ok() {
+            let mut status = self.status.lock().unwrap();
+            match kind {
+                MountKind::File => status.file_unmounts += 1,
+                _ => status.dir_unmounts += 1,
+            }
+        }
+        result
     }
 }
 
@@ -161,6 +196,8 @@ struct Core<B, E> {
     targets: Vec<WatchTarget>,
     backend: B,
     exists: E,
+    /// 对外可见状态快照（监听集合 + 挂载计数）。
+    status: Arc<StdMutex<WatcherStatus>>,
     /// 已直接挂载的目录 → 挂载类型（用于 Modify 抑制与卸载）。
     dirs: HashMap<PathBuf, MountKind>,
     /// 已挂载的文件级路径。
@@ -174,11 +211,17 @@ struct Core<B, E> {
 }
 
 impl<B: MountBackend, E: Fn(&Path) -> bool> Core<B, E> {
-    fn new(targets: Vec<WatchTarget>, backend: B, exists: E) -> Self {
+    fn new(
+        targets: Vec<WatchTarget>,
+        backend: B,
+        exists: E,
+        status: Arc<StdMutex<WatcherStatus>>,
+    ) -> Self {
         Self {
             targets,
             backend,
             exists,
+            status,
             dirs: HashMap::new(),
             files: HashSet::new(),
             degraded: HashSet::new(),
@@ -383,6 +426,15 @@ impl<B: MountBackend, E: Fn(&Path) -> bool> Core<B, E> {
         }
         self.known_direct = now_direct;
 
+        // 更新对外可见的监听集合快照。
+        {
+            let mut status = self.status.lock().unwrap();
+            status.dirs = self.dirs.keys().cloned().collect();
+            status.dirs.sort();
+            status.files = self.files.iter().cloned().collect();
+            status.files.sort();
+        }
+
         messages
     }
 
@@ -434,22 +486,34 @@ fn merge_dir(map: &mut HashMap<PathBuf, MountKind>, path: PathBuf, kind: MountKi
 }
 
 /// 文件监听句柄（设计 §4.5）。
-///
-/// 句柄不直接持有 notify watcher——watcher 由后台任务持有；`stop` 通知任务退出，
-/// 任务析构其 `Core` 时释放 watcher 与全部监听。
 pub struct FsWatcher {
+    watcher: Arc<StdMutex<RecommendedWatcher>>,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<()>>,
+    status: Arc<StdMutex<WatcherStatus>>,
 }
 
 impl FsWatcher {
-    /// 停止监听：通知后台任务退出（消费后释放 notify watcher 与全部监听）。
+    /// 当前监听状态快照（监听集合 + 挂载计数）。
+    pub fn status(&self) -> WatcherStatus {
+        self.status.lock().unwrap().clone()
+    }
+
+    /// 停止监听：通知后台任务退出，并主动卸载全部已跟踪监听后释放 watcher。
+    ///
+    /// 显式卸载使 OS 句柄确定性回收（不依赖后台任务被调度析构的时机）。
     pub fn stop(mut self) {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
         if let Some(task) = self.task.take() {
             task.abort();
+        }
+        let snapshot = self.status();
+        if let Ok(mut watcher) = self.watcher.lock() {
+            for path in snapshot.dirs.iter().chain(snapshot.files.iter()) {
+                let _ = watcher.unwatch(path);
+            }
         }
     }
 }
@@ -471,11 +535,18 @@ pub async fn start(
         },
     )?;
     let watcher = Arc::new(StdMutex::new(watcher));
+    let status = Arc::new(StdMutex::new(WatcherStatus::default()));
 
     let backend = NotifyBackend {
         watcher: watcher.clone(),
+        status: status.clone(),
     };
-    let mut core = Core::new(targets, backend, |path: &Path| path.exists());
+    let mut core = Core::new(
+        targets,
+        backend,
+        |path: &Path| path.exists(),
+        status.clone(),
+    );
 
     let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel::<WatchMessage>();
     // 启动时一次性挂载（同步完成，先于任何事件）。
@@ -513,8 +584,10 @@ pub async fn start(
 
     Ok((
         FsWatcher {
+            watcher,
             shutdown: Some(shutdown_tx),
             task: Some(task),
+            status,
         },
         out_rx,
     ))

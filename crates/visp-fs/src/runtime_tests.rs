@@ -387,9 +387,12 @@ fn fake_core(
     targets: Vec<WatchTarget>,
     exists: HashSet<PathBuf>,
 ) -> Core<FakeBackend, impl Fn(&Path) -> bool> {
-    Core::new(targets, FakeBackend::default(), move |path: &Path| {
-        exists.contains(path)
-    })
+    Core::new(
+        targets,
+        FakeBackend::default(),
+        move |path: &Path| exists.contains(path),
+        Arc::new(StdMutex::new(WatcherStatus::default())),
+    )
 }
 
 /// 2b#1 原子替换后仍可感知（细则 2a 的直接验收）。
@@ -597,4 +600,150 @@ fn kqueue_link_modify_does_not_remount_dirs() {
     let file = dir.path().join("a.md");
     core.process(RawEvent::Modify(file));
     assert_eq!(core.backend.watch_calls.len(), before);
+}
+
+// ── 生命周期与监听集合收敛（计划 2c） ────────────────────────────────
+
+/// 轮询直到监听状态满足谓词。
+async fn wait_status<F>(watcher: &FsWatcher, pred: F) -> bool
+where
+    F: Fn(&WatcherStatus) -> bool,
+{
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if pred(&watcher.status()) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    pred(&watcher.status())
+}
+
+/// 轮询直到接收端关闭（`recv` 返回 `None`），途中丢弃残留消息。
+async fn wait_closed(rx: &mut UnboundedReceiver<WatchMessage>, dur: Duration) -> bool {
+    let deadline = Instant::now() + dur;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        match timeout(remaining, rx.recv()).await {
+            Ok(None) => return true,
+            Ok(Some(_)) => continue,
+            Err(_) => return false,
+        }
+    }
+}
+
+/// 2c#1 `stop` 后不再投递、监听释放。
+#[tokio::test]
+async fn stop_halts_delivery_and_releases_watches() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.md");
+    std::fs::write(&file, "x").unwrap();
+    let target = direct(dir.path(), vec![Include::Extension("md".into())], &[]);
+    let (watcher, mut rx) = start(vec![target]).await.unwrap();
+
+    assert!(
+        wait_status(&watcher, |status| status.files.contains(&file)).await,
+        "启动后应已挂载既有文件"
+    );
+
+    watcher.stop();
+
+    assert!(
+        wait_closed(&mut rx, Duration::from_secs(5)).await,
+        "stop 后接收端应关闭，不再投递"
+    );
+    // 停止后写入不再产生事件（通道已关闭，recv 立即返回 None）。
+    std::fs::write(dir.path().join("b.md"), "y").unwrap();
+    assert!(
+        matches!(
+            timeout(Duration::from_millis(300), rx.recv()).await,
+            Ok(None)
+        ),
+        "stop 后不得再投递"
+    );
+}
+
+/// 2c#2 重复 create/delete 风暴下监听集合收敛、无句柄泄漏。
+#[tokio::test]
+async fn create_delete_storm_converges_without_leak() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("data.md");
+    std::fs::write(&file, "seed").unwrap();
+    let target = direct(dir.path(), vec![Include::Extension("md".into())], &[]);
+    let (watcher, _rx) = start(vec![target]).await.unwrap();
+
+    for _ in 0..25 {
+        std::fs::write(&file, "x").unwrap();
+        let _ = std::fs::remove_file(&file);
+    }
+    std::fs::write(&file, "final").unwrap();
+
+    assert!(
+        wait_status(&watcher, |status| status.dirs.len() == 1
+            && status.files.len() == 1
+            && status.files.contains(&file))
+        .await,
+        "风暴后监听集合应收敛为「1 目录 + 1 文件」：{:?}",
+        watcher.status()
+    );
+    watcher.stop();
+}
+
+/// 2c#3 接收端被 drop 后模块不 panic（守护后台任务的容错路径）。
+#[tokio::test]
+async fn dropping_receiver_does_not_panic() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.md");
+    std::fs::write(&file, "x").unwrap();
+    let target = direct(dir.path(), vec![Include::Extension("md".into())], &[]);
+    let (watcher, rx) = start(vec![target]).await.unwrap();
+
+    drop(rx);
+    // 触发事件；若投递路径 panic，任务会异常终止。
+    std::fs::write(&file, "y").unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // 句柄仍可正常停止。
+    watcher.stop();
+}
+
+/// 2c#4 目录级重挂仅在目录事件时发生（不因文件事件触发目录重挂）。
+#[tokio::test]
+async fn directory_remount_only_on_directory_events() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("a.md");
+    std::fs::write(&file, "x").unwrap();
+    let target = direct(dir.path(), vec![Include::Extension("md".into())], &[]);
+    let (watcher, mut rx) = start(vec![target]).await.unwrap();
+
+    assert!(
+        wait_status(&watcher, |status| status.dirs.len() == 1
+            && status.files.len() == 1)
+        .await
+    );
+    let before = watcher.status();
+
+    for _ in 0..10 {
+        std::fs::write(&file, "y").unwrap();
+    }
+    assert!(
+        wait_event(&mut rx, Duration::from_secs(5), |m| is_event(
+            m,
+            &file,
+            EventType::Modified
+        ))
+        .await
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let after = watcher.status();
+    assert_eq!(
+        before.dir_mounts, after.dir_mounts,
+        "文件事件不得触发目录重挂"
+    );
+    assert_eq!(before.dir_unmounts, after.dir_unmounts);
+    watcher.stop();
 }
