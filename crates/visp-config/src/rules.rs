@@ -21,6 +21,8 @@ pub struct RuleEngine {
     global_agents_md: Option<PathBuf>,
     /// 全局 rules 目录（构造时解析；重载复用，保证扫描逻辑等价）。
     global_rules_dir: Option<PathBuf>,
+    /// 祖先 `AGENTS.md` 向上查找的 `$HOME` 边界（构造时解析；重载复用）。
+    home: Option<PathBuf>,
     rules: Arc<RwLock<RuleSet>>,
 }
 
@@ -41,28 +43,32 @@ impl RuleEngine {
             project_path,
             crate::path::global_agents_md(),
             crate::path::rules_dir_global(),
+            crate::path::home_dir(),
         )
     }
 
-    /// 使用显式全局来源构造（测试隔离钩子，参照 `load_skills` 的注入模式）。
+    /// 使用显式全局来源与祖先边界构造（测试隔离钩子，参照 `load_skills` 的注入模式）。
     ///
-    /// 生产路径由 [`RuleEngine::new`] 传入 `path` 模块解析出的全局路径；
-    /// 测试可传入临时目录或 `None` 以避免读取真实 `~/.config/visp`。
+    /// 生产路径由 [`RuleEngine::new`] 传入 `path` 模块解析出的全局路径与 `home_dir()`；
+    /// 测试可传入临时目录或 `None`，以避免读取真实 `~/.config/visp` 与真实 `$HOME`。
     fn with_global_sources(
         project_path: &Path,
         global_agents_md: Option<PathBuf>,
         global_rules_dir: Option<PathBuf>,
+        home: Option<PathBuf>,
     ) -> std::io::Result<Self> {
         let ruleset = build_ruleset(
             project_path,
             global_agents_md.as_deref(),
             global_rules_dir.as_deref(),
+            home.as_deref(),
         )?;
 
         Ok(RuleEngine {
             project_path: project_path.to_path_buf(),
             global_agents_md,
             global_rules_dir,
+            home,
             rules: Arc::new(RwLock::new(ruleset)),
         })
     }
@@ -76,6 +82,7 @@ impl RuleEngine {
             &self.project_path,
             self.global_agents_md.as_deref(),
             self.global_rules_dir.as_deref(),
+            self.home.as_deref(),
         )?;
 
         let mut guard = self.rules.write().unwrap();
@@ -103,11 +110,12 @@ fn build_ruleset(
     project_path: &Path,
     global_agents_md: Option<&Path>,
     global_rules_dir: Option<&Path>,
+    home: Option<&Path>,
 ) -> std::io::Result<RuleSet> {
     let mut files = Vec::new();
 
-    // 1. AGENTS.md from project directory upward to root (closest first)
-    for md in discover_agents_md(project_path) {
+    // 1. AGENTS.md from project directory upward (bounded, closest first)
+    for md in discover_agents_md(project_path, home) {
         if let Ok(content) = std::fs::read_to_string(&md) {
             let header = format!("Instructions from: {}", md.display());
             files.push(RuleFile {
@@ -151,25 +159,18 @@ fn build_ruleset(
     Ok(RuleSet { content, files })
 }
 
-/// 从 project_path 向上遍历到根目录，寻找所有 AGENTS.md 文件。
-/// 返回结果按距离 project_path 从近到远排序。
-fn discover_agents_md(project_path: &Path) -> Vec<PathBuf> {
+/// 在共享祖先链上查找存在的 `AGENTS.md`，返回路径按距离 project_path 从近到远排序。
+///
+/// 边界（git 根 / `$HOME` / 不在 `$HOME` 下 / `$HOME` 不可解析）由
+/// [`crate::path::agents_md_ancestors_with_home`] 单点解析，加载器与监听计划共用。
+fn discover_agents_md(project_path: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     let mut result = Vec::new();
-    let mut current = Some(project_path.to_path_buf());
-
-    while let Some(path) = current {
-        let agents = path.join("AGENTS.md");
+    for dir in crate::path::agents_md_ancestors_with_home(project_path, home) {
+        let agents = dir.join("AGENTS.md");
         if agents.is_file() {
             result.push(agents);
         }
-        // Walk up to parent
-        current = path.parent().map(|p| p.to_path_buf());
-        // Stop at filesystem root
-        if path == path.parent().unwrap_or(&path) {
-            break;
-        }
     }
-
     result
 }
 
@@ -419,7 +420,8 @@ mod tests {
         fs::write(project.join("AGENTS.md"), "Ancestor instructions").unwrap();
 
         // RuleEngine created from subdir should discover ancestor AGENTS.md
-        let engine = RuleEngine::new(&subdir).unwrap();
+        // （注入 home=tmp，使 `$HOME` 边界不成为停止原因）
+        let engine = isolated_engine_with_home(&subdir, Some(tmp.path()));
         let rules = engine.get_active_rules();
         assert!(rules.contains("Ancestor instructions"));
     }
@@ -435,7 +437,7 @@ mod tests {
         fs::write(subdir.join("AGENTS.md"), "Subdir instructions").unwrap();
 
         // RuleEngine created from subdir should have both, subdir first
-        let engine = RuleEngine::new(&subdir).unwrap();
+        let engine = isolated_engine_with_home(&subdir, Some(tmp.path()));
         let rules = engine.get_active_rules();
         assert!(rules.contains("Root instructions"));
         assert!(rules.contains("Subdir instructions"));
@@ -446,9 +448,15 @@ mod tests {
         assert!(sub_pos < root_pos);
     }
 
-    /// 构造一个不读取真实全局配置目录的引擎（测试隔离：显式注入空的全局来源）。
+    /// 构造一个不读取真实全局配置、且向上遍历止于注入 `home` 的引擎（测试隔离）。
+    fn isolated_engine_with_home(project_path: &Path, home: Option<&Path>) -> RuleEngine {
+        RuleEngine::with_global_sources(project_path, None, None, home.map(Path::to_path_buf))
+            .unwrap()
+    }
+
+    /// 默认投影：`home` 不可解析语义，仅加载项目层。
     fn isolated_engine(project_path: &Path) -> RuleEngine {
-        RuleEngine::with_global_sources(project_path, None, None).unwrap()
+        isolated_engine_with_home(project_path, None)
     }
 
     // ---- 步骤 2a：RuleEngine 重载 ----
@@ -481,7 +489,7 @@ mod tests {
         fs::write(project.join("AGENTS.md"), "上级指令").unwrap();
         fs::write(subdir.join("AGENTS.md"), "项目指令").unwrap();
 
-        let engine = isolated_engine(&subdir);
+        let engine = isolated_engine_with_home(&subdir, Some(tmp.path()));
         let result = engine.reload().unwrap();
         let rules = &result.ruleset.content;
 
@@ -543,5 +551,179 @@ mod tests {
         assert!(second.ruleset.content.contains("守卫素材 B"));
         assert_ne!(first.ruleset.content, second.ruleset.content);
         assert_eq!(second.ruleset.content, engine.get_active_rules());
+    }
+
+    // ---- 步骤 5a：AGENTS.md 向上边界 + 共享祖先链函数 ----
+
+    /// 用例 1：某层含 `.git` 目录 → 处理完该层后停止，git 根之上不加载。
+    #[test]
+    fn test_ancestors_stop_at_git_root() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let sub = repo.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::create_dir_all(repo.join(".git")).unwrap(); // `.git` 目录即边界
+        fs::write(repo.join("AGENTS.md"), "仓库层指令").unwrap();
+        fs::write(tmp.path().join("AGENTS.md"), "git 根之上泄漏指令").unwrap();
+
+        let chain = crate::path::agents_md_ancestors_with_home(&sub, Some(tmp.path()));
+        assert_eq!(chain, vec![sub.clone(), repo.clone()]);
+
+        // home=tmp 使 `$HOME` 边界不成为停止原因，从而隔离验证 git 边界
+        let rules = isolated_engine_with_home(&sub, Some(tmp.path())).get_active_rules();
+        assert!(rules.contains("仓库层指令"));
+        assert!(!rules.contains("git 根之上泄漏指令"));
+    }
+
+    /// 用例 2：monorepo 子目录项目加载至 git 根的各层。
+    #[test]
+    fn test_monorepo_loads_up_to_git_root() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let packages = repo.join("packages");
+        let pkg = packages.join("pkg");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::write(repo.join("AGENTS.md"), "monorepo 根指令").unwrap();
+        fs::write(packages.join("AGENTS.md"), "包集指令").unwrap();
+        fs::write(tmp.path().join("AGENTS.md"), "越界指令").unwrap();
+
+        let chain = crate::path::agents_md_ancestors_with_home(&pkg, Some(tmp.path()));
+        assert_eq!(chain, vec![pkg.clone(), packages.clone(), repo.clone()]);
+
+        let rules = isolated_engine_with_home(&pkg, Some(tmp.path())).get_active_rules();
+        assert!(rules.contains("monorepo 根指令"));
+        assert!(rules.contains("包集指令"));
+        assert!(!rules.contains("越界指令"));
+    }
+
+    /// 用例 3：`.git` 是文件（worktree / submodule）→ 同样视为边界。
+    #[test]
+    fn test_git_file_is_boundary_for_worktree() {
+        let tmp = tempdir().unwrap();
+        let worktree = tmp.path().join("worktree");
+        let sub = worktree.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            "gitdir: /elsewhere/.git/worktrees/x\n",
+        )
+        .unwrap();
+        fs::write(worktree.join("AGENTS.md"), "worktree 指令").unwrap();
+        fs::write(tmp.path().join("AGENTS.md"), "越界指令").unwrap();
+
+        let chain = crate::path::agents_md_ancestors_with_home(&sub, Some(tmp.path()));
+        assert_eq!(chain, vec![sub.clone(), worktree.clone()]);
+
+        let rules = isolated_engine_with_home(&sub, Some(tmp.path())).get_active_rules();
+        assert!(rules.contains("worktree 指令"));
+        assert!(!rules.contains("越界指令"));
+    }
+
+    /// 用例 4：非 git 且项目在 `$HOME` 之下 → 止于 `$HOME`（该层含在内）。
+    #[test]
+    fn test_non_git_under_home_stops_at_home_inclusive() {
+        let tmp = tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let project = home.join("work").join("proj");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(home.join("AGENTS.md"), "HOME 层指令").unwrap();
+        fs::write(tmp.path().join("AGENTS.md"), "HOME 之上指令").unwrap();
+
+        let chain = crate::path::agents_md_ancestors_with_home(&project, Some(&home));
+        assert_eq!(
+            chain,
+            vec![project.clone(), home.join("work"), home.clone()]
+        );
+
+        let rules = isolated_engine_with_home(&project, Some(&home)).get_active_rules();
+        assert!(rules.contains("HOME 层指令"), "$HOME 层本身应含在内");
+        assert!(!rules.contains("HOME 之上指令"));
+    }
+
+    /// 用例 5：非 git 且项目不在 `$HOME` 之下 → 不向上，只加载项目层。
+    #[test]
+    fn test_project_outside_home_does_not_walk_up() {
+        let tmp = tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let outside = tmp.path().join("outside");
+        let project = outside.join("proj");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("AGENTS.md"), "项目层指令").unwrap();
+        fs::write(outside.join("AGENTS.md"), "祖先指令").unwrap();
+
+        let chain = crate::path::agents_md_ancestors_with_home(&project, Some(&home));
+        assert_eq!(chain, vec![project.clone()]);
+
+        let rules = isolated_engine_with_home(&project, Some(&home)).get_active_rules();
+        assert!(rules.contains("项目层指令"));
+        assert!(!rules.contains("祖先指令"));
+    }
+
+    /// 用例 6：`$HOME` 不可解析 → 只加载项目层。
+    #[test]
+    fn test_unresolvable_home_loads_only_project_layer() {
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path().join("a");
+        let project = parent.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(parent.join("AGENTS.md"), "祖先指令").unwrap();
+        fs::write(project.join("AGENTS.md"), "项目层指令").unwrap();
+
+        let chain = crate::path::agents_md_ancestors_with_home(&project, None);
+        assert_eq!(chain, vec![project.clone()]);
+
+        let rules = isolated_engine_with_home(&project, None).get_active_rules();
+        assert!(rules.contains("项目层指令"));
+        assert!(!rules.contains("祖先指令"));
+    }
+
+    /// 用例 7：祖先链函数可复用——输出为祖先目录列表（近先远后，均为目录）。
+    #[test]
+    fn test_ancestor_chain_resolver_is_reusable() {
+        let tmp = tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let project = home.join("a").join("b");
+        fs::create_dir_all(&project).unwrap();
+
+        let chain = crate::path::agents_md_ancestors_with_home(&project, Some(&home));
+        assert_eq!(chain, vec![project.clone(), home.join("a"), home.clone()]);
+        assert!(chain.iter().all(|p| p.is_dir()), "链中每项均为目录");
+        assert!(
+            chain
+                .iter()
+                .all(|p| p.file_name() != Some(std::ffi::OsStr::new("AGENTS.md"))),
+            "链中不含 AGENTS.md 文件名"
+        );
+    }
+
+    /// 用例 8：全局 AGENTS.md 通道不受边界改动影响（与向上遍历正交）。
+    #[test]
+    fn test_global_agents_md_channel_unchanged() {
+        let tmp = tempdir().unwrap();
+        let project = tmp.path().join("proj");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("AGENTS.md"), "项目 AGENTS").unwrap();
+
+        let global_dir = tmp.path().join("global");
+        fs::create_dir_all(&global_dir).unwrap();
+        fs::write(global_dir.join("AGENTS.md"), "全局 AGENTS").unwrap();
+
+        let engine = RuleEngine::with_global_sources(
+            &project,
+            Some(global_dir.join("AGENTS.md")),
+            None,
+            None, // home 不可解析 → 只项目层；全局通道独立生效
+        )
+        .unwrap();
+
+        let rules = engine.get_active_rules();
+        assert!(rules.contains("项目 AGENTS"));
+        assert!(rules.contains("全局 AGENTS"));
+        assert!(
+            rules.find("项目 AGENTS").unwrap() < rules.find("全局 AGENTS").unwrap(),
+            "项目/祖先 AGENTS 应先于全局通道"
+        );
     }
 }

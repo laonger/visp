@@ -139,6 +139,52 @@ pub fn startup_error_file() -> Option<PathBuf> {
     global_config_dir().map(|d| d.join(".startup-error"))
 }
 
+/// 解析 `AGENTS.md` 向上查找所用的**祖先链（目录列表，近先远后）**。
+///
+/// 这是加载器（`rules::discover_agents_md` 在此链上查存在的 `AGENTS.md`）与
+/// daemon 监听计划（据此生成祖先监听目标）共用的**单一**边界解析入口，避免两处漂移。
+///
+/// 边界规则（设计 §5.1）：
+/// 1. 某层目录含 `.git`（**目录或文件**，后者用于 worktree / submodule）→
+///    把该层纳入链后**停止**向上；
+/// 2. 未遇 `.git` 且项目位于 `home` 之下 → 到 `home` 层为止（**`home` 层含在内**）；
+/// 3. 项目**不在 `home` 之下**（如 `/tmp/x`、`/opt/x`）→ **不向上**，只返回项目层；
+/// 4. `home` 为 `None`（`$HOME` 不可解析）→ 只返回项目层。
+///
+/// 返回项均为**目录**（不含 `AGENTS.md` 文件名）；`home` 由调用方显式注入，
+/// 生产入口见 [`agents_md_ancestors`]，测试可注入隔离的 `home`。
+pub fn agents_md_ancestors_with_home(project: &Path, home: Option<&Path>) -> Vec<PathBuf> {
+    let mut chain = Vec::new();
+    // 规则 3/4：项目不在 `home` 之下或 `home` 不可解析 → 不向上。
+    let under_home = home.is_some_and(|h| project.starts_with(h));
+
+    let mut current = Some(project.to_path_buf());
+    while let Some(dir) = current {
+        chain.push(dir.clone());
+
+        // 规则 1：本层含 `.git` → 纳入后停止（优先于其余规则）。
+        if dir.join(".git").exists() {
+            break;
+        }
+        // 规则 3/4：不向上，仅项目层。
+        if !under_home {
+            break;
+        }
+        // 规则 2：到 `home` 层为止（含）。
+        if home == Some(dir.as_path()) {
+            break;
+        }
+        current = dir.parent().map(Path::to_path_buf);
+    }
+
+    chain
+}
+
+/// [`agents_md_ancestors_with_home`] 的生产入口：`home` 取 [`home_dir`]。
+pub fn agents_md_ancestors(project: &Path) -> Vec<PathBuf> {
+    agents_md_ancestors_with_home(project, home_dir().as_deref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

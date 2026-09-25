@@ -12,7 +12,7 @@ pub use config::{
     build_llm_config_from_model, init_config, load_config, merge_session_config,
     model_config_to_info, proto_to_llm_config, resolve_model, resolve_model_key, save_config,
 };
-pub use path::home_dir;
+pub use path::{agents_md_ancestors, agents_md_ancestors_with_home, home_dir};
 pub use prompt::DEFAULT_SYSTEM_PROMPT;
 pub use rules::{RuleEngine, RuleFile, RuleSet};
 pub use skills::{
