@@ -5,5 +5,6 @@
 //!
 //! Wave 1 只交付**纯逻辑核心**（无 IO、无 notify 接线）。
 
+pub mod degrade;
 pub mod normalize;
 pub mod target;
