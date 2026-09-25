@@ -632,6 +632,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(visp_daemon::watch::CoreReloadExecutor::new(
             reload_core.clone(),
         )),
+        // 细则 5 降级通知经 Chat 下行通道 best-effort 推送（与 reload 通知同一通道）。
+        Some(orchestrator_grpc_tx.clone()),
     )
     .await;
 

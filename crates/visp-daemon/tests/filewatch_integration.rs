@@ -59,7 +59,7 @@ async fn wait_until(predicate: impl Fn() -> bool, timeout: Duration) -> bool {
 /// 与生产路径完全一致。
 async fn start(project: &Path, global: Option<&Path>, executor: &Arc<FakeExecutor>) -> FileWatcher {
     let plan = Arc::new(WatchPlan::build(project, global));
-    FileWatcher::start(plan, executor.clone(), TEST_DEBOUNCE)
+    FileWatcher::start(plan, executor.clone(), TEST_DEBOUNCE, None)
         .await
         .expect("watcher 应能创建")
 }

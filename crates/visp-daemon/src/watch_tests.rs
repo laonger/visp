@@ -351,7 +351,7 @@ async fn filewatcher_factory_disabled_returns_none() {
     let project = TempDir::new().unwrap();
     let executor = Arc::new(CountingExecutor::default());
 
-    let watcher = start_file_watcher(false, project.path(), None, executor.clone()).await;
+    let watcher = start_file_watcher(false, project.path(), None, executor.clone(), None).await;
 
     assert!(watcher.is_none(), "开关关闭时不应创建 watcher");
     // 返回 None 即未构造 FileWatcher（`visp-fs` watcher 与后台任务唯一创建点在
@@ -371,8 +371,102 @@ async fn filewatcher_factory_enabled_creates_watcher() {
     fs::create_dir_all(project.path().join(".visp/agents")).unwrap();
     let executor = Arc::new(CountingExecutor::default());
 
-    let watcher = start_file_watcher(true, project.path(), None, executor).await;
+    let watcher = start_file_watcher(true, project.path(), None, executor, None).await;
 
     assert!(watcher.is_some(), "开关开启时应创建 watcher");
     watcher.unwrap().stop();
+}
+
+/// 构造一个「不可挂载」降级原因（细则 5）。
+fn unmountable() -> visp_fs::runtime::DegradeReason {
+    visp_fs::runtime::DegradeReason::Unmountable {
+        root: PathBuf::from("/nowhere/watched"),
+    }
+}
+
+/// 修正 3：降级事件 → best-effort 推送一条 `session_id` 为空的汇总 Status 帧。
+#[tokio::test]
+async fn degraded_event_pushes_empty_session_status_frame() {
+    let (msg_tx, msg_rx) = mpsc::unbounded_channel::<WatchMessage>();
+    let (down_tx, mut down_rx) = mpsc::channel::<AgentEventFrame>(8);
+
+    let project = TempDir::new().unwrap();
+    let plan = Arc::new(WatchPlan::build(project.path(), None));
+    let executor = Arc::new(CountingExecutor::default());
+
+    let handle = tokio::spawn(run_loop(
+        msg_rx,
+        plan,
+        executor,
+        Duration::from_millis(20),
+        Some(down_tx),
+    ));
+
+    msg_tx.send(WatchMessage::Degraded(unmountable())).unwrap();
+
+    let frame = tokio::time::timeout(Duration::from_secs(2), down_rx.recv())
+        .await
+        .expect("应在时限内收到降级通知")
+        .expect("下行通道应仍打开");
+    assert_eq!(
+        frame.session_id, "",
+        "降级通知 session_id 必须为空（TUI 路由主 tab 状态行）"
+    );
+    assert!(
+        matches!(frame.event, AgentEvent::StatusUpdate(_)),
+        "降级通知应为 StatusUpdate"
+    );
+
+    drop(msg_tx);
+    let _ = handle.await;
+}
+
+/// 修正 3：通道不可用（未注入）→ 不 panic、不影响消费循环。
+#[tokio::test]
+async fn degraded_without_downlink_does_not_panic_and_keeps_consuming() {
+    let (msg_tx, msg_rx) = mpsc::unbounded_channel::<WatchMessage>();
+
+    let project = TempDir::new().unwrap();
+    let plan = Arc::new(WatchPlan::build(project.path(), None));
+    let executor = Arc::new(CountingExecutor::default());
+
+    let handle = tokio::spawn(run_loop(
+        msg_rx,
+        plan,
+        executor.clone(),
+        Duration::from_millis(20),
+        None,
+    ));
+
+    msg_tx.send(WatchMessage::Degraded(unmountable())).unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert!(!handle.is_finished(), "通道不可用时降级不得终止消费循环");
+
+    // 后续文件事件仍正常驱动重载，证明循环存活且行为不受影响。
+    msg_tx
+        .send(WatchMessage::Event(visp_fs::runtime::FileEvent {
+            path: project.path().join(".visp/rules/a.md"),
+            kind: visp_fs::normalize::EventType::Modified,
+        }))
+        .unwrap();
+    let reloaded = tokio::time::timeout(Duration::from_secs(2), async {
+        while executor.calls.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(reloaded.is_ok(), "降级后消费循环仍应处理文件事件");
+
+    drop(msg_tx);
+    let _ = handle.await;
+}
+
+/// 修正 3：已关闭通道 → `notify_degraded` 静默容忍（best-effort，不 panic）。
+#[test]
+fn notify_degraded_is_best_effort_when_channel_unavailable() {
+    let reason = unmountable();
+    notify_degraded(&None, &reason); // 未注入：静默
+    let (down_tx, down_rx) = mpsc::channel(1);
+    drop(down_rx); // 已关闭
+    notify_degraded(&Some(down_tx), &reason);
 }
