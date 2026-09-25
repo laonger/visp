@@ -84,7 +84,7 @@ async fn consume_events(
         };
 
         let mut batch: HashMap<PathBuf, IndexEvent> = HashMap::new();
-        batch.insert(first.path.clone(), classify(&first.path, first.kind));
+        batch.insert(first.path.clone(), classify(first.kind));
 
         // 收集 debounce 窗口内的后续事件；每次到达都重置窗口。
         let sleep = tokio::time::sleep(DEBOUNCE);
@@ -95,7 +95,7 @@ async fn consume_events(
                 message = rx.recv() => {
                     match message {
                         Some(WatchMessage::Event(event)) => {
-                            batch.insert(event.path.clone(), classify(&event.path, event.kind));
+                            batch.insert(event.path.clone(), classify(event.kind));
                         }
                         Some(WatchMessage::Rescan) => {}
                         Some(WatchMessage::Degraded(reason)) => {
@@ -123,15 +123,13 @@ async fn consume_events(
 
 /// `visp-fs` 事件类型 → 索引器事件类型。
 ///
-/// 额外容错：**递归目标**下覆盖同名路径的原子替换（tmp+rename）时，`visp-fs`
-/// 只投递 `Removed`（设计 §4.3 细则 2a 的存在性探测仅覆盖文件级监听），而路径
-/// 实际仍存在。消费者按 §4.6「删除(同名) + 创建(同名)」语义，将其还原为
-/// 「创建」重插，避免索引因原子替换而丢失该文件。
-fn classify(path: &Path, kind: EventType) -> IndexEvent {
+/// 原子替换（tmp+rename 覆盖同名路径）的「删除(同名) + 创建(同名)」归一化由
+/// `visp-fs` 细则 2a 的存在性探测负责投递 `Created`，此处直接映射即可，不再做
+/// 消费端「`Removed` 且路径存在 ⇒ `Created`」的权宜还原（避免双重投递与语义重复）。
+fn classify(kind: EventType) -> IndexEvent {
     match kind {
         EventType::Created => IndexEvent::Created,
         EventType::Modified => IndexEvent::Modified,
-        EventType::Removed if path.exists() => IndexEvent::Created,
         EventType::Removed => IndexEvent::Removed,
     }
 }
