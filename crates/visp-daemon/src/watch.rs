@@ -84,7 +84,9 @@ impl WatchPlan {
 
         // #1 project 向上每个祖先目录（非递归）：命中 AGENTS.md；
         // project 根这一层另加 `.visp` 子树规则，服务 #6 的降级补挂链。
-        for ancestor in ancestors_inclusive(project) {
+        // 祖先链与加载器共用 `visp_config::agents_md_ancestors`（设计 §5.3），
+        // 边界（git 根 / $HOME / 不向上）单点解析，避免两处漂移。
+        for ancestor in visp_config::agents_md_ancestors(project) {
             let mut rules = vec![child_rule("AGENTS.md", ReloadDomain::Rules)];
             if ancestor == project {
                 rules.push(WatchRule {
@@ -280,17 +282,6 @@ fn child_rule(name: &str, domain: ReloadDomain) -> WatchRule {
         matcher: Matcher::Child(name.to_string()),
         domains: vec![domain],
     }
-}
-
-/// `path` 自身及全部祖先目录（近先远后）。
-fn ancestors_inclusive(path: &Path) -> Vec<PathBuf> {
-    let mut ancestors = Vec::new();
-    let mut current = Some(path);
-    while let Some(dir) = current {
-        ancestors.push(dir.to_path_buf());
-        current = dir.parent();
-    }
-    ancestors
 }
 
 /// 领域重载执行器抽象（设计 §5.6 事件处理管线第 3 步）。

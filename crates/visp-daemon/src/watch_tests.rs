@@ -1,11 +1,13 @@
 //! 监听计划构建测试（步骤 6a）。
 //!
-//! 计划构建是纯函数（只读传入路径的存在性），用 tempdir 构造存在性组合即可，
-//! 不触碰真实 `~/.config/visp`，无需 env 隔离与 `#[serial]`。
+//! 计划构建只读传入路径的存在性与祖先链边界（`.git` 标记 / `$HOME`），用 tempdir
+//! 构造存在性组合即可，不触碰真实 `~/.config/visp`。涉及祖先链边界（尤其 `$HOME`）
+//! 的用例需隔离环境变量，以 `#[serial]` 标注避免并发改写。
 
 use super::*;
 use std::fs;
 
+use serial_test::serial;
 use tempfile::TempDir;
 
 /// 取出指定目录的监听条目。
@@ -173,13 +175,14 @@ fn nine_category_targets_are_declared_for_visp_fs() {
 }
 
 #[test]
+#[serial]
 fn ancestor_chain_is_non_recursive() {
     let base = TempDir::new().unwrap();
     let project = base.path().join("a/b/c");
     fs::create_dir_all(&project).unwrap();
     let plan = WatchPlan::build(&project, None);
 
-    for ancestor in ancestors_inclusive(&project) {
+    for ancestor in visp_config::agents_md_ancestors(&project) {
         assert!(
             !entry(&plan, &ancestor).recursive,
             "祖先 {ancestor:?} 应非递归监听"
@@ -195,6 +198,74 @@ fn ancestor_chain_is_non_recursive() {
     assert_eq!(
         domains(&plan, &project.join(".visp/rules/a.md")),
         Some(vec![ReloadDomain::Rules])
+    );
+}
+
+/// 子步骤 5b：监听计划 #1（祖先链）必须与加载器共用同一套边界解析。
+///
+/// 一致性断言：计划中所有「project 的祖先或自身」条目 == 加载器解析出的祖先链；
+/// 既不能「监听但不加载」，也不能「加载但不监听」。
+#[test]
+#[serial]
+fn watch_plan_ancestor_chain_matches_loader() {
+    let base = TempDir::new().unwrap();
+    let project = base.path().join("a/b/c");
+    fs::create_dir_all(&project).unwrap();
+
+    let plan = WatchPlan::build(&project, None);
+    let expected = visp_config::agents_md_ancestors(&project);
+
+    let actual: Vec<PathBuf> = plan
+        .entries
+        .iter()
+        .filter(|entry| project.starts_with(&entry.dir))
+        .map(|entry| entry.dir.clone())
+        .collect();
+
+    assert_eq!(
+        actual, expected,
+        "监听计划 #1 必须与加载器解析出的祖先链一致"
+    );
+}
+
+/// 子步骤 5b：祖先链止于 git 根（含），计划不含 git 根之上的目录。
+///
+/// `#[serial]` + 短时改写 `HOME`，以复现设计 §5.1 规则 2「项目位于 `$HOME` 之下」
+/// 的上溯路径（否则天然未在 `$HOME` 下，链只含项目层，无法验证 git 边界）。
+#[test]
+#[serial]
+fn watch_plan_stops_at_git_root() {
+    let base = TempDir::new().unwrap();
+    let git_root = base.path().join("repo");
+    let project = git_root.join("pkg/sub");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir(git_root.join(".git")).unwrap();
+
+    let previous = std::env::var_os("HOME");
+    // SAFETY: `#[serial]` 保证本测试独占执行；仅在本构建窗口内重定向 HOME。
+    unsafe { std::env::set_var("HOME", base.path()) };
+    let plan = WatchPlan::build(&project, None);
+    let expected = visp_config::agents_md_ancestors(&project);
+    match previous {
+        Some(value) => unsafe { std::env::set_var("HOME", value) },
+        None => unsafe { std::env::remove_var("HOME") },
+    }
+
+    let actual: Vec<PathBuf> = plan
+        .entries
+        .iter()
+        .filter(|entry| project.starts_with(&entry.dir))
+        .map(|entry| entry.dir.clone())
+        .collect();
+
+    assert_eq!(actual, expected, "监听计划 #1 必须与加载器共用祖先链");
+    assert!(
+        actual.contains(&git_root),
+        "祖先链应包含 git 根层：{actual:?}"
+    );
+    assert!(
+        !actual.contains(&base.path().to_path_buf()),
+        "祖先链不得越过 git 根：{actual:?}"
     );
 }
 
