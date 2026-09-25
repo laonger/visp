@@ -435,6 +435,51 @@ async fn atomic_replace_then_in_place_edit_is_still_observed() {
     watcher.stop();
 }
 
+/// 修正：细则 2a 的存在性探测须覆盖**递归目标**。
+///
+/// 递归子树内、启动前已存在且已监听的文件被 tmp+rename 原子替换后，须补发
+/// 「创建」并把该路径重挂为文件级监听，使随后的原地覆写仍可感知。旧实现对
+/// 该探测仅门控文件级监听，递归目标下新 inode 不被监听 → 后续原地覆写漏检。
+#[tokio::test]
+async fn recursive_target_atomic_replace_then_in_place_edit_is_still_observed() {
+    let dir = tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    let file = sub.join("a.md");
+    std::fs::write(&file, "v1").unwrap(); // 启动前已存在（递归监听覆盖）
+
+    let target = recursive(dir.path(), vec![Include::Extension("md".into())], &[]);
+    let (watcher, mut rx) = start(vec![target]).await.unwrap();
+
+    // tmp + rename 覆盖同名已监听路径（原子替换）。
+    let tmp = sub.join("a.md.tmp");
+    std::fs::write(&tmp, "v2").unwrap();
+    std::fs::rename(&tmp, &file).unwrap();
+
+    assert!(
+        wait_event(&mut rx, Duration::from_secs(5), |m| is_event(
+            m,
+            &file,
+            EventType::Created
+        ))
+        .await,
+        "递归目标下原子替换须由细则 2a 补发创建事件"
+    );
+
+    // 随后原地覆写 → 仍收到「修改」（新 inode 已被细则 2a 重挂）。
+    std::fs::write(&file, "v3").unwrap();
+    assert!(
+        wait_event(&mut rx, Duration::from_secs(5), |m| is_event(
+            m,
+            &file,
+            EventType::Modified
+        ))
+        .await,
+        "递归目标下原子替换后原地覆写仍须可感知"
+    );
+    watcher.stop();
+}
+
 /// 2b#2 细则 1：`watch_not_found` 忽略。
 #[test]
 fn watch_not_found_is_recognized_and_ignored() {

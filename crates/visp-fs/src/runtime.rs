@@ -247,9 +247,21 @@ impl<B: MountBackend, E: Fn(&Path) -> bool> Core<B, E> {
             .any(|target| target.mode == WatchMode::DirectChildren && target.matches(path))
     }
 
-    /// 是否为文件级重挂目标：已监听文件，或直接子级范围内的现存文件。
+    /// 是否为文件级重挂目标（Create / Rename 新名路径的幂等重挂范围）：
+    /// 已监听文件，或直接子级范围内的现存文件。递归目标的普通文件不由此处补挂
+    /// （交由 notify 递归能力），仅细则 2a 的恢复路径会为其补文件级监听。
     fn is_remount_target(&self, path: &Path) -> bool {
         self.files.contains(path) || (self.is_direct_child_scope(path) && path.is_file())
+    }
+
+    /// 细则 2a 的恢复判定：Remove 命中**仍存在**的路径 ⇒ 覆盖同名已监听路径的
+    /// 原子替换（tmp+rename）⇒ 须重挂该路径并补发「创建」。
+    ///
+    /// **不限目标模式**：递归目标下 notify 的文件级监听随旧 inode 失效，且 kqueue
+    /// 目录 diff 不会为仍在 watch 集合内的同名路径补发 Create，故递归目标同样
+    /// 必须由本探测恢复（否则随后该路径的原地编辑全部漏检）。
+    fn should_recover(&self, path: &Path) -> bool {
+        self.files.contains(path) || (self.matches_any(path) && path.is_file())
     }
 
     /// 处理单个后端原始事件：细则 2a 探测 + 归一化 + 必要重挂 + 过滤投递。
@@ -261,7 +273,7 @@ impl<B: MountBackend, E: Fn(&Path) -> bool> Core<B, E> {
         // 补发 Create（该路径仍在 watch 集合内），故这是 kqueue 原子替换的必需恢复路径。
         if let RawEvent::Remove(path) = &raw
             && (self.exists)(path)
-            && self.is_remount_target(path)
+            && self.should_recover(path)
         {
             self.remount_file(path);
             if self.matches_any(path) {
@@ -449,7 +461,10 @@ impl<B: MountBackend, E: Fn(&Path) -> bool> Core<B, E> {
         Err(MAX_MOUNT_ATTEMPTS)
     }
 
-    /// 直接子级目标下当前存在的匹配文件集合。
+    /// 直接子级目标下当前存在的匹配文件集合，并保留细则 2a 恢复的递归目标文件。
+    ///
+    /// 保留项判定为「仍存在且命中任一目标」：使 2a 为重挂单个文件（而非整棵递归根）
+    /// 补上的文件级监听不会被随后的收敛误判为 stale 而卸载。
     fn desired_files(&self) -> HashSet<PathBuf> {
         let mut files = HashSet::new();
         for target in &self.targets {
@@ -468,6 +483,11 @@ impl<B: MountBackend, E: Fn(&Path) -> bool> Core<B, E> {
                 if is_file && target.matches(&path) {
                     files.insert(path);
                 }
+            }
+        }
+        for path in &self.files {
+            if (self.exists)(path) && self.matches_any(path) {
+                files.insert(path.clone());
             }
         }
         files
