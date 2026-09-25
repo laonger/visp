@@ -4889,6 +4889,12 @@ dependencies = [
 [[package]]
 name = "visp-fs"
 version = "0.5.1"
+dependencies = [
+ "notify",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "visp-llm"
