@@ -16,10 +16,10 @@ visp-db = { path = "../visp-db" }
 visp-mcp = { path = "../visp-mcp" }
 visp-agent = { path = "../visp-agent" }
 visp-config = { path = "../visp-config" }
+visp-fs = { path = "../visp-fs" }
 serde.workspace = true
 serde_json.workspace = true
 arc-swap.workspace = true
-notify.workspace = true
 async-trait.workspace = true
 tonic.workspace = true
 prost.workspace = true

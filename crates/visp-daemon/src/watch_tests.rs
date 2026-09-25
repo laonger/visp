@@ -98,6 +98,81 @@ fn nine_category_paths_map_to_domains() {
 }
 
 #[test]
+fn nine_category_targets_are_declared_for_visp_fs() {
+    let (project, global) = full_setup();
+    let plan = WatchPlan::build(project.path(), Some(global.path()));
+    let targets = plan.fs_targets();
+
+    let find = |root: &Path| {
+        targets
+            .iter()
+            .find(|target| target.root.as_path() == root)
+            .unwrap_or_else(|| panic!("缺少监听目标 {root:?}"))
+    };
+
+    // project 根合并了「AGENTS.md + `.visp` 前缀」两条包含（非递归）。
+    let project_root = find(project.path());
+    assert_eq!(project_root.mode, WatchMode::DirectChildren);
+    assert!(
+        project_root
+            .filter
+            .includes
+            .contains(&Include::FileName("AGENTS.md".into()))
+    );
+    assert!(
+        project_root
+            .filter
+            .includes
+            .contains(&Include::Prefix(PathBuf::from(".visp")))
+    );
+    assert!(project_root.filter.excludes.is_empty());
+
+    // 全局根与项目 `.visp` 根：按子目录名分流（非递归）。
+    let global_root = find(global.path());
+    assert_eq!(global_root.mode, WatchMode::DirectChildren);
+    for name in ["AGENTS.md", "rules", "agents", "skills"] {
+        assert!(
+            global_root
+                .filter
+                .includes
+                .contains(&Include::FileName(name.into()))
+        );
+    }
+    let visp = find(&project.path().join(".visp"));
+    assert_eq!(visp.mode, WatchMode::DirectChildren);
+    for name in ["rules", "agents", "skills"] {
+        assert!(
+            visp.filter
+                .includes
+                .contains(&Include::FileName(name.into()))
+        );
+    }
+
+    // 递归目标：rules/agents 按 `.md` 过滤，skills 全部包含（空包含集）。
+    for root in [
+        global.path().join("rules"),
+        global.path().join("agents"),
+        project.path().join(".visp/rules"),
+        project.path().join(".visp/agents"),
+    ] {
+        let target = find(&root);
+        assert_eq!(target.mode, WatchMode::Recursive);
+        assert_eq!(
+            target.filter.includes,
+            vec![Include::Extension("md".into())]
+        );
+    }
+    for root in [
+        global.path().join("skills"),
+        project.path().join(".visp/skills"),
+    ] {
+        let target = find(&root);
+        assert_eq!(target.mode, WatchMode::Recursive);
+        assert!(target.filter.includes.is_empty(), "skills 目标应全部包含");
+    }
+}
+
+#[test]
 fn ancestor_chain_is_non_recursive() {
     let base = TempDir::new().unwrap();
     let project = base.path().join("a/b/c");
@@ -148,9 +223,7 @@ fn fresh_project_without_visp_uses_root_fallback() {
     );
 
     // `.visp` 尚不存在，但计划中已保留其递归目标（供运行中补挂 + 重扫）。
-    let visp_agents = entry(&plan, &project.join(".visp/agents"));
-    assert!(visp_agents.recursive);
-    assert_eq!(visp_agents.rescan_domains, vec![ReloadDomain::Agents]);
+    assert!(entry(&plan, &project.join(".visp/agents")).recursive);
 }
 
 #[test]
@@ -272,7 +345,7 @@ impl ReloadExecutor for CountingExecutor {
     }
 }
 
-/// 步骤 6d：开关关闭 → 工厂返回「未创建」，不构造 notify watcher、不起后台任务。
+/// 步骤 6d：开关关闭 → 工厂返回「未创建」，不构造 watcher、不起后台任务。
 #[tokio::test]
 async fn filewatcher_factory_disabled_returns_none() {
     let project = TempDir::new().unwrap();
@@ -281,7 +354,7 @@ async fn filewatcher_factory_disabled_returns_none() {
     let watcher = start_file_watcher(false, project.path(), None, executor.clone()).await;
 
     assert!(watcher.is_none(), "开关关闭时不应创建 watcher");
-    // 返回 None 即未构造 FileWatcher（notify watcher 与后台任务唯一创建点在
+    // 返回 None 即未构造 FileWatcher（`visp-fs` watcher 与后台任务唯一创建点在
     // FileWatcher::start），假体执行器在整个窗口内零调用。
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(

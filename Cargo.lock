@@ -4765,7 +4765,6 @@ dependencies = [
 name = "visp-codegraph"
 version = "0.5.1"
 dependencies = [
- "notify",
  "rusqlite",
  "tempfile",
  "tokio",
@@ -4777,6 +4776,7 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-typescript",
  "visp-core",
+ "visp-fs",
  "walkdir",
 ]
 
@@ -4841,7 +4841,6 @@ dependencies = [
  "async-trait",
  "dashmap",
  "futures",
- "notify",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
@@ -4868,6 +4867,7 @@ dependencies = [
  "visp-context",
  "visp-core",
  "visp-db",
+ "visp-fs",
  "visp-llm",
  "visp-mcp",
  "visp-proto",

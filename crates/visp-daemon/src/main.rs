@@ -648,7 +648,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("shutdown signal received, stopping server");
 
     // 先停 watcher：关闭路径上不再有 reload 触发（设计 §5.6 生命周期）。
-    // stop 为尽力而为（abort 后台任务 + drop notify watcher），不阻断后续 shutdown。
+    // stop 为尽力而为（abort 后台任务 + 释放监听），不阻断后续 shutdown。
     if let Some(watcher) = file_watcher {
         watcher.stop();
     }

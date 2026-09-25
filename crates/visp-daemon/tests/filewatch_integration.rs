@@ -55,6 +55,8 @@ async fn wait_until(predicate: impl Fn() -> bool, timeout: Duration) -> bool {
     }
 }
 
+/// 构造监听：`WatchPlan` 经 [`FileWatcher::start`] 翻译为 `visp-fs` 目标后启动，
+/// 与生产路径完全一致。
 async fn start(project: &Path, global: Option<&Path>, executor: &Arc<FakeExecutor>) -> FileWatcher {
     let plan = Arc::new(WatchPlan::build(project, global));
     FileWatcher::start(plan, executor.clone(), TEST_DEBOUNCE)
@@ -95,11 +97,14 @@ async fn writing_agents_md_triggers_rules_reload() {
 #[tokio::test]
 async fn rapid_writes_are_debounced_into_one_reload() {
     let project = TempDir::new().unwrap();
+    // 文件在监听启动前已存在（计划备注 3）：否则 kqueue 会对新建文件自动补挂，
+    // 「原地覆写」盲区被掩盖。
+    let agents_md = project.path().join("AGENTS.md");
+    fs::write(&agents_md, "initial").unwrap();
     let executor = Arc::new(FakeExecutor::default());
     let watcher = start(project.path(), None, &executor).await;
     settle_backend().await;
 
-    let agents_md = project.path().join("AGENTS.md");
     for index in 0..5 {
         fs::write(&agents_md, format!("content {index}")).unwrap();
     }
@@ -114,6 +119,38 @@ async fn rapid_writes_are_debounced_into_one_reload() {
         executor.call_count(),
         1,
         "窗口内多写应合并为单次重载：{:?}",
+        executor.calls()
+    );
+    watcher.stop();
+}
+
+/// 计划 3a 测试 3：**启动前已存在**文件的原地覆写必须产生事件。
+///
+/// 修正既有 `rapid_writes_are_debounced_into_one_reload` 掩蔽的盲区——kqueue 非递归
+/// 目录监听不上报已存在文件的内容修改，必须依赖 `visp-fs` 的文件级监听。
+#[tokio::test]
+async fn in_place_overwrite_of_preexisting_file_produces_event() {
+    let project = TempDir::new().unwrap();
+    let agents_md = project.path().join("AGENTS.md");
+    fs::write(&agents_md, "initial").unwrap();
+
+    let executor = Arc::new(FakeExecutor::default());
+    let watcher = start(project.path(), None, &executor).await;
+    settle_backend().await;
+
+    // 原地覆写（非原子替换）：文件路径未变、inode 未变。
+    fs::write(&agents_md, "overwritten").unwrap();
+
+    assert!(
+        wait_until(
+            || executor
+                .calls()
+                .iter()
+                .any(|domains| domains.contains(&ReloadDomain::Rules)),
+            Duration::from_secs(5)
+        )
+        .await,
+        "启动前已存在文件的原地覆写应触发 rules 重载：{:?}",
         executor.calls()
     );
     watcher.stop();

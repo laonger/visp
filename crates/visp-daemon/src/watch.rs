@@ -1,18 +1,20 @@
-//! daemon 文件监听模块（设计 §5.6）。
+//! daemon 文件监听模块（设计 §5.6；已迁移至共享模块 `visp-fs`，设计 §4.7）。
 //!
 //! 分两层：
-//! - [`WatchPlan`]：启动时一次性构建的监听计划（纯构建 + 纯匹配，步骤 6a）；
-//! - 运行时（步骤 6b）：基于 `notify` 多路径挂载、按领域 debounce、缺目录补挂
-//!   与已监听路径去重。
+//! - [`WatchPlan`]：启动时一次性构建的**领域监听计划**（纯构建 + 纯匹配）；
+//! - 运行时：把计划翻译为 [`WatchTarget`] 交 `visp-fs` 完成挂载、事件归一化、
+//!   缺目录补挂与去重；daemon 侧只保留**领域分类**与**按领域 debounce 聚合**。
 //!
 //! 计划构建与事件匹配不触碰任何全局状态，测试用 tempdir 构造存在性组合即可覆盖。
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
+use tokio::sync::mpsc::UnboundedReceiver;
+
+use visp_fs::runtime::{FsWatcher, WatchMessage, start as start_fs};
+use visp_fs::target::{FilterRules, Include, WatchMode, WatchTarget};
 
 use crate::reload::{ReloadCore, ReloadDomain, ReloadItem};
 
@@ -25,7 +27,8 @@ pub const DEBOUNCE: Duration = Duration::from_millis(200);
 /// 监听计划（设计 §5.6 九行表）：路径全集 + 每路径监听模式 + 过滤规则 + 领域映射。
 ///
 /// `entries` 是全部**希望**监听的目录，含启动时尚不存在、运行中补挂的目标；
-/// 运行时按存在性决定实际挂载（缺目录降级链的执行层落实）。
+/// 实际挂载由 [`WatchPlan::fs_targets`] 翻译为 `visp-fs` 目标后交给它执行，
+/// daemon 侧只依据 [`WatchPlan::classify`] 做领域映射。
 #[derive(Debug, Clone, Default)]
 pub struct WatchPlan {
     pub entries: Vec<WatchEntry>,
@@ -40,11 +43,6 @@ pub struct WatchEntry {
     pub recursive: bool,
     /// 该目录下事件 → 领域的过滤规则。
     pub rules: Vec<WatchRule>,
-    /// 该目录被动态补挂时需立即重扫的领域。
-    ///
-    /// 补挂后立即重扫是 kqueue 递归监听竞态窗口的兜底（设计 §5.6 缓解一）。
-    /// 祖先目录 / 全局根 / 项目 `.visp` 等结构性目录无领域语义，故为空。
-    pub rescan_domains: Vec<ReloadDomain>,
 }
 
 /// 路径过滤规则（设计 §5.6 表格「路径过滤」列）。
@@ -69,7 +67,7 @@ pub enum Matcher {
 }
 
 /// 一次事件分类结果。`domains` 为空表示「事件相关但暂不直接命中领域」，
-/// 例如 `.visp` 目录本身创建——仍需触发补挂校准（设计 §5.6 缺目录降级链）。
+/// 例如 `.visp` 目录本身创建——补挂由 `visp-fs` 承担，daemon 侧不因此发起重载。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Classification {
     pub domains: Vec<ReloadDomain>,
@@ -93,7 +91,7 @@ impl WatchPlan {
                     domains: Vec::new(),
                 });
             }
-            plan.push_entry(ancestor, false, rules, Vec::new());
+            plan.push_entry(ancestor, false, rules);
         }
 
         // #2 全局配置根（非递归）：顶层 AGENTS.md + rules/agents/skills 子目录事件分流。
@@ -104,7 +102,7 @@ impl WatchPlan {
                 child_rule("agents", ReloadDomain::Agents),
                 child_rule("skills", ReloadDomain::Skills),
             ];
-            plan.push_entry(global.to_path_buf(), false, rules, Vec::new());
+            plan.push_entry(global.to_path_buf(), false, rules);
 
             // #3/#4/#5 全局 rules/agents/skills（递归）。
             plan.push_recursive(global.join("rules"), ReloadDomain::Rules, false);
@@ -119,7 +117,7 @@ impl WatchPlan {
             child_rule("agents", ReloadDomain::Agents),
             child_rule("skills", ReloadDomain::Skills),
         ];
-        plan.push_entry(visp.clone(), false, visp_rules, Vec::new());
+        plan.push_entry(visp.clone(), false, visp_rules);
 
         // #7/#8/#9 项目 rules/agents/skills（递归）。
         plan.push_recursive(visp.join("rules"), ReloadDomain::Rules, false);
@@ -157,24 +155,39 @@ impl WatchPlan {
         matched.then_some(Classification { domains })
     }
 
+    /// 翻译为 `visp-fs` 的目标声明（设计 §4.7：监听计划构建下沉 `visp-fs`）。
+    ///
+    /// 模式由条目 `recursive` 决定；包含规则由匹配器翻译（[`Matcher::Any`] 表达为
+    /// 「空包含集 = 全部包含」）；排除集为空——daemon 的排除语义由「不命中任何
+    /// 包含规则」表达。
+    pub fn fs_targets(&self) -> Vec<WatchTarget> {
+        self.entries
+            .iter()
+            .map(|entry| WatchTarget {
+                root: entry.dir.clone(),
+                mode: if entry.recursive {
+                    WatchMode::Recursive
+                } else {
+                    WatchMode::DirectChildren
+                },
+                filter: FilterRules {
+                    includes: includes_for(&entry.rules),
+                    excludes: Vec::new(),
+                },
+            })
+            .collect()
+    }
+
     /// 合并写入一个监听条目（同目录去重，递归模式向上取或）。
-    fn push_entry(
-        &mut self,
-        dir: PathBuf,
-        recursive: bool,
-        rules: Vec<WatchRule>,
-        rescan_domains: Vec<ReloadDomain>,
-    ) {
+    fn push_entry(&mut self, dir: PathBuf, recursive: bool, rules: Vec<WatchRule>) {
         if let Some(existing) = self.entries.iter_mut().find(|entry| entry.dir == dir) {
             existing.recursive |= recursive;
             existing.rules.extend(rules);
-            existing.rescan_domains.extend(rescan_domains);
         } else {
             self.entries.push(WatchEntry {
                 dir,
                 recursive,
                 rules,
-                rescan_domains,
             });
         }
     }
@@ -193,9 +206,35 @@ impl WatchPlan {
                 matcher,
                 domains: vec![domain],
             }],
-            vec![domain],
         );
     }
+}
+
+/// 汇总一组领域规则的包含条件（去重；空集表示「全部包含」）。
+///
+/// [`Matcher::VispSubtree`] 对应 `.visp` 子树前缀（仅用于结构性事件命中，
+/// 领域分流仍由 daemon 侧 `classify` 决定）。
+fn includes_for(rules: &[WatchRule]) -> Vec<Include> {
+    // `Any` 语义是「全部包含」，空包含集恰好表达该语义。
+    if rules
+        .iter()
+        .any(|rule| matches!(rule.matcher, Matcher::Any))
+    {
+        return Vec::new();
+    }
+    let mut includes: Vec<Include> = Vec::new();
+    for rule in rules {
+        let include = match &rule.matcher {
+            Matcher::Child(name) => Include::FileName(name.clone()),
+            Matcher::Extension(ext) => Include::Extension(ext.clone()),
+            Matcher::Any => continue,
+            Matcher::VispSubtree => Include::Prefix(PathBuf::from(".visp")),
+        };
+        if !includes.contains(&include) {
+            includes.push(include);
+        }
+    }
+    includes
 }
 
 impl WatchRule {
@@ -281,78 +320,53 @@ impl ReloadExecutor for CoreReloadExecutor {
     }
 }
 
-/// 文件监听运行时（步骤 6b）。
+/// 文件监听运行时（设计 §5.6；迁移后 §4.7）。
 ///
-/// 多路径挂载 [`WatchPlan`] → 回调线程过滤 → 后台任务按领域 debounce →
-/// 补挂缺目录 → 调用 [`ReloadExecutor`]。`stop` 中止后台任务并 drop watcher。
+/// 挂载、归一化、缺目录补挂、去重由 `visp-fs` 承担；本层消费其消息做领域分类，
+/// 并按领域窗口重置式 debounce 聚合后调用 [`ReloadExecutor`]。
 pub struct FileWatcher {
-    watcher: Arc<StdMutex<RecommendedWatcher>>,
+    watcher: FsWatcher,
     task: tokio::task::JoinHandle<()>,
 }
 
 impl FileWatcher {
     /// 启动监听。
     ///
-    /// 初始挂载计划中已存在的目录；个别挂载失败（如祖先层权限不足）降级为
-    /// 跳过 + warn，不阻断启动（设计 §5.6）。缺目录由运行中补挂链覆盖。
+    /// 把领域监听计划翻译为 `visp-fs` 目标：目标根不存在时由 `visp-fs` 降级监听
+    /// 最近存在祖先并在根出现后补挂（设计 G5）；根 / 最近祖先级挂载失败由
+    /// `visp-fs` 显式上报降级，本层仅记录，不阻断启动。
     pub async fn start(
         plan: Arc<WatchPlan>,
         executor: Arc<dyn ReloadExecutor>,
         debounce: Duration,
-    ) -> Result<Self, notify::Error> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<ReloadDomain>>();
+    ) -> Result<Self, String> {
+        let (watcher, messages) = start_fs(plan.fs_targets())
+            .await
+            .map_err(|error| error.to_string())?;
 
-        let callback_plan = plan.clone();
-        let watcher =
-            notify::recommended_watcher(move |result: Result<notify::Event, notify::Error>| {
-                let Ok(event) = result else {
-                    return;
-                };
-                for path in event.paths {
-                    if let Some(classification) = callback_plan.classify(&path) {
-                        let _ = tx.send(classification.domains);
-                    }
-                }
-            })?;
-        let watcher = Arc::new(StdMutex::new(watcher));
-
-        let mut mounted: HashSet<PathBuf> = HashSet::new();
-        for entry in &plan.entries {
-            if !entry.dir.exists() {
-                continue;
-            }
-            if mount(&watcher, &entry.dir, entry.recursive).is_ok() {
-                mounted.insert(entry.dir.clone());
-            } else {
-                tracing::warn!(dir = %entry.dir.display(), "文件监听挂载失败，跳过该目录");
-            }
-        }
-
-        let task_watcher = watcher.clone();
         let task_plan = plan.clone();
         let task = tokio::spawn(async move {
-            run_loop(rx, task_watcher, task_plan, executor, debounce, mounted).await;
+            run_loop(messages, task_plan, executor, debounce).await;
         });
 
         Ok(Self { watcher, task })
     }
 
-    /// 停止监听：中止后台任务并释放 notify watcher。
+    /// 停止监听：中止后台任务并释放全部监听。
     pub fn stop(self) {
         self.task.abort();
-        drop(self.watcher);
+        self.watcher.stop();
     }
 }
 
 /// 文件监听工厂入口（步骤 6d）。
 ///
-/// 开关关闭时返回 `None`——**不构造 notify watcher、不起后台任务**，自动热重载
-/// 整体失效、退回纯显式 `/reload` 形态（设计 §7 决策 12、§9 唯一回滚入口）。
+/// 开关关闭时返回 `None`——**不构造 watcher、不起后台任务**，自动热重载整体失效、
+/// 退回纯显式 `/reload` 形态（设计 §7 决策 12、§9 唯一回滚入口）。
 ///
-/// 开启时按 [`WatchPlan::build`] 构建监听计划并创建 [`FileWatcher`]，执行器由
-/// 调用方注入（生产路径传 [`CoreReloadExecutor`]，其委托共享 [`ReloadCore`]，
-/// 通知句柄已含于核心的下行通道）。notify watcher 构造失败降级为 `None` + warn，
-/// 不阻断 daemon 启动。
+/// 开启时按 [`WatchPlan::build`] 构建监听计划并创建 [`FileWatcher`]，执行器由调用方
+/// 注入（生产路径传 [`CoreReloadExecutor`]，其委托共享 [`ReloadCore`]，通知句柄已含
+/// 于核心的下行通道）。watcher 构造失败降级为 `None` + warn，不阻断 daemon 启动。
 pub async fn start_file_watcher(
     enabled: bool,
     project: &Path,
@@ -374,53 +388,46 @@ pub async fn start_file_watcher(
     }
 }
 
-/// 后台任务：窗口重置式 debounce + 补挂校准 + 领域重载。
+/// 重扫信号触发的全量重扫领域集合（设计 §4.2 P2-I：daemon 具备全量重扫能力）。
+const FULL_RESCAN_DOMAINS: [ReloadDomain; 3] = [
+    ReloadDomain::Rules,
+    ReloadDomain::Skills,
+    ReloadDomain::Agents,
+];
+
+/// 后台任务：窗口重置式 debounce + 领域聚合 + 重扫信号处理。
 async fn run_loop(
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<Vec<ReloadDomain>>,
-    watcher: Arc<StdMutex<RecommendedWatcher>>,
+    mut messages: UnboundedReceiver<WatchMessage>,
     plan: Arc<WatchPlan>,
     executor: Arc<dyn ReloadExecutor>,
     debounce: Duration,
-    mut mounted: HashSet<PathBuf>,
 ) {
-    while let Some(first) = rx.recv().await {
-        let mut domains = first;
+    while let Some(first) = messages.recv().await {
+        let mut domains: Vec<ReloadDomain> = Vec::new();
+        let mut rescan_all = false;
+        collect(first, &plan, &mut domains, &mut rescan_all);
 
-        // 开窗：首个事件起算，窗口内每来事件重置计时、合并领域（按领域聚合）。
+        // 开窗：首个事件起算，窗口内每来消息重置计时、合并领域（按领域聚合）。
         let sleep = tokio::time::sleep(debounce);
         tokio::pin!(sleep);
         loop {
             tokio::select! {
                 biased;
-                Some(more) = rx.recv() => {
-                    for domain in more {
-                        if !domains.contains(&domain) {
-                            domains.push(domain);
-                        }
-                    }
+                Some(message) = messages.recv() => {
+                    collect(message, &plan, &mut domains, &mut rescan_all);
                     sleep.as_mut().reset(tokio::time::Instant::now() + debounce);
                 }
                 _ = &mut sleep => break,
             }
         }
 
-        // 补挂校准：新出现的目录立刻挂载，并补该领域一次重扫标记
-        // （kqueue 递归监听竞态兜底，设计 §5.6 缓解一）；已删除目录移出集合，
-        // 使重建时可再次补挂且不重复挂载（缓解二）。
-        for entry in &plan.entries {
-            if entry.dir.exists() {
-                if !mounted.contains(&entry.dir)
-                    && mount(&watcher, &entry.dir, entry.recursive).is_ok()
-                {
-                    mounted.insert(entry.dir.clone());
-                    for domain in &entry.rescan_domains {
-                        if !domains.contains(domain) {
-                            domains.push(*domain);
-                        }
-                    }
+        // 重扫信号（G5）：补挂竞态窗口内的事件可能丢失，且信号不带领域——daemon 属
+        // 「收到事件即全量读盘重建」的消费者，故对全部领域做一次全量重扫（幂等）。
+        if rescan_all {
+            for domain in FULL_RESCAN_DOMAINS {
+                if !domains.contains(&domain) {
+                    domains.push(domain);
                 }
-            } else {
-                mounted.remove(&entry.dir);
             }
         }
 
@@ -430,18 +437,29 @@ async fn run_loop(
     }
 }
 
-/// 以指定模式挂载单个目录。
-fn mount(
-    watcher: &StdMutex<RecommendedWatcher>,
-    dir: &Path,
-    recursive: bool,
-) -> Result<(), notify::Error> {
-    let mode = if recursive {
-        RecursiveMode::Recursive
-    } else {
-        RecursiveMode::NonRecursive
-    };
-    watcher.lock().unwrap().watch(dir, mode)
+/// 把一条 `visp-fs` 消息并入当前 debounce 窗口的领域聚合。
+fn collect(
+    message: WatchMessage,
+    plan: &WatchPlan,
+    domains: &mut Vec<ReloadDomain>,
+    rescan_all: &mut bool,
+) {
+    match message {
+        WatchMessage::Event(event) => {
+            if let Some(classification) = plan.classify(&event.path) {
+                for domain in classification.domains {
+                    if !domains.contains(&domain) {
+                        domains.push(domain);
+                    }
+                }
+            }
+        }
+        WatchMessage::Rescan => *rescan_all = true,
+        // 细则 5：根 / 最近祖先级不可挂载——显式记录，不静默。
+        WatchMessage::Degraded(reason) => {
+            tracing::warn!(?reason, "文件监听降级：目标目录不可挂载");
+        }
+    }
 }
 
 #[cfg(test)]
