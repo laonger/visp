@@ -1,0 +1,4 @@
+[package]
+name = "visp-fs"
+version.workspace = true
+edition.workspace = true

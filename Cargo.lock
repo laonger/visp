@@ -4887,6 +4887,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "visp-fs"
+version = "0.5.1"
+
+[[package]]
 name = "visp-llm"
 version = "0.5.1"
 dependencies = [
