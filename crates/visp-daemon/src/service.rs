@@ -20,6 +20,7 @@ use visp_core::{
     tool::ToolContext,
     tool_registry::ToolRegistry,
 };
+use visp_daemon::bus::EventBus;
 use visp_daemon::reload::{ReloadCore, ReloadDomain, ReloadItem};
 use visp_mcp::manager::McpManager;
 use visp_proto::visp::{self as proto, coder_daemon_server::CoderDaemon};
@@ -138,9 +139,8 @@ pub struct CoderDaemonService {
     /// 向 Orchestrator 发送取消信号
     #[allow(dead_code)]
     cancel_tx: mpsc::Sender<visp_agent::orchestrator::CancelSignal>,
-    /// 从 Orchestrator 接收 AgentEventFrame（转发给 CLI），用 Mutex<Option> 允许 take
-    orchestrator_grpc_rx:
-        std::sync::Mutex<Option<mpsc::Receiver<visp_core::agent::AgentEventFrame>>>,
+    /// 显示面事件总线：每个 Chat 连接 `subscribe()` 独立订阅（设计 §5 D3）。
+    bus: Arc<EventBus>,
     /// 向 Orchestrator 发送 ClientMessage（CLI 输入）
     client_tx: mpsc::Sender<visp_agent::orchestrator::ClientMessage>,
 }
@@ -163,7 +163,7 @@ impl CoderDaemonService {
         mcp_manager: Arc<McpManager>,
         available_models: Vec<String>,
         cancel_tx: mpsc::Sender<visp_agent::orchestrator::CancelSignal>,
-        orchestrator_grpc_rx: mpsc::Receiver<visp_core::agent::AgentEventFrame>,
+        bus: Arc<EventBus>,
         client_tx: mpsc::Sender<visp_agent::orchestrator::ClientMessage>,
     ) -> Result<Self, String> {
         // 查找默认模型（匹配 {provider}/{name} 或 {provider}/{model} 格式）
@@ -241,7 +241,7 @@ impl CoderDaemonService {
             model_configs,
             model_config_keys,
             cancel_tx,
-            orchestrator_grpc_rx: std::sync::Mutex::new(Some(orchestrator_grpc_rx)),
+            bus,
             client_tx,
         })
     }
@@ -425,13 +425,8 @@ impl CoderDaemon for CoderDaemonService {
         let mut in_stream = request.into_inner();
         let (tx, rx) = mpsc::channel::<Result<proto::ServerMessage, Status>>(128);
 
-        // Take the orchestrator receiver (one per connection)
-        let mut orchestrator_rx = self
-            .orchestrator_grpc_rx
-            .lock()
-            .unwrap()
-            .take()
-            .ok_or_else(|| Status::internal("orchestrator receiver already taken"))?;
+        // 每连接独立订阅事件总线（无 take，重连天然允许）。
+        let mut bus_rx = self.bus.subscribe();
 
         // Clone channels for the two forwarding tasks
         let client_tx = self.client_tx.clone();
@@ -880,7 +875,17 @@ impl CoderDaemon for CoderDaemonService {
         // ── Outbound: Orchestrator → CLI ──
         let pending_outbound = pending_queries.clone();
         tokio::spawn(async move {
-            while let Some(frame) = orchestrator_rx.recv().await {
+            loop {
+                let envelope = match bus_rx.recv().await {
+                    Ok(envelope) => envelope,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        // replay 属 1a-3；本步仅记日志并继续，绝不 break。
+                        tracing::warn!(skipped, "chat 订阅者滞后，已丢弃最旧帧");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
+                let frame = envelope.frame;
                 let sid = frame.session_id.clone();
                 match frame.event {
                     AgentEvent::UserQuery {
@@ -1587,7 +1592,6 @@ mod tests {
         reload_core: Arc<ReloadCore>,
     ) -> CoderDaemonService {
         let (cancel_tx, _cancel_rx) = mpsc::channel(16);
-        let (_grpc_tx, orchestrator_grpc_rx) = mpsc::channel(256);
         let (client_tx, _client_rx) = mpsc::channel(64);
         CoderDaemonService {
             provider: Arc::new(StdRwLock::new(
@@ -1608,7 +1612,7 @@ mod tests {
             model_configs: vec![],
             model_config_keys: vec![],
             cancel_tx,
-            orchestrator_grpc_rx: std::sync::Mutex::new(Some(orchestrator_grpc_rx)),
+            bus: Arc::new(EventBus::new()),
             client_tx,
         }
     }
@@ -1616,6 +1620,14 @@ mod tests {
     fn make_service(mgr: StdArc<SessionManager>) -> CoderDaemonService {
         let (rule_engine, reload_core) = build_reload_core(Path::new("/tmp"));
         make_service_with_core(mgr, rule_engine, reload_core)
+    }
+
+    /// 构造 service 并暴露其总线句柄，供 Chat 订阅语义测试发布帧。
+    fn make_service_with_bus(mgr: StdArc<SessionManager>) -> (CoderDaemonService, Arc<EventBus>) {
+        let mut service = make_service(mgr);
+        let bus = Arc::new(EventBus::new());
+        service.bus = bus.clone();
+        (service, bus)
     }
 
     /// 隔离全局配置的测试环境：`VISP_CONFIG_DIR` → 临时空目录，drop 时还原。
@@ -1896,7 +1908,6 @@ mod tests {
             ..LlmConfig::default()
         };
         let (cancel_tx, _cancel_rx) = mpsc::channel(16);
-        let (_grpc_tx, orchestrator_grpc_rx) = mpsc::channel(256);
         let (client_tx, _client_rx) = mpsc::channel(64);
         let service = CoderDaemonService {
             provider: Arc::new(StdRwLock::new(
@@ -1917,7 +1928,7 @@ mod tests {
             model_configs: vec![],
             model_config_keys: vec![],
             cancel_tx,
-            orchestrator_grpc_rx: std::sync::Mutex::new(Some(orchestrator_grpc_rx)),
+            bus: Arc::new(EventBus::new()),
             client_tx,
         };
 
@@ -1947,7 +1958,6 @@ mod tests {
             ..LlmConfig::default()
         };
         let (cancel_tx, _cancel_rx) = mpsc::channel(16);
-        let (_grpc_tx, orchestrator_grpc_rx) = mpsc::channel(256);
         let (client_tx, _client_rx) = mpsc::channel(64);
         let service = CoderDaemonService {
             provider: Arc::new(StdRwLock::new(
@@ -1968,7 +1978,7 @@ mod tests {
             model_configs: vec![],
             model_config_keys: vec![],
             cancel_tx,
-            orchestrator_grpc_rx: std::sync::Mutex::new(Some(orchestrator_grpc_rx)),
+            bus: Arc::new(EventBus::new()),
             client_tx,
         };
 
@@ -2017,7 +2027,6 @@ mod tests {
             ..LlmConfig::default()
         };
         let (cancel_tx, _cancel_rx) = mpsc::channel(16);
-        let (_grpc_tx, orchestrator_grpc_rx) = mpsc::channel(256);
         let (client_tx, _client_rx) = mpsc::channel(64);
         let service = CoderDaemonService {
             provider: Arc::new(StdRwLock::new(
@@ -2044,7 +2053,7 @@ mod tests {
             model_configs: vec![mc],
             model_config_keys: vec!["TestProvider/TestModel".into()],
             cancel_tx,
-            orchestrator_grpc_rx: std::sync::Mutex::new(Some(orchestrator_grpc_rx)),
+            bus: Arc::new(EventBus::new()),
             client_tx,
         };
 
@@ -2091,7 +2100,6 @@ mod tests {
             extra: HashMap::new(),
         };
         let (cancel_tx, _cancel_rx) = mpsc::channel(16);
-        let (_grpc_tx, orchestrator_grpc_rx) = mpsc::channel(256);
         let (client_tx, _client_rx) = mpsc::channel(64);
         let service = CoderDaemonService {
             provider: Arc::new(StdRwLock::new(
@@ -2118,7 +2126,7 @@ mod tests {
             model_configs: vec![mc],
             model_config_keys: vec!["TestProvider/TestModel".into()],
             cancel_tx,
-            orchestrator_grpc_rx: std::sync::Mutex::new(Some(orchestrator_grpc_rx)),
+            bus: Arc::new(EventBus::new()),
             client_tx,
         };
 
@@ -3905,5 +3913,197 @@ mod tests {
                 .contains("field-wired"),
             "service.rule_engine 应指向核心重载的同一引擎"
         );
+    }
+
+    // ── 1a-2：Chat 显示面改为事件总线订阅 ──────────────────────────────
+
+    /// 构造一个空入站流（无 ClientMessage）的 Chat 请求：入站任务立即结束，
+    /// 出站任务仍持有响应发送端，订阅随 `chat()` 调用建立。
+    fn empty_chat_request() -> Request<Streaming<proto::ClientMessage>> {
+        use tonic::codec::{Codec, ProstCodec};
+        let mut codec = ProstCodec::<proto::ServerMessage, proto::ClientMessage>::default();
+        let decoder = codec.decoder();
+        let stream = Streaming::new_request(decoder, tonic::body::Body::empty(), None, None);
+        Request::new(stream)
+    }
+
+    fn bus_text_frame(text: &str, session_id: &str) -> visp_core::agent::AgentEventFrame {
+        visp_core::agent::AgentEventFrame {
+            event: AgentEvent::TextDelta(text.to_string()),
+            session_id: session_id.to_string(),
+            agent_name: "agent".to_string(),
+            parent_session_id: None,
+            parent_session_name: None,
+        }
+    }
+
+    fn status_frame() -> visp_core::agent::AgentEventFrame {
+        visp_core::agent::AgentEventFrame {
+            event: AgentEvent::Done,
+            session_id: "sess-1".to_string(),
+            agent_name: "agent".to_string(),
+            parent_session_id: None,
+            parent_session_name: None,
+        }
+    }
+
+    async fn next_msg(stream: &mut ResponseStream) -> proto::ServerMessage {
+        tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("应在时限内收到消息")
+            .expect("Chat 流不应提前结束")
+            .expect("消息不应为错误")
+    }
+
+    fn text_delta_of(msg: &proto::ServerMessage) -> String {
+        match &msg.payload {
+            Some(proto::server_message::Payload::TextDelta(td)) => td.delta.clone(),
+            other => panic!("expected TextDelta, got {other:?}"),
+        }
+    }
+
+    /// 1. 重连不再 `already taken`：同一 service 连续两次 chat 均成功。
+    #[tokio::test]
+    async fn chat_reconnect_is_allowed() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let service = make_service(mgr);
+
+        assert!(
+            service.chat(empty_chat_request()).await.is_ok(),
+            "首次 chat 应成功"
+        );
+        assert!(
+            service.chat(empty_chat_request()).await.is_ok(),
+            "重连不应再报 orchestrator receiver already taken"
+        );
+    }
+
+    /// 2. 多连接各自收到全量帧、顺序一致。
+    #[tokio::test]
+    async fn multiple_connections_each_receive_all_frames() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let (service, bus) = make_service_with_bus(mgr);
+
+        let mut a = service
+            .chat(empty_chat_request())
+            .await
+            .unwrap()
+            .into_inner();
+        let mut b = service
+            .chat(empty_chat_request())
+            .await
+            .unwrap()
+            .into_inner();
+
+        for i in 0..3 {
+            bus.publish(bus_text_frame(&format!("f{i}"), "s-1"));
+        }
+
+        for (label, stream) in [("a", &mut a), ("b", &mut b)] {
+            for i in 0..3 {
+                let msg = next_msg(stream).await;
+                assert_eq!(text_delta_of(&msg), format!("f{i}"), "连接 {label}");
+            }
+        }
+    }
+
+    /// 3. 某连接结束（drop receiver）不影响其它连接，也不影响发布端。
+    #[tokio::test]
+    async fn dropping_one_connection_does_not_affect_others() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let (service, bus) = make_service_with_bus(mgr);
+
+        let a = service
+            .chat(empty_chat_request())
+            .await
+            .unwrap()
+            .into_inner();
+        let mut b = service
+            .chat(empty_chat_request())
+            .await
+            .unwrap()
+            .into_inner();
+        drop(a);
+
+        bus.publish(bus_text_frame("survivor", "s-1"));
+        assert_eq!(text_delta_of(&next_msg(&mut b).await), "survivor");
+
+        // 发布端从不失败/阻塞：再发一帧仍即时返回并被存活连接收到。
+        bus.publish(bus_text_frame("again", "s-1"));
+        assert_eq!(text_delta_of(&next_msg(&mut b).await), "again");
+    }
+
+    /// 4. 无订阅者时 publish 不失败、不阻塞；随后建立的连接仍正常。
+    #[tokio::test]
+    async fn publish_without_subscribers_does_not_fail_or_break() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let (service, bus) = make_service_with_bus(mgr);
+
+        // 仅 sentinel 持有 receiver：publish 不 panic、不阻塞（否则测试挂起）。
+        bus.publish(bus_text_frame("no-sub", "s-1"));
+        bus.publish(bus_text_frame("no-sub-2", "s-1"));
+
+        // 之后建立的连接仍能收到后续帧——发布端未 break、订阅未受损。
+        let mut stream = service
+            .chat(empty_chat_request())
+            .await
+            .unwrap()
+            .into_inner();
+        bus.publish(bus_text_frame("after", "s-1"));
+        assert_eq!(text_delta_of(&next_msg(&mut stream).await), "after");
+    }
+
+    /// 5. 回归：单连接既有 Chat 行为（TextDelta/Done/UserQuery）结构不变。
+    #[tokio::test]
+    async fn single_connection_chat_frames_unchanged() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let (service, bus) = make_service_with_bus(mgr);
+
+        let mut stream = service
+            .chat(empty_chat_request())
+            .await
+            .unwrap()
+            .into_inner();
+
+        bus.publish(bus_text_frame("delta", "sess-1"));
+        match next_msg(&mut stream).await.payload {
+            Some(proto::server_message::Payload::TextDelta(td)) => {
+                assert_eq!(td.delta, "delta");
+                assert_eq!(td.session_id, "sess-1");
+                assert_eq!(td.agent_name, "agent");
+            }
+            other => panic!("expected TextDelta, got {other:?}"),
+        }
+
+        bus.publish(status_frame());
+        match next_msg(&mut stream).await.payload {
+            Some(proto::server_message::Payload::Done(done)) => {
+                assert_eq!(done.session_id, "sess-1");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+
+        let (respond, _respond_rx) = tokio::sync::mpsc::channel(1);
+        bus.publish(visp_core::agent::AgentEventFrame {
+            event: AgentEvent::UserQuery {
+                query_id: "q-1".into(),
+                message: "confirm?".into(),
+                options: vec!["yes".into()],
+                allow_other: false,
+                respond,
+            },
+            session_id: "sess-1".into(),
+            agent_name: "agent".into(),
+            parent_session_id: None,
+            parent_session_name: None,
+        });
+        match next_msg(&mut stream).await.payload {
+            Some(proto::server_message::Payload::UserQuery(q)) => {
+                assert_eq!(q.query_id, "q-1");
+                assert_eq!(q.message, "confirm?");
+                assert_eq!(q.session_id, "sess-1");
+            }
+            other => panic!("expected UserQuery, got {other:?}"),
+        }
     }
 }

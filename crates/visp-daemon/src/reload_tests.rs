@@ -54,15 +54,11 @@ struct TestHandles {
 }
 
 fn make_core(env: &IsolatedEnv, multi_agent: bool) -> TestHandles {
-    make_core_with_downlink(env, multi_agent, None)
+    make_core_with_bus(env, multi_agent)
 }
 
-/// 可注入 Chat 下行通道的核心构造（步骤 6c 通知测试用）。
-fn make_core_with_downlink(
-    env: &IsolatedEnv,
-    multi_agent: bool,
-    downlink: Option<mpsc::Sender<AgentEventFrame>>,
-) -> TestHandles {
+/// 构造带事件总线的核心（通知发布到总线）。
+fn make_core_with_bus(env: &IsolatedEnv, multi_agent: bool) -> TestHandles {
     let project = env.project();
     let rule_engine = Arc::new(RuleEngine::new(project).unwrap());
 
@@ -93,18 +89,15 @@ fn make_core_with_downlink(
     let global_tx = if multi_agent { Some(tx) } else { None };
 
     let bus = Arc::new(EventBus::new());
-    let mut core = ReloadCore::new(
+    let core = ReloadCore::new(
         rule_engine,
         tool_registry.clone(),
         agent_registry.clone(),
         overrides,
         global_tx,
         project.to_path_buf(),
-    );
-    if let Some(downlink) = downlink {
-        core = core.with_downlink(downlink);
-    }
-    core = core.with_bus(bus.clone());
+    )
+    .with_bus(bus.clone());
 
     TestHandles {
         core: Arc::new(core),
@@ -608,38 +601,13 @@ async fn tool_set_matches_subagent_set_after_reconcile() {
     );
 }
 
-// ── 步骤 6c：自动重载通知推送 ───────────────────────────────────────────
+// ── 步骤 6c：自动重载通知推送（1a-2：经事件总线） ──────────────────────
 
 #[tokio::test]
 #[serial]
 async fn auto_change_pushes_single_summary_with_empty_session_id() {
     let env = IsolatedEnv::new();
-    let (tx, mut rx) = mpsc::channel::<AgentEventFrame>(8);
-    let handles = make_core_with_downlink(&env, false, Some(tx));
-
-    fs::write(env.project().join("AGENTS.md"), "auto reload").unwrap();
-    let items = handles.core.reload_domains(&[ReloadDomain::Rules]).await;
-    assert!(items[0].changes > 0, "应有变更：{:?}", items[0]);
-
-    let frame = rx.try_recv().expect("有变更应推送一条汇总通知");
-    assert_eq!(frame.session_id, "", "session_id 必须为空以路由主 tab");
-    match frame.event {
-        AgentEvent::StatusUpdate(message) => {
-            assert!(message.contains("已热重载"), "message: {message}");
-            assert!(message.contains("rules"), "message: {message}");
-        }
-        _ => panic!("应为 StatusUpdate 帧"),
-    }
-    assert!(rx.try_recv().is_err(), "一次自动重载至多推送一条通知");
-}
-
-/// A2a：自动重载通知在既有下行之外**额外**发布到事件总线（纯加法）。
-#[tokio::test]
-#[serial]
-async fn auto_change_also_publishes_frame_to_bus() {
-    let env = IsolatedEnv::new();
-    let (tx, mut down_rx) = mpsc::channel::<AgentEventFrame>(8);
-    let handles = make_core_with_downlink(&env, false, Some(tx));
+    let handles = make_core(&env, false);
 
     // 先订阅，再触发（总线只投递订阅之后发布的事件）。
     let mut bus_rx = handles.bus.subscribe();
@@ -648,39 +616,39 @@ async fn auto_change_also_publishes_frame_to_bus() {
     let items = handles.core.reload_domains(&[ReloadDomain::Rules]).await;
     assert!(items[0].changes > 0, "应有变更：{:?}", items[0]);
 
-    // 既有下行行为未变：仍收到一条汇总通知。
-    let down_frame = down_rx.try_recv().expect("既有下行仍应收到通知");
-    assert!(matches!(down_frame.event, AgentEvent::StatusUpdate(_)));
-
-    // 总线额外收到同一帧。
-    let envelope = bus_rx.try_recv().expect("有变更应额外发布到总线");
-    assert_eq!(envelope.frame.session_id, "");
+    let envelope = bus_rx.try_recv().expect("有变更应推送一条汇总通知");
+    assert_eq!(
+        envelope.frame.session_id, "",
+        "session_id 必须为空以路由主 tab"
+    );
     match envelope.frame.event {
         AgentEvent::StatusUpdate(message) => {
             assert!(message.contains("已热重载"), "message: {message}");
+            assert!(message.contains("rules"), "message: {message}");
         }
         _ => panic!("应为 StatusUpdate 帧"),
     }
+    assert!(bus_rx.try_recv().is_err(), "一次自动重载至多推送一条通知");
 }
 
 #[tokio::test]
 #[serial]
 async fn no_change_is_silent() {
     let env = IsolatedEnv::new();
-    let (tx, mut rx) = mpsc::channel::<AgentEventFrame>(8);
-    let handles = make_core_with_downlink(&env, false, Some(tx));
+    let handles = make_core(&env, false);
+    let mut bus_rx = handles.bus.subscribe();
 
     let items = handles.core.reload_domains(&[ReloadDomain::Rules]).await;
     assert_eq!(items[0].changes, 0, "无 AGENTS.md 应判无变更");
-    assert!(rx.try_recv().is_err(), "全部无变化应静默");
+    assert!(bus_rx.try_recv().is_err(), "全部无变化应静默");
 }
 
 #[tokio::test]
 #[serial]
 async fn failure_pushes_error_status() {
     let env = IsolatedEnv::new();
-    let (tx, mut rx) = mpsc::channel::<AgentEventFrame>(8);
-    let handles = make_core_with_downlink(&env, true, Some(tx));
+    let handles = make_core(&env, true);
+    let mut bus_rx = handles.bus.subscribe();
 
     // 与核心工具 "skill" 大小写不敏感撞名 → agents 领域整体失败。
     write_valid_agent(
@@ -692,9 +660,9 @@ async fn failure_pushes_error_status() {
     let items = handles.core.reload_domains(&[ReloadDomain::Agents]).await;
     assert!(!items[0].success, "撞名应使 agents 失败：{:?}", items[0]);
 
-    let frame = rx.try_recv().expect("失败应推送一条错误性质通知");
-    assert_eq!(frame.session_id, "");
-    match frame.event {
+    let envelope = bus_rx.try_recv().expect("失败应推送一条错误性质通知");
+    assert_eq!(envelope.frame.session_id, "");
+    match envelope.frame.event {
         AgentEvent::StatusUpdate(message) => {
             assert!(message.contains("失败"), "message: {message}");
         }
@@ -702,19 +670,17 @@ async fn failure_pushes_error_status() {
     }
 }
 
+/// 无订阅者时发布不失败，也不影响 reload 结果。
 #[tokio::test]
 #[serial]
-async fn downlink_unavailable_does_not_panic() {
+async fn reload_without_subscribers_does_not_panic() {
     let env = IsolatedEnv::new();
-    let (tx, rx) = mpsc::channel::<AgentEventFrame>(8);
-    // 接收端已关闭：best-effort 发送失败应被静默容忍。
-    drop(rx);
-    let handles = make_core_with_downlink(&env, false, Some(tx));
+    let handles = make_core(&env, false);
 
     fs::write(env.project().join("AGENTS.md"), "auto reload").unwrap();
     let items = handles.core.reload_domains(&[ReloadDomain::Rules]).await;
 
     assert_eq!(items.len(), 1);
     assert!(items[0].success);
-    assert_eq!(items[0].changes, 1, "reload 结果不受通道不可用影响");
+    assert_eq!(items[0].changes, 1, "reload 结果不受无订阅者影响");
 }

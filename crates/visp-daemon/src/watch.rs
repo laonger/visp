@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::mpsc::{self, UnboundedReceiver};
+use tokio::sync::mpsc::UnboundedReceiver;
 
 use visp_core::agent::{AgentEvent, AgentEventFrame};
 use visp_fs::runtime::{DegradeReason, FsWatcher, WatchMessage, start as start_fs};
@@ -332,7 +332,6 @@ impl FileWatcher {
         plan: Arc<WatchPlan>,
         executor: Arc<dyn ReloadExecutor>,
         debounce: Duration,
-        downlink: Option<mpsc::Sender<AgentEventFrame>>,
         bus: Option<Arc<EventBus>>,
     ) -> Result<Self, String> {
         let (watcher, messages) = start_fs(plan.fs_targets())
@@ -341,7 +340,7 @@ impl FileWatcher {
 
         let task_plan = plan.clone();
         let task = tokio::spawn(async move {
-            run_loop(messages, task_plan, executor, debounce, downlink, bus).await;
+            run_loop(messages, task_plan, executor, debounce, bus).await;
         });
 
         Ok(Self { watcher, task })
@@ -361,15 +360,13 @@ impl FileWatcher {
 ///
 /// 开启时按 [`WatchPlan::build`] 构建监听计划并创建 [`FileWatcher`]，执行器由调用方
 /// 注入（生产路径传 [`CoreReloadExecutor`]，其委托共享 [`ReloadCore`]，通知句柄已含
-/// 于核心的下行通道）。`downlink` 为 Chat 下行通道（生产传装配处的
-/// `orchestrator_grpc_tx`），用于把细则 5 的降级 best-effort 推送到 TUI；未注入或
-/// 不可用时静默容忍，不影响启动。watcher 构造失败降级为 `None` + warn，不阻断 daemon 启动。
+/// 于核心的总线通道）。`bus` 为显示面事件总线，用于把细则 5 的降级通知投递到
+/// TUI；未注入时静默容忍，不影响启动。watcher 构造失败降级为 `None` + warn，不阻断 daemon 启动。
 pub async fn start_file_watcher(
     enabled: bool,
     project: &Path,
     global_config: Option<&Path>,
     executor: Arc<dyn ReloadExecutor>,
-    downlink: Option<mpsc::Sender<AgentEventFrame>>,
     bus: Option<Arc<EventBus>>,
 ) -> Option<FileWatcher> {
     if !enabled {
@@ -378,7 +375,7 @@ pub async fn start_file_watcher(
     }
 
     let plan = Arc::new(WatchPlan::build(project, global_config));
-    match FileWatcher::start(plan, executor, DEBOUNCE, downlink, bus).await {
+    match FileWatcher::start(plan, executor, DEBOUNCE, bus).await {
         Ok(watcher) => Some(watcher),
         Err(error) => {
             tracing::warn!(%error, "文件监听启动失败，自动热重载不可用");
@@ -400,13 +397,12 @@ async fn run_loop(
     plan: Arc<WatchPlan>,
     executor: Arc<dyn ReloadExecutor>,
     debounce: Duration,
-    downlink: Option<mpsc::Sender<AgentEventFrame>>,
     bus: Option<Arc<EventBus>>,
 ) {
     while let Some(first) = messages.recv().await {
         let mut domains: Vec<ReloadDomain> = Vec::new();
         let mut rescan_all = false;
-        collect(first, &plan, &mut domains, &mut rescan_all, &downlink, &bus);
+        collect(first, &plan, &mut domains, &mut rescan_all, &bus);
 
         // 开窗：首个事件起算，窗口内每来消息重置计时、合并领域（按领域聚合）。
         let sleep = tokio::time::sleep(debounce);
@@ -415,7 +411,7 @@ async fn run_loop(
             tokio::select! {
                 biased;
                 Some(message) = messages.recv() => {
-                    collect(message, &plan, &mut domains, &mut rescan_all, &downlink, &bus);
+                    collect(message, &plan, &mut domains, &mut rescan_all, &bus);
                     sleep.as_mut().reset(tokio::time::Instant::now() + debounce);
                 }
                 _ = &mut sleep => break,
@@ -444,7 +440,6 @@ fn collect(
     plan: &WatchPlan,
     domains: &mut Vec<ReloadDomain>,
     rescan_all: &mut bool,
-    downlink: &Option<mpsc::Sender<AgentEventFrame>>,
     bus: &Option<Arc<EventBus>>,
 ) {
     match message {
@@ -461,21 +456,17 @@ fn collect(
         // 细则 5：根 / 最近祖先级不可挂载——显式记录并 best-effort 通知 TUI，不静默。
         WatchMessage::Degraded(reason) => {
             tracing::warn!(?reason, "文件监听降级：目标目录不可挂载");
-            notify_degraded(downlink, bus, &reason);
+            notify_degraded(bus, &reason);
         }
     }
 }
 
-/// 细则 5 降级通知：best-effort 推送一条 `session_id` 为空的汇总 Status 帧。
+/// 细则 5 降级通知：best-effort 发布一条 `session_id` 为空的汇总 Status 帧。
 ///
-/// 与 reload 通知同一通道模式：`session_id` 置空使 TUI 路由到主 tab 状态行，
-/// 不携带任何未知会话；通道未注入 / 已关闭 / 已满均静默丢弃，不影响启动与运行。
-fn notify_degraded(
-    downlink: &Option<mpsc::Sender<AgentEventFrame>>,
-    bus: &Option<Arc<EventBus>>,
-    reason: &DegradeReason,
-) {
-    let Some(downlink) = downlink else {
+/// 与 reload 通知同一来源：`session_id` 置空使 TUI 路由到主 tab 状态行，
+/// 不携带任何未知会话；总线未注入 / 无订阅者均静默容忍，不影响启动与运行。
+fn notify_degraded(bus: &Option<Arc<EventBus>>, reason: &DegradeReason) {
+    let Some(bus) = bus else {
         return;
     };
     let message = format!("文件监听降级：{reason:?}");
@@ -487,10 +478,7 @@ fn notify_degraded(
         parent_session_id: None,
         parent_session_name: None,
     };
-    if let Some(bus) = bus {
-        bus.publish(frame.clone());
-    }
-    let _ = downlink.try_send(frame);
+    bus.publish(frame);
 }
 
 #[cfg(test)]

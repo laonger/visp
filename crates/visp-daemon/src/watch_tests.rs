@@ -9,6 +9,7 @@ use std::fs;
 
 use serial_test::serial;
 use tempfile::TempDir;
+use tokio::sync::mpsc;
 
 /// 取出指定目录的监听条目。
 fn entry<'a>(plan: &'a WatchPlan, dir: &Path) -> &'a WatchEntry {
@@ -422,8 +423,7 @@ async fn filewatcher_factory_disabled_returns_none() {
     let project = TempDir::new().unwrap();
     let executor = Arc::new(CountingExecutor::default());
 
-    let watcher =
-        start_file_watcher(false, project.path(), None, executor.clone(), None, None).await;
+    let watcher = start_file_watcher(false, project.path(), None, executor.clone(), None).await;
 
     assert!(watcher.is_none(), "开关关闭时不应创建 watcher");
     // 返回 None 即未构造 FileWatcher（`visp-fs` watcher 与后台任务唯一创建点在
@@ -443,7 +443,7 @@ async fn filewatcher_factory_enabled_creates_watcher() {
     fs::create_dir_all(project.path().join(".visp/agents")).unwrap();
     let executor = Arc::new(CountingExecutor::default());
 
-    let watcher = start_file_watcher(true, project.path(), None, executor, None, None).await;
+    let watcher = start_file_watcher(true, project.path(), None, executor, None).await;
 
     assert!(watcher.is_some(), "开关开启时应创建 watcher");
     watcher.unwrap().stop();
@@ -456,11 +456,12 @@ fn unmountable() -> visp_fs::runtime::DegradeReason {
     }
 }
 
-/// 修正 3：降级事件 → best-effort 推送一条 `session_id` 为空的汇总 Status 帧。
+/// 修正 3：降级事件 → best-effort 发布一条 `session_id` 为空的汇总 Status 帧。
 #[tokio::test]
 async fn degraded_event_pushes_empty_session_status_frame() {
     let (msg_tx, msg_rx) = mpsc::unbounded_channel::<WatchMessage>();
-    let (down_tx, mut down_rx) = mpsc::channel::<AgentEventFrame>(8);
+    let bus = Arc::new(EventBus::new());
+    let mut bus_rx = bus.subscribe();
 
     let project = TempDir::new().unwrap();
     let plan = Arc::new(WatchPlan::build(project.path(), None));
@@ -471,16 +472,16 @@ async fn degraded_event_pushes_empty_session_status_frame() {
         plan,
         executor,
         Duration::from_millis(20),
-        Some(down_tx),
-        None,
+        Some(bus),
     ));
 
     msg_tx.send(WatchMessage::Degraded(unmountable())).unwrap();
 
-    let frame = tokio::time::timeout(Duration::from_secs(2), down_rx.recv())
+    let envelope = tokio::time::timeout(Duration::from_secs(2), bus_rx.recv())
         .await
         .expect("应在时限内收到降级通知")
-        .expect("下行通道应仍打开");
+        .expect("总线应仍打开");
+    let frame = envelope.frame;
     assert_eq!(
         frame.session_id, "",
         "降级通知 session_id 必须为空（TUI 路由主 tab 状态行）"
@@ -494,9 +495,9 @@ async fn degraded_event_pushes_empty_session_status_frame() {
     let _ = handle.await;
 }
 
-/// 修正 3：通道不可用（未注入）→ 不 panic、不影响消费循环。
+/// 修正 3：总线未注入 → 不 panic、不影响消费循环。
 #[tokio::test]
-async fn degraded_without_downlink_does_not_panic_and_keeps_consuming() {
+async fn degraded_without_bus_does_not_panic_and_keeps_consuming() {
     let (msg_tx, msg_rx) = mpsc::unbounded_channel::<WatchMessage>();
 
     let project = TempDir::new().unwrap();
@@ -508,7 +509,6 @@ async fn degraded_without_downlink_does_not_panic_and_keeps_consuming() {
         plan,
         executor.clone(),
         Duration::from_millis(20),
-        None,
         None,
     ));
 
@@ -535,12 +535,11 @@ async fn degraded_without_downlink_does_not_panic_and_keeps_consuming() {
     let _ = handle.await;
 }
 
-/// 修正 3：已关闭通道 → `notify_degraded` 静默容忍（best-effort，不 panic）。
+/// 修正 3：无订阅者 / 未注入 → `notify_degraded` 静默容忍（best-effort，不 panic）。
 #[test]
-fn notify_degraded_is_best_effort_when_channel_unavailable() {
+fn notify_degraded_is_best_effort_without_subscribers() {
     let reason = unmountable();
-    notify_degraded(&None, &None, &reason); // 未注入：静默
-    let (down_tx, down_rx) = mpsc::channel(1);
-    drop(down_rx); // 已关闭
-    notify_degraded(&Some(down_tx), &None, &reason);
+    notify_degraded(&None, &reason); // 未注入：静默
+    let bus = Arc::new(EventBus::new()); // 仅 sentinel，无外部订阅者
+    notify_degraded(&Some(bus), &reason);
 }

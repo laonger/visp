@@ -32,15 +32,39 @@ fn noop_publisher() -> Arc<dyn FramePublisher> {
     Arc::new(NoopPublisher)
 }
 
+/// 测试用记录发布器：记录所有经总线发布的帧，供断言「哪些事件不应发布」。
+#[derive(Default)]
+struct RecordingPublisher {
+    frames: std::sync::Mutex<Vec<AgentEventFrame>>,
+}
+
+impl FramePublisher for RecordingPublisher {
+    fn publish(&self, frame: AgentEventFrame) {
+        self.frames.lock().unwrap().push(frame);
+    }
+}
+
+fn recording_publisher() -> Arc<RecordingPublisher> {
+    Arc::new(RecordingPublisher::default())
+}
+
 fn make_orchestrator() -> (
     Orchestrator,
     mpsc::Sender<Envelope>,
     mpsc::Sender<ClientMessage>,
-    mpsc::Receiver<AgentEventFrame>,
+) {
+    make_orchestrator_with_publisher(noop_publisher())
+}
+
+fn make_orchestrator_with_publisher(
+    bus: Arc<dyn FramePublisher>,
+) -> (
+    Orchestrator,
+    mpsc::Sender<Envelope>,
+    mpsc::Sender<ClientMessage>,
 ) {
     let (_cancel_tx, cancel_rx) = mpsc::channel(16);
     let (global_tx, global_rx) = mpsc::channel(256);
-    let (grpc_tx, grpc_rx) = mpsc::channel::<AgentEventFrame>(256);
     let (client_tx, client_rx) = mpsc::channel(64);
 
     let global_tx_for_orch = global_tx.clone();
@@ -59,7 +83,6 @@ fn make_orchestrator() -> (
         global_rx,
         global_tx_for_orch,
         client_rx,
-        grpc_tx,
         session_mgr,
         agent_registry,
         tool_registry,
@@ -68,17 +91,18 @@ fn make_orchestrator() -> (
         context_trimmer,
         Arc::new(visp_config::DaemonConfig::default()),
         HashMap::new(),
-        noop_publisher(),
+        bus,
     );
 
-    (orch, global_tx_for_test, client_tx, grpc_rx)
+    (orch, global_tx_for_test, client_tx)
 }
 
 #[tokio::test]
 async fn test_handle_text_delta_not_forwarded() {
-    let (mut orch, global_tx, _client_tx, mut grpc_rx) = make_orchestrator();
+    let recorder = recording_publisher();
+    let (mut orch, global_tx, _client_tx) = make_orchestrator_with_publisher(recorder.clone());
 
-    // Send TextDelta via global_tx (现已不再转发到 grpc_tx)
+    // Send TextDelta via global_tx (现已不再转发到总线)
     global_tx
         .send(Envelope {
             session_id: "s-1".to_string(),
@@ -93,17 +117,16 @@ async fn test_handle_text_delta_not_forwarded() {
         orch.handle_agent_message(envelope).await;
     }
 
-    // TextDelta 不应再被转发到 grpc_tx（由 run_agent_loop 直接送达）
-    let result = grpc_rx.try_recv();
+    // TextDelta 不应经 handle_agent_message 发布（由 run_agent_loop 直接送达总线）
     assert!(
-        result.is_err(),
-        "TextDelta should not be forwarded to grpc_tx"
+        recorder.frames.lock().unwrap().is_empty(),
+        "TextDelta should not be forwarded by handle_agent_message"
     );
 }
 
 #[tokio::test]
 async fn test_pending_query_routing() {
-    let (mut orch, _global_tx, _client_tx, _grpc_rx) = make_orchestrator();
+    let (mut orch, _global_tx, _client_tx) = make_orchestrator();
     let (respond, _response) = mpsc::channel(1);
 
     // Insert a pending query directly
@@ -126,7 +149,7 @@ async fn test_pending_query_routing() {
 
 #[test]
 fn test_resolve_provider_fallback() {
-    let (orch, _global_tx, _client_tx, _grpc_rx) = make_orchestrator();
+    let (orch, _global_tx, _client_tx) = make_orchestrator();
     // Without any providers registered, resolve_provider returns None
     let result = orch.resolve_provider(None, "unknown");
     assert!(result.is_none());
@@ -136,7 +159,7 @@ fn test_resolve_provider_fallback() {
 
 #[tokio::test]
 async fn test_spawn_request_creates_sub_agent() {
-    let (mut orch, _global_tx, _client_tx, mut _grpc_rx) = make_orchestrator();
+    let (mut orch, _global_tx, _client_tx) = make_orchestrator();
 
     // Inject a SpawnRequest
     let envelope = Envelope {
@@ -283,7 +306,6 @@ async fn test_subagent_applies_agent_model_override() {
     // the sub-session's LlmConfig is overridden with the correct model info.
     let (_cancel_tx, cancel_rx) = mpsc::channel(16);
     let (global_tx, global_rx) = mpsc::channel(256);
-    let (grpc_tx, grpc_rx) = mpsc::channel::<AgentEventFrame>(256);
     let (_client_tx, client_rx) = mpsc::channel(64);
 
     let store: Box<dyn visp_core::session::SessionStore> = Box::new(InMemorySessionStore::new());
@@ -343,7 +365,6 @@ async fn test_subagent_applies_agent_model_override() {
         global_rx,
         global_tx,
         client_rx,
-        grpc_tx,
         session_mgr,
         agent_registry,
         tool_registry,
@@ -409,9 +430,6 @@ async fn test_subagent_applies_agent_model_override() {
         sub_session.config.max_context_tokens, 64000,
         "sub-session max_context_tokens should be overridden by model info"
     );
-
-    // Drop grpc_rx to avoid warnings
-    drop(grpc_rx);
 }
 
 #[tokio::test]
@@ -420,7 +438,6 @@ async fn test_subagent_inherits_parent_config_when_no_model_override() {
     // the sub-session inherits the parent's config unchanged.
     let (_cancel_tx, cancel_rx) = mpsc::channel(16);
     let (global_tx, global_rx) = mpsc::channel(256);
-    let (grpc_tx, grpc_rx) = mpsc::channel::<AgentEventFrame>(256);
     let (_client_tx, client_rx) = mpsc::channel(64);
 
     let store: Box<dyn visp_core::session::SessionStore> = Box::new(InMemorySessionStore::new());
@@ -468,7 +485,6 @@ async fn test_subagent_inherits_parent_config_when_no_model_override() {
         global_rx,
         global_tx,
         client_rx,
-        grpc_tx,
         session_mgr,
         agent_registry,
         tool_registry,
@@ -510,8 +526,6 @@ async fn test_subagent_inherits_parent_config_when_no_model_override() {
         (sub_session.config.temperature - 0.8).abs() < f64::EPSILON,
         "sub-session should inherit parent temperature when no agent override"
     );
-
-    drop(grpc_rx);
 }
 
 /// Bug 复现：agent 定义有 model override 时，用户通过 /model 切换模型后，
@@ -520,7 +534,6 @@ async fn test_subagent_inherits_parent_config_when_no_model_override() {
 async fn test_main_agent_respects_user_model_switch() {
     let (_cancel_tx, cancel_rx) = mpsc::channel(16);
     let (global_tx, global_rx) = mpsc::channel(256);
-    let (grpc_tx, grpc_rx) = mpsc::channel::<AgentEventFrame>(256);
     let (_client_tx, client_rx) = mpsc::channel(64);
 
     let store: Box<dyn visp_core::session::SessionStore> = Box::new(InMemorySessionStore::new());
@@ -605,7 +618,6 @@ async fn test_main_agent_respects_user_model_switch() {
         global_rx,
         global_tx,
         client_rx,
-        grpc_tx,
         session_mgr,
         agent_registry,
         tool_registry,
@@ -642,13 +654,11 @@ async fn test_main_agent_respects_user_model_switch() {
         Some("ProviderB/model-b".to_string()),
         "用户切换的 model_key 不应被 agent 定义覆盖"
     );
-
-    drop(grpc_rx);
 }
 
 #[tokio::test]
 async fn test_orchestrator_tracks_sub_agent_join_handles() {
-    let (mut orch, _global_tx, _client_tx, _grpc_rx) = make_orchestrator();
+    let (mut orch, _global_tx, _client_tx) = make_orchestrator();
 
     // 初始 map 为空
     assert!(
@@ -700,7 +710,7 @@ async fn test_orchestrator_tracks_sub_agent_join_handles() {
 
 #[tokio::test]
 async fn test_handle_done_emits_completion_log() {
-    let (mut orch, _global_tx, _client_tx, _grpc_rx) = make_orchestrator();
+    let (mut orch, _global_tx, _client_tx) = make_orchestrator();
     let cancel = CancellationToken::new();
 
     // Create inbox for parent agent
@@ -756,7 +766,7 @@ async fn test_handle_agent_error_forwards_sub_agent_error_to_parent() {
     use visp_core::agent::{AgentMessage, Envelope};
     use visp_core::error::AgentErrorCode;
 
-    let (mut orch, _global_tx, _client_tx, _grpc_rx) = make_orchestrator();
+    let (mut orch, _global_tx, _client_tx) = make_orchestrator();
     let cancel = CancellationToken::new();
 
     // Parent agent + inbox
@@ -966,27 +976,16 @@ fn make_tracing_guard(
 }
 
 /// 创建完整可用的 orchestrator（含父 session、agent 定义、provider，默认配置）
-fn make_orchestrator_for_spawn() -> (
-    Orchestrator,
-    mpsc::Sender<Envelope>,
-    mpsc::Receiver<AgentEventFrame>,
-    String,
-) {
+fn make_orchestrator_for_spawn() -> (Orchestrator, mpsc::Sender<Envelope>, String) {
     make_orchestrator_for_spawn_with_config(AgentConfig::default())
 }
 
 /// 创建完整可用的 orchestrator，使用指定的 AgentConfig
 fn make_orchestrator_for_spawn_with_config(
     agent_config: AgentConfig,
-) -> (
-    Orchestrator,
-    mpsc::Sender<Envelope>,
-    mpsc::Receiver<AgentEventFrame>,
-    String,
-) {
+) -> (Orchestrator, mpsc::Sender<Envelope>, String) {
     let (_cancel_tx, cancel_rx) = mpsc::channel(16);
     let (global_tx, global_rx) = mpsc::channel(256);
-    let (grpc_tx, grpc_rx) = mpsc::channel::<AgentEventFrame>(256);
     let (_client_tx, client_rx) = mpsc::channel(64);
 
     let store: Box<dyn visp_core::session::SessionStore> = Box::new(InMemorySessionStore::new());
@@ -1027,7 +1026,6 @@ fn make_orchestrator_for_spawn_with_config(
         global_rx,
         global_tx_for_orch,
         client_rx,
-        grpc_tx,
         session_mgr,
         agent_registry,
         tool_registry,
@@ -1039,14 +1037,14 @@ fn make_orchestrator_for_spawn_with_config(
         noop_publisher(),
     );
 
-    (orch, global_tx, grpc_rx, parent_id)
+    (orch, global_tx, parent_id)
 }
 
 #[tokio::test]
 async fn test_subagent_spawn_span_created_in_orchestrator() {
     let (spans, _events, _tcs) = setup_tracing();
     let _guard = make_tracing_guard(&spans, &_events, &_tcs);
-    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn();
 
     let envelope = Envelope {
         session_id: parent_id.clone(),
@@ -1080,7 +1078,7 @@ async fn test_subagent_spawn_span_created_in_orchestrator() {
 async fn test_subagent_spawn_fields() {
     let (spans, _events, _tcs) = setup_tracing();
     let _guard = make_tracing_guard(&spans, &_events, &_tcs);
-    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn();
 
     let envelope = Envelope {
         session_id: parent_id.clone(),
@@ -1140,7 +1138,7 @@ async fn test_subagent_spawn_fields() {
 async fn test_subagent_run_loop_attached_via_instrument() {
     let (spans, _events, _tcs) = setup_tracing();
     let _guard = make_tracing_guard(&spans, &_events, &_tcs);
-    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn();
 
     let envelope = Envelope {
         session_id: parent_id.clone(),
@@ -1183,7 +1181,7 @@ async fn test_subagent_run_loop_attached_via_instrument() {
 async fn test_orchestrator_reads_trace_context_from_envelope() {
     let (spans, _events, _tcs) = setup_tracing();
     let _guard = make_tracing_guard(&spans, &_events, &_tcs);
-    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn();
 
     let tc = visp_core::TraceContext::new(
         "0af7651916cd43dd8448eb211c80319c".to_string(),
@@ -1255,7 +1253,7 @@ async fn test_orchestrator_reads_trace_context_from_envelope() {
 async fn test_orchestrator_missing_trace_context_falls_back_to_orphan() {
     let (spans, events, _tcs) = setup_tracing();
     let _guard = make_tracing_guard(&spans, &events, &_tcs);
-    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn();
 
     // Envelope 不带 trace_context（None），orchestrator 回退到
     // extract_trace_context() 生成 fallback TraceContext。
@@ -1357,7 +1355,7 @@ async fn test_orchestrator_missing_trace_context_falls_back_to_orphan() {
 async fn test_subagent_spawn_span_records_trace_fields_for_observation() {
     let (spans, _events, _tcs) = setup_tracing();
     let _guard = make_tracing_guard(&spans, &_events, &_tcs);
-    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn();
 
     // Envelope 携带了 trace_context，但 W2-S4 orchestrator 用 extract_trace_context()
     // 替换为 fallback UUID 版本。验证 spawn span 记录的是生成的字段。
@@ -1447,7 +1445,7 @@ async fn test_orchestrator_spawn_span_inherits_parent_via_set_parent() {
         id
     });
 
-    let (mut orch, _gtx, _grx, session_id) = make_orchestrator_for_spawn();
+    let (mut orch, _gtx, session_id) = make_orchestrator_for_spawn();
     let envelope = Envelope {
         session_id: session_id.clone(),
         message: AgentMessage::SpawnRequest {
@@ -1496,7 +1494,7 @@ async fn test_subagent_root_span_auto_parented_to_spawn_span() {
     let (spans, _events, _tcs, _guard) = setup_tracing_with_otel();
 
     let parent_span = tracing::info_span!("agent.iteration");
-    let (mut orch, _gtx, _grx, session_id) = make_orchestrator_for_spawn();
+    let (mut orch, _gtx, session_id) = make_orchestrator_for_spawn();
     let envelope = Envelope {
         session_id: session_id.clone(),
         message: AgentMessage::SpawnRequest {
@@ -1565,7 +1563,7 @@ async fn test_subagent_full_trace_chain_single_trace_id() {
         id
     });
 
-    let (mut orch, _gtx, _grx, session_id) = make_orchestrator_for_spawn();
+    let (mut orch, _gtx, session_id) = make_orchestrator_for_spawn();
     let envelope = Envelope {
         session_id: session_id.clone(),
         message: AgentMessage::SpawnRequest {
@@ -1637,7 +1635,7 @@ async fn test_spawn_uses_incoming_trace_context_not_reextracted() {
     )
     .expect("valid TraceContext");
 
-    let (mut orch, _gtx, _grx, session_id) = make_orchestrator_for_spawn();
+    let (mut orch, _gtx, session_id) = make_orchestrator_for_spawn();
     let envelope = Envelope {
         session_id: session_id.clone(),
         message: AgentMessage::SpawnRequest {
@@ -1686,7 +1684,7 @@ async fn test_spawn_uses_incoming_trace_context_not_reextracted() {
 async fn test_set_parent_fallback_when_trace_context_invalid() {
     let (spans, _events, _tcs, _guard) = setup_tracing_with_otel();
 
-    let (mut orch, _gtx, _grx, session_id) = make_orchestrator_for_spawn();
+    let (mut orch, _gtx, session_id) = make_orchestrator_for_spawn();
 
     // Construct an invalid TraceContext (empty trace_id — fails hex parse)
     let invalid_tc = visp_core::TraceContext {
@@ -1743,7 +1741,7 @@ async fn test_handle_agent_error_cancel_unifies_text() {
     use visp_core::agent::{AgentMessage, Envelope};
     use visp_core::error::AgentErrorCode;
 
-    let (mut orch, _global_tx, _client_tx, _grpc_rx) = make_orchestrator();
+    let (mut orch, _global_tx, _client_tx) = make_orchestrator();
     let cancel = CancellationToken::new();
 
     let (parent_inbox_tx, mut parent_inbox_rx) = mpsc::channel(16);
@@ -1801,7 +1799,7 @@ async fn test_handle_agent_error_cancel_unifies_text() {
 async fn test_subagent_spawn_langfuse_disabled_no_langfuse_fields() {
     let (spans, _events, _tcs) = setup_tracing();
     let _guard = make_tracing_guard(&spans, &_events, &_tcs);
-    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn();
 
     let envelope = Envelope {
         session_id: parent_id.clone(),
@@ -1857,8 +1855,7 @@ async fn test_subagent_spawn_langfuse_enabled_all_fields() {
         ..AgentConfig::default()
     };
 
-    let (mut orch, _global_tx, _grpc_rx, parent_id) =
-        make_orchestrator_for_spawn_with_config(agent_config);
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn_with_config(agent_config);
 
     let envelope = Envelope {
         session_id: parent_id.clone(),
@@ -1943,8 +1940,7 @@ async fn test_subagent_spawn_langfuse_enabled_partial() {
         ..AgentConfig::default()
     };
 
-    let (mut orch, _global_tx, _grpc_rx, parent_id) =
-        make_orchestrator_for_spawn_with_config(agent_config);
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn_with_config(agent_config);
 
     let envelope = Envelope {
         session_id: parent_id.clone(),
@@ -2018,8 +2014,7 @@ async fn test_subagent_spawn_langfuse_enabled_public_false() {
         ..AgentConfig::default()
     };
 
-    let (mut orch, _global_tx, _grpc_rx, parent_id) =
-        make_orchestrator_for_spawn_with_config(agent_config);
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn_with_config(agent_config);
 
     let envelope = Envelope {
         session_id: parent_id.clone(),
@@ -2068,7 +2063,7 @@ fn find_child_id(orch: &Orchestrator, parent_id: &str) -> String {
 
 #[tokio::test]
 async fn test_spawn_sub_agent_with_response_tx() {
-    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn();
     let (tx, _rx) = oneshot::channel();
 
     orch.spawn_sub_agent(
@@ -2092,7 +2087,7 @@ async fn test_spawn_sub_agent_with_response_tx() {
 
 #[tokio::test]
 async fn test_handle_done_response_tx_some() {
-    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn();
     let (tx, rx) = oneshot::channel();
 
     orch.spawn_sub_agent(
@@ -2127,7 +2122,7 @@ async fn test_handle_done_response_tx_some() {
 
 #[tokio::test]
 async fn test_handle_done_response_tx_none() {
-    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn();
     let cancel = CancellationToken::new();
     let (parent_inbox_tx, mut parent_inbox_rx) = mpsc::channel(16);
 
@@ -2170,7 +2165,7 @@ async fn test_handle_done_response_tx_none() {
 
 #[tokio::test]
 async fn test_handle_agent_error_response_tx_some() {
-    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn();
     let (tx, rx) = oneshot::channel();
 
     orch.spawn_sub_agent(
@@ -2207,7 +2202,7 @@ async fn test_handle_agent_error_response_tx_some() {
 
 #[tokio::test]
 async fn test_handle_agent_error_response_tx_none() {
-    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn();
     let cancel = CancellationToken::new();
     let (parent_inbox_tx, mut parent_inbox_rx) = mpsc::channel(16);
 
@@ -2254,7 +2249,7 @@ async fn test_handle_agent_error_response_tx_none() {
 
 #[tokio::test]
 async fn test_pending_responses_cleanup_on_done() {
-    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn();
     let (tx, _rx) = oneshot::channel();
 
     orch.spawn_sub_agent(
@@ -2282,7 +2277,7 @@ async fn test_pending_responses_cleanup_on_done() {
 
 #[tokio::test]
 async fn test_pending_responses_cleanup_on_error() {
-    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn();
     let (tx, _rx) = oneshot::channel();
 
     orch.spawn_sub_agent(
@@ -2414,8 +2409,7 @@ async fn test_sub_agent_depth_limit_still_applies() {
         max_depth: 0,
         ..AgentConfig::default()
     };
-    let (mut orch, _global_tx, _grpc_rx, parent_id) =
-        make_orchestrator_for_spawn_with_config(agent_config);
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn_with_config(agent_config);
 
     // 注册 parent agent，使其在 active_agents 中可查
     let cancel = CancellationToken::new();
@@ -2550,7 +2544,7 @@ async fn test_end_to_end_agent_tool_spawn() {
     // 4. 验证 oneshot response_tx 收到结果
     // 5. 验证结果包含预期内容
 
-    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn();
     let (tx, rx) = tokio::sync::oneshot::channel();
 
     // Register parent agent in active_agents so the sub-agent has a parent context
@@ -2687,8 +2681,7 @@ async fn test_spawn_queued_when_concurrency_limit_reached() {
         max_concurrent_subagents: 1,
         ..AgentConfig::default()
     };
-    let (mut orch, _global_tx, _grpc_rx, parent_id) =
-        make_orchestrator_for_spawn_with_config(agent_config);
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn_with_config(agent_config);
     register_parent(&mut orch, &parent_id);
 
     // 第一个 spawn：未达上限 → 立即启动
@@ -2720,8 +2713,7 @@ async fn test_queued_spawn_executed_after_done() {
         max_concurrent_subagents: 1,
         ..AgentConfig::default()
     };
-    let (mut orch, _global_tx, _grpc_rx, parent_id) =
-        make_orchestrator_for_spawn_with_config(agent_config);
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn_with_config(agent_config);
     register_parent(&mut orch, &parent_id);
 
     orch.handle_agent_message(spawn_request(&parent_id, "call-1"))
@@ -2757,8 +2749,7 @@ async fn test_queued_spawns_fifo_order() {
         max_concurrent_subagents: 1,
         ..AgentConfig::default()
     };
-    let (mut orch, _global_tx, _grpc_rx, parent_id) =
-        make_orchestrator_for_spawn_with_config(agent_config);
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn_with_config(agent_config);
     register_parent(&mut orch, &parent_id);
 
     orch.handle_agent_message(spawn_request(&parent_id, "call-1"))
@@ -2824,8 +2815,7 @@ async fn test_max_concurrent_subagents_config_limits_parallelism() {
         max_concurrent_subagents: 3,
         ..AgentConfig::default()
     };
-    let (mut orch, _global_tx, _grpc_rx, parent_id) =
-        make_orchestrator_for_spawn_with_config(agent_config);
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn_with_config(agent_config);
     register_parent(&mut orch, &parent_id);
 
     for call in ["call-1", "call-2", "call-3"] {
@@ -2854,8 +2844,7 @@ async fn test_zero_concurrency_limit_means_unlimited() {
         max_concurrent_subagents: 0,
         ..AgentConfig::default()
     };
-    let (mut orch, _global_tx, _grpc_rx, parent_id) =
-        make_orchestrator_for_spawn_with_config(agent_config);
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn_with_config(agent_config);
     register_parent(&mut orch, &parent_id);
 
     // 多个 spawn 全部立即启动，不排队
@@ -2879,7 +2868,7 @@ async fn test_zero_concurrency_limit_means_unlimited() {
 #[tokio::test]
 async fn test_spawn_not_queued_when_below_limit() {
     // 默认配置：上限 3
-    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn();
     register_parent(&mut orch, &parent_id);
 
     orch.handle_agent_message(spawn_request(&parent_id, "call-1"))
@@ -2929,7 +2918,7 @@ async fn test_spawn_sub_agent_extracts_images_from_prompt() {
     std::fs::write(&img_path, b"\x89PNG\r\n\x1a\nfake-image-bytes").unwrap();
     let img_path_str = img_path.to_str().unwrap().to_string();
 
-    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn();
 
     let prompt = format!("Describe this screenshot: <image: {img_path_str}>");
     let envelope = Envelope {
@@ -2967,7 +2956,7 @@ async fn test_spawn_sub_agent_extracts_images_from_prompt() {
 /// 用例 2：prompt 无 `<image:>` 标记 → 保留父会话最近含图消息的兜底转发
 #[tokio::test]
 async fn test_spawn_sub_agent_falls_back_to_parent_images() {
-    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn();
 
     // 父会话有一条含图的 user 消息（模拟用户上传截图）
     let mut parent_msg = visp_core::message::Message::user("user attached an image");
@@ -3025,7 +3014,7 @@ fn make_registry_agent(name: &str, description: &str) -> AgentDefinition {
 /// 用例 1：替换 registry 快照后，下一次 spawn 查表使用新定义。
 #[tokio::test]
 async fn test_agent_registry_swap_takes_effect_on_next_spawn() {
-    let (mut orch, _global_tx, _grpc_rx, parent_id) = make_orchestrator_for_spawn();
+    let (mut orch, _global_tx, parent_id) = make_orchestrator_for_spawn();
 
     // 初始 registry（来自 helper）仅含 "default"；替换为含 "late_added" 的新快照。
     let mut new_registry = AgentRegistry::new();
@@ -3064,7 +3053,7 @@ async fn test_agent_registry_swap_takes_effect_on_next_spawn() {
 /// 用例 2：同一主流程内多次查表共享同一次快照，中途替换不发生撕裂。
 #[test]
 fn test_agent_registry_single_snapshot_shared_within_flow() {
-    let (orch, _global_tx, _client_tx, _grpc_rx) = make_orchestrator();
+    let (orch, _global_tx, _client_tx) = make_orchestrator();
 
     let mut old_registry = AgentRegistry::new();
     old_registry
@@ -3106,7 +3095,7 @@ fn test_agent_registry_single_snapshot_shared_within_flow() {
 /// 用例 3：快照 clone 出的定义值可跨 await 使用（不持有 Guard/借用）。
 #[tokio::test]
 async fn test_agent_definition_clone_from_snapshot_survives_across_await() {
-    let (orch, _global_tx, _client_tx, _grpc_rx) = make_orchestrator();
+    let (orch, _global_tx, _client_tx) = make_orchestrator();
 
     let mut registry = AgentRegistry::new();
     registry

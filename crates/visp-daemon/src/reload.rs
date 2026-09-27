@@ -63,10 +63,8 @@ pub struct ReloadCore {
     /// 最近一次生效的 skills listing（变化守卫素材，设计 §5.2/§7 决策 13）。
     /// 重载执行受 [`ReloadCore::lock`] 串行化，此锁仅作内部可变状态。
     skills_listing: std::sync::Mutex<String>,
-    /// Chat 下行通道（`AgentEventFrame`，Chat 流下行帧的唯一来源）。
+    /// 事件总线句柄（设计 §5 D3）；`None` 表示未接线。
     /// 自动入口完成后 best-effort 推送汇总通知（设计 §5.5/§7 决策 11）。
-    downlink: Option<mpsc::Sender<AgentEventFrame>>,
-    /// 事件总线句柄（设计 §5 D3）；`None` 表示未接线。纯加法：既有下行行为不变。
     bus: Option<Arc<EventBus>>,
     /// 显式与自动路径共用的异步互斥量（设计 §7 决策 9）。
     lock: tokio::sync::Mutex<()>,
@@ -90,22 +88,12 @@ impl ReloadCore {
             global_tx,
             project_root,
             skills_listing: std::sync::Mutex::new(skills_listing),
-            downlink: None,
             bus: None,
             lock: tokio::sync::Mutex::new(()),
         }
     }
 
-    /// 注入 Chat 下行通道，供自动入口 best-effort 推送热重载通知。
-    ///
-    /// 通道身份：`AgentEventFrame` 下行帧的唯一来源（daemon 装配处
-    /// `orchestrator_grpc_tx`），与 `global_tx`（agent 工具事件通道）不同。
-    pub fn with_downlink(mut self, downlink: mpsc::Sender<AgentEventFrame>) -> Self {
-        self.downlink = Some(downlink);
-        self
-    }
-
-    /// 注入事件总线：通知在既有下行之外**额外**发布到总线（纯加法，设计 §5 D3）。
+    /// 注入事件总线：自动入口的通知发布到此（设计 §5 D3）。
     pub fn with_bus(mut self, bus: Arc<EventBus>) -> Self {
         self.bus = Some(bus);
         self
@@ -164,7 +152,7 @@ impl ReloadCore {
             return;
         };
         tracing::debug!(%message, "构建热重载通知");
-        let Some(downlink) = &self.downlink else {
+        let Some(bus) = &self.bus else {
             return;
         };
         let frame = AgentEventFrame {
@@ -174,10 +162,7 @@ impl ReloadCore {
             parent_session_id: None,
             parent_session_name: None,
         };
-        if let Some(bus) = &self.bus {
-            bus.publish(frame.clone());
-        }
-        let _ = downlink.try_send(frame);
+        bus.publish(frame);
     }
 
     fn reload_one(&self, domain: ReloadDomain) -> ReloadItem {

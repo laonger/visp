@@ -551,12 +551,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 8.7. Create orchestration channels
     let (global_tx, global_rx) = mpsc::channel(256);
     let (cancel_tx, cancel_rx) = mpsc::channel::<CancelSignal>(16);
-    let (orchestrator_grpc_tx, orchestrator_grpc_rx) =
-        mpsc::channel::<visp_core::agent::AgentEventFrame>(256);
     let (client_tx, client_rx) = mpsc::channel(64);
 
-    // 8.7.1. 进程内事件总线：显示面帧在既有 grpc 通道之外**额外**发布（纯加法，
-    //        设计 §5 D3）。既有 orchestrator_grpc_tx/rx 及其消费者完全不变。
+    // 8.7.1. 进程内事件总线：显示面帧的唯一来源（设计 §5 D3）。
+    //         orchestrator/reload/watch 发布，每个 Chat 连接独立订阅。
     let bus = Arc::new(visp_daemon::bus::EventBus::new());
 
     // 8.7.5. Register agent tools from AgentRegistry (skip in single-agent mode)
@@ -570,7 +568,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         global_rx,
         global_tx.clone(),
         client_rx,
-        orchestrator_grpc_tx.clone(),
         session_mgr.clone(),
         agent_registry.clone(),
         tool_registry.clone(),
@@ -596,9 +593,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(global_tx.clone()),
             cwd.clone(),
         )
-        // 自动热重载通知经 Chat 下行通道 best-effort 推送（设计 §7 决策 11）。
-        .with_downlink(orchestrator_grpc_tx.clone())
-        // 额外发布到事件总线（纯加法，设计 §5 D3）。
+        // 通知发布到事件总线（设计 §5 D3）。
         .with_bus(bus.clone()),
     );
 
@@ -616,7 +611,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mcp_manager,
         available_models,
         cancel_tx,
-        orchestrator_grpc_rx,
+        bus.clone(),
         client_tx,
     )
     .inspect_err(|error| {
@@ -639,9 +634,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(visp_daemon::watch::CoreReloadExecutor::new(
             reload_core.clone(),
         )),
-        // 细则 5 降级通知经 Chat 下行通道 best-effort 推送（与 reload 通知同一通道）。
-        Some(orchestrator_grpc_tx.clone()),
-        // 额外发布到事件总线（纯加法，设计 §5 D3）。
+        // 细则 5 降级通知发布到事件总线（与 reload 通知同一来源）。
         Some(bus.clone()),
     )
     .await;

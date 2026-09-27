@@ -3,8 +3,8 @@
 //! 基于 `tokio::sync::broadcast`：单源、连接无关、生产者永不阻塞，
 //! 订阅者滞后（满 1024）时仅丢最旧并得到 `Lagged(n)`。
 //!
-//! 本模块当前尚未接线（main.rs/service.rs 仍是旧的 `orchestrator_grpc_tx/rx`）；
-//! 接线在 1a-2 移除下面的 `dead_code` 允许。
+//! 显示面通道的唯一来源：orchestrator/reload/watch 发布，每个 Chat 连接
+//! `subscribe()` 独立消费（1a-2 已移除旧的 `orchestrator_grpc_tx/rx`）。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -27,7 +27,6 @@ pub struct BusEnvelope {
 /// 事件总线。
 ///
 /// 常持一个 sentinel `Receiver`，使「无其它订阅者」时 `send` 也不报错。
-#[allow(dead_code)] // 接线在 1a-2 移除
 pub struct EventBus {
     tx: broadcast::Sender<BusEnvelope>,
     /// 单一生序号，初值为启动时刻 epoch 毫秒。
@@ -36,7 +35,6 @@ pub struct EventBus {
     _sentinel: broadcast::Receiver<BusEnvelope>,
 }
 
-#[allow(dead_code)] // 接线在 1a-2 移除
 impl EventBus {
     /// 创建总线：容量 1024，seq 基数为当前 epoch 毫秒。
     #[allow(clippy::new_without_default)]

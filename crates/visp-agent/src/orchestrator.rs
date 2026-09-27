@@ -3,7 +3,7 @@
 //! 职责：
 //! - 从 global_rx 接收 Envelope（Agent → Orchestrator）
 //! - 从 grpc_rx 接收 ClientMessage（用户输入/查询响应）
-//! - 转发 Agent 事件到 grpc_tx（→ CLI）
+//! - 发布 Agent 显示面事件到 `FramePublisher`（事件总线 → CLI）
 //! - 管理子 Agent 的创建（spawn_sub_agent）、销毁（handle_done）、取消（cancel_agent）
 //! - 管理 pending_queries 将用户响应路由到对应 agent
 
@@ -151,8 +151,7 @@ pub struct Orchestrator {
     global_rx: mpsc::Receiver<Envelope>,
     global_tx: mpsc::Sender<Envelope>,
     grpc_rx: mpsc::Receiver<ClientMessage>,
-    grpc_tx: mpsc::Sender<AgentEventFrame>,
-    /// 显示面帧的额外发布出口（事件总线，设计 §5 D3）；纯加法，不影响 grpc_tx。
+    /// 显示面帧的唯一发布出口（事件总线，设计 §5 D3）。
     bus: Arc<dyn FramePublisher>,
 
     // ── 状态 ─────────────────────────────────────────────────
@@ -185,7 +184,6 @@ impl Orchestrator {
         global_rx: mpsc::Receiver<Envelope>,
         global_tx: mpsc::Sender<Envelope>,
         grpc_rx: mpsc::Receiver<ClientMessage>,
-        grpc_tx: mpsc::Sender<AgentEventFrame>,
         session_mgr: Arc<SessionManager>,
         agent_registry: Arc<ArcSwap<AgentRegistry>>,
         tool_registry: Arc<ToolRegistry>,
@@ -201,7 +199,6 @@ impl Orchestrator {
             global_rx,
             global_tx,
             grpc_rx,
-            grpc_tx,
             bus,
             active_agents: ActiveAgentRegistry::new(),
             pending_queries: HashMap::new(),
@@ -252,7 +249,7 @@ impl Orchestrator {
         let session_id = envelope.session_id.clone();
         match envelope.message {
             AgentMessage::TextDelta(_) => {
-                // TextDelta 已由 run_agent_loop 通过 tx（= grpc_tx）直接送达 CLI
+                // TextDelta 已由 run_agent_loop 通过总线直接送达 CLI
                 // 此处不重复转发
             }
             AgentMessage::ThinkingBlock(_) => {
@@ -315,8 +312,7 @@ impl Orchestrator {
                     parent_session_id,
                     parent_session_name,
                 };
-                self.bus.publish(frame.clone());
-                let _ = self.grpc_tx.send(frame).await;
+                self.bus.publish(frame);
             }
             AgentMessage::SpawnRequest {
                 call_id,
@@ -547,9 +543,8 @@ impl Orchestrator {
         let mut msg = Message::user(&clean_text);
         msg.images = images;
 
-        // Create forwarding task: agent_tx → grpc_tx with session context
+        // Create forwarding task: agent_tx → bus with session context
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
-        let grpc_tx = self.grpc_tx.clone();
         let bus = self.bus.clone();
         let sid = session_id.to_string();
         let agent_name = agent_name.clone();
@@ -562,10 +557,7 @@ impl Orchestrator {
                     parent_session_id: None,
                     parent_session_name: None,
                 };
-                bus.publish(frame.clone());
-                if grpc_tx.send(frame).await.is_err() {
-                    break;
-                }
+                bus.publish(frame);
             }
         });
 
@@ -845,9 +837,8 @@ impl Orchestrator {
             }
         }
 
-        // Create forwarding task: agent_tx → grpc_tx with session context
+        // Create forwarding task: agent_tx → bus with session context
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
-        let grpc_tx = self.grpc_tx.clone();
         let bus = self.bus.clone();
         let sid = sub_session_id.clone();
         let agent_name = subagent_type.to_string();
@@ -865,10 +856,7 @@ impl Orchestrator {
                     parent_session_id: parent_sid.clone(),
                     parent_session_name: parent_name.clone(),
                 };
-                bus.publish(frame.clone());
-                if grpc_tx.send(frame).await.is_err() {
-                    break;
-                }
+                bus.publish(frame);
             }
         });
 
@@ -1071,8 +1059,7 @@ impl Orchestrator {
                 parent_session_id: None,
                 parent_session_name: None,
             };
-            self.bus.publish(frame.clone());
-            let _ = self.grpc_tx.send(frame).await;
+            self.bus.publish(frame);
         }
     }
 
