@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "hook_event_name": "Stop",
+  "session_id": "sess-3f2a1b9c",
+  "cwd": "/home/user/project",
+  "source": "startup",
+  "origin": "tui",
+  "seq": 1758960000004,
+  "status": "completed",
+  "input_tokens": 1234,
+  "output_tokens": 567,
+  "tool_calls": 4
+}

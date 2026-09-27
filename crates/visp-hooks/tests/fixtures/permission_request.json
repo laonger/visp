@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "hook_event_name": "PermissionRequest",
+  "session_id": "sess-3f2a1b9c",
+  "cwd": "/home/user/project",
+  "source": "startup",
+  "origin": "tui",
+  "seq": 1758960000010,
+  "query_id": "q-1",
+  "kind": "approval",
+  "options_count": 2
+}

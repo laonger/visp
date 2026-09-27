@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "hook_event_name": "PostToolUseFailure",
+  "session_id": "sess-3f2a1b9c",
+  "cwd": "/home/user/project",
+  "source": "startup",
+  "origin": "tui",
+  "seq": 1758960000009,
+  "tool_use_id": "call_1",
+  "tool_name": "read_file",
+  "message": "file not found"
+}

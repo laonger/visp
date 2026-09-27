@@ -14,6 +14,8 @@ use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
+use crate::env::VISP_HOOK_SCHEMA;
+
 /// 公共信封字段名（`seq` 可选；`hook_event_name` 由事件枚举提供）。
 const ENVELOPE_KEYS: [&str; 7] = [
     "schema",
@@ -321,6 +323,12 @@ impl HookEvent {
             .ok_or_else(|| DeError::custom("缺少 hook_event_name"))?;
         let hook_event_name: HookEventName = serde_json::from_value(name)?;
         let context: HookContext = serde_json::from_value(value.clone())?;
+        if context.schema != VISP_HOOK_SCHEMA {
+            return Err(DeError::custom(format!(
+                "不支持的 schema 版本 {}（一期仅支持 {}）",
+                context.schema, VISP_HOOK_SCHEMA
+            )));
+        }
 
         let mut rest = object.clone();
         for key in ENVELOPE_KEYS {

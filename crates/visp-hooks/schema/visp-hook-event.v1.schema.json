@@ -1,0 +1,354 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "visp hook event v1",
+  "description": "visp hook 冻结事件契约（schema 版本 1）。依据 docs/design/2026-09-27-visp-hooks-design.md §6.2/§6.3。",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "hook_event_name",
+        "session_id",
+        "cwd",
+        "source",
+        "origin",
+        "short_id",
+        "project_path",
+        "model",
+        "model_key",
+        "agent_name"
+      ],
+      "properties": {
+        "schema": { "const": 1 },
+        "hook_event_name": { "const": "SessionStart" },
+        "session_id": { "type": "string" },
+        "cwd": { "type": "string" },
+        "source": { "enum": ["startup", "resume"] },
+        "origin": { "enum": ["tui", "headless", "other"] },
+        "seq": { "type": "integer", "minimum": 0 },
+        "short_id": { "type": "string" },
+        "project_path": { "type": "string" },
+        "model": { "type": "string" },
+        "model_key": { "type": "string" },
+        "agent_name": { "type": "string" },
+        "parent_session_id": { "type": "string" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "hook_event_name",
+        "session_id",
+        "cwd",
+        "source",
+        "origin",
+        "prompt_chars"
+      ],
+      "properties": {
+        "schema": { "const": 1 },
+        "hook_event_name": { "const": "UserPromptSubmit" },
+        "session_id": { "type": "string" },
+        "cwd": { "type": "string" },
+        "source": { "enum": ["startup", "resume"] },
+        "origin": { "enum": ["tui", "headless", "other"] },
+        "seq": { "type": "integer", "minimum": 0 },
+        "prompt_chars": { "type": "integer", "minimum": 0 },
+        "prompt": { "type": "string" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "hook_event_name",
+        "session_id",
+        "cwd",
+        "source",
+        "origin",
+        "status"
+      ],
+      "properties": {
+        "schema": { "const": 1 },
+        "hook_event_name": { "const": "AgentRunEnd" },
+        "session_id": { "type": "string" },
+        "cwd": { "type": "string" },
+        "source": { "enum": ["startup", "resume"] },
+        "origin": { "enum": ["tui", "headless", "other"] },
+        "seq": { "type": "integer", "minimum": 0 },
+        "status": { "type": "string" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "hook_event_name",
+        "session_id",
+        "cwd",
+        "source",
+        "origin",
+        "parent_session_id",
+        "agent_name",
+        "status"
+      ],
+      "properties": {
+        "schema": { "const": 1 },
+        "hook_event_name": { "const": "SubagentStop" },
+        "session_id": { "type": "string" },
+        "cwd": { "type": "string" },
+        "source": { "enum": ["startup", "resume"] },
+        "origin": { "enum": ["tui", "headless", "other"] },
+        "seq": { "type": "integer", "minimum": 0 },
+        "parent_session_id": { "type": "string" },
+        "agent_name": { "type": "string" },
+        "status": { "type": "string" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "hook_event_name",
+        "session_id",
+        "cwd",
+        "source",
+        "origin",
+        "status",
+        "input_tokens",
+        "output_tokens",
+        "tool_calls"
+      ],
+      "properties": {
+        "schema": { "const": 1 },
+        "hook_event_name": { "const": "Stop" },
+        "session_id": { "type": "string" },
+        "cwd": { "type": "string" },
+        "source": { "enum": ["startup", "resume"] },
+        "origin": { "enum": ["tui", "headless", "other"] },
+        "seq": { "type": "integer", "minimum": 0 },
+        "status": { "enum": ["completed", "cancelled"] },
+        "input_tokens": { "type": "integer", "minimum": 0 },
+        "output_tokens": { "type": "integer", "minimum": 0 },
+        "tool_calls": { "type": "integer", "minimum": 0 }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "hook_event_name",
+        "session_id",
+        "cwd",
+        "source",
+        "origin",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "schema": { "const": 1 },
+        "hook_event_name": { "const": "StopFailure" },
+        "session_id": { "type": "string" },
+        "cwd": { "type": "string" },
+        "source": { "enum": ["startup", "resume"] },
+        "origin": { "enum": ["tui", "headless", "other"] },
+        "seq": { "type": "integer", "minimum": 0 },
+        "code": { "type": "string" },
+        "message": { "type": "string" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "hook_event_name",
+        "session_id",
+        "cwd",
+        "source",
+        "origin",
+        "tool_use_id",
+        "tool_name"
+      ],
+      "properties": {
+        "schema": { "const": 1 },
+        "hook_event_name": { "const": "ToolCallRequested" },
+        "session_id": { "type": "string" },
+        "cwd": { "type": "string" },
+        "source": { "enum": ["startup", "resume"] },
+        "origin": { "enum": ["tui", "headless", "other"] },
+        "seq": { "type": "integer", "minimum": 0 },
+        "tool_use_id": { "type": "string" },
+        "tool_name": { "type": "string" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "hook_event_name",
+        "session_id",
+        "cwd",
+        "source",
+        "origin",
+        "tool_use_id",
+        "tool_name",
+        "requires_approval"
+      ],
+      "properties": {
+        "schema": { "const": 1 },
+        "hook_event_name": { "const": "PreToolUse" },
+        "session_id": { "type": "string" },
+        "cwd": { "type": "string" },
+        "source": { "enum": ["startup", "resume"] },
+        "origin": { "enum": ["tui", "headless", "other"] },
+        "seq": { "type": "integer", "minimum": 0 },
+        "tool_use_id": { "type": "string" },
+        "tool_name": { "type": "string" },
+        "requires_approval": { "type": "boolean" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "hook_event_name",
+        "session_id",
+        "cwd",
+        "source",
+        "origin",
+        "tool_use_id",
+        "tool_name"
+      ],
+      "properties": {
+        "schema": { "const": 1 },
+        "hook_event_name": { "const": "PostToolUse" },
+        "session_id": { "type": "string" },
+        "cwd": { "type": "string" },
+        "source": { "enum": ["startup", "resume"] },
+        "origin": { "enum": ["tui", "headless", "other"] },
+        "seq": { "type": "integer", "minimum": 0 },
+        "tool_use_id": { "type": "string" },
+        "tool_name": { "type": "string" },
+        "tool_input": {},
+        "tool_response": {}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "hook_event_name",
+        "session_id",
+        "cwd",
+        "source",
+        "origin",
+        "tool_use_id",
+        "tool_name",
+        "message"
+      ],
+      "properties": {
+        "schema": { "const": 1 },
+        "hook_event_name": { "const": "PostToolUseFailure" },
+        "session_id": { "type": "string" },
+        "cwd": { "type": "string" },
+        "source": { "enum": ["startup", "resume"] },
+        "origin": { "enum": ["tui", "headless", "other"] },
+        "seq": { "type": "integer", "minimum": 0 },
+        "tool_use_id": { "type": "string" },
+        "tool_name": { "type": "string" },
+        "message": { "type": "string" },
+        "tool_input": {},
+        "tool_response": {}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "hook_event_name",
+        "session_id",
+        "cwd",
+        "source",
+        "origin",
+        "query_id",
+        "kind",
+        "options_count"
+      ],
+      "properties": {
+        "schema": { "const": 1 },
+        "hook_event_name": { "const": "PermissionRequest" },
+        "session_id": { "type": "string" },
+        "cwd": { "type": "string" },
+        "source": { "enum": ["startup", "resume"] },
+        "origin": { "enum": ["tui", "headless", "other"] },
+        "seq": { "type": "integer", "minimum": 0 },
+        "query_id": { "type": "string" },
+        "kind": { "type": "string" },
+        "options_count": { "type": "integer", "minimum": 0 },
+        "message": { "type": "string" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "hook_event_name",
+        "session_id",
+        "cwd",
+        "source",
+        "origin",
+        "query_id",
+        "outcome",
+        "selected_index"
+      ],
+      "properties": {
+        "schema": { "const": 1 },
+        "hook_event_name": { "const": "PermissionResult" },
+        "session_id": { "type": "string" },
+        "cwd": { "type": "string" },
+        "source": { "enum": ["startup", "resume"] },
+        "origin": { "enum": ["tui", "headless", "other"] },
+        "seq": { "type": "integer", "minimum": 0 },
+        "query_id": { "type": "string" },
+        "outcome": { "type": "string" },
+        "selected_index": { "type": "integer" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "hook_event_name",
+        "session_id",
+        "cwd",
+        "source",
+        "origin",
+        "reason"
+      ],
+      "properties": {
+        "schema": { "const": 1 },
+        "hook_event_name": { "const": "SessionEnd" },
+        "session_id": { "type": "string" },
+        "cwd": { "type": "string" },
+        "source": { "enum": ["startup", "resume"] },
+        "origin": { "enum": ["tui", "headless", "other"] },
+        "seq": { "type": "integer", "minimum": 0 },
+        "reason": { "type": "string" },
+        "exit_code": { "type": "integer" }
+      }
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "hook_event_name": "SessionEnd",
+  "session_id": "sess-3f2a1b9c",
+  "cwd": "/home/user/project",
+  "source": "startup",
+  "origin": "tui",
+  "seq": 1758960000012,
+  "reason": "shutdown",
+  "exit_code": 0
+}
