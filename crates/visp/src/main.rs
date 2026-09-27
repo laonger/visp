@@ -169,24 +169,71 @@ async fn main() {
     });
     let exit_code = cli_status.code().unwrap_or(1);
 
-    // 9. Send shutdown to daemon via gRPC
-    eprintln!("[visp] Shutting down daemon...");
-    if let Err(e) = send_shutdown(&addr).await {
-        eprintln!("[visp] gRPC shutdown failed: {e}");
-    }
-
-    // 10. Wait for daemon to exit (5s timeout)
-    let daemon_exit = tokio::time::timeout(std::time::Duration::from_secs(5), daemon.wait()).await;
-    match daemon_exit {
-        Ok(Ok(_)) => eprintln!("[visp] Daemon stopped."),
-        Ok(Err(e)) => eprintln!("[visp] Daemon wait error: {e}"),
-        Err(_) => {
+    // 9. Send shutdown to daemon via gRPC, then wait for it to exit on its own.
+    //    The timeout is only a safety net so the launcher never hangs.
+    match shutdown_and_wait(
+        &mut daemon,
+        std::time::Duration::from_secs(5),
+        send_shutdown(&addr),
+    )
+    .await
+    {
+        DaemonExit::Exited => eprintln!("[visp] Daemon stopped."),
+        DaemonExit::WaitError(e) => eprintln!("[visp] Daemon wait error: {e}"),
+        DaemonExit::TimedOutKilled => {
             eprintln!("[visp] Daemon did not stop in time, killing...");
-            let _ = kill_daemon(&mut daemon).await;
         }
     }
 
     std::process::exit(exit_code);
+}
+
+/// Outcome of waiting for the daemon process to exit.
+#[derive(Debug)]
+enum DaemonExit {
+    /// The daemon exited on its own within the timeout.
+    Exited,
+    /// Waiting on the daemon failed.
+    WaitError(std::io::Error),
+    /// The daemon did not exit within the timeout; it was killed as a fallback.
+    TimedOutKilled,
+}
+
+/// Wait for the daemon to exit on its own, killing it only if it exceeds
+/// `timeout`.
+///
+/// This is the graceful-shutdown policy: the daemon is expected to exit on its
+/// own after receiving the shutdown RPC; the timeout is a safety net so the
+/// launcher never hangs.
+async fn wait_for_daemon_exit(daemon: &mut Child, timeout: std::time::Duration) -> DaemonExit {
+    match tokio::time::timeout(timeout, daemon.wait()).await {
+        Ok(Ok(_)) => DaemonExit::Exited,
+        Ok(Err(e)) => DaemonExit::WaitError(e),
+        Err(_) => {
+            let _ = kill_daemon(daemon).await;
+            DaemonExit::TimedOutKilled
+        }
+    }
+}
+
+/// Request a graceful daemon shutdown, then wait for it to exit with a bounded
+/// timeout fallback.
+///
+/// A failed `send_shutdown` is only logged; the wait (and the fallback kill)
+/// still runs so the launcher never hangs or panics.
+async fn shutdown_and_wait<Fut>(
+    daemon: &mut Child,
+    timeout: std::time::Duration,
+    send_shutdown: Fut,
+) -> DaemonExit
+where
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    eprintln!("[visp] Shutting down daemon...");
+    if let Err(e) = send_shutdown.await {
+        eprintln!("[visp] gRPC shutdown failed: {e}");
+    }
+    wait_for_daemon_exit(daemon, timeout).await
 }
 
 /// 查找二进制路径：优先同目录（cargo run 场景），其次 PATH。
@@ -314,6 +361,58 @@ async fn kill_daemon(daemon: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    /// Spawn a `sleep <secs>` child used to emulate the daemon process.
+    async fn spawn_sleep(secs: &str) -> Child {
+        Command::new("sleep").arg(secs).spawn().unwrap()
+    }
+
+    #[tokio::test]
+    async fn daemon_self_exit_within_timeout_is_not_killed() {
+        let mut daemon = spawn_sleep("0.05").await;
+        let outcome = wait_for_daemon_exit(&mut daemon, Duration::from_secs(5)).await;
+        assert!(matches!(outcome, DaemonExit::Exited));
+        // Exited on its own; the fallback kill was not the reason it is gone.
+        assert!(daemon.try_wait().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn daemon_timeout_falls_back_to_kill() {
+        let mut daemon = spawn_sleep("10").await;
+        let outcome = wait_for_daemon_exit(&mut daemon, Duration::from_millis(100)).await;
+        assert!(matches!(outcome, DaemonExit::TimedOutKilled));
+        // The fallback kill reaped the child, so nothing is left dangling.
+        assert!(daemon.try_wait().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn kill_daemon_terminates_running_child() {
+        let mut daemon = spawn_sleep("10").await;
+        kill_daemon(&mut daemon).await;
+        assert!(daemon.try_wait().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn send_shutdown_failure_still_waits_for_self_exit() {
+        let mut daemon = spawn_sleep("0.05").await;
+        let outcome = shutdown_and_wait(&mut daemon, Duration::from_secs(5), async {
+            Err("boom".to_string())
+        })
+        .await;
+        assert!(matches!(outcome, DaemonExit::Exited));
+    }
+
+    #[tokio::test]
+    async fn send_shutdown_failure_still_falls_back_to_kill() {
+        let mut daemon = spawn_sleep("10").await;
+        let outcome = shutdown_and_wait(&mut daemon, Duration::from_millis(100), async {
+            Err("boom".to_string())
+        })
+        .await;
+        assert!(matches!(outcome, DaemonExit::TimedOutKilled));
+        assert!(daemon.try_wait().unwrap().is_some());
+    }
 
     #[test]
     fn session_short_flag_passthrough() {
