@@ -3,12 +3,9 @@
 //! 契约层单一来源：事件名、公共信封、逐事件载荷结构与取值域。
 //! 仅含数据形态，不含任何匹配/执行/配置逻辑。
 //!
-//! # 未冻结取值域
-//!
-//! 设计 §6.2 仅显式冻结了 `source`/`origin`/`Stop.status`/`SessionEnd.exit_code`。
-//! `AgentRunEnd.status`、`SubagentStop.status`、`PermissionRequest.kind`、
-//! `PermissionResult.outcome` 的取值域**尚未冻结**，一期以 `String` 透传，
-//! 待设计补齐后收紧（属契约加法/收紧，不影响字段集合）。
+//! 全部取值域均以枚举收紧（设计 §6.2）：未知取值在反序列化时被拒绝。
+//! 例外：`StopFailure.code` 沿用 core 既有 `AgentErrorCode` 的序列化字符串，
+//! 取值以 core 为准，契约层不作枚举约束。
 
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -108,6 +105,33 @@ pub enum StopStatus {
     Cancelled,
 }
 
+/// 执行级完成态：`{completed, cancelled, failed}`（`AgentRunEnd`/`SubagentStop`）。
+///
+/// 与会话级 `StopStatus` 区分：执行级可表达 `failed`，会话级真错误走 `StopFailure`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentRunStatus {
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+/// `PermissionRequest` 类型：`{approval, question}`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionKind {
+    Approval,
+    Question,
+}
+
+/// `PermissionResult` 结果：`{selected, cancelled}`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionOutcome {
+    Selected,
+    Cancelled,
+}
+
 /// 公共信封：`schema`/`hook_event_name`/`session_id`/`cwd`/`source`/`origin`（+ 可选 `seq`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HookContext {
@@ -147,7 +171,7 @@ pub struct UserPromptSubmitPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentRunEndPayload {
-    pub status: String,
+    pub status: AgentRunStatus,
 }
 
 /// `SubagentStop` 载荷。
@@ -156,7 +180,7 @@ pub struct AgentRunEndPayload {
 pub struct SubagentStopPayload {
     pub parent_session_id: String,
     pub agent_name: String,
-    pub status: String,
+    pub status: AgentRunStatus,
 }
 
 /// `Stop` 载荷。
@@ -224,7 +248,7 @@ pub struct PostToolUseFailurePayload {
 #[serde(deny_unknown_fields)]
 pub struct PermissionRequestPayload {
     pub query_id: String,
-    pub kind: String,
+    pub kind: PermissionKind,
     pub options_count: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -235,7 +259,7 @@ pub struct PermissionRequestPayload {
 #[serde(deny_unknown_fields)]
 pub struct PermissionResultPayload {
     pub query_id: String,
-    pub outcome: String,
+    pub outcome: PermissionOutcome,
     pub selected_index: i64,
 }
 

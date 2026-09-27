@@ -79,7 +79,7 @@
         "source": { "enum": ["startup", "resume"] },
         "origin": { "enum": ["tui", "headless", "other"] },
         "seq": { "type": "integer", "minimum": 0 },
-        "status": { "type": "string" }
+        "status": { "enum": ["completed", "cancelled", "failed"] }
       }
     },
     {
@@ -106,7 +106,7 @@
         "seq": { "type": "integer", "minimum": 0 },
         "parent_session_id": { "type": "string" },
         "agent_name": { "type": "string" },
-        "status": { "type": "string" }
+        "status": { "enum": ["completed", "cancelled", "failed"] }
       }
     },
     {
@@ -294,7 +294,7 @@
         "origin": { "enum": ["tui", "headless", "other"] },
         "seq": { "type": "integer", "minimum": 0 },
         "query_id": { "type": "string" },
-        "kind": { "type": "string" },
+        "kind": { "enum": ["approval", "question"] },
         "options_count": { "type": "integer", "minimum": 0 },
         "message": { "type": "string" }
       }
@@ -322,7 +322,7 @@
         "origin": { "enum": ["tui", "headless", "other"] },
         "seq": { "type": "integer", "minimum": 0 },
         "query_id": { "type": "string" },
-        "outcome": { "type": "string" },
+        "outcome": { "enum": ["selected", "cancelled"] },
         "selected_index": { "type": "integer" }
       }
     },

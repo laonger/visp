@@ -311,6 +311,66 @@ fn invalid_fixtures_are_rejected() {
     assert!(HookEvent::from_value(missing_name).is_err());
     assert!(HookEvent::from_value(bad_source).is_err());
     assert!(HookEvent::from_value(bad_schema).is_err());
+
+    // 4 个收紧取值域：schema 与模型层都必须拒绝越界值。
+    let domain_cases: [(&str, &str, &str); 4] = [
+        ("agent_run_end.json", "status", "bogus"),
+        ("subagent_stop.json", "status", "bogus"),
+        ("permission_request.json", "kind", "bogus"),
+        ("permission_result.json", "outcome", "bogus"),
+    ];
+    for (file, field, bad) in domain_cases {
+        let mut value = fixture(file);
+        value[field] = Value::String(bad.to_string());
+        assert!(
+            !validator.is_valid(&value),
+            "{file} 的 {field}={bad} 应被 schema 拒绝"
+        );
+        assert!(
+            HookEvent::from_value(value).is_err(),
+            "{file} 的 {field}={bad} 应被模型拒绝"
+        );
+    }
+}
+
+// 0b-6：schema 对 4 个收紧取值域的 enum 集合与设计 §6.2 精确一致。
+#[test]
+fn schema_declares_exact_frozen_value_domains() {
+    let schema = schema();
+    let properties_of = |event: &str| {
+        schema["oneOf"]
+            .as_array()
+            .expect("oneOf")
+            .iter()
+            .find(|entry| entry["properties"]["hook_event_name"]["const"] == event)
+            .unwrap_or_else(|| panic!("缺少事件 {event}"))["properties"]
+            .clone()
+    };
+    let enum_of = |event: &str, field: &str| -> Vec<String> {
+        properties_of(event)[field]["enum"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{event}.{field} 应为 enum"))
+            .iter()
+            .map(|v| v.as_str().expect("enum 值应为字符串").to_string())
+            .collect()
+    };
+
+    assert_eq!(
+        enum_of("AgentRunEnd", "status"),
+        ["completed", "cancelled", "failed"]
+    );
+    assert_eq!(
+        enum_of("SubagentStop", "status"),
+        ["completed", "cancelled", "failed"]
+    );
+    assert_eq!(
+        enum_of("PermissionRequest", "kind"),
+        ["approval", "question"]
+    );
+    assert_eq!(
+        enum_of("PermissionResult", "outcome"),
+        ["selected", "cancelled"]
+    );
 }
 
 // 0b-5：每个 fixture 的必填公共字段与事件专属字段均存在（结构化断言）。

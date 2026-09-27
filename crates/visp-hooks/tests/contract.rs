@@ -117,7 +117,7 @@ fn all_samples() -> Vec<(HookEvent, Vec<&'static str>)> {
             event(
                 HookEventName::AgentRunEnd,
                 HookPayload::AgentRunEnd(AgentRunEndPayload {
-                    status: "completed".to_string(),
+                    status: AgentRunStatus::Completed,
                 }),
             ),
             vec!["status"],
@@ -128,7 +128,7 @@ fn all_samples() -> Vec<(HookEvent, Vec<&'static str>)> {
                 HookPayload::SubagentStop(SubagentStopPayload {
                     parent_session_id: "parent".to_string(),
                     agent_name: "child".to_string(),
-                    status: "completed".to_string(),
+                    status: AgentRunStatus::Completed,
                 }),
             ),
             vec!["parent_session_id", "agent_name", "status"],
@@ -198,7 +198,7 @@ fn all_samples() -> Vec<(HookEvent, Vec<&'static str>)> {
                 HookEventName::PermissionRequest,
                 HookPayload::PermissionRequest(PermissionRequestPayload {
                     query_id: "q1".to_string(),
-                    kind: "approval".to_string(),
+                    kind: PermissionKind::Approval,
                     options_count: 0,
                     message: None,
                 }),
@@ -210,7 +210,7 @@ fn all_samples() -> Vec<(HookEvent, Vec<&'static str>)> {
                 HookEventName::PermissionResult,
                 HookPayload::PermissionResult(PermissionResultPayload {
                     query_id: "q1".to_string(),
-                    outcome: "allowed".to_string(),
+                    outcome: PermissionOutcome::Selected,
                     selected_index: 0,
                 }),
             ),
@@ -280,6 +280,40 @@ fn enum_domains_and_optional_fields() {
         json!("cancelled")
     );
 
+    // 执行级 status ∈ {completed, cancelled, failed}。
+    assert_eq!(
+        serde_json::to_value(AgentRunStatus::Completed).unwrap(),
+        json!("completed")
+    );
+    assert_eq!(
+        serde_json::to_value(AgentRunStatus::Cancelled).unwrap(),
+        json!("cancelled")
+    );
+    assert_eq!(
+        serde_json::to_value(AgentRunStatus::Failed).unwrap(),
+        json!("failed")
+    );
+
+    // PermissionRequest.kind ∈ {approval, question}。
+    assert_eq!(
+        serde_json::to_value(PermissionKind::Approval).unwrap(),
+        json!("approval")
+    );
+    assert_eq!(
+        serde_json::to_value(PermissionKind::Question).unwrap(),
+        json!("question")
+    );
+
+    // PermissionResult.outcome ∈ {selected, cancelled}。
+    assert_eq!(
+        serde_json::to_value(PermissionOutcome::Selected).unwrap(),
+        json!("selected")
+    );
+    assert_eq!(
+        serde_json::to_value(PermissionOutcome::Cancelled).unwrap(),
+        json!("cancelled")
+    );
+
     let none = event(
         HookEventName::SessionEnd,
         HookPayload::SessionEnd(SessionEndPayload {
@@ -299,6 +333,74 @@ fn enum_domains_and_optional_fields() {
     )
     .to_value();
     assert_eq!(some.get("exit_code"), Some(&json!(0)));
+}
+
+// 0a-8：4 个冻结取值域的非法值在模型层被拒绝（不与 schema 重复，覆盖反序列化边界）。
+#[test]
+fn frozen_value_domains_reject_unknown_values() {
+    let cases: [(HookEvent, &str, &str); 4] = [
+        (
+            event(
+                HookEventName::AgentRunEnd,
+                HookPayload::AgentRunEnd(AgentRunEndPayload {
+                    status: AgentRunStatus::Completed,
+                }),
+            ),
+            "status",
+            "bogus",
+        ),
+        (
+            event(
+                HookEventName::SubagentStop,
+                HookPayload::SubagentStop(SubagentStopPayload {
+                    parent_session_id: "parent".to_string(),
+                    agent_name: "child".to_string(),
+                    status: AgentRunStatus::Failed,
+                }),
+            ),
+            "status",
+            "bogus",
+        ),
+        (
+            event(
+                HookEventName::PermissionRequest,
+                HookPayload::PermissionRequest(PermissionRequestPayload {
+                    query_id: "q1".to_string(),
+                    kind: PermissionKind::Question,
+                    options_count: 0,
+                    message: None,
+                }),
+            ),
+            "kind",
+            "bogus",
+        ),
+        (
+            event(
+                HookEventName::PermissionResult,
+                HookPayload::PermissionResult(PermissionResultPayload {
+                    query_id: "q1".to_string(),
+                    outcome: PermissionOutcome::Selected,
+                    selected_index: 0,
+                }),
+            ),
+            "outcome",
+            "bogus",
+        ),
+    ];
+
+    for (sample, field, bad) in cases {
+        assert!(
+            sample.to_value().get(field).is_some(),
+            "样本缺少字段 {field}"
+        );
+        let mut value = sample.to_value();
+        *value.get_mut(field).expect("字段存在") = json!(bad);
+        assert!(
+            HookEvent::from_value(value).is_err(),
+            "{} 的 {field}={bad} 应被拒绝",
+            sample.event_name().as_str()
+        );
+    }
 }
 
 // 0a-4：每事件载荷字段集合精确（不缺不多）。
