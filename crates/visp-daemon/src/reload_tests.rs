@@ -49,6 +49,8 @@ struct TestHandles {
     core: Arc<ReloadCore>,
     tool_registry: Arc<ToolRegistry>,
     agent_registry: Arc<ArcSwap<AgentRegistry>>,
+    /// 与核心共享的事件总线（A2a：通知额外发布到此）。
+    bus: Arc<EventBus>,
 }
 
 fn make_core(env: &IsolatedEnv, multi_agent: bool) -> TestHandles {
@@ -90,6 +92,7 @@ fn make_core_with_downlink(
     let (tx, _rx) = mpsc::channel(16);
     let global_tx = if multi_agent { Some(tx) } else { None };
 
+    let bus = Arc::new(EventBus::new());
     let mut core = ReloadCore::new(
         rule_engine,
         tool_registry.clone(),
@@ -101,11 +104,13 @@ fn make_core_with_downlink(
     if let Some(downlink) = downlink {
         core = core.with_downlink(downlink);
     }
+    core = core.with_bus(bus.clone());
 
     TestHandles {
         core: Arc::new(core),
         tool_registry,
         agent_registry,
+        bus,
     }
 }
 
@@ -626,6 +631,36 @@ async fn auto_change_pushes_single_summary_with_empty_session_id() {
         _ => panic!("应为 StatusUpdate 帧"),
     }
     assert!(rx.try_recv().is_err(), "一次自动重载至多推送一条通知");
+}
+
+/// A2a：自动重载通知在既有下行之外**额外**发布到事件总线（纯加法）。
+#[tokio::test]
+#[serial]
+async fn auto_change_also_publishes_frame_to_bus() {
+    let env = IsolatedEnv::new();
+    let (tx, mut down_rx) = mpsc::channel::<AgentEventFrame>(8);
+    let handles = make_core_with_downlink(&env, false, Some(tx));
+
+    // 先订阅，再触发（总线只投递订阅之后发布的事件）。
+    let mut bus_rx = handles.bus.subscribe();
+
+    fs::write(env.project().join("AGENTS.md"), "auto reload").unwrap();
+    let items = handles.core.reload_domains(&[ReloadDomain::Rules]).await;
+    assert!(items[0].changes > 0, "应有变更：{:?}", items[0]);
+
+    // 既有下行行为未变：仍收到一条汇总通知。
+    let down_frame = down_rx.try_recv().expect("既有下行仍应收到通知");
+    assert!(matches!(down_frame.event, AgentEvent::StatusUpdate(_)));
+
+    // 总线额外收到同一帧。
+    let envelope = bus_rx.try_recv().expect("有变更应额外发布到总线");
+    assert_eq!(envelope.frame.session_id, "");
+    match envelope.frame.event {
+        AgentEvent::StatusUpdate(message) => {
+            assert!(message.contains("已热重载"), "message: {message}");
+        }
+        _ => panic!("应为 StatusUpdate 帧"),
+    }
 }
 
 #[tokio::test]

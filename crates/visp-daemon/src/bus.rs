@@ -77,6 +77,16 @@ fn epoch_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// 让 daemon 总线满足 `visp-agent` 的帧发布抽象，供 `Orchestrator` 直发。
+///
+/// `Orchestrator` 位于 `visp-agent`，无法反向依赖 `visp-daemon`；本 trait 实现
+/// 是 daemon 侧唯一的桥接点，转发到既有 inherent [`EventBus::publish`]。
+impl visp_agent::orchestrator::FramePublisher for EventBus {
+    fn publish(&self, frame: AgentEventFrame) {
+        EventBus::publish(self, frame);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +214,19 @@ mod tests {
             Err(RecvError::Lagged(n)) => assert!(n > 0),
             _ => panic!("expected Lagged after exceeding capacity"),
         }
+    }
+
+    /// 7. 经 `FramePublisher` 抽象发布与 inherent publish 落在同一通道（daemon 侧桥接）。
+    #[tokio::test]
+    async fn frame_publisher_trait_publishes_to_bus() {
+        use visp_agent::orchestrator::FramePublisher;
+
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe();
+
+        FramePublisher::publish(&bus, text_frame("via-trait"));
+
+        let env = rx.recv().await.unwrap();
+        assert_eq!(text_of(&env), "via-trait");
     }
 }

@@ -422,7 +422,8 @@ async fn filewatcher_factory_disabled_returns_none() {
     let project = TempDir::new().unwrap();
     let executor = Arc::new(CountingExecutor::default());
 
-    let watcher = start_file_watcher(false, project.path(), None, executor.clone(), None).await;
+    let watcher =
+        start_file_watcher(false, project.path(), None, executor.clone(), None, None).await;
 
     assert!(watcher.is_none(), "开关关闭时不应创建 watcher");
     // 返回 None 即未构造 FileWatcher（`visp-fs` watcher 与后台任务唯一创建点在
@@ -442,7 +443,7 @@ async fn filewatcher_factory_enabled_creates_watcher() {
     fs::create_dir_all(project.path().join(".visp/agents")).unwrap();
     let executor = Arc::new(CountingExecutor::default());
 
-    let watcher = start_file_watcher(true, project.path(), None, executor, None).await;
+    let watcher = start_file_watcher(true, project.path(), None, executor, None, None).await;
 
     assert!(watcher.is_some(), "开关开启时应创建 watcher");
     watcher.unwrap().stop();
@@ -471,6 +472,7 @@ async fn degraded_event_pushes_empty_session_status_frame() {
         executor,
         Duration::from_millis(20),
         Some(down_tx),
+        None,
     ));
 
     msg_tx.send(WatchMessage::Degraded(unmountable())).unwrap();
@@ -507,6 +509,7 @@ async fn degraded_without_downlink_does_not_panic_and_keeps_consuming() {
         executor.clone(),
         Duration::from_millis(20),
         None,
+        None,
     ));
 
     msg_tx.send(WatchMessage::Degraded(unmountable())).unwrap();
@@ -536,8 +539,8 @@ async fn degraded_without_downlink_does_not_panic_and_keeps_consuming() {
 #[test]
 fn notify_degraded_is_best_effort_when_channel_unavailable() {
     let reason = unmountable();
-    notify_degraded(&None, &reason); // 未注入：静默
+    notify_degraded(&None, &None, &reason); // 未注入：静默
     let (down_tx, down_rx) = mpsc::channel(1);
     drop(down_rx); // 已关闭
-    notify_degraded(&Some(down_tx), &reason);
+    notify_degraded(&Some(down_tx), &None, &reason);
 }

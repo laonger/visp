@@ -36,6 +36,17 @@ use visp_config::DaemonConfig;
 
 use crate::active_agent::{ActiveAgent, ActiveAgentRegistry};
 
+/// 显示面帧发布抽象。
+///
+/// `Orchestrator`（visp-agent）需把显示面帧额外发布到 daemon 的事件总线，
+/// 但 `EventBus` 位于 `visp-daemon`，而 `visp-daemon` 依赖 `visp-agent`——
+/// 反向引用会形成 crate 依赖环。以最小 trait 解耦：由 `visp-daemon` 为
+/// `EventBus` 实现本 trait，装配处注入即可。
+pub trait FramePublisher: Send + Sync {
+    /// 发布一帧；实现方不得阻塞调用方，也不得因无订阅者而失败。
+    fn publish(&self, frame: AgentEventFrame);
+}
+
 /// 根据 allowed_sub_agents 筛选子 Agent 的工具列表
 fn filter_tools_for_sub_agent(
     tool_registry: &ToolRegistry,
@@ -141,6 +152,8 @@ pub struct Orchestrator {
     global_tx: mpsc::Sender<Envelope>,
     grpc_rx: mpsc::Receiver<ClientMessage>,
     grpc_tx: mpsc::Sender<AgentEventFrame>,
+    /// 显示面帧的额外发布出口（事件总线，设计 §5 D3）；纯加法，不影响 grpc_tx。
+    bus: Arc<dyn FramePublisher>,
 
     // ── 状态 ─────────────────────────────────────────────────
     active_agents: ActiveAgentRegistry,
@@ -181,6 +194,7 @@ impl Orchestrator {
         context_trimmer: Arc<dyn ContextTrimmer + Send + Sync>,
         daemon_config: Arc<DaemonConfig>,
         providers: HashMap<String, Arc<dyn LlmProvider>>,
+        bus: Arc<dyn FramePublisher>,
     ) -> Self {
         Self {
             cancel_rx,
@@ -188,6 +202,7 @@ impl Orchestrator {
             global_tx,
             grpc_rx,
             grpc_tx,
+            bus,
             active_agents: ActiveAgentRegistry::new(),
             pending_queries: HashMap::new(),
             sub_agent_handles: HashMap::new(),
@@ -287,22 +302,21 @@ impl Orchestrator {
                 let parent_session_name = parent_session_id
                     .as_ref()
                     .and_then(|pid| self.active_agents.get(pid).map(|a| a.agent_name.clone()));
-                let _ = self
-                    .grpc_tx
-                    .send(AgentEventFrame {
-                        event: AgentEvent::UserQuery {
-                            query_id,
-                            message,
-                            options,
-                            allow_other,
-                            respond: mpsc::channel(1).0,
-                        },
-                        session_id: session_id.clone(),
-                        agent_name,
-                        parent_session_id,
-                        parent_session_name,
-                    })
-                    .await;
+                let frame = AgentEventFrame {
+                    event: AgentEvent::UserQuery {
+                        query_id,
+                        message,
+                        options,
+                        allow_other,
+                        respond: mpsc::channel(1).0,
+                    },
+                    session_id: session_id.clone(),
+                    agent_name,
+                    parent_session_id,
+                    parent_session_name,
+                };
+                self.bus.publish(frame.clone());
+                let _ = self.grpc_tx.send(frame).await;
             }
             AgentMessage::SpawnRequest {
                 call_id,
@@ -536,21 +550,20 @@ impl Orchestrator {
         // Create forwarding task: agent_tx → grpc_tx with session context
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
         let grpc_tx = self.grpc_tx.clone();
+        let bus = self.bus.clone();
         let sid = session_id.to_string();
         let agent_name = agent_name.clone();
         tokio::spawn(async move {
             while let Some(event) = agent_rx.recv().await {
-                if grpc_tx
-                    .send(AgentEventFrame {
-                        event,
-                        session_id: sid.clone(),
-                        agent_name: agent_name.clone(),
-                        parent_session_id: None,
-                        parent_session_name: None,
-                    })
-                    .await
-                    .is_err()
-                {
+                let frame = AgentEventFrame {
+                    event,
+                    session_id: sid.clone(),
+                    agent_name: agent_name.clone(),
+                    parent_session_id: None,
+                    parent_session_name: None,
+                };
+                bus.publish(frame.clone());
+                if grpc_tx.send(frame).await.is_err() {
                     break;
                 }
             }
@@ -835,6 +848,7 @@ impl Orchestrator {
         // Create forwarding task: agent_tx → grpc_tx with session context
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
         let grpc_tx = self.grpc_tx.clone();
+        let bus = self.bus.clone();
         let sid = sub_session_id.clone();
         let agent_name = subagent_type.to_string();
         let parent_sid = Some(parent_session_id.to_string());
@@ -844,17 +858,15 @@ impl Orchestrator {
             .map(|a| a.agent_name.clone());
         tokio::spawn(async move {
             while let Some(event) = agent_rx.recv().await {
-                if grpc_tx
-                    .send(AgentEventFrame {
-                        event,
-                        session_id: sid.clone(),
-                        agent_name: agent_name.clone(),
-                        parent_session_id: parent_sid.clone(),
-                        parent_session_name: parent_name.clone(),
-                    })
-                    .await
-                    .is_err()
-                {
+                let frame = AgentEventFrame {
+                    event,
+                    session_id: sid.clone(),
+                    agent_name: agent_name.clone(),
+                    parent_session_id: parent_sid.clone(),
+                    parent_session_name: parent_name.clone(),
+                };
+                bus.publish(frame.clone());
+                if grpc_tx.send(frame).await.is_err() {
                     break;
                 }
             }
@@ -1052,16 +1064,15 @@ impl Orchestrator {
             }
         } else {
             // Root agent done — notify CLI
-            let _ = self
-                .grpc_tx
-                .send(AgentEventFrame {
-                    event: AgentEvent::Done,
-                    session_id: session_id.to_string(),
-                    agent_name,
-                    parent_session_id: None,
-                    parent_session_name: None,
-                })
-                .await;
+            let frame = AgentEventFrame {
+                event: AgentEvent::Done,
+                session_id: session_id.to_string(),
+                agent_name,
+                parent_session_id: None,
+                parent_session_name: None,
+            };
+            self.bus.publish(frame.clone());
+            let _ = self.grpc_tx.send(frame).await;
         }
     }
 

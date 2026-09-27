@@ -555,6 +555,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mpsc::channel::<visp_core::agent::AgentEventFrame>(256);
     let (client_tx, client_rx) = mpsc::channel(64);
 
+    // 8.7.1. 进程内事件总线：显示面帧在既有 grpc 通道之外**额外**发布（纯加法，
+    //        设计 §5 D3）。既有 orchestrator_grpc_tx/rx 及其消费者完全不变。
+    let bus = Arc::new(visp_daemon::bus::EventBus::new());
+
     // 8.7.5. Register agent tools from AgentRegistry (skip in single-agent mode)
     let agent_registry_snapshot = agent_registry.load_full();
     register_agent_tools(&tool_registry, &agent_registry_snapshot, Some(&global_tx))
@@ -575,6 +579,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         context_trimmer.clone(),
         Arc::new(config.clone()),
         providers,
+        bus.clone(),
     );
     tokio::spawn(async move {
         orchestrator.run().await;
@@ -592,7 +597,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cwd.clone(),
         )
         // 自动热重载通知经 Chat 下行通道 best-effort 推送（设计 §7 决策 11）。
-        .with_downlink(orchestrator_grpc_tx.clone()),
+        .with_downlink(orchestrator_grpc_tx.clone())
+        // 额外发布到事件总线（纯加法，设计 §5 D3）。
+        .with_bus(bus.clone()),
     );
 
     // 9. Assemble service
@@ -634,6 +641,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )),
         // 细则 5 降级通知经 Chat 下行通道 best-effort 推送（与 reload 通知同一通道）。
         Some(orchestrator_grpc_tx.clone()),
+        // 额外发布到事件总线（纯加法，设计 §5 D3）。
+        Some(bus.clone()),
     )
     .await;
 

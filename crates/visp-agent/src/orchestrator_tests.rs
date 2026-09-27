@@ -20,6 +20,18 @@ fn daemon_config_with_models(
     })
 }
 
+/// 测试用空帧发布器：`Orchestrator` 现在会把显示面帧额外发布到总线，测试若无需
+/// 断言总线则注入本无操作实现（visp-agent 无法引用 visp-daemon 的 `EventBus`）。
+struct NoopPublisher;
+
+impl FramePublisher for NoopPublisher {
+    fn publish(&self, _frame: AgentEventFrame) {}
+}
+
+fn noop_publisher() -> Arc<dyn FramePublisher> {
+    Arc::new(NoopPublisher)
+}
+
 fn make_orchestrator() -> (
     Orchestrator,
     mpsc::Sender<Envelope>,
@@ -56,6 +68,7 @@ fn make_orchestrator() -> (
         context_trimmer,
         Arc::new(visp_config::DaemonConfig::default()),
         HashMap::new(),
+        noop_publisher(),
     );
 
     (orch, global_tx_for_test, client_tx, grpc_rx)
@@ -339,6 +352,7 @@ async fn test_subagent_applies_agent_model_override() {
         context_trimmer,
         daemon_config,
         providers,
+        noop_publisher(),
     );
 
     // Spawn the sub-agent
@@ -463,6 +477,7 @@ async fn test_subagent_inherits_parent_config_when_no_model_override() {
         context_trimmer,
         Arc::new(visp_config::DaemonConfig::default()),
         providers,
+        noop_publisher(),
     );
 
     let envelope = Envelope {
@@ -599,6 +614,7 @@ async fn test_main_agent_respects_user_model_switch() {
         context_trimmer,
         daemon_config,
         providers,
+        noop_publisher(),
     );
 
     // 模拟用户通过 /model 切换到 model-b
@@ -1020,6 +1036,7 @@ fn make_orchestrator_for_spawn_with_config(
         context_trimmer,
         Arc::new(visp_config::DaemonConfig::default()),
         providers,
+        noop_publisher(),
     );
 
     (orch, global_tx, grpc_rx, parent_id)

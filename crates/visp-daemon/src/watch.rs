@@ -17,6 +17,7 @@ use visp_core::agent::{AgentEvent, AgentEventFrame};
 use visp_fs::runtime::{DegradeReason, FsWatcher, WatchMessage, start as start_fs};
 use visp_fs::target::{FilterRules, Include, WatchMode, WatchTarget};
 
+use crate::bus::EventBus;
 use crate::reload::{ReloadCore, ReloadDomain, ReloadItem};
 
 /// 自动重载的默认 debounce 窗口（设计 §7 决策 9）。
@@ -332,6 +333,7 @@ impl FileWatcher {
         executor: Arc<dyn ReloadExecutor>,
         debounce: Duration,
         downlink: Option<mpsc::Sender<AgentEventFrame>>,
+        bus: Option<Arc<EventBus>>,
     ) -> Result<Self, String> {
         let (watcher, messages) = start_fs(plan.fs_targets())
             .await
@@ -339,7 +341,7 @@ impl FileWatcher {
 
         let task_plan = plan.clone();
         let task = tokio::spawn(async move {
-            run_loop(messages, task_plan, executor, debounce, downlink).await;
+            run_loop(messages, task_plan, executor, debounce, downlink, bus).await;
         });
 
         Ok(Self { watcher, task })
@@ -368,6 +370,7 @@ pub async fn start_file_watcher(
     global_config: Option<&Path>,
     executor: Arc<dyn ReloadExecutor>,
     downlink: Option<mpsc::Sender<AgentEventFrame>>,
+    bus: Option<Arc<EventBus>>,
 ) -> Option<FileWatcher> {
     if !enabled {
         tracing::info!("自动文件监听已关闭（daemon.toml [daemon].filewatcher = false）");
@@ -375,7 +378,7 @@ pub async fn start_file_watcher(
     }
 
     let plan = Arc::new(WatchPlan::build(project, global_config));
-    match FileWatcher::start(plan, executor, DEBOUNCE, downlink).await {
+    match FileWatcher::start(plan, executor, DEBOUNCE, downlink, bus).await {
         Ok(watcher) => Some(watcher),
         Err(error) => {
             tracing::warn!(%error, "文件监听启动失败，自动热重载不可用");
@@ -398,11 +401,12 @@ async fn run_loop(
     executor: Arc<dyn ReloadExecutor>,
     debounce: Duration,
     downlink: Option<mpsc::Sender<AgentEventFrame>>,
+    bus: Option<Arc<EventBus>>,
 ) {
     while let Some(first) = messages.recv().await {
         let mut domains: Vec<ReloadDomain> = Vec::new();
         let mut rescan_all = false;
-        collect(first, &plan, &mut domains, &mut rescan_all, &downlink);
+        collect(first, &plan, &mut domains, &mut rescan_all, &downlink, &bus);
 
         // 开窗：首个事件起算，窗口内每来消息重置计时、合并领域（按领域聚合）。
         let sleep = tokio::time::sleep(debounce);
@@ -411,7 +415,7 @@ async fn run_loop(
             tokio::select! {
                 biased;
                 Some(message) = messages.recv() => {
-                    collect(message, &plan, &mut domains, &mut rescan_all, &downlink);
+                    collect(message, &plan, &mut domains, &mut rescan_all, &downlink, &bus);
                     sleep.as_mut().reset(tokio::time::Instant::now() + debounce);
                 }
                 _ = &mut sleep => break,
@@ -441,6 +445,7 @@ fn collect(
     domains: &mut Vec<ReloadDomain>,
     rescan_all: &mut bool,
     downlink: &Option<mpsc::Sender<AgentEventFrame>>,
+    bus: &Option<Arc<EventBus>>,
 ) {
     match message {
         WatchMessage::Event(event) => {
@@ -456,7 +461,7 @@ fn collect(
         // 细则 5：根 / 最近祖先级不可挂载——显式记录并 best-effort 通知 TUI，不静默。
         WatchMessage::Degraded(reason) => {
             tracing::warn!(?reason, "文件监听降级：目标目录不可挂载");
-            notify_degraded(downlink, &reason);
+            notify_degraded(downlink, bus, &reason);
         }
     }
 }
@@ -465,7 +470,11 @@ fn collect(
 ///
 /// 与 reload 通知同一通道模式：`session_id` 置空使 TUI 路由到主 tab 状态行，
 /// 不携带任何未知会话；通道未注入 / 已关闭 / 已满均静默丢弃，不影响启动与运行。
-fn notify_degraded(downlink: &Option<mpsc::Sender<AgentEventFrame>>, reason: &DegradeReason) {
+fn notify_degraded(
+    downlink: &Option<mpsc::Sender<AgentEventFrame>>,
+    bus: &Option<Arc<EventBus>>,
+    reason: &DegradeReason,
+) {
     let Some(downlink) = downlink else {
         return;
     };
@@ -478,6 +487,9 @@ fn notify_degraded(downlink: &Option<mpsc::Sender<AgentEventFrame>>, reason: &De
         parent_session_id: None,
         parent_session_name: None,
     };
+    if let Some(bus) = bus {
+        bus.publish(frame.clone());
+    }
     let _ = downlink.try_send(frame);
 }
 
