@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing;
 use tracing::Instrument;
@@ -144,7 +144,7 @@ pub struct Orchestrator {
 
     // ── 状态 ─────────────────────────────────────────────────
     active_agents: ActiveAgentRegistry,
-    pending_queries: HashMap<String, (String, oneshot::Sender<UserQueryResult>)>,
+    pending_queries: HashMap<String, (String, mpsc::Sender<UserQueryResult>)>,
     /// 持有 sub-agent run_agent_loop 的 JoinHandle，便于诊断与未来扩展（如 abort）。
     /// key = sub session_id；handle 仅作引用持有，drop 不会 abort。
     sub_agent_handles: HashMap<String, JoinHandle<()>>,
@@ -295,7 +295,7 @@ impl Orchestrator {
                             message,
                             options,
                             allow_other,
-                            respond: oneshot::channel().0,
+                            respond: mpsc::channel(1).0,
                         },
                         session_id: session_id.clone(),
                         agent_name,
@@ -362,10 +362,12 @@ impl Orchestrator {
                 text,
             } => {
                 if let Some((_session_id, respond)) = self.pending_queries.remove(&query_id) {
-                    let _ = respond.send(UserQueryResult {
-                        selected_index,
-                        text,
-                    });
+                    let _ = respond
+                        .send(UserQueryResult {
+                            selected_index,
+                            text,
+                        })
+                        .await;
                 }
             }
             ClientMessage::Cancel { session_id } => {

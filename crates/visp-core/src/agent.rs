@@ -36,6 +36,7 @@ pub struct UserQueryResult {
 }
 
 /// Agent 事件，用于流式通知外部（TUI/WS）
+#[derive(Clone)]
 pub enum AgentEvent {
     /// 文本增量
     TextDelta(String),
@@ -94,12 +95,13 @@ pub enum AgentEvent {
         message: String,
         options: Vec<String>,
         allow_other: bool,
-        respond: oneshot::Sender<UserQueryResult>,
+        respond: mpsc::Sender<UserQueryResult>,
     },
 }
 
 /// Agent 事件帧：AgentEvent 及其来源上下文。
 /// 用于标识事件来自哪个 agent，支持 CLI 显示 agent 名称前缀。
+#[derive(Clone)]
 pub struct AgentEventFrame {
     pub event: AgentEvent,
     pub session_id: String,
@@ -149,7 +151,7 @@ pub enum AgentMessage {
         message: String,
         options: Vec<String>,
         allow_other: bool,
-        respond: oneshot::Sender<UserQueryResult>,
+        respond: mpsc::Sender<UserQueryResult>,
     },
     SpawnRequest {
         call_id: String,
@@ -1138,7 +1140,7 @@ mod tests {
 
     #[test]
     fn test_agent_event_user_query() {
-        let (tx, _rx) = tokio::sync::oneshot::channel::<UserQueryResult>();
+        let (tx, _rx) = mpsc::channel::<UserQueryResult>(1);
         let evt = AgentEvent::UserQuery {
             query_id: "q1".into(),
             message: "confirm?".into(),
@@ -1158,6 +1160,57 @@ mod tests {
                 assert_eq!(message, "confirm?");
                 assert_eq!(options, vec!["Yes", "No"]);
                 assert!(allow_other);
+            }
+            _ => panic!("expected UserQuery"),
+        }
+    }
+
+    /// 0c-1: `AgentEventFrame` 克隆后各字段全等；`mpsc::Sender` 可克隆
+    #[test]
+    fn test_agent_event_frame_clone_fields_equal() {
+        let (tx, _rx) = mpsc::channel::<UserQueryResult>(1);
+        let frame = AgentEventFrame {
+            event: AgentEvent::UserQuery {
+                query_id: "q1".into(),
+                message: "confirm?".into(),
+                options: vec!["Yes".into(), "No".into()],
+                allow_other: true,
+                respond: tx.clone(),
+            },
+            session_id: "sess-1".into(),
+            agent_name: "main".into(),
+            parent_session_id: Some("parent-1".into()),
+            parent_session_name: Some("root".into()),
+        };
+
+        let cloned = frame.clone();
+
+        assert_eq!(cloned.session_id, frame.session_id);
+        assert_eq!(cloned.agent_name, frame.agent_name);
+        assert_eq!(cloned.parent_session_id, frame.parent_session_id);
+        assert_eq!(cloned.parent_session_name, frame.parent_session_name);
+
+        match (frame.event, cloned.event) {
+            (
+                AgentEvent::UserQuery {
+                    query_id: q1,
+                    message: m1,
+                    options: o1,
+                    allow_other: a1,
+                    ..
+                },
+                AgentEvent::UserQuery {
+                    query_id: q2,
+                    message: m2,
+                    options: o2,
+                    allow_other: a2,
+                    ..
+                },
+            ) => {
+                assert_eq!(q1, q2);
+                assert_eq!(m1, m2);
+                assert_eq!(o1, o2);
+                assert_eq!(a1, a2);
             }
             _ => panic!("expected UserQuery"),
         }
@@ -1459,10 +1512,12 @@ mod tests {
             match event {
                 AgentEvent::UserQuery { respond, .. } => {
                     // Respond immediately to allow tool task to proceed
-                    let _ = respond.send(UserQueryResult {
-                        selected_index: 0,
-                        text: String::new(),
-                    });
+                    let _ = respond
+                        .send(UserQueryResult {
+                            selected_index: 0,
+                            text: String::new(),
+                        })
+                        .await;
                 }
                 AgentEvent::Done => {
                     done = true;
@@ -1524,10 +1579,12 @@ mod tests {
             match event {
                 AgentEvent::UserQuery { respond, .. } => {
                     // Deny immediately to allow tool task to proceed
-                    let _ = respond.send(UserQueryResult {
-                        selected_index: 1,
-                        text: String::new(),
-                    });
+                    let _ = respond
+                        .send(UserQueryResult {
+                            selected_index: 1,
+                            text: String::new(),
+                        })
+                        .await;
                 }
                 AgentEvent::ToolCallResult {
                     is_error: true,
@@ -1597,10 +1654,12 @@ mod tests {
             match event {
                 AgentEvent::UserQuery { respond, .. } => {
                     // Always Allow
-                    let _ = respond.send(UserQueryResult {
-                        selected_index: 2,
-                        text: String::new(),
-                    });
+                    let _ = respond
+                        .send(UserQueryResult {
+                            selected_index: 2,
+                            text: String::new(),
+                        })
+                        .await;
                 }
                 AgentEvent::Done => {
                     done = true;
@@ -1897,10 +1956,12 @@ mod tests {
                     assert_eq!(options, &vec!["Red", "Blue"]);
                     assert!(!allow_other);
                     // Respond with option index 0 (Red)
-                    let _ = respond.send(UserQueryResult {
-                        selected_index: 0,
-                        text: String::new(),
-                    });
+                    let _ = respond
+                        .send(UserQueryResult {
+                            selected_index: 0,
+                            text: String::new(),
+                        })
+                        .await;
                 }
                 AgentEvent::Done => {
                     done = true;
@@ -1958,10 +2019,12 @@ mod tests {
             match event {
                 AgentEvent::UserQuery { respond, .. } => {
                     marker_found = true;
-                    let _ = respond.send(UserQueryResult {
-                        selected_index: 0,
-                        text: String::new(),
-                    });
+                    let _ = respond
+                        .send(UserQueryResult {
+                            selected_index: 0,
+                            text: String::new(),
+                        })
+                        .await;
                 }
                 AgentEvent::TextDelta(t) => {
                     text_deltas.push(t);
@@ -2036,10 +2099,12 @@ mod tests {
                     assert_eq!(options, &vec!["Default"]);
                     assert!(allow_other);
                     // Send custom text with selected_index = -1
-                    let _ = respond.send(UserQueryResult {
-                        selected_index: -1,
-                        text: "my custom input".into(),
-                    });
+                    let _ = respond
+                        .send(UserQueryResult {
+                            selected_index: -1,
+                            text: "my custom input".into(),
+                        })
+                        .await;
                 }
                 AgentEvent::Done => {}
                 _ => {}

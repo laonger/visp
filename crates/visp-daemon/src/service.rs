@@ -6,7 +6,7 @@ use std::sync::{Mutex, RwLock as StdRwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
-use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::sync::{RwLock, mpsc};
 use tonic::{Request, Response, Status, Streaming};
 
 use visp_codegraph::CodeGraph;
@@ -441,9 +441,8 @@ impl CoderDaemon for CoderDaemonService {
 
         // Shared pending user queries: maps query_id → respond sender
         // Used to route UserResponse from CLI back to the agent loop that's waiting
-        // for it. This is necessary because the orchestrator cannot store the respond
-        // sender (it's not clonable and the event bypasses global_tx).
-        let pending_queries: Arc<Mutex<HashMap<String, oneshot::Sender<UserQueryResult>>>> =
+        // for it. This is necessary because the event bypasses global_tx.
+        let pending_queries: Arc<Mutex<HashMap<String, mpsc::Sender<UserQueryResult>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         // ── Inbound: CLI → Orchestrator / Pending Queries ──
@@ -586,7 +585,7 @@ impl CoderDaemon for CoderDaemonService {
                         let responded = {
                             let mut map = pending_inbound.lock().unwrap();
                             if let Some(respond) = map.remove(&query_id) {
-                                let _ = respond.send(UserQueryResult {
+                                let _ = respond.try_send(UserQueryResult {
                                     selected_index,
                                     text: text.clone(),
                                 });
@@ -2287,7 +2286,7 @@ mod tests {
 
     #[test]
     fn test_agent_event_to_server_message_user_query() {
-        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let event = AgentEvent::UserQuery {
             query_id: "q-1".into(),
             message: "confirm?".into(),

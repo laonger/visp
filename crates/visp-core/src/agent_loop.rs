@@ -35,7 +35,6 @@ use futures::FutureExt;
 use futures::Stream;
 use futures::StreamExt;
 use tokio::sync::mpsc;
-use tokio::sync::oneshot;
 use tracing::Instrument;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -96,7 +95,7 @@ fn event_to_msg(event: &AgentEvent) -> Option<AgentMessage> {
             content: content.clone(),
             is_error: *is_error,
         }),
-        AgentEvent::UserQuery { .. } => None, // oneshot not clonable
+        AgentEvent::UserQuery { .. } => None, // 不转发：AgentMessage::UserQuery 生产不可达
         AgentEvent::ImageBlock { .. } | AgentEvent::ImageError { .. } => None,
         AgentEvent::Done => Some(AgentMessage::Done),
     }
@@ -592,7 +591,7 @@ async fn collect_stream_events(
 enum StreamDecision {
     Done,
     UserQuery {
-        response_rx: oneshot::Receiver<UserQueryResult>,
+        response_rx: mpsc::Receiver<UserQueryResult>,
     },
     Continue,
 }
@@ -692,7 +691,7 @@ async fn handle_stream_result(
             }
 
             // Send UserQuery event
-            let (resp_tx, resp_rx) = oneshot::channel::<UserQueryResult>();
+            let (resp_tx, resp_rx) = mpsc::channel::<UserQueryResult>(1);
             send_event(
                 tx,
                 sm,
@@ -1184,7 +1183,7 @@ async fn execute_tool_calls(
                 let already_approved = sm.is_tool_approved(&session_id, &tc.name);
 
                 if requires_approval && !already_approved {
-                    let (resp_tx, resp_rx) = oneshot::channel::<UserQueryResult>();
+                    let (resp_tx, mut resp_rx) = mpsc::channel::<UserQueryResult>(1);
                     let args_display = format_tool_args(&tc.arguments);
                     let _ = tx
                         .send(AgentEvent::UserQuery {
@@ -1211,7 +1210,7 @@ async fn execute_tool_calls(
                             selected_index: -1,
                             text: String::new(),
                         },
-                        r = resp_rx => r.unwrap_or_default(),
+                        r = resp_rx.recv() => r.unwrap_or_default(),
                     };
                     match result.selected_index {
                         0 => {}
@@ -1827,7 +1826,7 @@ pub async fn run_agent_loop(
                     );
                     return;
                 }
-                Ok(StreamDecision::UserQuery { response_rx }) => {
+                Ok(StreamDecision::UserQuery { mut response_rx }) => {
                     // Await the user's answer, but bail out immediately if the
                     // agent is cancelled (Stop pressed) — otherwise the loop
                     // hangs here forever.
@@ -1837,7 +1836,7 @@ pub async fn run_agent_loop(
                             tracing::info!(session_id = %sid, "agent cancelled while waiting for user query");
                             return;
                         }
-                        r = response_rx => r.unwrap_or_default(),
+                        r = response_rx.recv() => r.unwrap_or_default(),
                     };
 
                     // Build user message from result

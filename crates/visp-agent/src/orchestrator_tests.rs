@@ -2,6 +2,7 @@ use super::*;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use visp_core::context::{ContextTrimmer, NoopTrimmer};
 use visp_core::session::InMemorySessionStore;
@@ -90,7 +91,7 @@ async fn test_handle_text_delta_not_forwarded() {
 #[tokio::test]
 async fn test_pending_query_routing() {
     let (mut orch, _global_tx, _client_tx, _grpc_rx) = make_orchestrator();
-    let (respond, _response) = oneshot::channel();
+    let (respond, _response) = mpsc::channel(1);
 
     // Insert a pending query directly
     orch.handle_agent_message(Envelope {
