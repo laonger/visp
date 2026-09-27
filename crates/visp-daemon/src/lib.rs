@@ -6,6 +6,7 @@
 //!
 //! The daemon binary (`main.rs`) is a separate target.
 
+pub mod bus;
 pub mod config;
 pub mod observability;
 pub mod reload;
