@@ -5011,6 +5011,7 @@ dependencies = [
  "tempfile",
  "toml",
  "tracing",
+ "visp-hooks",
  "visp-proto",
 ]
 

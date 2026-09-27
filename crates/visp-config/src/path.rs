@@ -81,6 +81,14 @@ pub fn agents_dir_project(project: &Path) -> PathBuf {
     visp_dir(project).join("agents")
 }
 
+/// 返回 `{project}/.visp/hooks`（项目级 hook 可执行文件目录）。
+///
+/// 项目级 hook 的 `command` 必须解析到该目录内的可执行文件（设计 D7/§8.2）；
+/// 供后续信任校验与监听排除复用。
+pub fn hooks_dir_project(project: &Path) -> PathBuf {
+    visp_dir(project).join("hooks")
+}
+
 /// 返回 `~/.config/visp/agents`
 pub fn agents_dir_global() -> Option<PathBuf> {
     global_config_dir().map(|d| d.join("agents"))
@@ -332,6 +340,15 @@ mod tests {
         assert_eq!(
             agents_dir_global(),
             Some(PathBuf::from("/home/user/.config/visp/agents"))
+        );
+    }
+
+    #[test]
+    fn test_hooks_dir_project() {
+        let project = Path::new("/proj");
+        assert_eq!(
+            hooks_dir_project(project),
+            PathBuf::from("/proj/.visp/hooks")
         );
     }
 

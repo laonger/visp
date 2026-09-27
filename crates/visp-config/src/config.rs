@@ -1,3 +1,4 @@
+use crate::hooks::{HooksConfig, merge_hooks};
 use crate::path;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -127,6 +128,9 @@ pub struct DaemonConfig {
     #[serde(default)]
     #[allow(dead_code)]
     pub observability: ObservabilityConfig,
+    /// 生命周期 hook 规则（设计 §7）。
+    #[serde(default, skip_serializing_if = "HooksConfig::is_empty")]
+    pub hooks: HooksConfig,
 }
 
 impl Default for DaemonConfig {
@@ -141,6 +145,7 @@ impl Default for DaemonConfig {
             mcp: McpConfig::default(),
             storage: StorageSection::default(),
             observability: ObservabilityConfig::default(),
+            hooks: HooksConfig::default(),
         }
     }
 }
@@ -831,7 +836,12 @@ fn default_observability_log_file() -> Option<String> {
 pub fn load_config(config_path: Option<&Path>) -> Result<DaemonConfig, String> {
     // 1. 如果通过 CLI 参数指定了配置文件，直接使用该文件（最高优先级，跳过 merge）
     if let Some(path) = config_path {
-        return load_from_file(path);
+        let config = load_from_file(path)?;
+        config
+            .hooks
+            .validate()
+            .map_err(|e| format!("invalid [hooks] in {}: {e}", path.display()))?;
+        return Ok(config);
     }
 
     // 2. 加载全局配置 ~/.config/visp/daemon.toml
@@ -844,9 +854,13 @@ pub fn load_config(config_path: Option<&Path>) -> Result<DaemonConfig, String> {
     } else {
         default_config()
     };
+    config
+        .hooks
+        .validate()
+        .map_err(|e| format!("invalid [hooks] in global config: {e}"))?;
 
     // 3. 加载项目配置 cwd/.visp/daemon.toml，merge 到全局配置（项目优先级更高）
-    //    合并范围：[llm] 全部字段 + [[agent.builtin]]（按 name 字段级合并）
+    //    合并范围：[llm] 全部字段 + [[agent.builtin]]（按 name 字段级合并）+ [hooks]（同 id 覆盖）
     let project_path = path::daemon_toml_project(&path::project_dir());
     if project_path.exists() {
         tracing::info!(
@@ -855,8 +869,13 @@ pub fn load_config(config_path: Option<&Path>) -> Result<DaemonConfig, String> {
         );
         match load_from_file(&project_path) {
             Ok(project_config) => {
+                project_config
+                    .hooks
+                    .validate()
+                    .map_err(|e| format!("invalid [hooks] in {}: {e}", project_path.display()))?;
                 merge_llm_sections(&mut config.llm, &project_config.llm);
                 merge_agent_builtins(&mut config.agent.builtin, &project_config.agent.builtin);
+                merge_hooks(&mut config.hooks, &project_config.hooks);
             }
             Err(e) => {
                 tracing::warn!(path = %project_path.display(), error = %e, "failed to load project config, ignoring");
@@ -1055,6 +1074,7 @@ fn default_config() -> DaemonConfig {
             path: default_storage_path(),
         },
         observability: ObservabilityConfig::default(),
+        hooks: HooksConfig::default(),
     }
 }
 

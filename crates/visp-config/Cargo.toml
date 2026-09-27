@@ -10,6 +10,7 @@ toml = "0.8"
 tracing.workspace = true
 chrono.workspace = true
 async-trait.workspace = true
+visp-hooks = { path = "../visp-hooks" }
 visp-proto = { path = "../visp-proto" }
 
 [dev-dependencies]
