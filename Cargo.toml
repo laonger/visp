@@ -11,6 +11,7 @@ members = [
     "crates/visp-daemon",
     "crates/visp-db",
     "crates/visp-fs",
+    "crates/visp-hooks",
     "crates/visp-llm",
     "crates/visp-mcp",
     "crates/visp-proto",

@@ -4897,6 +4897,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "visp-hooks"
+version = "0.5.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "visp-llm"
 version = "0.5.1"
 dependencies = [
