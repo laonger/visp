@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -44,6 +44,106 @@ use crate::hook_map::{MapCtx, map_frame};
 pub trait HookDrainHost: Send + Sync {
     /// 在 `budget` 内排空在飞的 hook 执行。
     async fn drain(&self, budget: Duration);
+}
+
+/// 生效规则摘要：`id` / 作用域 / 启用状态（设计 §15 `GetHookStats` 规则列表）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleSummary {
+    /// 规则唯一名。
+    pub id: String,
+    /// 规则来源作用域。
+    pub scope: HookScope,
+    /// 是否启用。
+    pub enabled: bool,
+}
+
+impl RuleSummary {
+    /// 作用域的 proto 拼写（与 `HookScope` serde `lowercase` 一致）。
+    pub fn scope_str(&self) -> &'static str {
+        match self.scope {
+            HookScope::Global => "global",
+            HookScope::Project => "project",
+        }
+    }
+}
+
+/// hook 运行时只读计数 + 生效规则摘要（设计 §15：五类计数）。
+///
+/// `emitted`/`dropped` 由 [`HookRuntime`] 计数；`executed`/`failed`/`timed_out`
+/// 取自执行器（默认 [`SpawnHandler`] 的 `HookStats`）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HookStatsSnapshot {
+    /// 进入运行时的 hook 事件数。
+    pub emitted: u64,
+    /// 运行时丢弃的事件数（关停后到达 / 总线消费者滞后）。
+    pub dropped: u64,
+    /// 进程正常退出（exit code 0）次数。
+    pub executed: u64,
+    /// 启动后失败次数（非零退出 / 被信号终止 / 等待出错）。
+    pub failed: u64,
+    /// 超时被杀次数。
+    pub timed_out: u64,
+    /// 生效规则摘要（按执行集顺序：全局在前）。
+    pub rules: Vec<RuleSummary>,
+}
+
+/// 进程执行计数来源（设计 §15：`executed`/`failed`/`timed_out`）。
+///
+/// 默认执行器 [`SpawnHandler`] 自带 `HookStats`；注入自定义 [`Handler`] 时缺省为
+/// [`NoopExecCounters`]（恒零），测试可注入其它实现。
+pub trait ExecCounters: Send + Sync {
+    /// 正常退出次数。
+    fn executed(&self) -> u64;
+    /// 失败次数。
+    fn failed(&self) -> u64;
+    /// 超时次数。
+    fn timed_out(&self) -> u64;
+}
+
+impl ExecCounters for SpawnHandler {
+    fn executed(&self) -> u64 {
+        self.stats().executed()
+    }
+    fn failed(&self) -> u64 {
+        self.stats().failed()
+    }
+    fn timed_out(&self) -> u64 {
+        self.stats().timed_out()
+    }
+}
+
+/// 恒零执行计数（注入 handler 无进程计数时的兜底）。
+#[derive(Debug, Default)]
+pub struct NoopExecCounters;
+
+impl ExecCounters for NoopExecCounters {
+    fn executed(&self) -> u64 {
+        0
+    }
+    fn failed(&self) -> u64 {
+        0
+    }
+    fn timed_out(&self) -> u64 {
+        0
+    }
+}
+
+/// 只读 hook 统计来源（`GetHookStats` RPC 的数据面）。
+///
+/// 实现必须**只读**且线程安全：读取不得触发派发/执行等副作用。
+pub trait HookStatsSource: Send + Sync {
+    /// 读取当前计数与生效规则摘要。
+    fn hook_stats(&self) -> HookStatsSnapshot;
+}
+
+/// 无 hook 运行时的只读统计实现（全零计数 + 空规则表）。
+#[derive(Debug, Default)]
+pub struct NoopHookStats;
+
+impl HookStatsSource for NoopHookStats {
+    fn hook_stats(&self) -> HookStatsSnapshot {
+        HookStatsSnapshot::default()
+    }
 }
 
 /// 以会话/项目路径构造默认映射上下文（`cwd=project_path`、`source=Startup`、`origin=Tui`）。
@@ -202,6 +302,7 @@ fn setup_hook_runtime_inner(
             match receiver.recv().await {
                 Ok(envelope) => consumer.dispatch_event(envelope.event, envelope.seq),
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    consumer.record_dropped(skipped);
                     tracing::warn!(skipped, "hook 运行时消费滞后，丢弃部分事件");
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -211,12 +312,20 @@ fn setup_hook_runtime_inner(
     Some(runtime)
 }
 
-/// hook 运行时：持有执行器与映射上下文，向总线消费方提供分发与 drain 入口。
+/// hook 运行时：持有执行器与映射上下文，向总线消费方提供分发、drain 与只读计数入口。
 pub struct HookRuntime {
     executor: Executor,
     map_ctx: MapCtx,
     /// 是否接收新派发；drain 后置 `false`。
     accepting: AtomicBool,
+    /// 进入运行时的 hook 事件数（设计 §15 `emitted`）。
+    emitted: AtomicU64,
+    /// 运行时丢弃的事件数（关停后到达 / 总线消费者滞后）。
+    dropped: AtomicU64,
+    /// 进程执行计数来源（默认 [`SpawnHandler`]）。
+    exec_counters: Arc<dyn ExecCounters>,
+    /// 生效规则摘要（供 `GetHookStats`）。
+    rules_summary: Vec<RuleSummary>,
 }
 
 impl HookRuntime {
@@ -237,11 +346,14 @@ impl HookRuntime {
             .iter()
             .map(|rule| (rule.id.clone(), process_spec(rule, &project_path)))
             .collect();
-        let handler: Arc<dyn Handler> = Arc::new(SpawnHandler::new(project_path, specs));
-        Self::assemble(&selected, map_ctx, handler)
+        let handler = Arc::new(SpawnHandler::new(project_path, specs));
+        let counters: Arc<dyn ExecCounters> = handler.clone();
+        Self::assemble(&selected, map_ctx, handler, counters)
     }
 
     /// 以可注入 [`Handler`] 构建运行时（测试/内嵌 consumers 用，如 herdr D8）。
+    ///
+    /// 注入 handler 无进程计数 → 执行计数恒为零（[`NoopExecCounters`]）。
     pub fn build_with_handler(
         global_rules: &[HookRule],
         project_rules: &[HookRule],
@@ -250,25 +362,56 @@ impl HookRuntime {
         handler: Arc<dyn Handler>,
     ) -> Self {
         let selected = select_rules(global_rules, project_rules, trusted);
-        Self::assemble(&selected, map_ctx, handler)
+        Self::assemble(&selected, map_ctx, handler, Arc::new(NoopExecCounters))
+    }
+
+    /// 以可注入 [`Handler`] **与**执行计数来源构建运行时（测试用）。
+    pub fn build_with_handler_and_counters(
+        global_rules: &[HookRule],
+        project_rules: &[HookRule],
+        trusted: bool,
+        map_ctx: MapCtx,
+        handler: Arc<dyn Handler>,
+        exec_counters: Arc<dyn ExecCounters>,
+    ) -> Self {
+        let selected = select_rules(global_rules, project_rules, trusted);
+        Self::assemble(&selected, map_ctx, handler, exec_counters)
     }
 
     /// 由已选规则集与 Handler 组装。
-    fn assemble(selected: &[&HookRule], map_ctx: MapCtx, handler: Arc<dyn Handler>) -> Self {
+    fn assemble(
+        selected: &[&HookRule],
+        map_ctx: MapCtx,
+        handler: Arc<dyn Handler>,
+        exec_counters: Arc<dyn ExecCounters>,
+    ) -> Self {
         let rules: Vec<DispatchRule> = selected.iter().map(|rule| dispatch_rule(rule)).collect();
+        let rules_summary: Vec<RuleSummary> = selected
+            .iter()
+            .map(|rule| RuleSummary {
+                id: rule.id.clone(),
+                scope: rule.scope,
+                enabled: rule.enabled,
+            })
+            .collect();
         Self {
             executor: Executor::new(rules, handler),
             map_ctx,
             accepting: AtomicBool::new(true),
+            emitted: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
+            exec_counters,
+            rules_summary,
         }
     }
 
     /// 分发一个总线事件。
     ///
     /// `Hook` 事件直接转为 [`DispatchInput`]（总线 `seq` 回填信封）；`Frame` 事件经
-    /// [`map_frame`] 映射，未映射的帧忽略。`drain` 之后不再接收新派发。
+    /// [`map_frame`] 映射，未映射的帧忽略。`drain` 之后不再接收新派发（计为丢弃）。
     pub fn dispatch_event(&self, event: BusEvent, seq: u64) {
         if !self.accepting.load(Ordering::Acquire) {
+            self.record_dropped(1);
             return;
         }
         let hook_event = match event {
@@ -278,13 +421,32 @@ impl HookRuntime {
                 None => return,
             },
         };
+        self.emitted.fetch_add(1, Ordering::Relaxed);
         self.executor.dispatch(dispatch_input(hook_event, seq));
+    }
+
+    /// 记录 `count` 个被运行时丢弃的事件（总线消费者滞后等）。
+    pub fn record_dropped(&self, count: u64) {
+        self.dropped.fetch_add(count, Ordering::Relaxed);
     }
 
     /// 停止接收新派发，并在 `budget` 内尽力排空执行队列；返回是否在 budget 内排空。
     pub async fn drain(&self, budget: Duration) -> bool {
         self.accepting.store(false, Ordering::Release);
         self.executor.drain(budget).await
+    }
+}
+
+impl HookStatsSource for HookRuntime {
+    fn hook_stats(&self) -> HookStatsSnapshot {
+        HookStatsSnapshot {
+            emitted: self.emitted.load(Ordering::Relaxed),
+            dropped: self.dropped.load(Ordering::Relaxed),
+            executed: self.exec_counters.executed(),
+            failed: self.exec_counters.failed(),
+            timed_out: self.exec_counters.timed_out(),
+            rules: self.rules_summary.clone(),
+        }
     }
 }
 
@@ -697,6 +859,171 @@ mod tests {
         let runtime = runtime_with(&[], &[], false, handler);
         let host: Arc<dyn HookDrainHost> = Arc::new(runtime);
         host.drain(Duration::from_millis(10)).await;
+    }
+
+    // ── 计数与只读快照（步骤 1b-3a：设计 §15） ──
+
+    /// 可注入的执行计数来源（测试用）。
+    #[derive(Default)]
+    struct FakeExecCounters {
+        executed: AtomicU64,
+        failed: AtomicU64,
+        timed_out: AtomicU64,
+    }
+
+    impl ExecCounters for FakeExecCounters {
+        fn executed(&self) -> u64 {
+            self.executed.load(Ordering::SeqCst)
+        }
+        fn failed(&self) -> u64 {
+            self.failed.load(Ordering::SeqCst)
+        }
+        fn timed_out(&self) -> u64 {
+            self.timed_out.load(Ordering::SeqCst)
+        }
+    }
+
+    /// 轮询等待条件成立（有上限，避免悬挂）。
+    async fn wait_until(mut cond: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !cond() {
+            assert!(Instant::now() < deadline, "条件未在超时内满足");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// 11a. 快照初值为零，且携带生效规则摘要（id/scope/enabled）。
+    #[test]
+    fn stats_snapshot_lists_effective_rules() {
+        let mut project_rule = rule("project");
+        project_rule.scope = HookScope::Project;
+        project_rule.enabled = false;
+        let handler = Arc::new(RecordingHandler::new());
+        let runtime = runtime_with(&[rule("global")], &[project_rule], true, handler);
+
+        let snapshot = runtime.hook_stats();
+        assert_eq!(
+            (
+                snapshot.emitted,
+                snapshot.dropped,
+                snapshot.executed,
+                snapshot.failed,
+                snapshot.timed_out,
+            ),
+            (0, 0, 0, 0, 0)
+        );
+        assert_eq!(snapshot.rules.len(), 2);
+        assert_eq!(snapshot.rules[0].id, "global");
+        assert_eq!(snapshot.rules[0].scope_str(), "global");
+        assert!(snapshot.rules[0].enabled);
+        assert_eq!(snapshot.rules[1].id, "project");
+        assert_eq!(snapshot.rules[1].scope_str(), "project");
+        assert!(!snapshot.rules[1].enabled);
+    }
+
+    /// 11b. `emitted` 随进入运行时的 hook 事件增长；未映射帧不计。
+    #[tokio::test]
+    async fn stats_emitted_grows_with_dispatched_events() {
+        let handler = Arc::new(RecordingHandler::new());
+        let runtime = runtime_with(&[rule("r")], &[], false, handler);
+        assert_eq!(runtime.hook_stats().emitted, 0);
+
+        runtime.dispatch_event(stop_event(), 1);
+        // 未映射帧（规则命中全部事件也不派发）不计入 emitted。
+        runtime.dispatch_event(BusEvent::Frame(frame(AgentEvent::TextDelta("x".into()))), 2);
+
+        assert_eq!(runtime.hook_stats().emitted, 1);
+        assert_eq!(runtime.hook_stats().dropped, 0);
+    }
+
+    /// 11c. `dropped` 记录关停（drain）后到达的派发与总线滞后丢弃。
+    #[tokio::test]
+    async fn stats_dropped_records_post_drain_and_lag() {
+        let handler = Arc::new(RecordingHandler::new());
+        let runtime = runtime_with(&[rule("r")], &[], false, handler.clone());
+
+        runtime.dispatch_event(stop_event(), 1);
+        tokio::time::timeout(Duration::from_secs(1), handler.wait_for(1))
+            .await
+            .expect("首条事件应被派发");
+        assert!(runtime.drain(Duration::from_millis(200)).await);
+
+        // drain 之后再派发 → 计为 dropped，不增加 emitted。
+        runtime.dispatch_event(stop_event(), 2);
+        assert_eq!(runtime.hook_stats().emitted, 1);
+        assert_eq!(runtime.hook_stats().dropped, 1);
+
+        // 总线滞后（broadcast Lagged）跳过的条数计入 dropped。
+        runtime.record_dropped(3);
+        assert_eq!(runtime.hook_stats().dropped, 4);
+    }
+
+    /// 11d. `executed`/`failed`/`timed_out` 从注入的执行计数来源读取。
+    #[tokio::test]
+    async fn stats_reads_injected_exec_counters() {
+        let handler = Arc::new(RecordingHandler::new());
+        let counters = Arc::new(FakeExecCounters::default());
+        let runtime = HookRuntime::build_with_handler_and_counters(
+            &[rule("r")],
+            &[],
+            false,
+            session_ctx(PROJECT),
+            handler,
+            counters.clone(),
+        );
+
+        counters.executed.fetch_add(2, Ordering::SeqCst);
+        counters.failed.fetch_add(1, Ordering::SeqCst);
+        counters.timed_out.fetch_add(4, Ordering::SeqCst);
+
+        let snapshot = runtime.hook_stats();
+        assert_eq!(
+            (snapshot.executed, snapshot.failed, snapshot.timed_out),
+            (2, 1, 4)
+        );
+    }
+
+    /// 11e. 默认 `SpawnHandler` 路径：真实进程的执行结果反映到快照。
+    #[tokio::test]
+    async fn stats_counts_real_spawn_handler_outcomes() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().to_string_lossy().into_owned();
+
+        let mut ok_rule = rule("ok");
+        ok_rule.command = "sh".to_string();
+        ok_rule.args = vec!["-c".to_string(), "exit 0".to_string()];
+        let mut fail_rule = rule("fail");
+        fail_rule.command = "sh".to_string();
+        fail_rule.args = vec!["-c".to_string(), "exit 3".to_string()];
+        let mut timeout_rule = rule("timeout");
+        timeout_rule.command = "sh".to_string();
+        timeout_rule.args = vec!["-c".to_string(), "sleep 5".to_string()];
+        timeout_rule.timeout_ms = 50;
+
+        let runtime = HookRuntime::build(
+            &[ok_rule, fail_rule, timeout_rule],
+            &[],
+            false,
+            session_ctx(project),
+        );
+
+        runtime.dispatch_event(stop_event(), 1);
+        wait_until(|| {
+            let stats = runtime.hook_stats();
+            stats.executed == 1 && stats.failed == 1 && stats.timed_out == 1
+        })
+        .await;
+
+        let snapshot = runtime.hook_stats();
+        assert_eq!(snapshot.executed, 1);
+        assert_eq!(snapshot.failed, 1);
+        assert_eq!(snapshot.timed_out, 1);
+    }
+
+    /// 11f. `NoopHookStats` 返回全零 + 空规则（无执行器时的只读兜底）。
+    #[test]
+    fn noop_hook_stats_is_all_zero() {
+        assert_eq!(NoopHookStats.hook_stats(), HookStatsSnapshot::default());
     }
 
     // ── 接线 helper（bus → dispatch；任务 1b-2c-b） ──

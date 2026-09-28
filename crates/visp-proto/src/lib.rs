@@ -110,6 +110,84 @@ mod tests {
         // 运行时无需断言（避免 always-true 断言）。
     }
 
+    // ============ GetHookStats 协议（步骤 1b-3a）============
+
+    /// `GetHookStats` 请求/响应消息已生成、字段可构造且 round-trip。
+    #[test]
+    fn get_hook_stats_messages_round_trip() {
+        let request = visp::GetHookStatsRequest {
+            project: "/tmp/proj".to_string(),
+        };
+        let decoded =
+            visp::GetHookStatsRequest::decode(request.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(decoded.project, "/tmp/proj");
+
+        // 请求可空：缺省（无 project）编码为空字节。
+        assert!(
+            visp::GetHookStatsRequest::default()
+                .encode_to_vec()
+                .is_empty(),
+            "空请求应编码为空字节"
+        );
+
+        let response = visp::HookStatsResponse {
+            emitted: 1,
+            dropped: 2,
+            executed: 3,
+            failed: 4,
+            timed_out: 5,
+            rules: vec![visp::HookRuleSummary {
+                id: "r1".to_string(),
+                scope: "global".to_string(),
+                enabled: true,
+            }],
+        };
+        let decoded = visp::HookStatsResponse::decode(response.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(
+            (
+                decoded.emitted,
+                decoded.dropped,
+                decoded.executed,
+                decoded.failed,
+                decoded.timed_out,
+            ),
+            (1, 2, 3, 4, 5)
+        );
+        assert_eq!(decoded.rules.len(), 1);
+        assert_eq!(decoded.rules[0].id, "r1");
+        assert_eq!(decoded.rules[0].scope, "global");
+        assert!(decoded.rules[0].enabled);
+    }
+
+    /// 生成的 client 与 server trait 均暴露只读 get_hook_stats 方法。
+    #[test]
+    fn service_traits_expose_get_hook_stats() {
+        // 编译期断言：server trait 具备 get_hook_stats 方法。
+        #[allow(dead_code)]
+        async fn assert_server_has_get_hook_stats<S: visp::coder_daemon_server::CoderDaemon>(
+            service: &S,
+            request: tonic::Request<visp::GetHookStatsRequest>,
+        ) -> std::result::Result<tonic::Response<visp::HookStatsResponse>, tonic::Status> {
+            service.get_hook_stats(request).await
+        }
+
+        // 编译期断言：client 具备 get_hook_stats 方法。
+        #[allow(dead_code)]
+        fn assert_client_has_get_hook_stats<T>(
+            client: &mut visp::coder_daemon_client::CoderDaemonClient<T>,
+        ) where
+            T: tonic::client::GrpcService<tonic::body::Body>,
+            T::Error: Into<tonic::codegen::StdError>,
+            T::ResponseBody: tonic::codegen::Body<Data = tonic::codegen::Bytes> + Send + 'static,
+            <T::ResponseBody as tonic::codegen::Body>::Error: Into<tonic::codegen::StdError> + Send,
+        {
+            let future = client.get_hook_stats(visp::GetHookStatsRequest::default());
+            drop(future);
+        }
+
+        // 验证发生在上述内部函数的编译期类型检查；运行时无需断言。
+    }
+
     /// oneof 回归：ClientMessage / ServerMessage 的 oneof 变体集合与改动前一致（防误动）。
     #[test]
     fn oneof_variant_sets_unchanged() {

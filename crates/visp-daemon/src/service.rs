@@ -34,6 +34,7 @@ use visp_proto::visp::{self as proto, coder_daemon_server::CoderDaemon};
 use crate::config::DaemonConfig;
 use crate::config::LlmModelConfig;
 use crate::shutdown::{HOOK_DRAIN_BUDGET, HookDrainHost};
+use visp_daemon::hook_runtime::HookStatsSource;
 
 type ResponseStream =
     Pin<Box<dyn futures::Stream<Item = Result<proto::ServerMessage, tonic::Status>> + Send>>;
@@ -216,6 +217,8 @@ pub struct CoderDaemonService {
     shutdown_notify: Arc<Notify>,
     /// 关停期的 hook 有界 drain 宿主（1a 为空实现，1b-2c 接真实执行器）。
     hook_drain: Arc<dyn HookDrainHost>,
+    /// 只读 hook 计数/规则摘要来源（`GetHookStats` RPC；无运行时为全零实现）。
+    hook_stats: Arc<dyn HookStatsSource>,
     /// 终止态抑制标记：首次关停后置位，`SessionEnd` 只发一次。
     /// 以 `Arc` 共享给 Chat 的 inbound 任务，使 `PermissionResult` 发射点也能感知终止态。
     shutting_down: Arc<AtomicBool>,
@@ -243,6 +246,7 @@ impl CoderDaemonService {
         client_tx: mpsc::Sender<visp_agent::orchestrator::ClientMessage>,
         shutdown_notify: Arc<Notify>,
         hook_drain: Arc<dyn HookDrainHost>,
+        hook_stats: Arc<dyn HookStatsSource>,
     ) -> Result<Self, String> {
         // 查找默认模型（匹配 {provider}/{name} 或 {provider}/{model} 格式）
         let default_idx = if let Some(ref default_key) = daemon_config.llm.default {
@@ -323,6 +327,7 @@ impl CoderDaemonService {
             client_tx,
             shutdown_notify,
             hook_drain,
+            hook_stats,
             shutting_down: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -1183,6 +1188,39 @@ impl CoderDaemon for CoderDaemonService {
         }))
     }
 
+    /// 只读 hook 诊断：五类计数 + 生效规则摘要（设计 §15）。
+    ///
+    /// 不改变任何运行时状态；`project` 字段一期预留（daemon 仅维护单项目运行时）。
+    async fn get_hook_stats(
+        &self,
+        request: Request<proto::GetHookStatsRequest>,
+    ) -> Result<Response<proto::HookStatsResponse>, Status> {
+        let req = request.into_inner();
+        if !req.project.is_empty() {
+            tracing::debug!(
+                project = %req.project,
+                "GetHookStats project filter ignored (single-project runtime)"
+            );
+        }
+        let snapshot = self.hook_stats.hook_stats();
+        Ok(Response::new(proto::HookStatsResponse {
+            emitted: snapshot.emitted,
+            dropped: snapshot.dropped,
+            executed: snapshot.executed,
+            failed: snapshot.failed,
+            timed_out: snapshot.timed_out,
+            rules: snapshot
+                .rules
+                .iter()
+                .map(|rule| proto::HookRuleSummary {
+                    id: rule.id.clone(),
+                    scope: rule.scope_str().to_string(),
+                    enabled: rule.enabled,
+                })
+                .collect(),
+        }))
+    }
+
     async fn shutdown(
         &self,
         _request: Request<proto::ShutdownRequest>,
@@ -1975,6 +2013,7 @@ mod tests {
             client_tx,
             shutdown_notify: Arc::new(Notify::new()),
             hook_drain: Arc::new(crate::shutdown::NoopHookDrain),
+            hook_stats: Arc::new(visp_daemon::hook_runtime::NoopHookStats),
             shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -2317,6 +2356,7 @@ mod tests {
             client_tx,
             shutdown_notify: Arc::new(Notify::new()),
             hook_drain: Arc::new(crate::shutdown::NoopHookDrain),
+            hook_stats: Arc::new(visp_daemon::hook_runtime::NoopHookStats),
             shutting_down: Arc::new(AtomicBool::new(false)),
         };
 
@@ -2370,6 +2410,7 @@ mod tests {
             client_tx,
             shutdown_notify: Arc::new(Notify::new()),
             hook_drain: Arc::new(crate::shutdown::NoopHookDrain),
+            hook_stats: Arc::new(visp_daemon::hook_runtime::NoopHookStats),
             shutting_down: Arc::new(AtomicBool::new(false)),
         };
 
@@ -2448,6 +2489,7 @@ mod tests {
             client_tx,
             shutdown_notify: Arc::new(Notify::new()),
             hook_drain: Arc::new(crate::shutdown::NoopHookDrain),
+            hook_stats: Arc::new(visp_daemon::hook_runtime::NoopHookStats),
             shutting_down: Arc::new(AtomicBool::new(false)),
         };
 
@@ -2524,6 +2566,7 @@ mod tests {
             client_tx,
             shutdown_notify: Arc::new(Notify::new()),
             hook_drain: Arc::new(crate::shutdown::NoopHookDrain),
+            hook_stats: Arc::new(visp_daemon::hook_runtime::NoopHookStats),
             shutting_down: Arc::new(AtomicBool::new(false)),
         };
 
@@ -5132,4 +5175,113 @@ mod tests {
 
     // 35. 异常退出（进程被杀 / panic / SIGKILL）无 `SessionEnd`：
     // 该场景无法在进程内自动断言（进程已消失），标注为手工验收项。
+
+    // ── 步骤 1b-3a：只读 GetHookStats gRPC handler ──────────────────────────
+
+    use std::sync::atomic::AtomicUsize;
+    use visp_config::hooks::HookScope;
+    use visp_daemon::hook_runtime::{HookStatsSnapshot, HookStatsSource, RuleSummary};
+
+    /// 可控只读统计来源（测试注入）；记录读取次数以断言 RPC 只读。
+    struct FakeHookStatsSource {
+        snapshot: HookStatsSnapshot,
+        reads: StdArc<AtomicUsize>,
+    }
+
+    impl HookStatsSource for FakeHookStatsSource {
+        fn hook_stats(&self) -> HookStatsSnapshot {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.snapshot.clone()
+        }
+    }
+
+    /// 用例 1：快照五类计数 + 生效规则摘要完整映射到 proto 响应；重复调用只读无害。
+    #[tokio::test]
+    async fn get_hook_stats_maps_snapshot_to_response() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let mut service = make_service(mgr);
+        let reads = StdArc::new(AtomicUsize::new(0));
+        service.hook_stats = StdArc::new(FakeHookStatsSource {
+            snapshot: HookStatsSnapshot {
+                emitted: 11,
+                dropped: 2,
+                executed: 3,
+                failed: 4,
+                timed_out: 5,
+                rules: vec![
+                    RuleSummary {
+                        id: "global-rule".to_string(),
+                        scope: HookScope::Global,
+                        enabled: true,
+                    },
+                    RuleSummary {
+                        id: "project-rule".to_string(),
+                        scope: HookScope::Project,
+                        enabled: false,
+                    },
+                ],
+            },
+            reads: reads.clone(),
+        });
+
+        let response = service
+            .get_hook_stats(Request::new(proto::GetHookStatsRequest {
+                project: String::new(),
+            }))
+            .await
+            .expect("只读 RPC 不应产生 gRPC error")
+            .into_inner();
+        assert_eq!(
+            (
+                response.emitted,
+                response.dropped,
+                response.executed,
+                response.failed,
+                response.timed_out,
+            ),
+            (11, 2, 3, 4, 5)
+        );
+        assert_eq!(response.rules.len(), 2);
+        assert_eq!(response.rules[0].id, "global-rule");
+        assert_eq!(response.rules[0].scope, "global");
+        assert!(response.rules[0].enabled);
+        assert_eq!(response.rules[1].id, "project-rule");
+        assert_eq!(response.rules[1].scope, "project");
+        assert!(!response.rules[1].enabled);
+
+        // 只读：再次调用（含可选 project）结果一致，仅发生读取。
+        let second = service
+            .get_hook_stats(Request::new(proto::GetHookStatsRequest {
+                project: "/proj".to_string(),
+            }))
+            .await
+            .expect("只读 RPC 不应产生 gRPC error")
+            .into_inner();
+        assert_eq!(response, second);
+        assert_eq!(reads.load(Ordering::SeqCst), 2, "每次调用只读取一次");
+    }
+
+    /// 用例 2：无 hook 运行时（默认服务）返回全零计数与空规则表。
+    #[tokio::test]
+    async fn get_hook_stats_defaults_to_zero_without_runtime() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let service = make_service(mgr);
+
+        let response = service
+            .get_hook_stats(Request::new(proto::GetHookStatsRequest::default()))
+            .await
+            .expect("只读 RPC 不应产生 gRPC error")
+            .into_inner();
+        assert_eq!(
+            (
+                response.emitted,
+                response.dropped,
+                response.executed,
+                response.failed,
+                response.timed_out,
+            ),
+            (0, 0, 0, 0, 0)
+        );
+        assert!(response.rules.is_empty());
+    }
 }

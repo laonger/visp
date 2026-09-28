@@ -499,6 +499,48 @@ message ReloadConfigResponse {
     repeated Item results = 1;
 }
 
+// ============ Hooks ============
+
+// 只读 hook 统计请求（设计 §15）。空消息表示查询 daemon 全局统计。
+message GetHookStatsRequest {
+    // 可选项目路径过滤。一期 daemon 只维护单项目 hook 运行时，该字段
+    // 预留（为空时返回当前生效运行时的统计；非空时暂不参与过滤）。
+    string project = 1;
+}
+
+// 生效规则摘要：id / 作用域 / 启用状态。
+message HookRuleSummary {
+    // 规则唯一名（内置规则以 `builtin:` 前缀）。
+    string id = 1;
+
+    // 规则来源作用域："global" / "project"。
+    string scope = 2;
+
+    // 是否启用。
+    bool enabled = 3;
+}
+
+// 只读 hook 统计响应（设计 §15：五类计数 + 生效规则列表）。
+message HookStatsResponse {
+    // 进入运行时的 hook 事件数。
+    uint64 emitted = 1;
+
+    // 运行时丢弃的事件数（关停后到达 / 总线消费者滞后）。
+    uint64 dropped = 2;
+
+    // 进程正常退出（exit code 0）次数。
+    uint64 executed = 3;
+
+    // 启动后失败次数（非零退出 / 被信号终止 / 等待出错）。
+    uint64 failed = 4;
+
+    // 超时被杀次数。
+    uint64 timed_out = 5;
+
+    // 生效规则简要列表。
+    repeated HookRuleSummary rules = 6;
+}
+
 // ============ Service ============
 service CoderDaemon {
     // Session 管理：创建、列举、删除、查询
@@ -523,4 +565,8 @@ service CoderDaemon {
     // 显式 /reload：重载 rules/skills/agents 并回执 system_prompt，逐项返回结果。
     // 部分失败不返回 gRPC error，而是正常响应中带逐项失败信息。
     rpc ReloadConfig(ReloadConfigRequest) returns (ReloadConfigResponse);
+
+    // 只读 hook 诊断：计数（emitted/dropped/executed/failed/timed_out）与生效规则列表。
+    // 不改变任何运行时状态（设计 §15）。
+    rpc GetHookStats(GetHookStatsRequest) returns (HookStatsResponse);
 }

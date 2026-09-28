@@ -610,9 +610,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 优雅关停管道（设计 D13）：Shutdown RPC 经此 Notify 唤醒 main；hook 有界
     // drain 宿主：有 hook 规则时为真实执行器（8.7.2 接线），否则维持空实现。
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
-    let hook_drain: Arc<dyn crate::shutdown::HookDrainHost> = match hook_runtime {
-        Some(runtime) => runtime,
+    let hook_drain: Arc<dyn crate::shutdown::HookDrainHost> = match &hook_runtime {
+        Some(runtime) => runtime.clone(),
         None => Arc::new(crate::shutdown::NoopHookDrain),
+    };
+    // 只读统计来源（GetHookStats）：与 drain 宿主同一运行时；无运行时为全零实现。
+    let hook_stats: Arc<dyn visp_daemon::hook_runtime::HookStatsSource> = match &hook_runtime {
+        Some(runtime) => runtime.clone(),
+        None => Arc::new(visp_daemon::hook_runtime::NoopHookStats),
     };
     let service = CoderDaemonService::new(
         model_configs,
@@ -630,6 +635,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client_tx,
         shutdown_notify.clone(),
         hook_drain,
+        hook_stats,
     )
     .inspect_err(|error| {
         // The desktop launcher redirects release stdout/stderr to a log file.
