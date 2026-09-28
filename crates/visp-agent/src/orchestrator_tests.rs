@@ -3123,7 +3123,7 @@ async fn test_agent_definition_clone_from_snapshot_survives_across_await() {
 //
 // 依据：设计 §6.2/§6.4、实施计划 1b-1b 测试表第 1–10 条。
 
-use visp_hooks::{HookEvent, HookEventName, HookPayload, Origin, SessionSource};
+use visp_hooks::{HookEvent, HookEventName, HookPayload, Origin, SessionSource, StopStatus};
 
 /// 从记录发布器中提取 hook 域事件（忽略显示域 Frame）。
 fn recorded_hooks(recorder: &Arc<RecordingPublisher>) -> Vec<HookEvent> {
@@ -3482,5 +3482,235 @@ async fn test_user_prompt_submit_prompt_chars_and_no_raw_prompt() {
             assert!(p.prompt.is_none(), "默认脱敏：不应携带原文");
         }
         other => panic!("期望 UserPromptSubmit 载荷，得到 {other:?}"),
+    }
+}
+
+// ── M1: 会话级 Stop / StopFailure hook 发射 ──────────────────────────────
+//
+// 依据：设计 §6.2 完成事件分层（执行级 vs 会话级）、实施计划 1b-1b 第 13–19 条。
+
+/// 统计总线上的 root `Done` 帧数量（TUI 显示面看到的回合结束信号）。
+fn count_done_frames(recorder: &Arc<RecordingPublisher>) -> usize {
+    recorder
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e, BusEvent::Frame(f) if matches!(f.event, AgentEvent::Done)))
+        .count()
+}
+
+/// 注册一个 root ActiveAgent（无真实 loop），供生命周期 hook 断言使用。
+fn register_root_agent(orch: &mut Orchestrator, sid: &str) {
+    let (inbox_tx, _inbox_rx) = mpsc::channel(16);
+    orch.active_agents.register(ActiveAgent {
+        session_id: sid.to_string(),
+        parent_session_id: None,
+        agent_name: "default".to_string(),
+        cancel_token: CancellationToken::new(),
+        inbox: inbox_tx,
+        pending_call_id: None,
+        started_at: Instant::now(),
+    });
+}
+
+/// 第 11/15/19 条：主回合 TUI 恰收到 1 条 `Done` 帧（来自
+/// `agent_loop → 主转发任务 → 总线`），且会话级 `Hook(Stop)` 恰 1 条；
+/// `handle_done` 不再补发第二条 root `Done` 帧。
+#[tokio::test]
+async fn test_root_turn_has_single_done_frame_and_single_stop_hook() {
+    let recorder = recording_publisher();
+    let (mut orch, sid) = make_orchestrator_for_main_agent(recorder.clone());
+
+    orch.start_main_agent(&sid, "hello").await;
+
+    // 排空 global_rx（等价于 orchestrator run 循环），直到 Done 被处理
+    // （active_agents 清空）且显示面 Done 帧已由主转发任务发布。
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            while let Ok(envelope) = orch.global_rx.try_recv() {
+                orch.handle_agent_message(envelope).await;
+            }
+            if orch.active_agents.get(&sid).is_none() && count_done_frames(&recorder) >= 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(finished.is_ok(), "主 agent 回合应在超时前结束");
+
+    let done_frames = count_done_frames(&recorder);
+    assert_eq!(
+        done_frames, 1,
+        "TUI 每回合应恰收到 1 条 Done 帧（去重后），实际 {done_frames}"
+    );
+
+    let hooks = recorded_hooks(&recorder);
+    assert_eq!(
+        count_event(&hooks, HookEventName::Stop),
+        1,
+        "会话级 Stop 应恰发一次"
+    );
+    let stop = hooks
+        .iter()
+        .find(|h| h.event_name() == HookEventName::Stop)
+        .expect("应发出 Stop");
+    assert_eq!(stop.context.session_id, sid);
+    assert_eq!(stop.context.source, SessionSource::Startup);
+    match &stop.payload {
+        HookPayload::Stop(p) => {
+            assert_eq!(
+                p.status,
+                StopStatus::Completed,
+                "正常 Done → status=completed"
+            );
+            assert_eq!(
+                (p.input_tokens, p.output_tokens, p.tool_calls),
+                (0, 0, 0),
+                "空 MockProvider 回合用量为 0"
+            );
+        }
+        other => panic!("期望 Stop 载荷，得到 {other:?}"),
+    }
+}
+
+/// 第 17 条：root 真 `Error` → 会话级 `StopFailure`（含 code/message）。
+#[tokio::test]
+async fn test_root_error_emits_stop_failure_hook() {
+    let recorder = recording_publisher();
+    let (mut orch, _global_tx, _client_tx) = make_orchestrator_with_publisher(recorder.clone());
+    let sid = orch
+        .session_mgr
+        .create(&PathBuf::from("/tmp"), LlmConfig::default())
+        .unwrap()
+        .id;
+    register_root_agent(&mut orch, &sid);
+
+    orch.handle_agent_error(&sid, AgentErrorCode::Internal, "boom".to_string())
+        .await;
+
+    let hooks = recorded_hooks(&recorder);
+    assert_eq!(
+        count_event(&hooks, HookEventName::StopFailure),
+        1,
+        "root 真错误应发一次 StopFailure"
+    );
+    assert_eq!(
+        count_event(&hooks, HookEventName::Stop),
+        0,
+        "真错误不得发 Stop"
+    );
+    let failure = hooks
+        .iter()
+        .find(|h| h.event_name() == HookEventName::StopFailure)
+        .expect("应发出 StopFailure");
+    assert_eq!(failure.context.session_id, sid);
+    match &failure.payload {
+        HookPayload::StopFailure(p) => {
+            assert_eq!(p.code, "Internal", "code 取 AgentErrorCode 序列化字符串");
+            assert_eq!(p.message, "boom");
+        }
+        other => panic!("期望 StopFailure 载荷，得到 {other:?}"),
+    }
+}
+
+/// 第 16/18 条：root 用户取消 → `Stop(status=cancelled)`，**不**误入 `StopFailure`。
+#[tokio::test]
+async fn test_root_cancel_emits_stop_cancelled_not_failure() {
+    let recorder = recording_publisher();
+    let (mut orch, _global_tx, _client_tx) = make_orchestrator_with_publisher(recorder.clone());
+    let sid = orch
+        .session_mgr
+        .create(&PathBuf::from("/tmp"), LlmConfig::default())
+        .unwrap()
+        .id;
+    register_root_agent(&mut orch, &sid);
+
+    orch.handle_agent_error(
+        &sid,
+        AgentErrorCode::Cancelled,
+        "Agent loop cancelled".to_string(),
+    )
+    .await;
+
+    let hooks = recorded_hooks(&recorder);
+    assert_eq!(
+        count_event(&hooks, HookEventName::StopFailure),
+        0,
+        "用户取消不得误入 StopFailure"
+    );
+    assert_eq!(
+        count_event(&hooks, HookEventName::Stop),
+        1,
+        "用户取消应发停止（cancelled）"
+    );
+    let stop = hooks
+        .iter()
+        .find(|h| h.event_name() == HookEventName::Stop)
+        .expect("应发出 Stop");
+    match &stop.payload {
+        HookPayload::Stop(p) => {
+            assert_eq!(p.status, StopStatus::Cancelled, "取消 → status=cancelled")
+        }
+        other => panic!("期望 Stop 载荷，得到 {other:?}"),
+    }
+}
+
+/// 第 14/20 条：子 agent 完成/失败**不**产生会话级 `Stop`/`StopFailure`（子路径不变）。
+#[tokio::test]
+async fn test_sub_agent_completion_emits_no_session_level_hook() {
+    for code in [None, Some(AgentErrorCode::Internal)] {
+        let recorder = recording_publisher();
+        let (mut orch, _global_tx, _client_tx) = make_orchestrator_with_publisher(recorder.clone());
+        let parent_id = orch
+            .session_mgr
+            .create(&PathBuf::from("/tmp"), LlmConfig::default())
+            .unwrap()
+            .id;
+        register_root_agent(&mut orch, &parent_id);
+        let child = orch
+            .session_mgr
+            .create_sub(SubSessionParams {
+                parent_id: Some(parent_id.clone()),
+                agent_name: "default".to_string(),
+                session_id: None,
+                project_path: PathBuf::from("/tmp"),
+                config: LlmConfig::default(),
+                permission: vec![],
+                approved_tools: HashSet::new(),
+            })
+            .unwrap();
+
+        let (child_inbox_tx, _child_inbox_rx) = mpsc::channel(16);
+        orch.active_agents.register(ActiveAgent {
+            session_id: child.id.clone(),
+            parent_session_id: Some(parent_id.clone()),
+            agent_name: "default".to_string(),
+            cancel_token: CancellationToken::new(),
+            inbox: child_inbox_tx,
+            pending_call_id: Some("call-1".to_string()),
+            started_at: Instant::now(),
+        });
+
+        match code {
+            None => orch.handle_done(&child.id).await,
+            Some(c) => {
+                orch.handle_agent_error(&child.id, c, "boom".to_string())
+                    .await
+            }
+        }
+
+        let hooks = recorded_hooks(&recorder);
+        assert_eq!(
+            count_event(&hooks, HookEventName::Stop),
+            0,
+            "子 agent 不产生会话级 Stop"
+        );
+        assert_eq!(
+            count_event(&hooks, HookEventName::StopFailure),
+            0,
+            "子 agent 不产生会话级 StopFailure"
+        );
     }
 }

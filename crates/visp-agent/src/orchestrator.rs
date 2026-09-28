@@ -7,7 +7,7 @@
 //! - 管理子 Agent 的创建（spawn_sub_agent）、销毁（handle_done）、取消（cancel_agent）
 //! - 管理 pending_queries 将用户响应路由到对应 agent
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -36,7 +36,7 @@ use visp_core::tool_registry::ToolRegistry;
 use visp_config::DaemonConfig;
 use visp_hooks::{
     HookContext, HookEvent, HookEventName, HookPayload, Origin, SessionSource, SessionStartPayload,
-    UserPromptSubmitPayload, VISP_HOOK_SCHEMA,
+    StopFailurePayload, StopPayload, StopStatus, UserPromptSubmitPayload, VISP_HOOK_SCHEMA,
 };
 
 use crate::active_agent::{ActiveAgent, ActiveAgentRegistry};
@@ -173,9 +173,13 @@ pub struct Orchestrator {
     pending_responses: HashMap<String, tokio::sync::oneshot::Sender<String>>,
     /// 因并发上限而排队等待的 spawn 请求（FIFO，subagent 完成释放空位后消费）
     queued_spawns: std::collections::VecDeque<QueuedSpawn>,
-    /// 本 daemon 内已发射过 `SessionStart` 的 session（设计 §6.2 裁定 #2：
-    /// 该 session 首次 `start_loop` 成功；同一 daemon 内第二个新建会话仍会发）。
-    session_start_emitted: HashSet<String>,
+    /// 本 daemon 内已发射过 `SessionStart` 的 session 及其绑定时刻来源
+    /// （设计 §6.2 裁定 #2：该 session 首次 `start_loop` 成功；同一 daemon 内第二个
+    /// 新建会话仍会发）。会话级 `Stop`/`StopFailure` 复用同一 `source`。
+    session_sources: HashMap<String, SessionSource>,
+    /// 同回合最近一次 `UsageInfo`（input_tokens, output_tokens, tool_calls），
+    /// 供会话级 `Stop` 载荷取值（设计 §6.2）。
+    latest_usage: HashMap<String, (u64, u64, u64)>,
 
     // ── 共享依赖 ─────────────────────────────────────────────
     session_mgr: Arc<SessionManager>,
@@ -217,7 +221,8 @@ impl Orchestrator {
             sub_agent_handles: HashMap::new(),
             pending_responses: HashMap::new(),
             queued_spawns: std::collections::VecDeque::new(),
-            session_start_emitted: HashSet::new(),
+            session_sources: HashMap::new(),
+            latest_usage: HashMap::new(),
             session_mgr,
             agent_registry,
             tool_registry,
@@ -268,8 +273,18 @@ impl Orchestrator {
             AgentMessage::ThinkingBlock(_) => {
                 // 不在 V1 中转发
             }
-            AgentMessage::UsageInfo { .. } => {
-                // UsageInfo 已由 run_agent_loop 直接送达 CLI
+            AgentMessage::UsageInfo {
+                input_tokens,
+                output_tokens,
+                tool_calls,
+                ..
+            } => {
+                // UsageInfo 已由 run_agent_loop 直接送达 CLI；此处仅记录同回合最近
+                // 用量，供会话级 `Stop` 载荷取值（设计 §6.2）。
+                self.latest_usage.insert(
+                    session_id,
+                    (input_tokens as u64, output_tokens as u64, tool_calls as u64),
+                );
             }
             AgentMessage::UsageDelta { .. } => {
                 // 逐 chunk 增量同样由 run_agent_loop 直送 CLI，此处不重复转发
@@ -559,7 +574,12 @@ impl Orchestrator {
         // `SessionStart` 仅在「该 session 本次 daemon 内首次 start_loop 成功」时发射：
         // per-session 标记集合保证同会话第二回合不再发，但同 daemon 内第二个新建
         // 会话仍会发；`is_main` 过滤（`parent_id.is_none()`）排除子 agent。
-        if is_main && self.session_start_emitted.insert(session_id.to_string()) {
+        if is_main
+            && self
+                .session_sources
+                .insert(session_id.to_string(), session_source(&ctx))
+                .is_none()
+        {
             self.publish_session_start(session_id, &ctx, &agent_name);
         }
         // `UserPromptSubmit`：主 agent 受理 UserInput 且 start_loop 成功时发一次。
@@ -1076,15 +1096,20 @@ impl Orchestrator {
                 );
             }
         } else {
-            // Root agent done — notify CLI
-            let frame = AgentEventFrame {
-                event: AgentEvent::Done,
-                session_id: session_id.to_string(),
-                agent_name,
-                parent_session_id: None,
-                parent_session_name: None,
-            };
-            self.bus.publish(BusEvent::Frame(frame));
+            // Root agent done — 会话级 `Stop`（设计 §6.2：清理置 Idle 之后）。
+            //
+            // 不再补发 root `Done` 帧：主 agent 的 `Done` 帧由 `agent_loop` →
+            // 主转发任务 → 总线独立送达 TUI（并派生执行级 `AgentRunEnd`），
+            // 此处再发会造成根回合重复的 `Done` 帧。
+            let (input_tokens, output_tokens, tool_calls) =
+                self.latest_usage.remove(session_id).unwrap_or((0, 0, 0));
+            self.publish_stop(
+                session_id,
+                StopStatus::Completed,
+                input_tokens,
+                output_tokens,
+                tool_calls,
+            );
         }
     }
 
@@ -1171,13 +1196,26 @@ impl Orchestrator {
             );
         } else if is_cancel {
             tracing::info!(session_id, agent_name, "root agent cancelled by user");
+            // 用户取消：会话级 `Stop(status=cancelled)`，**不**误入 `StopFailure`
+            // （设计 §6.2：#18）。
+            let (input_tokens, output_tokens, tool_calls) =
+                self.latest_usage.remove(session_id).unwrap_or((0, 0, 0));
+            self.publish_stop(
+                session_id,
+                StopStatus::Cancelled,
+                input_tokens,
+                output_tokens,
+                tool_calls,
+            );
         } else {
-            // Root agent error — Error event 已由 run_agent_loop 直接送 CLI；这里仅记录
+            // Root agent error — Error 帧仍由 run_agent_loop 直送 CLI；
+            // 会话级 `StopFailure`（设计 §6.2：语义收敛后，含 code/message）。
             tracing::error!(
                 session_id,
                 agent_name,
                 "root agent errored: {normalized_message}"
             );
+            self.publish_stop_failure(session_id, &format!("{code:?}"), &normalized_message);
         }
     }
 
@@ -1319,6 +1357,62 @@ impl Orchestrator {
             }),
         };
         self.bus.publish(BusEvent::Hook(event));
+    }
+
+    /// 发布会话级 `Stop`（root agent 正常完成 / 用户取消；设计 §6.2）。
+    fn publish_stop(
+        &self,
+        session_id: &str,
+        status: StopStatus,
+        input_tokens: u64,
+        output_tokens: u64,
+        tool_calls: u64,
+    ) {
+        let event = HookEvent {
+            context: self.hook_context(session_id, HookEventName::Stop),
+            payload: HookPayload::Stop(StopPayload {
+                status,
+                input_tokens,
+                output_tokens,
+                tool_calls,
+            }),
+        };
+        self.bus.publish(BusEvent::Hook(event));
+    }
+
+    /// 发布会话级 `StopFailure`（root agent 真错误；设计 §6.2）。
+    fn publish_stop_failure(&self, session_id: &str, code: &str, message: &str) {
+        let event = HookEvent {
+            context: self.hook_context(session_id, HookEventName::StopFailure),
+            payload: HookPayload::StopFailure(StopFailurePayload {
+                code: code.to_string(),
+                message: message.to_string(),
+            }),
+        };
+        self.bus.publish(BusEvent::Hook(event));
+    }
+
+    /// 构造 hook 公共信封：`cwd` 取会话项目路径，`source` 取绑定时刻记录，
+    /// `origin` 本步固定 `tui`（与 `SessionStart`/`UserPromptSubmit` 一致）。
+    fn hook_context(&self, session_id: &str, hook_event_name: HookEventName) -> HookContext {
+        let cwd = self
+            .session_mgr
+            .get(session_id)
+            .map(|s| s.project_path.display().to_string())
+            .unwrap_or_default();
+        HookContext {
+            schema: VISP_HOOK_SCHEMA,
+            hook_event_name,
+            session_id: session_id.to_string(),
+            cwd,
+            source: self
+                .session_sources
+                .get(session_id)
+                .copied()
+                .unwrap_or(SessionSource::Startup),
+            origin: Origin::Tui,
+            seq: None,
+        }
     }
 
     pub fn resolve_provider(
