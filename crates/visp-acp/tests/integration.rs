@@ -20,10 +20,11 @@ use tonic::{Request, Response, Status, Streaming};
 use visp_proto::visp::coder_daemon_server::{CoderDaemon, CoderDaemonServer};
 use visp_proto::visp::{
     ClientMessage, CreateSessionRequest, DeleteSessionRequest, Done, Error as ProtoError,
-    GetSessionRequest, GetSymbolDetailsRequest, HealthStatus, ListSessionsResponse,
-    ReadFileRequest, ReadFileResponse, SearchSymbolsRequest, SearchSymbolsResponse, ServerMessage,
-    Session, ShutdownRequest, SymbolDetails, TextDelta, UserQuery, UserResponse, client_message,
-    server_message,
+    GetHookStatsRequest, GetSessionRequest, GetSymbolDetailsRequest, HealthStatus,
+    HookStatsResponse, ListSessionsResponse, ReadFileRequest, ReadFileResponse,
+    ReloadConfigRequest, ReloadConfigResponse, SearchSymbolsRequest, SearchSymbolsResponse,
+    ServerMessage, Session, ShutdownRequest, SymbolDetails, TextDelta, UserQuery, UserResponse,
+    client_message, server_message,
 };
 
 // ===== ScriptedDaemon:第 N 条输入触发回放 per_input[N] 输出段 =====
@@ -118,6 +119,20 @@ impl CoderDaemon for ScriptedDaemon {
         }))
     }
     async fn shutdown(&self, _request: Request<ShutdownRequest>) -> Result<Response<()>, Status> {
+        Err(Status::unimplemented("stub"))
+    }
+
+    async fn reload_config(
+        &self,
+        _request: Request<ReloadConfigRequest>,
+    ) -> Result<Response<ReloadConfigResponse>, Status> {
+        Err(Status::unimplemented("stub"))
+    }
+
+    async fn get_hook_stats(
+        &self,
+        _request: Request<GetHookStatsRequest>,
+    ) -> Result<Response<HookStatsResponse>, Status> {
         Err(Status::unimplemented("stub"))
     }
 }
@@ -367,9 +382,8 @@ async fn cancel_during_question_yields_cancelled() {
     let mut saw_elicitation = false;
     loop {
         let (method, _id, _v) = client.recv_any().await;
-        match method.as_deref() {
-            Some("elicitation/create") => saw_elicitation = true,
-            _ => {}
+        if let Some("elicitation/create") = method.as_deref() {
+            saw_elicitation = true;
         }
         if saw_elicitation {
             break;

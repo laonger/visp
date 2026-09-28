@@ -3801,38 +3801,19 @@ mod tests {
             .await;
         });
 
-        // 等待 loop 发出 UserQuery 事件（进入 select! 等待）
-        let mut respond = None;
-        loop {
+        // 等待 loop 发出 UserQuery 事件（进入 select! 等待）；
+        // 持有 respond 不回填，确保 loop 停在等待中
+        let _respond = loop {
             match tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await {
-                Ok(Some(AgentEvent::UserQuery { respond: r, .. })) => {
-                    respond = Some(r);
-                    break;
-                }
-                Ok(Some(AgentEvent::TextDelta(_))) => {
-                    eprintln!("[diag] event: TextDelta");
-                }
-                Ok(Some(AgentEvent::StatusUpdate(s))) => {
-                    eprintln!("[diag] event: StatusUpdate({s})");
-                }
-                Ok(Some(AgentEvent::Error { code, message })) => {
-                    eprintln!("[diag] event: Error({code:?}, {message})");
-                }
-                Ok(Some(AgentEvent::Done)) => {
-                    eprintln!("[diag] event: Done");
-                }
-                Ok(Some(_)) => {
-                    eprintln!("[diag] event: <other variant>");
-                }
+                Ok(Some(AgentEvent::UserQuery { respond: r, .. })) => break r,
                 Ok(None) => {
                     let _ = handle.await; // 若 task panic,此处会打印 panic 位置
                     panic!("run_agent_loop ended before emitting UserQuery");
                 }
                 Err(_) => panic!("timeout waiting for UserQuery"),
+                Ok(Some(_)) => continue, // 其他事件：继续等待 UserQuery
             }
-        }
-        // 持有 respond 不回填，确保 loop 停在 UserQuery 等待中
-        let _respond = respond;
+        };
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         // 提问等待中取消

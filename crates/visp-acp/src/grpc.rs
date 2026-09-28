@@ -273,8 +273,9 @@ mod tests {
 
     use visp_proto::visp::coder_daemon_server::{CoderDaemon, CoderDaemonServer};
     use visp_proto::visp::{
-        CreateSessionRequest, DeleteSessionRequest, GetSessionRequest, GetSymbolDetailsRequest,
-        HealthStatus, ListSessionsResponse, ReadFileRequest, ReadFileResponse,
+        CreateSessionRequest, DeleteSessionRequest, GetHookStatsRequest, GetSessionRequest,
+        GetSymbolDetailsRequest, HealthStatus, HookStatsResponse, ListSessionsResponse,
+        ReadFileRequest, ReadFileResponse, ReloadConfigRequest, ReloadConfigResponse,
         SearchSymbolsRequest, SearchSymbolsResponse, Session, ShutdownRequest, SymbolDetails,
     };
 
@@ -365,6 +366,20 @@ mod tests {
             &self,
             _request: Request<ShutdownRequest>,
         ) -> Result<Response<()>, Status> {
+            Err(Status::unimplemented("stub"))
+        }
+
+        async fn reload_config(
+            &self,
+            _request: Request<ReloadConfigRequest>,
+        ) -> Result<Response<ReloadConfigResponse>, Status> {
+            Err(Status::unimplemented("stub"))
+        }
+
+        async fn get_hook_stats(
+            &self,
+            _request: Request<GetHookStatsRequest>,
+        ) -> Result<Response<HookStatsResponse>, Status> {
             Err(Status::unimplemented("stub"))
         }
     }

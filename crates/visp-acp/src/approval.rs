@@ -176,7 +176,7 @@ mod tests {
     fn permission_options_four_kinds() {
         let opts = permission_options();
         assert_eq!(opts.len(), 4);
-        let kinds: Vec<_> = opts.iter().map(|o| o.kind.clone()).collect();
+        let kinds: Vec<_> = opts.iter().map(|o| o.kind).collect();
         assert_eq!(
             kinds,
             vec![
