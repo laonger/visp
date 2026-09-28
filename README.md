@@ -260,7 +260,7 @@ Sub-Agent 委托时自动创建独立 Tab，实时展示每个 Agent 的运行�
 curl -fsSL https://raw.githubusercontent.com/laonger/visp/master/install.sh | bash
 ```
 
-可用选项：`--bin-dir DIR`（安装目录，默认 `~/.local/bin`）、`--tag TAG`（指定 Release 版本，默认 `latest`）、`--no-config`（跳过配置初始化）、`--no-herdr`（跳过 herdr hook 安装）、`--dry-run`（仅打印动作）。完整选项见 `install.sh --help`。
+可用选项：`--bin-dir DIR`（安装目录，默认 `~/.local/bin`）、`--tag TAG`（指定 Release 版本，默认 `latest`）、`--model MODEL` / `--api-key KEY`（非交互写入配置，仅在本次新建 `daemon.toml` 时生效，也可用环境变量 `VISP_MODEL` / `VISP_API_KEY`；优先级为命令行 > 环境变量 > 交互提问 > 骨架默认）、`--no-config`（跳过配置初始化）、`--no-herdr`（跳过 herdr hook 安装）、`--uninstall`（卸载二进制，可配 `--purge-config` 一并删除配置目录）、`--yes`（跳过删除配置的确认）、`--dry-run`（仅打印动作）。完整选项见 `install.sh --help`。
 
 ### 编译
 
