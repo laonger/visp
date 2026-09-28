@@ -9,7 +9,8 @@
 #   [[hooks.rules]]
 #   id         = "herdr"
 #   event      = ["SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop",
-#                 "StopFailure", "AgentRunEnd", "SubagentStop"]
+#                 "StopFailure", "AgentRunEnd", "SubagentStop", "SessionEnd"]
+#                 （SessionEnd 触发 pane release-agent，释放 herdr agent 权威）
 #   command    = "/abs/path/to/.config/visp/hooks/herdr.hook.sh"
 #   on_full    = "coalesce_latest"
 #   timeout_ms = 2000
@@ -56,6 +57,14 @@ case "${VISP_HOOK_EVENT:-}" in
         ;;
     Stop|StopFailure|AgentRunEnd|SubagentStop|SessionStart)
         state="idle"
+        ;;
+    SessionEnd)
+        # 会话结束：显式释放 herdr agent 权威，避免 visp 退出后边栏残留。
+        # 只释放，不做状态上报 / 完成通知。
+        "$HERDR_BIN_PATH" pane release-agent "$HERDR_PANE_ID" \
+            --source custom:visp --agent visp \
+            >/dev/null 2>&1 || true
+        exit 0
         ;;
     *)
         # 未映射事件不上报。

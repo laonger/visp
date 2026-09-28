@@ -406,7 +406,7 @@ max_context_tokens = 128000
 # pane 内（HERDR_ENV=1）生效。
 # [[hooks.rules]]
 # id = "herdr"
-# event = ["SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop", "StopFailure", "AgentRunEnd", "SubagentStop"]
+# event = ["SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop", "StopFailure", "AgentRunEnd", "SubagentStop", "SessionEnd"]
 # command = "/abs/path/to/.config/visp/hooks/herdr.hook.sh"
 # on_full = "coalesce_latest"
 # timeout_ms = 2000

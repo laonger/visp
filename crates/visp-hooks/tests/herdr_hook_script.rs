@@ -321,3 +321,50 @@ fn non_stop_events_never_notify() {
         );
     }
 }
+
+// 8. SessionEnd + 护栏满足 → 恰好一次 release-agent；不 report-agent、不 notification。
+#[test]
+fn session_end_releases_agent_without_report_or_notify() {
+    let sandbox = Sandbox::new();
+    let calls = sandbox.run_calls(Some("SessionEnd"), Some("1"), Some(PANE));
+    assert_eq!(calls.len(), 1, "SessionEnd 应恰好一次调用: {calls:?}");
+
+    let expected: Vec<String> = [
+        "pane",
+        "release-agent",
+        PANE,
+        "--source",
+        "custom:visp",
+        "--agent",
+        "visp",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    assert_eq!(calls[0], expected, "SessionEnd 应调用 release-agent");
+
+    for forbidden in ["report-agent", "notification"] {
+        assert!(
+            !calls[0].iter().any(|a| a == forbidden),
+            "SessionEnd 不应调用 {forbidden}: {calls:?}"
+        );
+    }
+}
+
+// 9. SessionEnd 但护栏不满足（无 HERDR_ENV）→ 不调用假 CLI。
+#[test]
+fn session_end_guard_skips_outside_herdr() {
+    let sandbox = Sandbox::new();
+    assert!(
+        sandbox
+            .run_calls(Some("SessionEnd"), None, Some(PANE))
+            .is_empty(),
+        "HERDR_ENV 未设仍调用假 CLI"
+    );
+    assert!(
+        sandbox
+            .run_calls(Some("SessionEnd"), Some("1"), None)
+            .is_empty(),
+        "HERDR_PANE_ID 未设仍调用假 CLI"
+    );
+}

@@ -221,7 +221,7 @@ cp assets/hooks/herdr.hook.sh ~/.config/visp/hooks/
 ```toml
 [[hooks.rules]]
 id = "herdr"
-event = ["SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop", "StopFailure", "AgentRunEnd", "SubagentStop"]
+event = ["SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop", "StopFailure", "AgentRunEnd", "SubagentStop", "SessionEnd"]
 command = "/abs/path/to/.config/visp/hooks/herdr.hook.sh"
 on_full = "coalesce_latest"
 timeout_ms = 2000

@@ -437,13 +437,13 @@ stdin JSON：顶层 `schema`/`hook_event_name`/`session_id`/`cwd`/`source`/`orig
 ```toml
 [[hooks.rules]]
 id = "herdr"
-event = ["SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop", "StopFailure", "AgentRunEnd", "SubagentStop"]
+event = ["SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop", "StopFailure", "AgentRunEnd", "SubagentStop", "SessionEnd"]
 command = "~/.config/visp/hooks/herdr.hook.sh"
 on_full = "coalesce_latest"
 timeout_ms = 2000
 ```
 
-脚本仅在 `HERDR_ENV=1`（herdr pane 内）时生效；状态映射：`UserPromptSubmit→working`、`PermissionRequest→blocked`、`Stop/StopFailure/AgentRunEnd/SubagentStop/SessionStart→idle`。用 `visp hooks list/doctor` 校验。
+脚本仅在 `HERDR_ENV=1`（herdr pane 内）时生效；状态映射：`UserPromptSubmit→working`、`PermissionRequest→blocked`、`Stop/StopFailure/AgentRunEnd/SubagentStop/SessionStart→idle`。`SessionEnd` 时脚本调用 `pane release-agent` 释放 herdr agent 权威，避免 visp 退出后边栏残留。用 `visp hooks list/doctor` 校验。
 
 herdr 设计 §11.5 的 snake_case 草案**已被本设计取代**。
 
