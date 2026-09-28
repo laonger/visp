@@ -142,12 +142,12 @@ pub fn map_frame(frame: &AgentEventFrame, ctx: &MapCtx) -> Option<HookEvent> {
             ),
             Some(parent) => subagent_stop(frame, ctx, parent, AgentRunStatus::Completed),
         },
-        AgentEvent::Error { .. } => match &frame.parent_session_id {
-            Some(parent) => subagent_stop(frame, ctx, parent, AgentRunStatus::Failed),
+        AgentEvent::Error { .. } => {
             // 主 agent 的错误是会话级 `StopFailure` 事实，由 orchestrator 在语义
             // 收敛后发 `Hook`；执行级映射不产出（设计 §6.2 完成事件分层）。
-            None => return None,
-        },
+            let parent = frame.parent_session_id.as_ref()?;
+            subagent_stop(frame, ctx, parent, AgentRunStatus::Failed)
+        }
         // 其余帧（TextDelta/ThinkingBlock/Usage*/StatusUpdate/Image*/…）不属 hook 域。
         _ => return None,
     };
