@@ -1,6 +1,6 @@
 # TODO & 已知限制
 
-> 最后更新：2026-09-18
+> 最后更新：2026-09-23
 > 基于真实代码状态核实，旧文档中 3 项「待实现」经确认已完成。
 
 ## Phase 完成状态
@@ -10,7 +10,7 @@
 | 1 | 项目骨架 + 核心抽象 | ✅ |
 | 2 | LLM Provider + 内置工具 | ✅ |
 | 3 | Agent 核心 + Daemon | ✅ |
-| 4 | CLI 前端 (visp-cli) | ✅ |
+| 4 | CLI 前端 (visp-tui) | ✅ |
 | 5 | CodeGraph 代码智能 | ✅ |
 
 **测试分布**：visp-codegraph 18+64 · visp-core 53 · visp-daemon 17 · visp-llm 22 · visp-tools 27 · 其余 ~480
@@ -150,6 +150,26 @@ CLI proxy that reduces LLM token consumption by 60-90% on common dev commands. S
 
 ---
 
+### P2：工具审批 `reject_always` 语义（core — 来自 visp-acp 设计未决 5，2026-09-23 拍板本期降级）
+
+**问题**：审批答复 `selected_index` 仅支持 `0`（允许）/`2`（始终允许）/其他（拒绝，`agent_loop.rs:1216-1244`），无「永久拒绝某工具」的会话内存储位。ACP 适配器（`visp-acp`，见 `docs/design/visp-design-acp.md` §6.5）收到客户端 `reject_always` 只能降级为 `reject_once`（`selected_index = 1`），用户选"永久拒绝"后同类工具仍会再弹窗。
+
+**影响**：安全方向（多弹窗不会误放行），功能保真度缺失。
+
+**方案参考**：Session 增加 `rejected_tools: HashSet<String>`（对齐已有 `approved_tools`），审批判定逻辑优先查拒绝集合；`reject_always` 回填新语义索引或在 UserResponse 中携带 always_reject 标记。可与 ACP 适配器 M1 后迭代同批实现。
+
+---
+
+### P2：LLM 原生 stop reason 透出（daemon / llm — 来自 visp-acp 设计未决 5，2026-09-23 拍板本期降级）
+
+**问题**：daemon/LLM 层未向上暴露 LLM 原生 stop reason（`max_tokens` 截断、内容过滤、工具调用终止等不可区分），错误一律以统一 `Error` 收尾。ACP 侧只能把所有结束映射为 `end_turn`/`refusal`，Zed 用户无法看到「输出因长度被截断」。
+
+**影响**：信息保真度，无功能损害；长输出截断时用户略困惑。
+
+**方案参考**：`visp-llm` provider 响应解析处保留 stop reason 原始值，沿 `AgentEvent`/`ServerMessage` 透传（proto 可加可选字段），TUI/ACP 按需展示。属既有缺口，非 ACP 引入。
+
+---
+
 ## 🔶 已知限制（可优化，非阻塞）
 
 ### Phase 3 已知限制
@@ -212,7 +232,7 @@ Agent 循环在等待 UserQuery 确认时 panic，mpsc sender 被 drop，daemon 
 
 ### 已知限制
 
-#### 未识别终端回退 BEL 兜底（visp-cli — 已修订进设计正文，经用户拍板 2026-09-18）
+#### 未识别终端回退 BEL 兜底（visp-tui — 已修订进设计正文，经用户拍板 2026-09-18）
 
 **问题**：rmux / tmux 等复用器可能拦截或丢弃 OSC 9/777/99 通知序列（rmux 的 `osc_notification` 为空实现），导致通知完全静默。
 
