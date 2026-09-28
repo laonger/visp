@@ -254,6 +254,14 @@ Sub-Agent 委托时自动创建独立 Tab，实时展示每个 Agent 的运行�
 
 解压后包含 `visp`（启动器）、`visp-daemon`（后台服务）、`visp-tui`（终端界面）三个二进制文件，可直接运行。
 
+也可以一键安装（下载预编译二进制、初始化配置骨架、安装 herdr hook）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/laonger/visp/master/install.sh | bash
+```
+
+可用选项：`--bin-dir DIR`（安装目录，默认 `~/.local/bin`）、`--tag TAG`（指定 Release 版本，默认 `latest`）、`--no-config`（跳过配置初始化）、`--no-herdr`（跳过 herdr hook 安装）、`--dry-run`（仅打印动作）。完整选项见 `install.sh --help`。
+
 ### 编译
 
 ```bash
