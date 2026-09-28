@@ -31,6 +31,9 @@ use crate::event::HookEventName;
 /// 规则队列默认容量（每条规则独立队列）。
 pub const DEFAULT_QUEUE_CAPACITY: usize = 1024;
 
+/// [`Executor::drain`] 的轮询间隔。
+const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(2);
+
 /// 规则队列溢出策略（设计 §7.2 `on_full`）。
 ///
 /// 与 `visp-config::hooks::OnFull` 同义；因 crate 边界不引入反向依赖，
@@ -331,6 +334,34 @@ impl Executor {
                 Self::ensure_worker(rule.clone(), self.handler.clone());
             }
         }
+    }
+
+    /// 有界等待规则队列排空（设计 D13 关停 drain）。
+    ///
+    /// 轮询各规则：**队列为空**且**串行 worker 不在执行**时视为排空，立即返回 `true`；
+    /// 超过 `budget` 仍未排空则返回 `false`（调用方另有硬超时兜底）。
+    ///
+    /// `parallel = true` 的规则执行在游离任务中，无队列水位可观测，故本方法对其
+    /// **尽力而为**（可能在其完成前返回）。
+    pub async fn drain(&self, budget: Duration) -> bool {
+        let deadline = Instant::now() + budget;
+        loop {
+            if self.idle() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(DRAIN_POLL_INTERVAL).await;
+        }
+    }
+
+    /// 所有规则队列为空且无串行 worker 在执行。
+    fn idle(&self) -> bool {
+        self.rules.iter().all(|rule| {
+            rule.queue.lock().expect("队列锁").is_empty()
+                && !rule.worker_active.load(Ordering::Acquire)
+        })
     }
 
     /// 确保串行 worker 在运行（幂等）。

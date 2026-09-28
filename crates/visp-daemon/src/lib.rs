@@ -9,6 +9,7 @@
 pub mod bus;
 pub mod config;
 pub mod hook_map;
+pub mod hook_runtime;
 pub mod observability;
 pub mod reload;
 pub mod watch;

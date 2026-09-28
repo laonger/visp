@@ -22,15 +22,9 @@ use visp_mcp::manager::McpManager;
 /// 兜底，宿主即使超时也不会拖住关停。
 pub const HOOK_DRAIN_BUDGET: Duration = Duration::from_secs(2);
 
-/// 关停期的 hook drain 宿主。
-///
-/// 契约：`drain` 必须在 `budget` 内返回；真实执行器（1b-2c）在实现里停止
-/// 接收新 hook 工作、等待在飞执行完成后返回。
-#[async_trait]
-pub trait HookDrainHost: Send + Sync {
-    /// 在 `budget` 内排空在飞的 hook 执行。
-    async fn drain(&self, budget: Duration);
-}
+// hook drain 契约迁入库层 `hook_runtime`（执行器在库层实现该契约），在此重导出以
+// 保持既有引用（`service.rs`/`main.rs` 的 `crate::shutdown::HookDrainHost`）不变。
+pub use visp_daemon::hook_runtime::HookDrainHost;
 
 /// 默认空实现：无 hook 执行器时立即返回，关停行为与旧版一致。
 pub struct NoopHookDrain;
