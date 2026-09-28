@@ -8,9 +8,11 @@
 pub mod dispatcher;
 pub mod env;
 pub mod event;
+pub mod herdr;
 pub mod spawn_handler;
 
 pub use dispatcher::*;
 pub use env::*;
 pub use event::*;
+pub use herdr::*;
 pub use spawn_handler::*;
