@@ -129,7 +129,13 @@ pub struct DaemonConfig {
     #[allow(dead_code)]
     pub observability: ObservabilityConfig,
     /// 生命周期 hook 规则（设计 §7）。
-    #[serde(default, skip_serializing_if = "HooksConfig::is_empty")]
+    ///
+    /// 宽松反序列化：整节解析失败时降级为空规则集（设计 §1.2，hook 问题不阻断启动）。
+    #[serde(
+        default,
+        deserialize_with = "crate::hooks::deserialize_hooks_lenient",
+        skip_serializing_if = "HooksConfig::is_empty"
+    )]
     pub hooks: HooksConfig,
 }
 
@@ -833,14 +839,25 @@ fn default_observability_log_file() -> Option<String> {
     Some("~/.visp/logs".into())
 }
 
+/// `[hooks]` 规则级降级：剔除无效规则并逐条 `warn`，保留有效规则（设计 §1.2）。
+///
+/// hook 配置问题**不阻断 visp 启动**；问题暴露交由 `visp hooks doctor`（后续任务）。
+/// 整节解析失败由 [`crate::hooks::deserialize_hooks_lenient`] 更早降级为空规则集。
+fn degrade_invalid_hooks(hooks: &mut HooksConfig, source: &str) {
+    for error in hooks.sanitize() {
+        tracing::warn!(
+            source = %source,
+            error = %error,
+            "invalid hook rule dropped; visp startup continues (run `visp hooks doctor` to inspect)"
+        );
+    }
+}
+
 pub fn load_config(config_path: Option<&Path>) -> Result<DaemonConfig, String> {
     // 1. 如果通过 CLI 参数指定了配置文件，直接使用该文件（最高优先级，跳过 merge）
     if let Some(path) = config_path {
-        let config = load_from_file(path)?;
-        config
-            .hooks
-            .validate()
-            .map_err(|e| format!("invalid [hooks] in {}: {e}", path.display()))?;
+        let mut config = load_from_file(path)?;
+        degrade_invalid_hooks(&mut config.hooks, &path.display().to_string());
         return Ok(config);
     }
 
@@ -854,10 +871,7 @@ pub fn load_config(config_path: Option<&Path>) -> Result<DaemonConfig, String> {
     } else {
         default_config()
     };
-    config
-        .hooks
-        .validate()
-        .map_err(|e| format!("invalid [hooks] in global config: {e}"))?;
+    degrade_invalid_hooks(&mut config.hooks, "global config");
 
     // 3. 加载项目配置 cwd/.visp/daemon.toml，merge 到全局配置（项目优先级更高）
     //    合并范围：[llm] 全部字段 + [[agent.builtin]]（按 name 字段级合并）+ [hooks]（同 id 覆盖）
@@ -868,11 +882,11 @@ pub fn load_config(config_path: Option<&Path>) -> Result<DaemonConfig, String> {
             "loading project-level config"
         );
         match load_from_file(&project_path) {
-            Ok(project_config) => {
-                project_config
-                    .hooks
-                    .validate()
-                    .map_err(|e| format!("invalid [hooks] in {}: {e}", project_path.display()))?;
+            Ok(mut project_config) => {
+                degrade_invalid_hooks(
+                    &mut project_config.hooks,
+                    &project_path.display().to_string(),
+                );
                 merge_llm_sections(&mut config.llm, &project_config.llm);
                 merge_agent_builtins(&mut config.agent.builtin, &project_config.agent.builtin);
                 merge_hooks(&mut config.hooks, &project_config.hooks);

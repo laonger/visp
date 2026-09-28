@@ -376,6 +376,31 @@ fn excluded_paths_produce_no_domain() {
     );
 }
 
+/// D11 固化：`.visp/hooks/` 下的脚本/信任文件**显式**不映射领域（不热重载）。
+#[test]
+fn hooks_subtree_is_explicitly_excluded() {
+    let (project, global) = full_setup();
+    fs::create_dir_all(project.path().join(".visp/hooks")).unwrap();
+    let plan = WatchPlan::build(project.path(), Some(global.path()));
+    let project = project.path();
+
+    for path in [
+        project.join(".visp/hooks/notify.sh"),
+        project.join(".visp/hooks/trusted.json"),
+        project.join(".visp/hooks/nested/x.sh"),
+        project.join(".visp/hooks"),
+    ] {
+        assert_eq!(
+            plan.classify(&path),
+            None,
+            "{path:?} 属 D11 排除范围，不应命中领域"
+        );
+    }
+
+    // 对照：同层 `[hooks]` 所在的 `.visp/daemon.toml` 亦不命中（配置需重启）。
+    assert_eq!(plan.classify(&project.join(".visp/daemon.toml")), None);
+}
+
 #[test]
 fn global_root_children_dispatch_by_subdir() {
     let global = TempDir::new().unwrap();
@@ -532,6 +557,61 @@ async fn degraded_without_bus_does_not_panic_and_keeps_consuming() {
     })
     .await;
     assert!(reloaded.is_ok(), "降级后消费循环仍应处理文件事件");
+
+    drop(msg_tx);
+    let _ = handle.await;
+}
+
+/// D11：写/改 `.visp/hooks/**` 或 `[hooks]`（daemon.toml）不产生热重载事件。
+#[tokio::test]
+async fn hooks_events_do_not_trigger_reload() {
+    let (msg_tx, msg_rx) = mpsc::unbounded_channel::<WatchMessage>();
+    let project = TempDir::new().unwrap();
+    fs::create_dir_all(project.path().join(".visp/hooks")).unwrap();
+    let plan = Arc::new(WatchPlan::build(project.path(), None));
+    let executor = Arc::new(CountingExecutor::default());
+
+    let handle = tokio::spawn(run_loop(
+        msg_rx,
+        plan,
+        executor.clone(),
+        Duration::from_millis(20),
+        None,
+    ));
+
+    for path in [
+        project.path().join(".visp/hooks/notify.sh"),
+        project.path().join(".visp/hooks/trusted.json"),
+        project.path().join(".visp/daemon.toml"),
+    ] {
+        msg_tx
+            .send(WatchMessage::Event(visp_fs::runtime::FileEvent {
+                path,
+                kind: visp_fs::normalize::EventType::Modified,
+            }))
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert_eq!(
+        executor.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "hook 配置/脚本改动不得触发热重载（D11）"
+    );
+
+    // 对照：普通 rules 事件仍触发重载，证明循环存活且非恒静默。
+    msg_tx
+        .send(WatchMessage::Event(visp_fs::runtime::FileEvent {
+            path: project.path().join(".visp/rules/a.md"),
+            kind: visp_fs::normalize::EventType::Modified,
+        }))
+        .unwrap();
+    let reloaded = tokio::time::timeout(Duration::from_secs(2), async {
+        while executor.calls.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(reloaded.is_ok(), "对照事件应触发重载");
 
     drop(msg_tx);
     let _ = handle.await;

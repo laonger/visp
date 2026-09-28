@@ -14,7 +14,8 @@ pub use config::{
     model_config_to_info, proto_to_llm_config, resolve_model, resolve_model_key, save_config,
 };
 pub use hooks::{
-    DEFAULT_HOOK_TIMEOUT_MS, HookConfigError, HookRule, HookScope, HooksConfig, OnFull, merge_hooks,
+    DEFAULT_HOOK_TIMEOUT_MS, HookConfigError, HookRule, HookScope, HooksConfig, OnFull,
+    deserialize_hooks_lenient, merge_hooks,
 };
 pub use path::{agents_md_ancestors, agents_md_ancestors_with_home, home_dir, hooks_dir_project};
 pub use prompt::DEFAULT_SYSTEM_PROMPT;

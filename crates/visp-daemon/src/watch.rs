@@ -260,6 +260,11 @@ impl WatchRule {
 ///
 /// 排除清单（system-prompt.md、daemon.toml、webfetch.toml、logs、codegraph.db
 /// 及其余 `.visp` 内容）因不在 rules/agents/skills 之内，自然零命中。
+///
+/// `hooks` 目录**显式**返回 `None`（不映射领域）：设计 D11 规定 `[hooks]` 配置与
+/// `.visp/hooks/` 信任/脚本文件一期**不热重载**，改动需重启 daemon。此处固化该契约，
+/// 防止未来 watch 计划扩展时误纳入 hooks。与其它排除项不同，hooks 是预期未来可能
+/// 支持热重载的目录，故不依赖「未列入白名单」的隐式排除。
 fn visp_subtree_domains(rel: &Path) -> Option<Vec<ReloadDomain>> {
     let mut components = rel.components();
     match components.next() {
@@ -272,6 +277,8 @@ fn visp_subtree_domains(rel: &Path) -> Option<Vec<ReloadDomain>> {
             "rules" => Some(vec![ReloadDomain::Rules]),
             "agents" => Some(vec![ReloadDomain::Agents]),
             "skills" => Some(vec![ReloadDomain::Skills]),
+            // D11：hook 配置/信任文件改动不热重载，显式不映射（需重启）。
+            "hooks" => None,
             _ => None,
         },
         Some(_) => None,

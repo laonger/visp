@@ -3,7 +3,7 @@
 //! 本模块只负责**配置形态**：反序列化、全局/项目合并（`scope` 标注）、
 //! 规则校验。规则匹配/执行属 `visp-hooks` 执行器，不在此处。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -130,6 +130,63 @@ impl HooksConfig {
             }
         }
         Ok(())
+    }
+
+    /// 校验并降级：逐条剔除无效规则（空 `id` / 重复 `id` / 空 `command`），
+    /// **保留**有效规则；返回每条被剔除规则对应的错误（可能为空）。
+    ///
+    /// 与 fail-fast 的 [`HooksConfig::validate`] 不同，本方法不中断、不丢弃有效
+    /// 规则，供加载路径实现「hook 配置问题不阻断 visp 启动」（设计 §1.2 零侵入）。
+    /// 问题暴露交由 `visp hooks doctor`。
+    ///
+    /// 重复 `id` 保留**首条**、剔除后续（与 [`merge_hooks`] 的「后者覆盖」不同：
+    /// 这里无法判定重复项意图，保守保留最早出现者）。
+    pub fn sanitize(&mut self) -> Vec<HookConfigError> {
+        let mut errors = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut kept = Vec::with_capacity(self.rules.len());
+        for (index, rule) in self.rules.drain(..).enumerate() {
+            if rule.id.trim().is_empty() {
+                errors.push(HookConfigError::EmptyId { index });
+                continue;
+            }
+            if !seen.insert(rule.id.clone()) {
+                errors.push(HookConfigError::DuplicateId {
+                    id: rule.id.clone(),
+                });
+                continue;
+            }
+            if rule.command.trim().is_empty() {
+                errors.push(HookConfigError::EmptyCommand {
+                    id: rule.id.clone(),
+                });
+                continue;
+            }
+            kept.push(rule);
+        }
+        self.rules = kept;
+        errors
+    }
+}
+
+/// 宽松反序列化 `[hooks]`（设计 §1.2 零侵入）。
+///
+/// 整节解析失败（未知 `event`、缺 `command` 等）时降级为**空规则集**并 `warn`，
+/// 而非让整个 `daemon.toml` 加载失败——hook 配置问题不阻断 visp 启动。
+/// 规则级非法项（空 `id` / 重复 `id` / 空 `command`）由 [`HooksConfig::sanitize`] 处理。
+pub fn deserialize_hooks_lenient<'de, D>(deserializer: D) -> Result<HooksConfig, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match HooksConfig::deserialize(deserializer) {
+        Ok(config) => Ok(config),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "invalid [hooks] section; all hook rules ignored (run `visp hooks doctor` to inspect)"
+            );
+            Ok(HooksConfig::default())
+        }
     }
 }
 
@@ -306,10 +363,10 @@ command = "/p/b"
     #[test]
     fn invalid_rules_report_clear_errors() {
         // 未知 event：契约枚举在反序列化阶段即拒绝，错误信息含事件名。
-        let unknown_event = toml::from_str::<DaemonConfig>(
+        // 加载路径经宽松反序列化会将其降级为空节，此处直接验证底层错误信息。
+        let unknown_event = toml::from_str::<HooksConfig>(
             r#"
-[hooks]
-[[hooks.rules]]
+[[rules]]
 id = "x"
 event = ["NotAnEvent"]
 command = "/x"
@@ -322,10 +379,9 @@ command = "/x"
         );
 
         // 缺 command：反序列化阶段报 missing field。
-        let missing_command = toml::from_str::<DaemonConfig>(
+        let missing_command = toml::from_str::<HooksConfig>(
             r#"
-[hooks]
-[[hooks.rules]]
+[[rules]]
 id = "x"
 event = ["Stop"]
 "#,
@@ -379,6 +435,165 @@ command = ""
         );
     }
 
+    /// 降级：1 条无效（重复 id）+ N 条有效 → 有效 N 条保留 + 1 条错误。
+    #[test]
+    fn sanitize_drops_invalid_and_keeps_valid() {
+        let mut config: HooksConfig = toml::from_str(
+            r#"
+[[rules]]
+id = "keep-a"
+event = ["Stop"]
+command = "/a"
+
+[[rules]]
+id = "dup"
+event = ["Stop"]
+command = "/b"
+
+[[rules]]
+id = "dup"
+event = ["Stop"]
+command = "/c"
+
+[[rules]]
+id = "keep-b"
+event = ["StopFailure"]
+command = "/d"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.rules.len(), 4);
+
+        let errors = config.sanitize();
+
+        assert_eq!(
+            errors,
+            vec![HookConfigError::DuplicateId {
+                id: "dup".to_string()
+            }]
+        );
+        let ids: Vec<&str> = config.rules.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["keep-a", "dup", "keep-b"]);
+        // 重复 id 保留首条。
+        assert_eq!(config.rules[1].command, "/b");
+    }
+
+    /// 降级：空 id / 空 command 亦被剔除，且各自产生错误；合法项原样保留。
+    #[test]
+    fn sanitize_drops_empty_id_and_command() {
+        let mut config: HooksConfig = toml::from_str(
+            r#"
+[[rules]]
+id = ""
+event = ["Stop"]
+command = "/a"
+
+[[rules]]
+id = "non-empty-command"
+event = ["Stop"]
+command = ""
+
+[[rules]]
+id = "ok"
+event = ["Stop"]
+command = "/ok"
+"#,
+        )
+        .unwrap();
+
+        let errors = config.sanitize();
+
+        assert_eq!(
+            errors,
+            vec![
+                HookConfigError::EmptyId { index: 0 },
+                HookConfigError::EmptyCommand {
+                    id: "non-empty-command".to_string()
+                },
+            ]
+        );
+        assert_eq!(config.rules.len(), 1);
+        assert_eq!(config.rules[0].id, "ok");
+    }
+
+    /// 降级：全部规则无效 → 空规则集（且不 panic）。
+    #[test]
+    fn sanitize_all_invalid_yields_empty_rules() {
+        let mut config: HooksConfig = toml::from_str(
+            r#"
+[[rules]]
+id = ""
+event = ["Stop"]
+command = "/a"
+
+[[rules]]
+id = "empty-command"
+event = ["Stop"]
+command = ""
+
+[[rules]]
+id = ""
+event = ["Stop"]
+command = "/c"
+"#,
+        )
+        .unwrap();
+
+        let errors = config.sanitize();
+
+        assert_eq!(
+            errors,
+            vec![
+                HookConfigError::EmptyId { index: 0 },
+                HookConfigError::EmptyCommand {
+                    id: "empty-command".to_string()
+                },
+                HookConfigError::EmptyId { index: 2 },
+            ]
+        );
+        assert!(config.rules.is_empty());
+        assert!(config.is_empty());
+    }
+
+    /// 整节解析失败（未知 event）降级为空规则集，而非让 `daemon.toml` 加载失败。
+    #[test]
+    fn lenient_hooks_deserialize_drops_unparseable_section() {
+        let config: DaemonConfig = toml::from_str(
+            r#"
+[daemon]
+listen_addr = "127.0.0.1:9090"
+
+[hooks]
+[[hooks.rules]]
+id = "x"
+event = ["NotAnEvent"]
+command = "/x"
+"#,
+        )
+        .unwrap();
+
+        assert!(config.hooks.rules.is_empty());
+        assert_eq!(config.daemon.listen_addr, "127.0.0.1:9090");
+    }
+
+    /// 回归：合法规则不受宽松反序列化影响。
+    #[test]
+    fn lenient_hooks_deserialize_keeps_valid_section() {
+        let config: DaemonConfig = toml::from_str(
+            r#"
+[hooks]
+[[hooks.rules]]
+id = "ok"
+event = ["Stop"]
+command = "/ok"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.hooks.rules.len(), 1);
+        assert_eq!(config.hooks.rules[0].id, "ok");
+    }
+
     #[test]
     fn hooks_rule_defaults_locked() {
         let config: DaemonConfig = toml::from_str(
@@ -406,6 +621,68 @@ command = "/x"
         assert_eq!(rule.cwd, None);
         assert!(rule.include.is_empty());
         assert_eq!(rule.scope, HookScope::Global);
+    }
+
+    /// 加载路径（CLI 显式路径）：含 1 条无效 + 1 条有效的 `[hooks]` 配置，
+    /// 加载**成功**且保留有效规则（hook 问题不阻断启动）。
+    #[test]
+    fn load_config_degrades_invalid_hook_rule_and_keeps_valid() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            file,
+            r#"
+[daemon]
+listen_addr = "127.0.0.1:9090"
+
+[hooks]
+
+[[hooks.rules]]
+id = "ok"
+event = ["Stop"]
+command = "/ok"
+
+[[hooks.rules]]
+id = "dup"
+event = ["Stop"]
+command = "/a"
+
+[[hooks.rules]]
+id = "dup"
+event = ["Stop"]
+command = "/b"
+"#
+        )
+        .unwrap();
+
+        let config = load_config(Some(file.path())).expect("hook 配置问题不应阻断加载");
+        let ids: Vec<&str> = config.hooks.rules.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["ok", "dup"]);
+        assert_eq!(config.hooks.rules[1].command, "/a");
+    }
+
+    /// 加载路径：整节无法解析（未知 event）→ 加载成功 + 空规则集。
+    #[test]
+    fn load_config_degrades_unparseable_hooks_section() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            file,
+            r#"
+[daemon]
+listen_addr = "127.0.0.1:9090"
+
+[hooks]
+
+[[hooks.rules]]
+id = "bad"
+event = ["NotAnEvent"]
+command = "/bad"
+"#
+        )
+        .unwrap();
+
+        let config = load_config(Some(file.path())).expect("整节解析失败也不应阻断加载");
+        assert!(config.hooks.rules.is_empty());
+        assert_eq!(config.daemon.listen_addr, "127.0.0.1:9090");
     }
 
     #[test]
