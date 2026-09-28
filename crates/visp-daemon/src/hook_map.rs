@@ -30,25 +30,17 @@ pub struct MapCtx {
     pub origin: Origin,
     /// canonical 项目路径（交付时 `cwd` 与 `VISP_PROJECT_PATH` 的权威来源）。
     pub project_path: String,
-    /// `PermissionRequest.kind`：`{approval, question}`。
-    ///
-    /// 冻结契约要求 `AgentEvent::UserQuery` **显式携带** `kind`（设计 §6.2 D12），
-    /// 但当前 core 的 `UserQuery` 尚未引入该字段（由 agent 侧独立任务补齐）。
-    /// 在该字段落地前，接线层经此上下文传入；**真实来源在接线层填充**。
-    /// 待 core 落地后，本字段退化为回退值，映射改从帧读取。
-    pub permission_kind: PermissionKind,
 }
 
 impl Default for MapCtx {
-    /// 缺省占位：空 `cwd`/`project_path`、`source=Startup`、`origin=Tui`、
-    /// `permission_kind=Approval`。真实值一律由接线层填充。
+    /// 缺省占位：空 `cwd`/`project_path`、`source=Startup`、`origin=Tui`。
+    /// 真实值一律由接线层填充。
     fn default() -> Self {
         Self {
             cwd: String::new(),
             source: SessionSource::Startup,
             origin: Origin::Tui,
             project_path: String::new(),
-            permission_kind: PermissionKind::Approval,
         }
     }
 }
@@ -123,14 +115,17 @@ pub fn map_frame(frame: &AgentEventFrame, ctx: &MapCtx) -> Option<HookEvent> {
             ToolOutcome::Denied | ToolOutcome::Cancelled | ToolOutcome::Truncated => return None,
         },
         AgentEvent::UserQuery {
-            query_id, options, ..
+            query_id,
+            options,
+            kind,
+            ..
         } => make_hook(
             frame,
             ctx,
             HookEventName::PermissionRequest,
             HookPayload::PermissionRequest(PermissionRequestPayload {
                 query_id: query_id.clone(),
-                kind: ctx.permission_kind,
+                kind: core_permission_kind(*kind),
                 options_count: options.len() as u64,
                 // 默认脱敏：原文仅在规则显式 include 时由交付层回填（设计 §8.4）。
                 message: None,
@@ -157,6 +152,16 @@ pub fn map_frame(frame: &AgentEventFrame, ctx: &MapCtx) -> Option<HookEvent> {
         _ => return None,
     };
     Some(event)
+}
+
+/// core 侧 [`visp_core::agent::PermissionKind`] → 冻结契约 [`PermissionKind`]。
+///
+/// 两枚举取值域一一对应；显式转换以免 core 与 hooks 契约耦合。
+fn core_permission_kind(kind: visp_core::agent::PermissionKind) -> PermissionKind {
+    match kind {
+        visp_core::agent::PermissionKind::Approval => PermissionKind::Approval,
+        visp_core::agent::PermissionKind::Question => PermissionKind::Question,
+    }
 }
 
 /// 构造子 agent 执行级完成事件（`Done`/`Error`，`parent` 由调用方保证为 `Some`）。
@@ -212,7 +217,6 @@ mod tests {
             source: SessionSource::Startup,
             origin: Origin::Tui,
             project_path: "/work".to_string(),
-            permission_kind: PermissionKind::Approval,
         }
     }
 
@@ -240,13 +244,14 @@ mod tests {
         })
     }
 
-    fn user_query_frame() -> AgentEventFrame {
+    fn user_query_frame(kind: visp_core::agent::PermissionKind) -> AgentEventFrame {
         let (tx, _rx) = mpsc::channel::<UserQueryResult>(1);
         frame(AgentEvent::UserQuery {
             query_id: "q1".to_string(),
             message: "Allow tool: bash?".to_string(),
             options: vec!["Yes".to_string(), "No".to_string()],
             allow_other: false,
+            kind,
             respond: tx,
         })
     }
@@ -346,12 +351,35 @@ mod tests {
         }
     }
 
+    /// `PermissionRequest.kind` 从**帧**读取（Approval），不再依赖 `MapCtx`。
     #[test]
-    fn user_query_maps_to_permission_request() {
-        let mut c = ctx();
-        c.permission_kind = PermissionKind::Question;
+    fn user_query_approval_kind_read_from_frame() {
+        let event = map_frame(
+            &user_query_frame(visp_core::agent::PermissionKind::Approval),
+            &ctx(),
+        )
+        .expect("UserQuery 应映射");
 
-        let event = map_frame(&user_query_frame(), &c).expect("UserQuery 应映射");
+        assert_eq!(event.event_name(), HookEventName::PermissionRequest);
+        match event.payload {
+            HookPayload::PermissionRequest(p) => {
+                assert_eq!(p.query_id, "q1");
+                assert_eq!(p.kind, PermissionKind::Approval);
+                assert_eq!(p.options_count, 2);
+                assert_eq!(p.message, None);
+            }
+            other => panic!("expected PermissionRequest, got {other:?}"),
+        }
+    }
+
+    /// `PermissionRequest.kind` 从**帧**读取（Question）。
+    #[test]
+    fn user_query_question_kind_read_from_frame() {
+        let event = map_frame(
+            &user_query_frame(visp_core::agent::PermissionKind::Question),
+            &ctx(),
+        )
+        .expect("UserQuery 应映射");
 
         assert_eq!(event.event_name(), HookEventName::PermissionRequest);
         match event.payload {
@@ -472,7 +500,6 @@ mod tests {
         assert_eq!(c.project_path, "");
         assert_eq!(c.source, SessionSource::Startup);
         assert_eq!(c.origin, Origin::Tui);
-        assert_eq!(c.permission_kind, PermissionKind::Approval);
     }
 
     /// 产出事件严格符合冻结契约取值域，可经扁平 JSON round-trip。

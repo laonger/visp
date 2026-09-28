@@ -36,6 +36,18 @@ pub struct UserQueryResult {
     pub text: String,
 }
 
+/// `AgentEvent::UserQuery` 的显式类型：区分「工具审批弹窗」与「普通提问」。
+///
+/// 冻结契约 `PermissionRequest.kind: {approval, question}` 要求由事件**显式携带**，
+/// 避免消费方对 `message` 做字符串嗅探（设计 §6.2 D12）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionKind {
+    /// 工具审批弹窗（`requires_approval` 路径）。
+    Approval,
+    /// 普通提问（LLM 输出的 `[USER_QUERY]` 标记路径）。
+    Question,
+}
+
 /// 工具调用结果分类。
 ///
 /// 作为 `AgentEvent::ToolCallResult` 的显式状态字段，并承担 `is_error` 的
@@ -132,6 +144,8 @@ pub enum AgentEvent {
         message: String,
         options: Vec<String>,
         allow_other: bool,
+        /// 显式类型：审批弹窗 vs 普通提问（见 [`PermissionKind`]）。
+        kind: PermissionKind,
         respond: mpsc::Sender<UserQueryResult>,
     },
 }
@@ -1183,6 +1197,7 @@ mod tests {
             message: "confirm?".into(),
             options: vec!["Yes".into(), "No".into()],
             allow_other: true,
+            kind: PermissionKind::Approval,
             respond: tx,
         };
         match evt {
@@ -1191,12 +1206,14 @@ mod tests {
                 message,
                 options,
                 allow_other,
+                kind,
                 ..
             } => {
                 assert_eq!(query_id, "q1");
                 assert_eq!(message, "confirm?");
                 assert_eq!(options, vec!["Yes", "No"]);
                 assert!(allow_other);
+                assert_eq!(kind, PermissionKind::Approval);
             }
             _ => panic!("expected UserQuery"),
         }
@@ -1212,6 +1229,7 @@ mod tests {
                 message: "confirm?".into(),
                 options: vec!["Yes".into(), "No".into()],
                 allow_other: true,
+                kind: PermissionKind::Approval,
                 respond: tx.clone(),
             },
             session_id: "sess-1".into(),
@@ -1990,6 +2008,7 @@ mod tests {
                     ref message,
                     ref options,
                     allow_other,
+                    kind,
                     respond,
                     ..
                 } => {
@@ -1997,6 +2016,7 @@ mod tests {
                     assert_eq!(message, "Choose:");
                     assert_eq!(options, &vec!["Red", "Blue"]);
                     assert!(!allow_other);
+                    assert_eq!(kind, PermissionKind::Question);
                     // Respond with option index 0 (Red)
                     let _ = respond
                         .send(UserQueryResult {
@@ -2133,6 +2153,7 @@ mod tests {
                     ref message,
                     ref options,
                     allow_other,
+                    kind,
                     respond,
                     ..
                 } => {
@@ -2140,6 +2161,7 @@ mod tests {
                     assert_eq!(message, "Enter value:");
                     assert_eq!(options, &vec!["Default"]);
                     assert!(allow_other);
+                    assert_eq!(kind, PermissionKind::Question);
                     // Send custom text with selected_index = -1
                     let _ = respond
                         .send(UserQueryResult {

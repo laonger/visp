@@ -1351,6 +1351,7 @@ fn spawn_outbound(
                     options,
                     allow_other,
                     respond,
+                    ..
                 } => {
                     // Store the respond sender so the inbound task can route
                     // UserResponse back directly to the waiting agent loop.
@@ -1814,6 +1815,7 @@ fn agent_event_to_server_message(
             options,
             allow_other,
             respond: _,
+            ..
         } => Some(proto::ServerMessage {
             payload: Some(proto::server_message::Payload::UserQuery(
                 proto::UserQuery {
@@ -2707,6 +2709,7 @@ mod tests {
             message: "confirm?".into(),
             options: vec!["yes".into(), "no".into()],
             allow_other: true,
+            kind: visp_core::agent::PermissionKind::Approval,
             respond: tx,
         };
         let msg = agent_event_to_server_message(event, "sess-1", "").unwrap();
@@ -4497,6 +4500,7 @@ mod tests {
                 message: "confirm?".into(),
                 options: vec!["yes".into()],
                 allow_other: false,
+                kind: visp_core::agent::PermissionKind::Approval,
                 respond,
             },
             session_id: "sess-1".into(),

@@ -333,6 +333,9 @@ impl Orchestrator {
                         message,
                         options,
                         allow_other,
+                        // 帧由 AgentMessage::UserQuery 生产不可达（见 agent_loop `event_to_msg`），
+                        // 此分支仅为类型完整保留；kind 取普通提问语义。
+                        kind: visp_core::agent::PermissionKind::Question,
                         respond: mpsc::channel(1).0,
                     },
                     session_id: session_id.clone(),

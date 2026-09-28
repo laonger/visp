@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use crate::ProviderMetadata;
 use crate::agent::{
-    AgentConfig, AgentEvent, AgentLoopContext, AgentMessage, Envelope, ToolExecResult, ToolOutcome,
-    UserQueryResult, cleanup_orphan_tool_uses, extract_thinking_text, format_tool_args,
-    llm_error_to_code, parse_user_query_marker, render_tool_guide, strip_user_query_marker,
+    AgentConfig, AgentEvent, AgentLoopContext, AgentMessage, Envelope, PermissionKind,
+    ToolExecResult, ToolOutcome, UserQueryResult, cleanup_orphan_tool_uses, extract_thinking_text,
+    format_tool_args, llm_error_to_code, parse_user_query_marker, render_tool_guide,
+    strip_user_query_marker,
 };
 use crate::error::AgentErrorCode;
 use crate::error::LlmError;
@@ -705,6 +706,7 @@ async fn handle_stream_result(
                     message: marker.message.clone(),
                     options: marker.options.clone(),
                     allow_other: marker.allow_other,
+                    kind: PermissionKind::Question,
                     respond: resp_tx,
                 },
             )
@@ -1195,6 +1197,7 @@ async fn execute_tool_calls(
                             message: format!("Allow tool: {}({})?", tc.name, args_display),
                             options: Vec::new(),
                             allow_other: false,
+                            kind: PermissionKind::Approval,
                             respond: resp_tx,
                         })
                         .await;
@@ -5815,11 +5818,14 @@ mod tests {
             "approved path must emit exactly one PreToolUse"
         );
         assert!(pre[0].2, "requires_approval must be true");
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AgentEvent::UserQuery { .. })),
-            "approval dialog must have been shown"
+        let dialog_kind = events.iter().find_map(|e| match e {
+            AgentEvent::UserQuery { kind, .. } => Some(*kind),
+            _ => None,
+        });
+        assert_eq!(
+            dialog_kind,
+            Some(PermissionKind::Approval),
+            "approval dialog must carry PermissionKind::Approval"
         );
     }
 
