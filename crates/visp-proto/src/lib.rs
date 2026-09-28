@@ -83,7 +83,8 @@ mod tests {
     fn service_traits_expose_reload_config() {
         // 编译期断言：server trait 具备 reload_config 方法（函数体类型检查即可，
         // 无需实际调用）。
-        #[allow(dead_code)]
+        // `tonic::Status` 为 tonic 约定的大 Err 变体，无法装箱。
+        #[allow(dead_code, clippy::result_large_err)]
         async fn assert_server_has_reload_config<S: visp::coder_daemon_server::CoderDaemon>(
             service: &S,
             request: tonic::Request<visp::ReloadConfigRequest>,
@@ -163,7 +164,8 @@ mod tests {
     #[test]
     fn service_traits_expose_get_hook_stats() {
         // 编译期断言：server trait 具备 get_hook_stats 方法。
-        #[allow(dead_code)]
+        // `tonic::Status` 为 tonic 约定的大 Err 变体，无法装箱。
+        #[allow(dead_code, clippy::result_large_err)]
         async fn assert_server_has_get_hook_stats<S: visp::coder_daemon_server::CoderDaemon>(
             service: &S,
             request: tonic::Request<visp::GetHookStatsRequest>,

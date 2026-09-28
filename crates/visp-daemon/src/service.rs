@@ -1857,7 +1857,6 @@ fn agent_event_to_server_message(
             message,
             options,
             allow_other,
-            respond: _,
             ..
         } => Some(proto::ServerMessage {
             payload: Some(proto::server_message::Payload::UserQuery(

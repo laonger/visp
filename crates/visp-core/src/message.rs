@@ -677,7 +677,7 @@ mod tests {
         let (clean, images) = Message::extract_images(&text);
 
         // 标记被移除，文本保留
-        assert_eq!(clean, format!("看这张图  好看吗"));
+        assert_eq!(clean, "看这张图  好看吗".to_string());
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].path, path_str);
         assert_eq!(images[0].mime_type, "image/png");
