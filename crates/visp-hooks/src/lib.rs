@@ -5,12 +5,14 @@
 //! 契约层零执行逻辑、零 IO；决策内核不做进程 spawn/IO，副作用经 [`dispatcher::Handler`]
 //! 由上层注入。配置（`HookRule`）与进程执行在后续阶段接线。
 
+pub mod composite;
 pub mod dispatcher;
 pub mod env;
 pub mod event;
 pub mod herdr;
 pub mod spawn_handler;
 
+pub use composite::*;
 pub use dispatcher::*;
 pub use env::*;
 pub use event::*;

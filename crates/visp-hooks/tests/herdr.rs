@@ -297,3 +297,57 @@ fn builtin_rule_identity_and_coalesce() {
         assert!(rule.event.contains(&event), "{event:?}");
     }
 }
+
+// ── `[herdr].enabled` 门控判定（任务 1b-4b） ──
+
+/// `Off` 覆盖一切：即便环境满足也不注册。
+#[test]
+fn signup_off_never_registers() {
+    let full = env(&[
+        (HERDR_ENV, "1"),
+        (HERDR_BIN_PATH, "/bin/true"),
+        (HERDR_PANE_ID, "p1"),
+    ]);
+    assert!(!herdr_signup(HerdrEnabled::Off, &full));
+    assert!(!herdr_signup(HerdrEnabled::Off, &[]));
+}
+
+/// `Auto`：仅当护栏满足（ENV=1 且 BIN/PANE 均非空）时注册。
+#[test]
+fn signup_auto_requires_guardrails() {
+    let full = env(&[
+        (HERDR_ENV, "1"),
+        (HERDR_BIN_PATH, "/bin/true"),
+        (HERDR_PANE_ID, "p1"),
+    ]);
+    assert!(herdr_signup(HerdrEnabled::Auto, &full));
+
+    // 缺 ENV / ENV≠1 / 缺 BIN / 空 BIN / 缺 PANE → 一律不注册。
+    for partial in [
+        env(&[(HERDR_BIN_PATH, "/bin/true"), (HERDR_PANE_ID, "p1")]),
+        env(&[
+            (HERDR_ENV, "0"),
+            (HERDR_BIN_PATH, "/bin/true"),
+            (HERDR_PANE_ID, "p1"),
+        ]),
+        env(&[(HERDR_ENV, "1"), (HERDR_PANE_ID, "p1")]),
+        env(&[
+            (HERDR_ENV, "1"),
+            (HERDR_BIN_PATH, ""),
+            (HERDR_PANE_ID, "p1"),
+        ]),
+        env(&[(HERDR_ENV, "1"), (HERDR_BIN_PATH, "/bin/true")]),
+    ] {
+        assert!(!herdr_signup(HerdrEnabled::Auto, &partial), "{partial:?}");
+    }
+}
+
+/// `On`：显式开启即注册（缺 pane 身份时绑定内部静默降级）。
+#[test]
+fn signup_on_registers_without_identity() {
+    assert!(herdr_signup(HerdrEnabled::On, &[]));
+    assert!(herdr_signup(
+        HerdrEnabled::On,
+        &env(&[(HERDR_ENV, "1"), (HERDR_BIN_PATH, "/bin/true")])
+    ));
+}

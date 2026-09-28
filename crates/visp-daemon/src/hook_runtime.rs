@@ -29,8 +29,9 @@ use visp_config::hooks::{HookRule, HookScope, HooksConfig, OnFull};
 use visp_config::trust::{HookTrustStore, TrustStatus, verify};
 use visp_core::bus::BusEvent;
 use visp_hooks::{
-    DispatchInput, DispatchRule, Executor, Handler, HookEvent, HookPayload, Origin, PermissionKind,
-    ProcessSpec, QueuePolicy, SessionSource, SpawnHandler,
+    BUILTIN_HERDR_RULE_ID, CompositeHandler, DispatchInput, DispatchRule, Executor, Handler,
+    HerdrBinding, HerdrEnabled, HookEvent, HookPayload, Origin, PermissionKind, ProcessSpec,
+    QueuePolicy, SessionSource, SpawnHandler, builtin_rule, herdr_signup,
 };
 
 use crate::bus::EventBus;
@@ -256,6 +257,114 @@ pub fn setup_hook_runtime_with_handler(
     setup_hook_runtime_inner(config, project_path, trust_store, bus, Some(handler))
 }
 
+/// 带内置 herdr 门控的接线入口（设计 D8；herdr 集成设计决策 3–4/9）。
+///
+/// 与 [`setup_hook_runtime`] 相同，另按 [`HerdrEnabled`] 门控决定是否把
+/// [`builtin_rule`]（`builtin:herdr`）并入生效规则集：
+///
+/// - **门控满足** → 以 [`CompositeHandler`] 组装：`builtin:herdr` 走进程内
+///   [`HerdrBinding`]，其余规则仍走脚本 [`SpawnHandler`]；herdr 事件与脚本规则
+///   **共用同一 executor 接口**。
+/// - **门控不满足**（[`HerdrEnabled::Off`]，或 `Auto` 而护栏不足）→ 与
+///   [`setup_hook_runtime`] 完全一致（不注册、零行为）。
+///
+/// `env` 为环境快照：生产传当前进程环境，测试注入假环境以脱离真实环境依赖。
+/// 生效规则为零（无规则且 herdr 未注册）时返回 `None`。
+pub fn setup_hook_runtime_with_herdr(
+    config: &HooksConfig,
+    herdr: HerdrEnabled,
+    env: &[(String, String)],
+    project_path: &Path,
+    trust_store: &HookTrustStore,
+    bus: &Arc<EventBus>,
+) -> Option<Arc<HookRuntime>> {
+    let (global, project) = split_scopes(config);
+    let trusted = project_rules_trusted(project_path, &project, trust_store);
+    let herdr_active = herdr_signup(herdr, env);
+
+    // 生效规则为零（无规则且 herdr 未注册）→ 不构建、不订阅（零开销）。
+    if global.is_empty() && (project.is_empty() || !trusted) && !herdr_active {
+        if !project.is_empty() {
+            warn_untrusted_project_rules(&project);
+        }
+        return None;
+    }
+
+    let map_ctx = session_ctx(project_path.to_string_lossy());
+    let runtime = Arc::new(if herdr_active {
+        build_herdr_runtime(&global, &project, trusted, map_ctx, env)
+    } else {
+        HookRuntime::build(&global, &project, trusted, map_ctx)
+    });
+    subscribe_bus(Arc::clone(&runtime), bus);
+    Some(runtime)
+}
+
+/// 拆分合并后的规则集为（全局, 项目）两份，保持原顺序。
+fn split_scopes(config: &HooksConfig) -> (Vec<HookRule>, Vec<HookRule>) {
+    let global = config
+        .rules
+        .iter()
+        .filter(|rule| rule.scope == HookScope::Global)
+        .cloned()
+        .collect();
+    let project = config
+        .rules
+        .iter()
+        .filter(|rule| rule.scope == HookScope::Project)
+        .cloned()
+        .collect();
+    (global, project)
+}
+
+/// 以复合 Handler 构建「脚本 + 内置 herdr」运行时（门控满足时）。
+fn build_herdr_runtime(
+    global: &[HookRule],
+    project: &[HookRule],
+    trusted: bool,
+    map_ctx: MapCtx,
+    env: &[(String, String)],
+) -> HookRuntime {
+    let selected = select_rules(global, project, trusted);
+    let specs: HashMap<String, ProcessSpec> = selected
+        .iter()
+        .map(|rule| (rule.id.clone(), process_spec(rule, &map_ctx.project_path)))
+        .collect();
+    let scripts = Arc::new(SpawnHandler::new(map_ctx.project_path.clone(), specs));
+    let binding: Arc<dyn Handler> = Arc::new(HerdrBinding::from_env(env));
+    let builtins = HashMap::from([(BUILTIN_HERDR_RULE_ID.to_string(), binding)]);
+    let handler: Arc<dyn Handler> = Arc::new(CompositeHandler::new(scripts.clone(), builtins));
+    // 执行计数仍取自脚本路径（herdr 另有 HerdrStats）；herdr 失败不计入进程计数。
+    let counters: Arc<dyn ExecCounters> = scripts;
+    HookRuntime::build_with_extra_rules(
+        global,
+        project,
+        trusted,
+        map_ctx,
+        vec![builtin_rule()],
+        handler,
+        counters,
+    )
+}
+
+/// 订阅总线并 spawn 消费循环（`Lagged` 记 warn 后继续，`Closed` 退出）。
+fn subscribe_bus(runtime: Arc<HookRuntime>, bus: &Arc<EventBus>) {
+    let mut receiver = bus.subscribe();
+    let consumer = Arc::clone(&runtime);
+    tokio::spawn(async move {
+        loop {
+            match receiver.recv().await {
+                Ok(envelope) => consumer.dispatch_event(envelope.event, envelope.seq),
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    consumer.record_dropped(skipped);
+                    tracing::warn!(skipped, "hook 运行时消费滞后，丢弃部分事件");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
 /// 接线主体：规则拆分 + 信任门控 + 零开销短路 + 构建 + 订阅 + 消费循环。
 fn setup_hook_runtime_inner(
     config: &HooksConfig,
@@ -264,18 +373,7 @@ fn setup_hook_runtime_inner(
     bus: &Arc<EventBus>,
     handler: Option<Arc<dyn Handler>>,
 ) -> Option<Arc<HookRuntime>> {
-    let global: Vec<HookRule> = config
-        .rules
-        .iter()
-        .filter(|rule| rule.scope == HookScope::Global)
-        .cloned()
-        .collect();
-    let project: Vec<HookRule> = config
-        .rules
-        .iter()
-        .filter(|rule| rule.scope == HookScope::Project)
-        .cloned()
-        .collect();
+    let (global, project) = split_scopes(config);
     let trusted = project_rules_trusted(project_path, &project, trust_store);
 
     // 生效规则为零 → 不构建、不订阅（零开销）。未受信任的项目规则在此显式告警，
@@ -295,20 +393,7 @@ fn setup_hook_runtime_inner(
         None => HookRuntime::build(&global, &project, trusted, map_ctx),
     };
     let runtime = Arc::new(runtime);
-    let mut receiver = bus.subscribe();
-    let consumer = Arc::clone(&runtime);
-    tokio::spawn(async move {
-        loop {
-            match receiver.recv().await {
-                Ok(envelope) => consumer.dispatch_event(envelope.event, envelope.seq),
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    consumer.record_dropped(skipped);
-                    tracing::warn!(skipped, "hook 运行时消费滞后，丢弃部分事件");
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    });
+    subscribe_bus(Arc::clone(&runtime), bus);
     Some(runtime)
 }
 
@@ -348,7 +433,7 @@ impl HookRuntime {
             .collect();
         let handler = Arc::new(SpawnHandler::new(project_path, specs));
         let counters: Arc<dyn ExecCounters> = handler.clone();
-        Self::assemble(&selected, map_ctx, handler, counters)
+        Self::assemble(&selected, Vec::new(), map_ctx, handler, counters)
     }
 
     /// 以可注入 [`Handler`] 构建运行时（测试/内嵌 consumers 用，如 herdr D8）。
@@ -362,7 +447,13 @@ impl HookRuntime {
         handler: Arc<dyn Handler>,
     ) -> Self {
         let selected = select_rules(global_rules, project_rules, trusted);
-        Self::assemble(&selected, map_ctx, handler, Arc::new(NoopExecCounters))
+        Self::assemble(
+            &selected,
+            Vec::new(),
+            map_ctx,
+            handler,
+            Arc::new(NoopExecCounters),
+        )
     }
 
     /// 以可注入 [`Handler`] **与**执行计数来源构建运行时（测试用）。
@@ -375,18 +466,38 @@ impl HookRuntime {
         exec_counters: Arc<dyn ExecCounters>,
     ) -> Self {
         let selected = select_rules(global_rules, project_rules, trusted);
-        Self::assemble(&selected, map_ctx, handler, exec_counters)
+        Self::assemble(&selected, Vec::new(), map_ctx, handler, exec_counters)
     }
 
-    /// 由已选规则集与 Handler 组装。
+    /// 以额外**内置规则**（如 `builtin:herdr`）与 Handler 构建运行时（herdr D8）。
+    ///
+    /// 内置规则与配置规则一同进入执行集与只读规则摘要（内置作用域记为全局）；
+    /// 其执行由注入的 [`Handler`]（如 [`CompositeHandler`]）按 `id` 路由。
+    pub fn build_with_extra_rules(
+        global_rules: &[HookRule],
+        project_rules: &[HookRule],
+        trusted: bool,
+        map_ctx: MapCtx,
+        extra_rules: Vec<DispatchRule>,
+        handler: Arc<dyn Handler>,
+        exec_counters: Arc<dyn ExecCounters>,
+    ) -> Self {
+        let selected = select_rules(global_rules, project_rules, trusted);
+        Self::assemble(&selected, extra_rules, map_ctx, handler, exec_counters)
+    }
+
+    /// 由已选规则集、额外内置规则与 Handler 组装。
     fn assemble(
         selected: &[&HookRule],
+        extra_rules: Vec<DispatchRule>,
         map_ctx: MapCtx,
         handler: Arc<dyn Handler>,
         exec_counters: Arc<dyn ExecCounters>,
     ) -> Self {
-        let rules: Vec<DispatchRule> = selected.iter().map(|rule| dispatch_rule(rule)).collect();
-        let rules_summary: Vec<RuleSummary> = selected
+        let mut rules: Vec<DispatchRule> =
+            selected.iter().map(|rule| dispatch_rule(rule)).collect();
+        rules.extend(extra_rules.iter().cloned());
+        let mut rules_summary: Vec<RuleSummary> = selected
             .iter()
             .map(|rule| RuleSummary {
                 id: rule.id.clone(),
@@ -394,6 +505,12 @@ impl HookRuntime {
                 enabled: rule.enabled,
             })
             .collect();
+        // 内置规则无用户作用域，记为全局；顺序由执行器按 `(order, id)` 统一重排。
+        rules_summary.extend(extra_rules.iter().map(|rule| RuleSummary {
+            id: rule.id.clone(),
+            scope: HookScope::Global,
+            enabled: rule.enabled,
+        }));
         Self {
             executor: Executor::new(rules, handler),
             map_ctx,
@@ -520,6 +637,7 @@ fn payload_kind(payload: &HookPayload) -> Option<&'static str> {
 mod tests {
     use super::*;
     use std::collections::HashMap as Map;
+    use std::fs;
     use std::time::Instant;
 
     use crate::bus::EventBus;
@@ -527,7 +645,8 @@ mod tests {
     use visp_config::trust::HookTrustStore;
     use visp_core::agent::{AgentEvent, AgentEventFrame};
     use visp_hooks::{
-        HookContext, HookEventName, RecordingHandler, StopPayload, StopStatus, VISP_HOOK_SCHEMA,
+        HERDR_BIN_PATH, HERDR_ENV, HERDR_PANE_ID, HookContext, HookEventName, RecordingHandler,
+        SessionStartPayload, StopPayload, StopStatus, VISP_HOOK_SCHEMA,
     };
 
     const PROJECT: &str = "/tmp/visp-project";
@@ -1165,5 +1284,232 @@ mod tests {
 
         assert!(setup_hook_runtime(&config, project, &HookTrustStore::default(), &bus).is_none());
         assert_eq!(bus.receiver_count(), before, "未信任项目规则不应订阅总线");
+    }
+
+    // ── 内置 herdr 注册（任务 1b-4b；设计 D8） ──
+
+    /// 造一个可执行的假 herdr：把收到的 argv 逐行写入 `out`。
+    #[cfg(unix)]
+    fn recording_herdr(dir: &Path, out: &Path) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("herdr-fake.sh");
+        let body = format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", out.display());
+        fs::write(&path, body).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// herdr 启用环境快照（`HERDR_ENV=1` + BIN + PANE）。
+    #[cfg(unix)]
+    fn herdr_env(bin: &str) -> Vec<(String, String)> {
+        vec![
+            (HERDR_ENV.to_string(), "1".to_string()),
+            (HERDR_BIN_PATH.to_string(), bin.to_string()),
+            (HERDR_PANE_ID.to_string(), "pane-7".to_string()),
+        ]
+    }
+
+    #[cfg(unix)]
+    fn read_args(path: &Path) -> Vec<String> {
+        fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// `SessionStart` 总线事件（映射为 herdr `idle`）。
+    fn session_start_event() -> BusEvent {
+        BusEvent::Hook(HookEvent {
+            context: HookContext {
+                schema: VISP_HOOK_SCHEMA,
+                hook_event_name: HookEventName::SessionStart,
+                session_id: "s1".to_string(),
+                cwd: PROJECT.to_string(),
+                source: SessionSource::Startup,
+                origin: Origin::Tui,
+                seq: None,
+            },
+            payload: HookPayload::SessionStart(SessionStartPayload {
+                short_id: "short".to_string(),
+                project_path: PROJECT.to_string(),
+                model: "model".to_string(),
+                model_key: "key".to_string(),
+                agent_name: "agent".to_string(),
+                parent_session_id: None,
+            }),
+        })
+    }
+
+    /// 12a. `Auto` 且 `HERDR_ENV=1` → 注册内置规则，事件经假 CLI 上报。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn registers_builtin_herdr_and_reports_when_auto_and_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("argv.txt");
+        let bin = recording_herdr(dir.path(), &out);
+        let env = herdr_env(&bin);
+
+        let bus = Arc::new(EventBus::new());
+        let runtime = setup_hook_runtime_with_herdr(
+            &HooksConfig::default(),
+            HerdrEnabled::Auto,
+            &env,
+            dir.path(),
+            &HookTrustStore::default(),
+            &bus,
+        )
+        .expect("herdr 开启应构建运行时（即使无脚本规则）");
+
+        let ids: Vec<String> = runtime
+            .hook_stats()
+            .rules
+            .into_iter()
+            .map(|rule| rule.id)
+            .collect();
+        assert!(
+            ids.contains(&BUILTIN_HERDR_RULE_ID.to_string()),
+            "生效规则集应含内置规则：{ids:?}"
+        );
+
+        bus.publish(session_start_event());
+        wait_until(|| out.exists()).await;
+
+        let args = read_args(&out);
+        assert_eq!(args.first().map(String::as_str), Some("pane"));
+        assert!(args.contains(&"report-agent".to_string()));
+        assert!(args.contains(&"pane-7".to_string()));
+        assert!(args.contains(&"custom:visp".to_string()));
+        assert!(args.contains(&"idle".to_string()), "SessionStart → idle");
+    }
+
+    /// 12b. `Off` 或 `Auto` 而 env 不满足 → 不注册、零行为。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn herdr_not_registered_when_off_or_env_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("argv.txt");
+        let bin = recording_herdr(dir.path(), &out);
+        let full = herdr_env(&bin);
+
+        let bus = Arc::new(EventBus::new());
+        assert!(
+            setup_hook_runtime_with_herdr(
+                &HooksConfig::default(),
+                HerdrEnabled::Off,
+                &full,
+                dir.path(),
+                &HookTrustStore::default(),
+                &bus,
+            )
+            .is_none(),
+            "显式关闭不得注册"
+        );
+
+        let no_env = vec![
+            (HERDR_BIN_PATH.to_string(), bin.clone()),
+            (HERDR_PANE_ID.to_string(), "pane-7".to_string()),
+        ];
+        let bus = Arc::new(EventBus::new());
+        let before = bus.receiver_count();
+        assert!(
+            setup_hook_runtime_with_herdr(
+                &HooksConfig::default(),
+                HerdrEnabled::Auto,
+                &no_env,
+                dir.path(),
+                &HookTrustStore::default(),
+                &bus,
+            )
+            .is_none(),
+            "auto 而 HERDR_ENV≠1 不得注册"
+        );
+        assert_eq!(bus.receiver_count(), before, "未注册不应订阅总线");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!out.exists(), "未注册时不得有任何 herdr 行为");
+    }
+
+    /// 12c. 复合路由：脚本规则走 `SpawnHandler`，`builtin:herdr` 走绑定（同一运行时分发）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn script_rules_use_spawn_handler_while_builtin_uses_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let herdr_out = dir.path().join("argv.txt");
+        let script_out = dir.path().join("script.txt");
+        let bin = recording_herdr(dir.path(), &herdr_out);
+        let env = herdr_env(&bin);
+
+        let mut script = rule("script-rule");
+        script.event = vec![HookEventName::SessionStart];
+        script.command = "sh".to_string();
+        script.args = vec![
+            "-c".to_string(),
+            format!("echo ran >> '{}'", script_out.display()),
+        ];
+        let config = HooksConfig {
+            rules: vec![script],
+        };
+
+        let bus = Arc::new(EventBus::new());
+        let runtime = setup_hook_runtime_with_herdr(
+            &config,
+            HerdrEnabled::Auto,
+            &env,
+            dir.path(),
+            &HookTrustStore::default(),
+            &bus,
+        )
+        .expect("脚本规则 + herdr 应构建运行时");
+
+        bus.publish(session_start_event());
+        wait_until(|| herdr_out.exists() && script_out.exists()).await;
+
+        assert!(
+            read_args(&herdr_out).contains(&"report-agent".to_string()),
+            "内置规则应走 herdr 绑定"
+        );
+        assert!(
+            fs::read_to_string(&script_out).unwrap().contains("ran"),
+            "脚本规则应走 SpawnHandler"
+        );
+        wait_until(|| runtime.hook_stats().executed >= 1).await;
+    }
+
+    /// 12d. herdr 失败（CLI 不存在）不影响脚本规则与主流程（隔离）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn herdr_failure_is_isolated_from_scripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let script_out = dir.path().join("script.txt");
+        // 指向不存在的 CLI：绑定启动失败，仅日志 + 计数。
+        let env = herdr_env("/nonexistent/visp-herdr-cli");
+
+        let mut script = rule("script-rule");
+        script.event = vec![HookEventName::SessionStart];
+        script.command = "sh".to_string();
+        script.args = vec![
+            "-c".to_string(),
+            format!("echo ran >> '{}'", script_out.display()),
+        ];
+        let config = HooksConfig {
+            rules: vec![script],
+        };
+
+        let bus = Arc::new(EventBus::new());
+        let runtime = setup_hook_runtime_with_herdr(
+            &config,
+            HerdrEnabled::Auto,
+            &env,
+            dir.path(),
+            &HookTrustStore::default(),
+            &bus,
+        )
+        .expect("脚本规则 + herdr 应构建运行时");
+
+        bus.publish(session_start_event());
+        wait_until(|| script_out.exists()).await;
+        wait_until(|| runtime.hook_stats().executed >= 1).await;
+        assert!(fs::read_to_string(&script_out).unwrap().contains("ran"));
     }
 }

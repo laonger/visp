@@ -2,7 +2,7 @@
 //!
 //! herdr 是首个**进程内**消费者：以 [`Handler`] 实现接入与脚本规则相同的 executor
 //! 接口，并由 [`builtin_rule`] 以 `id = "builtin:herdr"` 的内置规则形式呈现；daemon
-//! 侧注册留待接线步骤。
+//! 侧按门控（[`HerdrEnabled`]/[`herdr_signup`]）注册并经复合 Handler 分发。
 //!
 //! ## 状态映射
 //!
@@ -147,6 +147,36 @@ pub fn builtin_rule() -> DispatchRule {
         on_full: QueuePolicy::CoalesceLatest,
         parallel: false,
         cooldown_ms: 0,
+    }
+}
+
+/// 门控意图：`[herdr].enabled` 的三态语义（herdr 集成设计决策 9）。
+///
+/// 配置来源不属本 crate；调用方（daemon）把配置/默认值解析为三态后经
+/// [`herdr_signup`] 判定是否注册 [`HerdrBinding`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HerdrEnabled {
+    /// 自动（默认）：仅当护栏满足（可真正上报）时注册。
+    #[default]
+    Auto,
+    /// 显式开启：即使缺 pane 身份也注册（绑定内部仍会静默降级）。
+    On,
+    /// 显式关闭：覆盖一切，永不注册。
+    Off,
+}
+
+/// 门控判定（纯函数）：给定门控意图与环境快照，返回是否应注册内置 herdr 绑定。
+///
+/// - [`HerdrEnabled::Off`] → `false`。
+/// - [`HerdrEnabled::On`] → `true`。
+/// - [`HerdrEnabled::Auto`] → 与 [`HerdrBinding`] 护栏一致（`HERDR_ENV=1` 且
+///   `HERDR_BIN_PATH`/`HERDR_PANE_ID` 均非空）；
+///   「能否真正上报」为准，缺一即不注册（零行为）。
+pub fn herdr_signup(enabled: HerdrEnabled, env: &[(String, String)]) -> bool {
+    match enabled {
+        HerdrEnabled::Off => false,
+        HerdrEnabled::On => true,
+        HerdrEnabled::Auto => HerdrBinding::from_env(env).enabled(),
     }
 }
 
