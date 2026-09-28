@@ -481,7 +481,9 @@ async fn degraded_event_pushes_empty_session_status_frame() {
         .await
         .expect("应在时限内收到降级通知")
         .expect("总线应仍打开");
-    let frame = envelope.frame;
+    let visp_core::bus::BusEvent::Frame(frame) = envelope.event else {
+        panic!("应为 Frame 事件");
+    };
     assert_eq!(
         frame.session_id, "",
         "降级通知 session_id 必须为空（TUI 路由主 tab 状态行）"

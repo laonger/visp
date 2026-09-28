@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 use visp_agent::agent_loader::{BuiltinAgentOverride, load_agents_with_stats};
 use visp_core::agent::{AgentEvent, AgentEventFrame, AgentTool, Envelope};
 use visp_core::agent_registry::AgentRegistry;
+use visp_core::bus::BusEvent;
 use visp_core::rules::RuleEngine;
 use visp_core::tool_registry::ToolRegistry;
 use visp_tools::skill::SkillTool;
@@ -162,7 +163,7 @@ impl ReloadCore {
             parent_session_id: None,
             parent_session_name: None,
         };
-        bus.publish(frame);
+        bus.publish(BusEvent::Frame(frame));
     }
 
     fn reload_one(&self, domain: ReloadDomain) -> ReloadItem {

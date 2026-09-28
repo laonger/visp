@@ -617,11 +617,11 @@ async fn auto_change_pushes_single_summary_with_empty_session_id() {
     assert!(items[0].changes > 0, "应有变更：{:?}", items[0]);
 
     let envelope = bus_rx.try_recv().expect("有变更应推送一条汇总通知");
-    assert_eq!(
-        envelope.frame.session_id, "",
-        "session_id 必须为空以路由主 tab"
-    );
-    match envelope.frame.event {
+    let visp_core::bus::BusEvent::Frame(frame) = envelope.event else {
+        panic!("应为 Frame 事件");
+    };
+    assert_eq!(frame.session_id, "", "session_id 必须为空以路由主 tab");
+    match frame.event {
         AgentEvent::StatusUpdate(message) => {
             assert!(message.contains("已热重载"), "message: {message}");
             assert!(message.contains("rules"), "message: {message}");
@@ -661,8 +661,11 @@ async fn failure_pushes_error_status() {
     assert!(!items[0].success, "撞名应使 agents 失败：{:?}", items[0]);
 
     let envelope = bus_rx.try_recv().expect("失败应推送一条错误性质通知");
-    assert_eq!(envelope.frame.session_id, "");
-    match envelope.frame.event {
+    let visp_core::bus::BusEvent::Frame(frame) = envelope.event else {
+        panic!("应为 Frame 事件");
+    };
+    assert_eq!(frame.session_id, "");
+    match frame.event {
         AgentEvent::StatusUpdate(message) => {
             assert!(message.contains("失败"), "message: {message}");
         }

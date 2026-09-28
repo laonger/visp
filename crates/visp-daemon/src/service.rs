@@ -12,6 +12,7 @@ use tonic::{Request, Response, Status, Streaming};
 use visp_codegraph::CodeGraph;
 use visp_core::{
     agent::{AgentConfig, AgentEvent, UserQueryResult},
+    bus::BusEvent,
     context::ContextTrimmer,
     message::{MessageType, Role},
     provider::{LlmConfig, LlmProvider},
@@ -885,7 +886,11 @@ impl CoderDaemon for CoderDaemonService {
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 };
-                let frame = envelope.frame;
+                // 出站仅转发显示域帧；hook 域事件不面向 TUI，仅供 hook 执行器消费。
+                let frame = match envelope.event {
+                    BusEvent::Frame(frame) => frame,
+                    BusEvent::Hook(_) => continue,
+                };
                 let sid = frame.session_id.clone();
                 match frame.event {
                     AgentEvent::UserQuery {
@@ -3996,7 +4001,7 @@ mod tests {
             .into_inner();
 
         for i in 0..3 {
-            bus.publish(bus_text_frame(&format!("f{i}"), "s-1"));
+            bus.publish(BusEvent::Frame(bus_text_frame(&format!("f{i}"), "s-1")));
         }
 
         for (label, stream) in [("a", &mut a), ("b", &mut b)] {
@@ -4025,11 +4030,11 @@ mod tests {
             .into_inner();
         drop(a);
 
-        bus.publish(bus_text_frame("survivor", "s-1"));
+        bus.publish(BusEvent::Frame(bus_text_frame("survivor", "s-1")));
         assert_eq!(text_delta_of(&next_msg(&mut b).await), "survivor");
 
         // 发布端从不失败/阻塞：再发一帧仍即时返回并被存活连接收到。
-        bus.publish(bus_text_frame("again", "s-1"));
+        bus.publish(BusEvent::Frame(bus_text_frame("again", "s-1")));
         assert_eq!(text_delta_of(&next_msg(&mut b).await), "again");
     }
 
@@ -4040,8 +4045,8 @@ mod tests {
         let (service, bus) = make_service_with_bus(mgr);
 
         // 仅 sentinel 持有 receiver：publish 不 panic、不阻塞（否则测试挂起）。
-        bus.publish(bus_text_frame("no-sub", "s-1"));
-        bus.publish(bus_text_frame("no-sub-2", "s-1"));
+        bus.publish(BusEvent::Frame(bus_text_frame("no-sub", "s-1")));
+        bus.publish(BusEvent::Frame(bus_text_frame("no-sub-2", "s-1")));
 
         // 之后建立的连接仍能收到后续帧——发布端未 break、订阅未受损。
         let mut stream = service
@@ -4049,7 +4054,7 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        bus.publish(bus_text_frame("after", "s-1"));
+        bus.publish(BusEvent::Frame(bus_text_frame("after", "s-1")));
         assert_eq!(text_delta_of(&next_msg(&mut stream).await), "after");
     }
 
@@ -4065,7 +4070,7 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        bus.publish(bus_text_frame("delta", "sess-1"));
+        bus.publish(BusEvent::Frame(bus_text_frame("delta", "sess-1")));
         match next_msg(&mut stream).await.payload {
             Some(proto::server_message::Payload::TextDelta(td)) => {
                 assert_eq!(td.delta, "delta");
@@ -4075,7 +4080,7 @@ mod tests {
             other => panic!("expected TextDelta, got {other:?}"),
         }
 
-        bus.publish(status_frame());
+        bus.publish(BusEvent::Frame(status_frame()));
         match next_msg(&mut stream).await.payload {
             Some(proto::server_message::Payload::Done(done)) => {
                 assert_eq!(done.session_id, "sess-1");
@@ -4084,7 +4089,7 @@ mod tests {
         }
 
         let (respond, _respond_rx) = tokio::sync::mpsc::channel(1);
-        bus.publish(visp_core::agent::AgentEventFrame {
+        bus.publish(BusEvent::Frame(visp_core::agent::AgentEventFrame {
             event: AgentEvent::UserQuery {
                 query_id: "q-1".into(),
                 message: "confirm?".into(),
@@ -4096,7 +4101,7 @@ mod tests {
             agent_name: "agent".into(),
             parent_session_id: None,
             parent_session_name: None,
-        });
+        }));
         match next_msg(&mut stream).await.payload {
             Some(proto::server_message::Payload::UserQuery(q)) => {
                 assert_eq!(q.query_id, "q-1");
@@ -4104,6 +4109,69 @@ mod tests {
                 assert_eq!(q.session_id, "sess-1");
             }
             other => panic!("expected UserQuery, got {other:?}"),
+        }
+    }
+
+    /// 6. hook 域事件不面向 TUI：出站忽略，不产生任何 ServerMessage。
+    #[tokio::test]
+    async fn hook_event_is_not_forwarded_outbound() {
+        use visp_hooks::{
+            HookContext, HookEvent, HookEventName, HookPayload, Origin, SessionEndPayload,
+            SessionSource,
+        };
+
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let (service, bus) = make_service_with_bus(mgr);
+        let mut stream = service
+            .chat(empty_chat_request())
+            .await
+            .unwrap()
+            .into_inner();
+
+        // 先确认订阅已生效：一帧 Frame 正常到达。
+        bus.publish(BusEvent::Frame(bus_text_frame("before", "s-1")));
+        assert_eq!(text_delta_of(&next_msg(&mut stream).await), "before");
+
+        // 注入 hook 事件：出站必须忽略。
+        bus.publish(BusEvent::Hook(HookEvent {
+            context: HookContext {
+                schema: 1,
+                hook_event_name: HookEventName::SessionEnd,
+                session_id: "s-1".into(),
+                cwd: "/tmp".into(),
+                source: SessionSource::Startup,
+                origin: Origin::Tui,
+                seq: Some(1),
+            },
+            payload: HookPayload::SessionEnd(SessionEndPayload {
+                reason: "quit".into(),
+                exit_code: Some(0),
+            }),
+        }));
+
+        // 紧随其后的 Frame 就是下一个消息——证明 Hook 未产生任何出站消息。
+        bus.publish(BusEvent::Frame(bus_text_frame("after", "s-1")));
+        assert_eq!(text_delta_of(&next_msg(&mut stream).await), "after");
+    }
+
+    /// 7. 回归：显示域 Frame 仍被出站转发到 CLI。
+    #[tokio::test]
+    async fn frame_event_is_forwarded_outbound() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let (service, bus) = make_service_with_bus(mgr);
+        let mut stream = service
+            .chat(empty_chat_request())
+            .await
+            .unwrap()
+            .into_inner();
+
+        bus.publish(BusEvent::Frame(bus_text_frame("hello", "s-9")));
+        match next_msg(&mut stream).await.payload {
+            Some(proto::server_message::Payload::TextDelta(td)) => {
+                assert_eq!(td.delta, "hello");
+                assert_eq!(td.session_id, "s-9");
+            }
+            other => panic!("expected TextDelta, got {other:?}"),
         }
     }
 }

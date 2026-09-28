@@ -44,3 +44,4 @@ serial_test = "3"
 tokio-util = "0.7"
 async-trait = { workspace = true }
 futures = { workspace = true }
+visp-hooks = { path = "../visp-hooks" }

@@ -20,27 +20,27 @@ fn daemon_config_with_models(
     })
 }
 
-/// 测试用空帧发布器：`Orchestrator` 现在会把显示面帧额外发布到总线，测试若无需
-/// 断言总线则注入本无操作实现（visp-agent 无法引用 visp-daemon 的 `EventBus`）。
+/// 测试用空事件发布器：`Orchestrator` 会把总线事件发布到 [`EventPublisher`]，
+/// 测试若无需断言总线则注入本无操作实现（visp-agent 无法引用 visp-daemon 的 `EventBus`）。
 struct NoopPublisher;
 
-impl FramePublisher for NoopPublisher {
-    fn publish(&self, _frame: AgentEventFrame) {}
+impl EventPublisher for NoopPublisher {
+    fn publish(&self, _event: BusEvent) {}
 }
 
-fn noop_publisher() -> Arc<dyn FramePublisher> {
+fn noop_publisher() -> Arc<dyn EventPublisher> {
     Arc::new(NoopPublisher)
 }
 
-/// 测试用记录发布器：记录所有经总线发布的帧，供断言「哪些事件不应发布」。
+/// 测试用记录发布器：记录所有经总线发布的事件，供断言「哪些事件不应发布」。
 #[derive(Default)]
 struct RecordingPublisher {
-    frames: std::sync::Mutex<Vec<AgentEventFrame>>,
+    events: std::sync::Mutex<Vec<BusEvent>>,
 }
 
-impl FramePublisher for RecordingPublisher {
-    fn publish(&self, frame: AgentEventFrame) {
-        self.frames.lock().unwrap().push(frame);
+impl EventPublisher for RecordingPublisher {
+    fn publish(&self, event: BusEvent) {
+        self.events.lock().unwrap().push(event);
     }
 }
 
@@ -57,7 +57,7 @@ fn make_orchestrator() -> (
 }
 
 fn make_orchestrator_with_publisher(
-    bus: Arc<dyn FramePublisher>,
+    bus: Arc<dyn EventPublisher>,
 ) -> (
     Orchestrator,
     mpsc::Sender<Envelope>,
@@ -119,7 +119,7 @@ async fn test_handle_text_delta_not_forwarded() {
 
     // TextDelta 不应经 handle_agent_message 发布（由 run_agent_loop 直接送达总线）
     assert!(
-        recorder.frames.lock().unwrap().is_empty(),
+        recorder.events.lock().unwrap().is_empty(),
         "TextDelta should not be forwarded by handle_agent_message"
     );
 }

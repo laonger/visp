@@ -3,7 +3,7 @@
 //! 职责：
 //! - 从 global_rx 接收 Envelope（Agent → Orchestrator）
 //! - 从 grpc_rx 接收 ClientMessage（用户输入/查询响应）
-//! - 发布 Agent 显示面事件到 `FramePublisher`（事件总线 → CLI）
+//! - 发布 Agent 显示面事件到 `EventPublisher`（事件总线 → CLI）
 //! - 管理子 Agent 的创建（spawn_sub_agent）、销毁（handle_done）、取消（cancel_agent）
 //! - 管理 pending_queries 将用户响应路由到对应 agent
 
@@ -23,6 +23,7 @@ use visp_core::agent::{
 };
 use visp_core::agent_definition::{AgentDefinition, merge_permissions};
 use visp_core::agent_registry::AgentRegistry;
+use visp_core::bus::{BusEvent, EventPublisher};
 use visp_core::context::ContextTrimmer;
 use visp_core::error::{AgentErrorCode, SessionError};
 use visp_core::message::Message;
@@ -35,17 +36,6 @@ use visp_core::tool_registry::ToolRegistry;
 use visp_config::DaemonConfig;
 
 use crate::active_agent::{ActiveAgent, ActiveAgentRegistry};
-
-/// 显示面帧发布抽象。
-///
-/// `Orchestrator`（visp-agent）需把显示面帧额外发布到 daemon 的事件总线，
-/// 但 `EventBus` 位于 `visp-daemon`，而 `visp-daemon` 依赖 `visp-agent`——
-/// 反向引用会形成 crate 依赖环。以最小 trait 解耦：由 `visp-daemon` 为
-/// `EventBus` 实现本 trait，装配处注入即可。
-pub trait FramePublisher: Send + Sync {
-    /// 发布一帧；实现方不得阻塞调用方，也不得因无订阅者而失败。
-    fn publish(&self, frame: AgentEventFrame);
-}
 
 /// 根据 allowed_sub_agents 筛选子 Agent 的工具列表
 fn filter_tools_for_sub_agent(
@@ -152,7 +142,8 @@ pub struct Orchestrator {
     global_tx: mpsc::Sender<Envelope>,
     grpc_rx: mpsc::Receiver<ClientMessage>,
     /// 显示面帧的唯一发布出口（事件总线，设计 §5 D3）。
-    bus: Arc<dyn FramePublisher>,
+    /// 发布抽象 [`EventPublisher`] 定义于 `visp-core`，daemon 以 `EventBus` 注入。
+    bus: Arc<dyn EventPublisher>,
 
     // ── 状态 ─────────────────────────────────────────────────
     active_agents: ActiveAgentRegistry,
@@ -192,7 +183,7 @@ impl Orchestrator {
         context_trimmer: Arc<dyn ContextTrimmer + Send + Sync>,
         daemon_config: Arc<DaemonConfig>,
         providers: HashMap<String, Arc<dyn LlmProvider>>,
-        bus: Arc<dyn FramePublisher>,
+        bus: Arc<dyn EventPublisher>,
     ) -> Self {
         Self {
             cancel_rx,
@@ -312,7 +303,7 @@ impl Orchestrator {
                     parent_session_id,
                     parent_session_name,
                 };
-                self.bus.publish(frame);
+                self.bus.publish(BusEvent::Frame(frame));
             }
             AgentMessage::SpawnRequest {
                 call_id,
@@ -557,7 +548,7 @@ impl Orchestrator {
                     parent_session_id: None,
                     parent_session_name: None,
                 };
-                bus.publish(frame);
+                bus.publish(BusEvent::Frame(frame));
             }
         });
 
@@ -856,7 +847,7 @@ impl Orchestrator {
                     parent_session_id: parent_sid.clone(),
                     parent_session_name: parent_name.clone(),
                 };
-                bus.publish(frame);
+                bus.publish(BusEvent::Frame(frame));
             }
         });
 
@@ -1059,7 +1050,7 @@ impl Orchestrator {
                 parent_session_id: None,
                 parent_session_name: None,
             };
-            self.bus.publish(frame);
+            self.bus.publish(BusEvent::Frame(frame));
         }
     }
 

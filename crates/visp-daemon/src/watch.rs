@@ -14,6 +14,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use visp_core::agent::{AgentEvent, AgentEventFrame};
+use visp_core::bus::BusEvent;
 use visp_fs::runtime::{DegradeReason, FsWatcher, WatchMessage, start as start_fs};
 use visp_fs::target::{FilterRules, Include, WatchMode, WatchTarget};
 
@@ -478,7 +479,7 @@ fn notify_degraded(bus: &Option<Arc<EventBus>>, reason: &DegradeReason) {
         parent_session_id: None,
         parent_session_name: None,
     };
-    bus.publish(frame);
+    bus.publish(BusEvent::Frame(frame));
 }
 
 #[cfg(test)]

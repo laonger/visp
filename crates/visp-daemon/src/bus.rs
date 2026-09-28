@@ -10,18 +10,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::broadcast;
-use visp_core::agent::AgentEventFrame;
+use visp_core::{BusEvent, EventPublisher};
 
 /// 总线容量（设计 §5 D3：1024 起步）。
 const BUS_CAPACITY: usize = 1024;
 
-/// 总线信封：事件帧 + 发布序号。
+/// 总线信封：事件载荷 + 发布序号。
 #[derive(Clone)]
 pub struct BusEnvelope {
     /// 发布序号；`base = epoch_ms`，每次发布 +1。
     pub seq: u64,
-    /// 被广播的 agent 事件帧。
-    pub frame: AgentEventFrame,
+    /// 被广播的总线事件（显示域帧或 hook 域事件）。
+    pub event: BusEvent,
 }
 
 /// 事件总线。
@@ -51,9 +51,9 @@ impl EventBus {
     ///
     /// **不返回任何错误**：无订阅者、订阅者 lagged 均被忽略，发布端永不阻塞、
     /// 调用方不会因发布结果而 `break`。
-    pub fn publish(&self, frame: AgentEventFrame) {
+    pub fn publish(&self, event: BusEvent) {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-        let _ = self.tx.send(BusEnvelope { seq, frame });
+        let _ = self.tx.send(BusEnvelope { seq, event });
     }
 
     /// 订阅总线。只收到订阅之后发布的事件；连接结束即 drop。
@@ -67,6 +67,14 @@ impl EventBus {
     }
 }
 
+/// 让 daemon 总线满足 `visp-core` 的发布抽象，供 `Orchestrator` / reload / watch
+/// 经统一契约投递 [`BusEvent`]。
+impl EventPublisher for EventBus {
+    fn publish(&self, event: BusEvent) {
+        EventBus::publish(self, event);
+    }
+}
+
 /// 当前 epoch 毫秒。
 fn epoch_ms() -> u64 {
     SystemTime::now()
@@ -75,21 +83,12 @@ fn epoch_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// 让 daemon 总线满足 `visp-agent` 的帧发布抽象，供 `Orchestrator` 直发。
-///
-/// `Orchestrator` 位于 `visp-agent`，无法反向依赖 `visp-daemon`；本 trait 实现
-/// 是 daemon 侧唯一的桥接点，转发到既有 inherent [`EventBus::publish`]。
-impl visp_agent::orchestrator::FramePublisher for EventBus {
-    fn publish(&self, frame: AgentEventFrame) {
-        EventBus::publish(self, frame);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
     use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+    use visp_core::agent::AgentEventFrame;
 
     fn text_frame(text: &str) -> AgentEventFrame {
         AgentEventFrame {
@@ -102,10 +101,18 @@ mod tests {
     }
 
     fn text_of(env: &BusEnvelope) -> String {
-        match &env.frame.event {
-            visp_core::agent::AgentEvent::TextDelta(text) => text.clone(),
-            _ => panic!("expected TextDelta frame"),
+        match &env.event {
+            BusEvent::Frame(frame) => match &frame.event {
+                visp_core::agent::AgentEvent::TextDelta(text) => text.clone(),
+                _ => panic!("expected TextDelta frame"),
+            },
+            BusEvent::Hook(_) => panic!("expected Frame event"),
         }
+    }
+
+    /// 将显示域帧包成总线事件。
+    fn frame_event(frame: AgentEventFrame) -> BusEvent {
+        BusEvent::Frame(frame)
     }
 
     /// 1. 多订阅者各自收到全量帧，顺序一致。
@@ -117,7 +124,7 @@ mod tests {
 
         const N: usize = 5;
         for i in 0..N {
-            bus.publish(text_frame(&format!("frame-{i}")));
+            bus.publish(frame_event(text_frame(&format!("frame-{i}"))));
         }
 
         for rx in [&mut a, &mut b] {
@@ -132,12 +139,12 @@ mod tests {
     #[tokio::test]
     async fn events_published_before_subscribe_are_lost() {
         let bus = EventBus::new();
-        bus.publish(text_frame("before"));
+        bus.publish(frame_event(text_frame("before")));
 
         let mut rx = bus.subscribe();
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
 
-        bus.publish(text_frame("after"));
+        bus.publish(frame_event(text_frame("after")));
         let env = rx.recv().await.unwrap();
         assert_eq!(text_of(&env), "after");
     }
@@ -149,7 +156,7 @@ mod tests {
         assert_eq!(bus.tx.receiver_count(), 1, "sentinel must be held");
 
         let before = bus.seq();
-        bus.publish(text_frame("lonely"));
+        bus.publish(frame_event(text_frame("lonely")));
         assert_eq!(bus.seq(), before + 1);
     }
 
@@ -159,7 +166,7 @@ mod tests {
         let bus = EventBus::new();
         let mut rx = bus.subscribe();
 
-        bus.publish(text_frame("hello"));
+        bus.publish(frame_event(text_frame("hello")));
         let env = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
             .await
             .expect("publish should not block receiver")
@@ -182,7 +189,7 @@ mod tests {
         let mut rx = bus.subscribe();
         const N: u64 = 100;
         for i in 0..N {
-            bus.publish(text_frame(&format!("f-{i}")));
+            bus.publish(frame_event(text_frame(&format!("f-{i}"))));
         }
         let mut seqs = Vec::new();
         for _ in 0..N {
@@ -205,7 +212,7 @@ mod tests {
 
         // 发布超过容量：若发布端会阻塞，本循环无法返回。
         for i in 0..(BUS_CAPACITY + 10) {
-            bus.publish(text_frame(&format!("f-{i}")));
+            bus.publish(frame_event(text_frame(&format!("f-{i}"))));
         }
 
         match rx.recv().await {
@@ -214,15 +221,13 @@ mod tests {
         }
     }
 
-    /// 7. 经 `FramePublisher` 抽象发布与 inherent publish 落在同一通道（daemon 侧桥接）。
+    /// 7. 经 `EventPublisher` 抽象发布与 inherent publish 落在同一通道（daemon 侧发布契约）。
     #[tokio::test]
-    async fn frame_publisher_trait_publishes_to_bus() {
-        use visp_agent::orchestrator::FramePublisher;
-
+    async fn event_publisher_trait_publishes_to_bus() {
         let bus = EventBus::new();
         let mut rx = bus.subscribe();
 
-        FramePublisher::publish(&bus, text_frame("via-trait"));
+        EventPublisher::publish(&bus, frame_event(text_frame("via-trait")));
 
         let env = rx.recv().await.unwrap();
         assert_eq!(text_of(&env), "via-trait");
