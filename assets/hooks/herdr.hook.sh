@@ -16,6 +16,13 @@
 #   HERDR_ENV        herdr pane 标记；!= 1 时静默退出
 #   HERDR_BIN_PATH   herdr CLI 路径
 #   HERDR_PANE_ID    目标 pane id
+#   VISP_HERDR_NOTIFY  完成通知开关；值 0/false/off（大小写不敏感）时关闭，其它或未设默认开启
+#
+# 完成通知：herdr 对 pane 的「完成通知」仅在 pane 未被查看时触发（Idle+unseen→Done），
+# 且无「强制提醒」配置；故本脚本在回合结束时显式调用
+# `notification show`（Custom 类型恒为 Current，声音不受聚焦抑制）以确保通知必达。
+# 若还想要视觉弹窗，需在 herdr 配置 `[ui.toast].delivery`（默认 off）；
+# 用 `VISP_HERDR_NOTIFY=0` 可关闭本脚本发出的显式通知。
 #
 # 设计约束：失败 / 缺失 / 未映射一律静默降级，绝不阻断 agent 主流程。
 # 本脚本不读取 stdin（visp 写入 JSON 后即关写端，未读取无碍）。
@@ -61,6 +68,21 @@ if [ -n "$message" ]; then
 else
     "$HERDR_BIN_PATH" pane report-agent "$HERDR_PANE_ID" \
         --source custom:visp --agent visp --state "$state" \
+        >/dev/null 2>&1 || true
+fi
+
+# 显式完成通知：仅在会话级回合完成（Stop，每回合一次）时发送一次；
+# AgentRunEnd / SubagentStop / SessionStart 等不发送，避免重复。
+# 用 VISP_HERDR_NOTIFY=0/false/off（大小写不敏感）关闭；未设或其它值为默认开启。
+notify_disabled=0
+case "${VISP_HERDR_NOTIFY:-}" in
+    0 | [Oo][Ff][Ff] | [Ff][Aa][Ll][Ss][Ee])
+        notify_disabled=1
+        ;;
+esac
+if [ "$notify_disabled" -eq 0 ] && [ "${VISP_HOOK_EVENT:-}" = "Stop" ]; then
+    "$HERDR_BIN_PATH" notification show "visp" \
+        --body "回合完成" --sound done \
         >/dev/null 2>&1 || true
 fi
 
