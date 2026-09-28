@@ -1,10 +1,12 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use tokio::process::{Child, Command};
 use tonic::transport::Endpoint;
 use visp_proto::visp::ShutdownRequest;
 use visp_proto::visp::coder_daemon_client::CoderDaemonClient;
+
+mod hook_cmd;
 
 /// visp launcher — starts daemon + CLI in one command
 #[derive(Parser)]
@@ -32,6 +34,39 @@ struct Cli {
     /// Passed to the daemon as --config-dir.
     #[arg(long)]
     config_dir: Option<String>,
+
+    /// Do not spawn any hook process; only match and print.
+    #[arg(long, global = true)]
+    dry_run: bool,
+
+    #[command(subcommand)]
+    command: Option<LauncherCommand>,
+}
+
+/// Launcher subcommands (default: start daemon + TUI).
+#[derive(Subcommand, Debug)]
+enum LauncherCommand {
+    /// Inspect lifecycle hooks: list / doctor / test / logs.
+    Hooks {
+        #[command(subcommand)]
+        action: HooksAction,
+    },
+}
+
+/// `visp hooks` actions (design §15 / D10 / D11).
+#[derive(Subcommand, Debug)]
+enum HooksAction {
+    /// List hook rules with source (global/project/builtin) and trust status.
+    List,
+    /// Static checks plus read-only runtime counters (GetHookStats).
+    Doctor,
+    /// Dry-run match rules against a sample payload for an event name or rule id.
+    Test {
+        /// Event name (e.g. `Stop`) or rule id.
+        target: String,
+    },
+    /// Show where hook runtime logs are written.
+    Logs,
 }
 
 #[tokio::main]
@@ -43,6 +78,12 @@ async fn main() {
     if let Some(ref dir) = cli.config_dir {
         // SAFETY: single-threaded setup before any threads are spawned.
         unsafe { std::env::set_var("VISP_CONFIG_DIR", dir) };
+    }
+
+    // `visp hooks ...`: inspect hooks without launching the daemon/TUI.
+    if let Some(ref command) = cli.command {
+        let code = run_subcommand(command, &cli).await;
+        std::process::exit(code);
     }
 
     // Resolve sibling binary paths (same dir as launcher for cargo run, or PATH)
@@ -186,6 +227,15 @@ async fn main() {
     }
 
     std::process::exit(exit_code);
+}
+
+/// Dispatch launcher subcommands; returns the process exit code.
+async fn run_subcommand(command: &LauncherCommand, cli: &Cli) -> i32 {
+    match command {
+        LauncherCommand::Hooks { action } => {
+            hook_cmd::run(action, Path::new(&cli.project), &cli.addr, cli.dry_run).await
+        }
+    }
 }
 
 /// Outcome of waiting for the daemon process to exit.
@@ -463,5 +513,62 @@ mod tests {
     fn config_dir_absent_defaults_none() {
         let cli = Cli::try_parse_from(["visp"]).unwrap();
         assert!(cli.config_dir.is_none());
+    }
+
+    #[test]
+    fn hooks_list_subcommand_parses() {
+        let cli = Cli::try_parse_from(["visp", "hooks", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(LauncherCommand::Hooks {
+                action: HooksAction::List
+            })
+        ));
+        assert!(!cli.dry_run);
+    }
+
+    #[test]
+    fn hooks_doctor_subcommand_parses() {
+        let cli = Cli::try_parse_from(["visp", "hooks", "doctor"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(LauncherCommand::Hooks {
+                action: HooksAction::Doctor
+            })
+        ));
+    }
+
+    #[test]
+    fn hooks_test_subcommand_takes_target() {
+        let cli = Cli::try_parse_from(["visp", "hooks", "test", "Stop"]).unwrap();
+        match cli.command {
+            Some(LauncherCommand::Hooks {
+                action: HooksAction::Test { target },
+            }) => assert_eq!(target, "Stop"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hooks_logs_subcommand_parses() {
+        let cli = Cli::try_parse_from(["visp", "hooks", "logs"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(LauncherCommand::Hooks {
+                action: HooksAction::Logs
+            })
+        ));
+    }
+
+    #[test]
+    fn global_dry_run_flag_parses_after_subcommand() {
+        let cli = Cli::try_parse_from(["visp", "hooks", "test", "Stop", "--dry-run"]).unwrap();
+        assert!(cli.dry_run);
+    }
+
+    #[test]
+    fn no_subcommand_defaults_to_none() {
+        let cli = Cli::try_parse_from(["visp"]).unwrap();
+        assert!(cli.command.is_none());
     }
 }

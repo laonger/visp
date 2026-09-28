@@ -4941,9 +4941,13 @@ version = "0.5.1"
 dependencies = [
  "chrono",
  "clap",
+ "serde",
+ "tempfile",
  "tokio",
+ "toml",
  "tonic 0.13.1",
  "visp-config",
+ "visp-hooks",
  "visp-proto",
 ]
 
