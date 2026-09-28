@@ -189,6 +189,46 @@ tool_timeout_secs = 120  # 覆盖默认 60s 超时
 
 MCP 工具与内置工具同属一个 Registry，Agent 循环自动识别与调用。工具名冲突时 MCP 工具会被跳过（内置工具优先级更高）。
 
+### Hooks 生命周期钩子
+
+在 visp 生命周期的固定节点执行用户自己的命令（写状态文件、审批时桌面通知、回合结束触发 git/CI、错误告警、喂给多路复用器等），全程异步、绝不阻断 agent 主流程。
+
+**事件**（PascalCase）：`SessionStart`、`UserPromptSubmit`、`AgentRunEnd`、`SubagentStop`、`Stop`、`StopFailure`、`ToolCallRequested`、`PreToolUse`、`PostToolUse`、`PostToolUseFailure`、`PermissionRequest`、`PermissionResult`、`SessionEnd`。
+
+**投递与执行**：
+
+- 标量（`VISP_HOOK_EVENT`、`VISP_SESSION_ID`、`VISP_PROJECT_PATH`、`VISP_HOOK_RULE_ID` 等）经环境变量传入；完整载荷以 JSON 写入子进程 stdin
+- `command` 是 argv 首元素、**不经 shell 解析**；子进程默认**不继承** daemon 环境，仅白名单（`PATH`/`HOME`/`TERM`/`LANG` 与 `VISP_*`/`HERDR_*` 前缀）加规则 `env`
+- 每条规则强制 `timeout_ms`（超时杀整个进程树），失败静默（仅日志/计数）、不重试
+
+**配置示例**（`~/.config/visp/daemon.toml`）：
+
+```toml
+[[hooks.rules]]
+id = "20-notify-blocked"
+event = ["PermissionRequest"]
+command = "/usr/bin/osascript"
+args = ["-e", "display notification \"visp 等待审批\""]
+timeout_ms = 3000
+```
+
+**herdr 集成**：随包脚本 `assets/hooks/herdr.hook.sh` 在 herdr pane 内上报 agent 状态，复制后加一条规则即可（`~` 不会展开，请填绝对路径）：
+
+```bash
+cp assets/hooks/herdr.hook.sh ~/.config/visp/hooks/
+```
+
+```toml
+[[hooks.rules]]
+id = "herdr"
+event = ["SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop", "StopFailure", "AgentRunEnd", "SubagentStop"]
+command = "/abs/path/to/.config/visp/hooks/herdr.hook.sh"
+on_full = "coalesce_latest"
+timeout_ms = 2000
+```
+
+诊断命令：`visp hooks list | doctor | test <id|event> | logs`。字段全表与更多示例见 [`docs/daemon.example.toml`](docs/daemon.example.toml)，设计详见 [`docs/design/2026-09-27-visp-hooks-design.md`](docs/design/2026-09-27-visp-hooks-design.md)。
+
 ### 可观测性
 内置 OpenTelemetry 集成，支持 OTLP 导出 trace 到 [Langfuse](https://langfuse.com/) 或任意 OTel 兼容后端。覆盖完整的 Agent 调用链：`agent.run` → `iteration` → `gen_ai.client.operation` → `tool.execute`，Sub-Agent 通过 `visp.subagent.spawn` span 建立父子关系。内置 PII 脱敏、`sample_rate` 采样控制、零采样快速路径。
 
@@ -304,6 +344,25 @@ permissions:
 
 frontmatter 支持 `name`、`description`、`permissions`（限制可用工具）等字段。主 Agent 通过 TaskTool 自动发现并委托任务给匹配的 Sub-Agent。
 
+### 钩子配置（hooks）
+
+生命周期钩子配置在 `daemon.toml` 的 `[hooks]` 节，规则为 `[[hooks.rules]]` 数组：
+
+- **全局规则**（`~/.config/visp/daemon.toml`）默认启用
+- **项目级规则**（`.visp/daemon.toml`）默认**惰性**、须显式信任后才运行；其 `command` 必须位于 `.visp/hooks/` 内，且禁止 `sh -c` 包装
+
+```toml
+# ~/.config/visp/daemon.toml
+[[hooks.rules]]
+id = "20-notify-blocked"
+event = ["PermissionRequest"]
+command = "/usr/bin/osascript"
+args = ["-e", "display notification \"visp 等待审批\""]
+timeout_ms = 3000
+```
+
+规则支持 `id`/`order`/`event`/`matcher`/`command`/`args`/`env`/`cwd`/`timeout_ms`/`enabled`/`on_full`/`parallel`/`cooldown_ms`/`include` 等字段，逐字段说明与事件清单见 [`docs/daemon.example.toml`](docs/daemon.example.toml)，完整设计见 [`docs/design/2026-09-27-visp-hooks-design.md`](docs/design/2026-09-27-visp-hooks-design.md)。用 `visp hooks list | doctor | test <id|event> | logs` 诊断。
+
 ### 运行
 
 ```bash
@@ -388,6 +447,7 @@ Rust (edition 2024) · tokio · tonic + prost · serde · ratatui + crossterm ·
 
 - Session 存储为 SQLite，重启 daemon 后可恢复（需使用 `-s` 参数）
 - 多模型配置下切换模型时动态创建 provider，切换后新 agent loop 生效
+- 钩子配置（`[hooks]`）暂不支持热重载，修改后需重启 daemon 生效
 
 详见 [docs/TODO.md](docs/TODO.md).
 

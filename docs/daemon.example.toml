@@ -349,3 +349,82 @@ max_context_tokens = 128000
 # transport = { type = "get", url = "http://localhost:9000" }
 # tools_endpoint = "/tools"
 # call_endpoint = "/call"
+
+# =============================================================================
+# [hooks] — 生命周期钩子（lifecycle hooks）
+# =============================================================================
+# 在 visp 生命周期的固定节点执行用户自己的命令（写状态文件、审批时推送、
+# 回合结束触发 git/CI、错误告警、喂给多路复用器等）。
+#
+# 事件名（PascalCase）：
+#   SessionStart  UserPromptSubmit  AgentRunEnd  SubagentStop
+#   Stop  StopFailure  ToolCallRequested  PreToolUse  PostToolUse
+#   PostToolUseFailure  PermissionRequest  PermissionResult  SessionEnd
+#
+# 投递：标量（VISP_HOOK_EVENT / VISP_SESSION_ID / VISP_PROJECT_PATH /
+#   VISP_HOOK_RULE_ID 等）经环境变量传入；完整载荷以 JSON 写入子进程
+#   stdin（写完即关）。
+#
+# 环境：子进程默认「不继承」daemon 环境，仅白名单
+#   PATH / HOME / TERM / LANG 与 VISP_* / HERDR_* 前缀，外加规则自身的 env。
+#
+# 执行：全异步、绝不阻断 agent 主流程；每规则强制 timeout_ms（超时杀整个
+#   进程树）；失败静默（仅日志 + 计数），不重试。
+#
+# 安全：全局规则默认启用；项目级规则（.visp/daemon.toml）默认惰性、须显式
+#   信任，且项目级 command 必须位于 .visp/hooks/ 内、禁止 sh -c 包装。
+#
+# 诊断：visp hooks list | doctor | test <id|event> | logs
+# 设计文档：docs/design/2026-09-27-visp-hooks-design.md
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# [[hooks.rules]] — 规则示例（均默认注释掉）
+# ---------------------------------------------------------------------------
+# command 为 argv 首元素、无 shell 解析；args 为其后的参数数组。
+# 同事件多规则按 id 字典序执行（可用 order 覆盖）。
+
+# ----- 示例 1：回合结束写时间戳 -----
+# [[hooks.rules]]
+# id = "10-log-turn-end"
+# event = ["Stop"]
+# command = "/usr/bin/date"
+# args = ["+%Y-%m-%dT%H:%M:%S"]
+# timeout_ms = 2000
+
+# ----- 示例 2：等待审批时发桌面通知 -----
+# [[hooks.rules]]
+# id = "20-notify-blocked"
+# event = ["PermissionRequest"]
+# command = "/usr/bin/osascript"
+# args = ["-e", "display notification \"visp 等待审批\""]
+# timeout_ms = 3000
+
+# ----- 示例 3：herdr 状态上报（随包脚本，须用绝对路径） -----
+# 脚本来自 assets/hooks/herdr.hook.sh，复制到 ~/.config/visp/hooks/ 后填其
+# 绝对路径。注意：command 中的 ~ 不会展开，请写绝对路径。脚本仅在 herdr
+# pane 内（HERDR_ENV=1）生效。
+# [[hooks.rules]]
+# id = "herdr"
+# event = ["SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop", "StopFailure", "AgentRunEnd", "SubagentStop"]
+# command = "/abs/path/to/.config/visp/hooks/herdr.hook.sh"
+# on_full = "coalesce_latest"
+# timeout_ms = 2000
+
+# ---------------------------------------------------------------------------
+# 规则字段说明
+# ---------------------------------------------------------------------------
+# id          规则唯一名；决定同事件多规则的字典序（必填，同作用域内不可重复）
+# order       显式顺序覆盖（缺省按 id 字典序）
+# event       命中事件名数组（必填，PascalCase）
+# matcher     正则匹配 tool_name / source / kind（缺省全匹配）
+# command     argv 首元素，无 shell；项目级须位于 .visp/hooks/ 内（必填）
+# args        传给 command 的参数数组
+# env         规则显式注入的环境变量表（叠加在白名单之上）
+# cwd         工作目录（缺省取 project_path）
+# timeout_ms  单次执行超时，单位毫秒（默认 60000）
+# enabled     是否启用（默认 true）
+# on_full     队列溢出策略：drop_new | drop_old | coalesce_latest（默认 drop_new）
+# parallel    放开同规则并发、放弃默认保序（默认 false）
+# cooldown_ms 最小触发间隔，单位毫秒（默认 0）
+# include     载荷可选字段：prompt / tool_input / tool_response（默认空 = 脱敏）
