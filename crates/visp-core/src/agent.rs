@@ -23,6 +23,7 @@ use crate::session::SessionStatus;
 use crate::tool::{ToolContext, ToolResult, ToolType};
 use crate::tool_registry::ToolRegistry;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -33,6 +34,32 @@ use tokio_util::sync::CancellationToken;
 pub struct UserQueryResult {
     pub selected_index: i32,
     pub text: String,
+}
+
+/// 工具调用结果分类。
+///
+/// 作为 `AgentEvent::ToolCallResult` 的显式状态字段，并承担 `is_error` 的
+/// **单一映射来源**（见 [`ToolOutcome::into_is_error`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutcome {
+    /// 工具成功执行
+    Success,
+    /// 工具执行返回失败
+    Failure,
+    /// 审批被用户拒绝
+    Denied,
+    /// 执行前已取消
+    Cancelled,
+    /// 工具参数畸形/截断（如 max_output_tokens 超限）
+    Truncated,
+}
+
+impl ToolOutcome {
+    /// `outcome → is_error` 的单一映射：仅 `Success` 为 `false`，其余为 `true`。
+    pub fn into_is_error(self) -> bool {
+        !matches!(self, ToolOutcome::Success)
+    }
 }
 
 /// Agent 事件，用于流式通知外部（TUI/WS）
@@ -71,6 +98,16 @@ pub enum AgentEvent {
         tool_name: String,
         content: String,
         is_error: bool,
+        /// 结果分类（`is_error` 由此单一映射，见 `ToolOutcome::into_is_error`）
+        outcome: ToolOutcome,
+    },
+    /// 工具即将执行（审批通过后、真实执行前）。
+    ///
+    /// 仅类型定义；发射点由后续 hooks 实现步骤接入。
+    PreToolUse {
+        call_id: String,
+        tool_name: String,
+        requires_approval: bool,
     },
     /// 状态更新
     StatusUpdate(String),
@@ -1326,7 +1363,7 @@ mod tests {
         );
         assert!(events
             .iter()
-            .any(|e| matches!(e, AgentEvent::ToolCallResult { call_id, is_error: false, .. } if call_id == "call-1")));
+            .any(|e| matches!(e, AgentEvent::ToolCallResult { call_id, is_error: false, outcome: ToolOutcome::Success, .. } if call_id == "call-1")));
         assert!(events.iter().any(|e| matches!(e, AgentEvent::Done)));
         assert!(
             events
@@ -1384,6 +1421,7 @@ mod tests {
                 AgentEvent::ToolCallResult {
                     call_id,
                     is_error: false,
+                    outcome: ToolOutcome::Success,
                     ..
                 } => Some(call_id.as_str()),
                 _ => None,
@@ -1574,6 +1612,7 @@ mod tests {
         });
 
         let mut error_result: Option<String> = None;
+        let mut denied_outcome: Option<ToolOutcome> = None;
 
         while let Some(event) = rx.recv().await {
             match event {
@@ -1589,15 +1628,18 @@ mod tests {
                 AgentEvent::ToolCallResult {
                     is_error: true,
                     content,
+                    outcome,
                     ..
                 } => {
                     error_result = Some(content);
+                    denied_outcome = Some(outcome);
                 }
                 _ => {}
             }
         }
 
         assert_eq!(error_result, Some("User denied".into()));
+        assert_eq!(denied_outcome, Some(ToolOutcome::Denied));
         assert!(
             !executed.load(Ordering::SeqCst),
             "Tool should NOT have been executed after denial"
@@ -2689,6 +2731,77 @@ mod tests {
 
         assert!(result.is_error);
         assert!(result.content.contains("Missing required 'prompt'"));
+    }
+
+    // ── ToolOutcome：五值 + is_error 单一映射（计划 0c-2 测试 1/2）──────────────
+
+    #[test]
+    fn test_tool_outcome_variants_and_is_error_mapping() {
+        // 五值齐全
+        let all = [
+            ToolOutcome::Success,
+            ToolOutcome::Failure,
+            ToolOutcome::Denied,
+            ToolOutcome::Cancelled,
+            ToolOutcome::Truncated,
+        ];
+        // 可序列化（hook 契约使用小写名）
+        assert_eq!(
+            serde_json::to_string(&all).unwrap(),
+            r#"["success","failure","denied","cancelled","truncated"]"#
+        );
+        // 映射不变量：Success -> false，其余 -> true
+        assert!(!ToolOutcome::Success.into_is_error());
+        for outcome in [
+            ToolOutcome::Failure,
+            ToolOutcome::Denied,
+            ToolOutcome::Cancelled,
+            ToolOutcome::Truncated,
+        ] {
+            assert!(
+                outcome.into_is_error(),
+                "{outcome:?} 应映射为 is_error=true"
+            );
+        }
+    }
+
+    /// 测试 3（截断路径）：畸形参数 → 不执行工具，is_error=true 且 outcome=Truncated。
+    #[tokio::test]
+    async fn test_tool_call_result_truncated_outcome() {
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(TestProvider::new(vec![
+            vec![
+                ChatEvent::ToolCall {
+                    id: "call-trunc".into(),
+                    name: "finder".into(),
+                    arguments: "{ \"path\": ".into(), // 畸形/截断 JSON
+                },
+                ChatEvent::Done,
+            ],
+            vec![ChatEvent::Done],
+        ]));
+        let (tool, executed) = mock_tool("finder", false);
+
+        let (events, _sm, _sid) = run_collect(
+            provider,
+            vec![tool],
+            test_setup(),
+            10,
+            200,
+            Message::user("truncate"),
+        )
+        .await;
+
+        assert!(!executed.load(Ordering::SeqCst), "畸形参数不应执行工具");
+        let hit = events.iter().find_map(|e| match e {
+            AgentEvent::ToolCallResult {
+                is_error,
+                outcome,
+                content,
+                ..
+            } if content.contains("[TRUNCATED]") => Some((*is_error, *outcome)),
+            _ => None,
+        });
+        assert_eq!(hit, Some((true, ToolOutcome::Truncated)));
     }
 
     // ── cleanup_orphan_tool_uses ──────────────────────────────────────────────

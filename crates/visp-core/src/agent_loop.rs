@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::ProviderMetadata;
 use crate::agent::{
-    AgentConfig, AgentEvent, AgentLoopContext, AgentMessage, Envelope, ToolExecResult,
+    AgentConfig, AgentEvent, AgentLoopContext, AgentMessage, Envelope, ToolExecResult, ToolOutcome,
     UserQueryResult, cleanup_orphan_tool_uses, extract_thinking_text, format_tool_args,
     llm_error_to_code, parse_user_query_marker, render_tool_guide, strip_user_query_marker,
 };
@@ -89,6 +89,7 @@ fn event_to_msg(event: &AgentEvent) -> Option<AgentMessage> {
             tool_name,
             content,
             is_error,
+            outcome: _,
         } => Some(AgentMessage::ToolCallResult {
             call_id: call_id.clone(),
             tool_name: tool_name.clone(),
@@ -96,6 +97,7 @@ fn event_to_msg(event: &AgentEvent) -> Option<AgentMessage> {
             is_error: *is_error,
         }),
         AgentEvent::UserQuery { .. } => None, // 不转发：AgentMessage::UserQuery 生产不可达
+        AgentEvent::PreToolUse { .. } => None, // 不产出：仅为 hook 事实，无对应 AgentMessage
         AgentEvent::ImageBlock { .. } | AgentEvent::ImageError { .. } => None,
         AgentEvent::Done => Some(AgentMessage::Done),
     }
@@ -1141,6 +1143,7 @@ async fn execute_tool_calls(
                         result: ToolResult::error("Cancelled"),
                         duration_ms: None,
                     };
+                    let outcome = ToolOutcome::Cancelled;
                     forward_global!(AgentMessage::ToolCallResult {
                         call_id: tc.id.clone(),
                         tool_name: tc.name.clone(),
@@ -1152,7 +1155,8 @@ async fn execute_tool_calls(
                             call_id: tc.id.clone(),
                             tool_name: tc.name.clone(),
                             content: "Cancelled".into(),
-                            is_error: true,
+                            outcome,
+                            is_error: outcome.into_is_error(),
                         })
                         .await;
                     return result;
@@ -1219,6 +1223,7 @@ async fn execute_tool_calls(
                         }
                         _ => {
                             let result = ToolResult::error("User denied");
+                            let outcome = ToolOutcome::Denied;
                             forward_global!(AgentMessage::ToolCallResult {
                                 call_id: tc.id.clone(),
                                 tool_name: tc.name.clone(),
@@ -1230,7 +1235,8 @@ async fn execute_tool_calls(
                                     call_id: tc.id.clone(),
                                     tool_name: tc.name.clone(),
                                     content: result.content.clone(),
-                                    is_error: result.is_error,
+                                    outcome,
+                                    is_error: outcome.into_is_error(),
                                 })
                                 .await;
                             return ToolExecResult {
@@ -1274,6 +1280,7 @@ async fn execute_tool_calls(
                              - Do NOT retry the same large write_file call — it will fail again.",
                             tc.arguments.len(),
                         ));
+                        let outcome = ToolOutcome::Truncated;
                         forward_global!(AgentMessage::ToolCallResult {
                             call_id: tc.id.clone(),
                             tool_name: tc.name.clone(),
@@ -1285,7 +1292,8 @@ async fn execute_tool_calls(
                                 call_id: tc.id.clone(),
                                 tool_name: tc.name.clone(),
                                 content: result.content.clone(),
-                                is_error: result.is_error,
+                                outcome,
+                                is_error: outcome.into_is_error(),
                             })
                             .await;
                         return ToolExecResult {
@@ -1339,6 +1347,11 @@ async fn execute_tool_calls(
                     }
                 }
 
+                let outcome = if result.is_error {
+                    ToolOutcome::Failure
+                } else {
+                    ToolOutcome::Success
+                };
                 forward_global!(AgentMessage::ToolCallResult {
                     call_id: tc.id.clone(),
                     tool_name: tc.name.clone(),
@@ -1350,7 +1363,8 @@ async fn execute_tool_calls(
                         call_id: tc.id.clone(),
                         tool_name: tc.name.clone(),
                         content: result.content.clone(),
-                        is_error: result.is_error,
+                        outcome,
+                        is_error: outcome.into_is_error(),
                     })
                     .await;
 
@@ -1999,6 +2013,17 @@ mod tests {
     use std::sync::Arc as StdArc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tracing_subscriber::prelude::*;
+
+    /// 计划 0c-2 测试 4：PreToolUse 经 `event_to_msg` 不产出 AgentMessage（显式 None）。
+    #[test]
+    fn test_event_to_msg_pre_tool_use_is_not_forwarded() {
+        let event = AgentEvent::PreToolUse {
+            call_id: "call-1".into(),
+            tool_name: "bash".into(),
+            requires_approval: true,
+        };
+        assert!(event_to_msg(&event).is_none());
+    }
 
     /// RateLimit mock: first `fail_attempts` calls return RateLimit, then Ok(Done)
     struct RateLimitProvider {
@@ -4712,7 +4737,7 @@ mod tests {
             hard_limit: 10,
             ..Default::default()
         };
-        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(64);
 
         run_agent_loop(
             provider,
@@ -4725,6 +4750,18 @@ mod tests {
             tx,
         )
         .await;
+
+        // 计划 0c-2 测试 3（真实失败路径）：is_error=true 且 outcome=Failure。
+        let mut failure: Option<(bool, ToolOutcome)> = None;
+        while let Ok(event) = rx.try_recv() {
+            if let AgentEvent::ToolCallResult {
+                is_error, outcome, ..
+            } = event
+            {
+                failure = Some((is_error, outcome));
+            }
+        }
+        assert_eq!(failure, Some((true, ToolOutcome::Failure)));
 
         let captured = spans.lock().unwrap();
         let tool_span = captured

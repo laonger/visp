@@ -922,9 +922,9 @@ impl CoderDaemon for CoderDaemonService {
                         }
                     }
                     _ => {
-                        let proto_msg =
-                            agent_event_to_server_message(frame.event, &sid, &frame.agent_name);
-                        if let Some(payload) = proto_msg.payload
+                        if let Some(proto_msg) =
+                            agent_event_to_server_message(frame.event, &sid, &frame.agent_name)
+                            && let Some(payload) = proto_msg.payload
                             && response_tx
                                 .send(Ok(proto::ServerMessage {
                                     payload: Some(payload),
@@ -1350,11 +1350,11 @@ fn agent_event_to_server_message(
     event: AgentEvent,
     session_id: &str,
     agent_name: &str,
-) -> proto::ServerMessage {
+) -> Option<proto::ServerMessage> {
     let sid = session_id.to_owned();
     let aname = agent_name.to_owned();
     match event {
-        AgentEvent::TextDelta(delta) => proto::ServerMessage {
+        AgentEvent::TextDelta(delta) => Some(proto::ServerMessage {
             payload: Some(proto::server_message::Payload::TextDelta(
                 proto::TextDelta {
                     delta,
@@ -1362,12 +1362,12 @@ fn agent_event_to_server_message(
                     agent_name: aname,
                 },
             )),
-        },
+        }),
         AgentEvent::ToolCallRequest {
             call_id,
             tool_name,
             arguments,
-        } => proto::ServerMessage {
+        } => Some(proto::ServerMessage {
             payload: Some(proto::server_message::Payload::ToolCall(proto::ToolCall {
                 call_id,
                 tool_name,
@@ -1375,13 +1375,14 @@ fn agent_event_to_server_message(
                 session_id: sid,
                 agent_name: aname,
             })),
-        },
+        }),
         AgentEvent::ToolCallResult {
             call_id,
             tool_name,
             content,
             is_error,
-        } => proto::ServerMessage {
+            outcome: _,
+        } => Some(proto::ServerMessage {
             payload: Some(proto::server_message::Payload::ToolResult(
                 proto::ToolResult {
                     call_id,
@@ -1392,7 +1393,9 @@ fn agent_event_to_server_message(
                     agent_name: aname,
                 },
             )),
-        },
+        }),
+        // PreToolUse 是 hook 事实，无对应的显示 ServerMessage。
+        AgentEvent::PreToolUse { .. } => None,
         AgentEvent::UsageInfo {
             input_tokens,
             output_tokens,
@@ -1400,7 +1403,7 @@ fn agent_event_to_server_message(
             cache_creation_input_tokens,
             cache_read_input_tokens,
             cost,
-        } => proto::ServerMessage {
+        } => Some(proto::ServerMessage {
             payload: Some(proto::server_message::Payload::UsageInfo(
                 proto::UsageInfo {
                     input_tokens,
@@ -1412,13 +1415,13 @@ fn agent_event_to_server_message(
                     session_id: sid,
                 },
             )),
-        },
+        }),
         AgentEvent::UsageDelta {
             input_tokens,
             output_tokens,
             cache_creation_input_tokens,
             cache_read_input_tokens,
-        } => proto::ServerMessage {
+        } => Some(proto::ServerMessage {
             payload: Some(proto::server_message::Payload::UsageDelta(
                 proto::UsageDelta {
                     input_tokens,
@@ -1428,14 +1431,14 @@ fn agent_event_to_server_message(
                     session_id: sid,
                 },
             )),
-        },
+        }),
         AgentEvent::ThinkingBlock(block) => {
             let thinking = block.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
             let signature = block
                 .get("signature")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            proto::ServerMessage {
+            Some(proto::ServerMessage {
                 payload: Some(proto::server_message::Payload::ThinkingBlock(
                     proto::ThinkingBlock {
                         thinking: thinking.to_string(),
@@ -1443,9 +1446,9 @@ fn agent_event_to_server_message(
                         session_id: sid,
                     },
                 )),
-            }
+            })
         }
-        AgentEvent::StatusUpdate(message) => proto::ServerMessage {
+        AgentEvent::StatusUpdate(message) => Some(proto::ServerMessage {
             payload: Some(proto::server_message::Payload::StatusUpdate(
                 proto::StatusUpdate {
                     message,
@@ -1455,14 +1458,14 @@ fn agent_event_to_server_message(
                     view_only: false,
                 },
             )),
-        },
+        }),
         AgentEvent::UserQuery {
             query_id,
             message,
             options,
             allow_other,
             respond: _,
-        } => proto::ServerMessage {
+        } => Some(proto::ServerMessage {
             payload: Some(proto::server_message::Payload::UserQuery(
                 proto::UserQuery {
                     query_id: query_id.clone(),
@@ -1472,20 +1475,20 @@ fn agent_event_to_server_message(
                     session_id: sid,
                 },
             )),
-        },
-        AgentEvent::Error { code, message } => proto::ServerMessage {
+        }),
+        AgentEvent::Error { code, message } => Some(proto::ServerMessage {
             payload: Some(proto::server_message::Payload::Error(proto::Error {
                 code: code.to_string(),
                 message,
                 session_id: sid,
                 agent_name: aname,
             })),
-        },
+        }),
         AgentEvent::ImageBlock {
             path,
             mime_type,
             remote_url,
-        } => proto::ServerMessage {
+        } => Some(proto::ServerMessage {
             payload: Some(proto::server_message::Payload::ImageBlock(
                 proto::ImageBlock {
                     path,
@@ -1495,8 +1498,8 @@ fn agent_event_to_server_message(
                     agent_name: aname,
                 },
             )),
-        },
-        AgentEvent::ImageError { reason } => proto::ServerMessage {
+        }),
+        AgentEvent::ImageError { reason } => Some(proto::ServerMessage {
             payload: Some(proto::server_message::Payload::ImageError(
                 proto::ImageError {
                     reason,
@@ -1504,12 +1507,12 @@ fn agent_event_to_server_message(
                     agent_name: aname,
                 },
             )),
-        },
-        AgentEvent::Done => proto::ServerMessage {
+        }),
+        AgentEvent::Done => Some(proto::ServerMessage {
             payload: Some(proto::server_message::Payload::Done(proto::Done {
                 session_id: sid,
             })),
-        },
+        }),
     }
 }
 
@@ -2240,7 +2243,8 @@ mod tests {
     #[test]
     fn test_agent_event_to_server_message_text_delta() {
         let msg =
-            agent_event_to_server_message(AgentEvent::TextDelta("hello".into()), "sess-1", "");
+            agent_event_to_server_message(AgentEvent::TextDelta("hello".into()), "sess-1", "")
+                .unwrap();
         match msg.payload {
             Some(proto::server_message::Payload::TextDelta(t)) => {
                 assert_eq!(t.delta, "hello");
@@ -2250,6 +2254,17 @@ mod tests {
         }
     }
 
+    /// 计划 0c-2 测试 4：PreToolUse 在 daemon 映射路径上显式不产出 ServerMessage。
+    #[test]
+    fn test_agent_event_to_server_message_pre_tool_use_is_none() {
+        let event = AgentEvent::PreToolUse {
+            call_id: "call-1".into(),
+            tool_name: "bash".into(),
+            requires_approval: false,
+        };
+        assert!(agent_event_to_server_message(event, "sess-1", "").is_none());
+    }
+
     #[test]
     fn test_agent_event_to_server_message_tool_call() {
         let event = AgentEvent::ToolCallRequest {
@@ -2257,7 +2272,7 @@ mod tests {
             tool_name: "bash".into(),
             arguments: r#"{"cmd":"ls"}"#.into(),
         };
-        let msg = agent_event_to_server_message(event, "sess-1", "");
+        let msg = agent_event_to_server_message(event, "sess-1", "").unwrap();
         match msg.payload {
             Some(proto::server_message::Payload::ToolCall(t)) => {
                 assert_eq!(t.call_id, "call-1");
@@ -2271,7 +2286,7 @@ mod tests {
 
     #[test]
     fn test_agent_event_to_server_message_done() {
-        let msg = agent_event_to_server_message(AgentEvent::Done, "sess-1", "");
+        let msg = agent_event_to_server_message(AgentEvent::Done, "sess-1", "").unwrap();
         match msg.payload {
             Some(proto::server_message::Payload::Done(d)) => {
                 assert_eq!(d.session_id, "sess-1");
@@ -2286,7 +2301,7 @@ mod tests {
             code: visp_core::error::AgentErrorCode::MaxIterations,
             message: "max reached".into(),
         };
-        let msg = agent_event_to_server_message(event, "sess-1", "");
+        let msg = agent_event_to_server_message(event, "sess-1", "").unwrap();
         match msg.payload {
             Some(proto::server_message::Payload::Error(e)) => {
                 assert_eq!(e.code, "Maximum iterations reached");
@@ -2307,7 +2322,7 @@ mod tests {
             allow_other: true,
             respond: tx,
         };
-        let msg = agent_event_to_server_message(event, "sess-1", "");
+        let msg = agent_event_to_server_message(event, "sess-1", "").unwrap();
         match msg.payload {
             Some(proto::server_message::Payload::UserQuery(query)) => {
                 assert_eq!(query.query_id, "q-1");
