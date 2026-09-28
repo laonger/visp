@@ -2,7 +2,7 @@
 
 ## 概述
 
-将分散在 visp-daemon、visp-core、visp-mcp、visp-llm、visp-tools、visp-command、visp、visp-cli、visp-db 中的配置管理逻辑，统一迁移到新建的 `visp-config` crate。涵盖配置的读、写、优先级、传递四个维度。
+将分散在 visp-daemon、visp-core、visp-mcp、visp-llm、visp-tools、visp-command、visp、visp-tui、visp-db 中的配置管理逻辑，统一迁移到新建的 `visp-config` crate。涵盖配置的读、写、优先级、传递四个维度。
 
 设计文档：`docs/design/visp-config.md`
 
@@ -66,7 +66,7 @@ cargo clippy -p visp-config
 
 #### 🟢 绿 - 实现
 为以下 crate 的 Cargo.toml 添加 `visp-config = { path = "../visp-config" }`：
-visp-core、visp-llm、visp-mcp、visp-daemon、visp-agent、visp-tools、visp-cli、visp、visp-command、visp-db
+visp-core、visp-llm、visp-mcp、visp-daemon、visp-agent、visp-tools、visp-tui、visp、visp-command、visp-db
 
 #### 🧪 测试
 ```bash
@@ -329,7 +329,7 @@ cargo clippy -p visp-config
 
 ---
 
-### 任务 D：visp-tools + visp-command + visp-cli + visp + visp-db
+### 任务 D：visp-tools + visp-command + visp-tui + visp + visp-db
 
 #### Step 6d：更新路径引用
 #### 🟢 绿 - 实现
@@ -338,12 +338,12 @@ cargo clippy -p visp-config
 3. visp-tools/codegraph.rs: `.visp/codegraph.db` 路径改用 `visp_config::path::codegraph_db`（5 处）
 4. visp-command/init_agent.rs: `.visp/agents/` 路径改用 `visp_config::path::agents_dir_project`
 5. visp-command/init_skill.rs: `.visp/skills/` 路径改用 `visp_config::path::skills_dir_project`
-6. visp-cli/image.rs: `.visp/images` 临时缓存路径改用 `visp_config::path::image_cache_dir`
+6. visp-tui/image.rs: `.visp/images` 临时缓存路径改用 `visp_config::path::image_cache_dir`
 7. visp/main.rs: `get_log_dir()` 改用 `visp_config::path::log_dir`；启动 daemon 前调用 `visp_config::load_config()` 获取基础 listen_addr
 8. visp-db/store.rs: `~/` 路径展开改用 `visp_config::path::expand_home`
 
 #### 📦 提交
-`refactor: update visp-tools, visp-command, visp-cli, visp, visp-db to use visp_config::path`
+`refactor: update visp-tools, visp-command, visp-tui, visp, visp-db to use visp_config::path`
 
 ---
 

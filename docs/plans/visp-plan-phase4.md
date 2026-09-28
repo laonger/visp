@@ -2,32 +2,32 @@
 
 ## 概述
 
-Phase 4 实现终端交互界面。创建新 crate visp-cli，通过 gRPC 连接 daemon，提供 REPL 对话体验。
+Phase 4 实现终端交互界面。创建新 crate visp-tui，通过 gRPC 连接 daemon，提供 REPL 对话体验。
 
 ---
 
-## 步骤 1：visp-cli 项目骨架
+## 步骤 1：visp-tui 项目骨架
 
 ### 🔴 红 — 验证
 
-`cargo build -p visp-cli` 失败（crate 不存在）。
+`cargo build -p visp-tui` 失败（crate 不存在）。
 
 ### 🟢 绿 — 实现
 
-- 创建 `crates/visp-cli/Cargo.toml`，依赖：`visp-proto`, `tonic`, `tokio` (rt-multi-thread + macros + signal), `clap` (derive), `rustyline` (default-features = false, features = ["with-file-history"])
-- 创建 `crates/visp-cli/src/main.rs`（最小入口：`fn main() {}`）
-- 修改 workspace `Cargo.toml` 的 `members` 添加 `"crates/visp-cli"`
+- 创建 `crates/visp-tui/Cargo.toml`，依赖：`visp-proto`, `tonic`, `tokio` (rt-multi-thread + macros + signal), `clap` (derive), `rustyline` (default-features = false, features = ["with-file-history"])
+- 创建 `crates/visp-tui/src/main.rs`（最小入口：`fn main() {}`）
+- 修改 workspace `Cargo.toml` 的 `members` 添加 `"crates/visp-tui"`
 
 ### 🧪 测试 → 🔍 类型检查
 
 ```bash
-cargo build -p visp-cli && cargo clippy -p visp-cli -- -D warnings
+cargo build -p visp-tui && cargo clippy -p visp-tui -- -D warnings
 ```
 
 ### 📦 提交
 
 ```bash
-git add crates/visp-cli/ Cargo.toml Cargo.lock && git commit -m "feat(visp-cli): create crate skeleton"
+git add crates/visp-tui/ Cargo.toml Cargo.lock && git commit -m "feat(visp-tui): create crate skeleton"
 ```
 
 ---
@@ -36,7 +36,7 @@ git add crates/visp-cli/ Cargo.toml Cargo.lock && git commit -m "feat(visp-cli):
 
 ### 2a：gRPC 客户端（client.rs）
 
-新建 `crates/visp-cli/src/client.rs`。在 main.rs 中添加 `mod client;`。
+新建 `crates/visp-tui/src/client.rs`。在 main.rs 中添加 `mod client;`。
 
 #### 🔴 红 — 测试
 
@@ -71,12 +71,12 @@ git add crates/visp-cli/ Cargo.toml Cargo.lock && git commit -m "feat(visp-cli):
 #### 📦 提交
 
 ```bash
-git add crates/visp-cli/ && git commit -m "feat(visp-cli): gRPC client with ChatHandle bidirectional stream"
+git add crates/visp-tui/ && git commit -m "feat(visp-tui): gRPC client with ChatHandle bidirectional stream"
 ```
 
 ### 2b：终端显示（display.rs）
 
-新建 `crates/visp-cli/src/display.rs`。在 main.rs 中添加 `mod display;`。
+新建 `crates/visp-tui/src/display.rs`。在 main.rs 中添加 `mod display;`。
 
 #### 🔴 红 — 测试
 
@@ -100,14 +100,14 @@ git add crates/visp-cli/ && git commit -m "feat(visp-cli): gRPC client with Chat
 #### 📦 提交
 
 ```bash
-git add crates/visp-cli/ && git commit -m "feat(visp-cli): terminal display formatting with streaming text and truncation"
+git add crates/visp-tui/ && git commit -m "feat(visp-tui): terminal display formatting with streaming text and truncation"
 ```
 
 ---
 
 ## 步骤 3：REPL 循环（repl.rs）
 
-新建 `crates/visp-cli/src/repl.rs`。在 main.rs 中添加 `mod repl;`。
+新建 `crates/visp-tui/src/repl.rs`。在 main.rs 中添加 `mod repl;`。
 
 #### 🔴 红 — 测试
 
@@ -134,14 +134,14 @@ REPL 是终端交互组件，单元测试困难。验证编译通过 + 手动测
 #### 📦 提交
 
 ```bash
-git add crates/visp-cli/ && git commit -m "feat(visp-cli): REPL loop with select!, InputMode, and special commands"
+git add crates/visp-tui/ && git commit -m "feat(visp-tui): REPL loop with select!, InputMode, and special commands"
 ```
 
 ---
 
 ## 步骤 4：main.rs 入口
 
-修改 `crates/visp-cli/src/main.rs`。
+修改 `crates/visp-tui/src/main.rs`。
 
 #### 🔴 红 — 测试
 
@@ -160,7 +160,7 @@ git add crates/visp-cli/ && git commit -m "feat(visp-cli): REPL loop with select
 #### 📦 提交
 
 ```bash
-git add crates/visp-cli/ && git commit -m "feat(visp-cli): main entry with CLI args, connection, and REPL startup"
+git add crates/visp-tui/ && git commit -m "feat(visp-tui): main entry with CLI args, connection, and REPL startup"
 ```
 
 ---
@@ -213,9 +213,9 @@ cargo test --workspace && clippy && fmt
 
 | Wave | 并行数 | Crate | 步骤 | 测试用例 |
 |---|---|---|---|---|
-| 1 | 1 | visp-cli | 骨架 | 0 |
-| 2 | 2 | visp-cli | client + display | 3 |
-| 3 | 2 | visp-cli | repl + main | 0 |
+| 1 | 1 | visp-tui | 骨架 | 0 |
+| 2 | 2 | visp-tui | client + display | 3 |
+| 3 | 2 | visp-tui | repl + main | 0 |
 | 4 | — | 全 workspace | 质量门 | — |
 
 总计：**5 个步骤，3 个测试用例**（CLI 多为终端交互，自动化测试有限）。

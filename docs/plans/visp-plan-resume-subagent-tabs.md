@@ -2,20 +2,20 @@
 
 ## 概述
 
-实现 `visp -s <main-id>` 或 `/sessions <id>` 切换会话时，daemon 递归回放所有后代子 agent 的历史，CLI 以 ViewOnly tab 展示。涉及 5 个 crate：visp-proto / visp-core / visp-db / visp-daemon / visp-cli。
+实现 `visp -s <main-id>` 或 `/sessions <id>` 切换会话时，daemon 递归回放所有后代子 agent 的历史，CLI 以 ViewOnly tab 展示。涉及 5 个 crate：visp-proto / visp-core / visp-db / visp-daemon / visp-tui。
 
 设计文档：`docs/design/visp-design-resume-subagent-tabs.md`（第四版）。
 
 ### 设计文档笔误修正（计划阶段确认）
 
-设计文档"改动范围"表中 `AgentStatus` 归属写为 visp-core，实际位置是 `crates/visp-cli/src/app.rs:296`。本计划按真实位置实施，回头同步修设计文档。
+设计文档"改动范围"表中 `AgentStatus` 归属写为 visp-core，实际位置是 `crates/visp-tui/src/app.rs:296`。本计划按真实位置实施，回头同步修设计文档。
 
 ### 关键事实（计划阶段确认）
 
 | 事实 | 位置 | 现状 |
 |---|---|---|
-| `AgentStatus` 枚举 | `visp-cli/src/app.rs:296` | 3 变体：Running/Done/Error |
-| `TabEntry::new(session_id, agent_name)` | `visp-cli/src/app.rs:318` | 硬编码 `status: AgentStatus::Running` |
+| `AgentStatus` 枚举 | `visp-tui/src/app.rs:296` | 3 变体：Running/Done/Error |
+| `TabEntry::new(session_id, agent_name)` | `visp-tui/src/app.rs:318` | 硬编码 `status: AgentStatus::Running` |
 | `SessionStore` trait | `visp-core/src/session.rs:53` | 8 方法，无 `list_child_sessions` |
 | `SessionRepo` SQL 层 | `visp-db/src/session_repo.rs` | `list_by_project` 模式可复用 |
 | `StatusUpdate` proto | `visp-proto/proto/visp.proto` | 已有 `session_id/agent_name/user_inputs`，无 `view_only` |
@@ -52,7 +52,7 @@ cargo test -p visp-proto && cargo clippy -p visp-proto -- -D warnings && cargo f
 
 ---
 
-## 步骤 2：visp-cli AgentStatus + TabEntry 扩展
+## 步骤 2：visp-tui AgentStatus + TabEntry 扩展
 
 ### 2a：AgentStatus 新增 ViewOnly 变体
 
@@ -70,7 +70,7 @@ cargo test -p visp-proto && cargo clippy -p visp-proto -- -D warnings && cargo f
 #### 测试 → 类型检查
 
 ```bash
-cargo test -p visp-cli agent_status && cargo clippy -p visp-cli -- -D warnings
+cargo test -p visp-tui agent_status && cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### 提交
@@ -94,7 +94,7 @@ cargo test -p visp-cli agent_status && cargo clippy -p visp-cli -- -D warnings
 #### 测试 → 类型检查
 
 ```bash
-cargo test -p visp-cli tab_entry && cargo clippy -p visp-cli -- -D warnings && cargo fmt -p visp-cli -- --check
+cargo test -p visp-tui tab_entry && cargo clippy -p visp-tui -- -D warnings && cargo fmt -p visp-tui -- --check
 ```
 
 #### 提交
@@ -256,7 +256,7 @@ cargo test -p visp-daemon user_input session_not_active && cargo clippy -p visp-
 
 ---
 
-## 步骤 6：visp-cli route_frame 适配 view_only + ViewOnly tab UI
+## 步骤 6：visp-tui route_frame 适配 view_only + ViewOnly tab UI
 
 ### 6a：route_frame 按 view_only 建 ViewOnly tab
 
@@ -276,7 +276,7 @@ cargo test -p visp-daemon user_input session_not_active && cargo clippy -p visp-
 #### 测试 → 类型检查
 
 ```bash
-cargo test -p visp-cli route_frame view_only && cargo clippy -p visp-cli -- -D warnings
+cargo test -p visp-tui route_frame view_only && cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### 提交
@@ -305,7 +305,7 @@ cargo test -p visp-cli route_frame view_only && cargo clippy -p visp-cli -- -D w
 #### 测试 → 类型检查
 
 ```bash
-cargo test -p visp-cli view_only_tab && cargo clippy -p visp-cli -- -D warnings && cargo fmt -p visp-cli -- --check
+cargo test -p visp-tui view_only_tab && cargo clippy -p visp-tui -- -D warnings && cargo fmt -p visp-tui -- --check
 ```
 
 #### 提交
@@ -329,7 +329,7 @@ cargo test -p visp-cli view_only_tab && cargo clippy -p visp-cli -- -D warnings 
 #### 测试 → 类型检查
 
 ```bash
-cargo test -p visp-cli session_not_active error_frame && cargo clippy -p visp-cli -- -D warnings
+cargo test -p visp-tui session_not_active error_frame && cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### 提交
@@ -371,10 +371,10 @@ cargo test --test '*' resume_sub_agent && cargo clippy -- -D warnings && cargo f
 ### Wave 1：基础类型扩展（3 个并行任务，并行）
 
 - 任务 A: 步骤 1a（visp-proto view_only 字段）
-- 任务 B: 步骤 2a + 2b（visp-cli AgentStatus + TabEntry::new_view_only）
+- 任务 B: 步骤 2a + 2b（visp-tui AgentStatus + TabEntry::new_view_only）
 - 任务 C: 步骤 3a（visp-core SessionStore trait 扩展）
 
-> 三个任务在不同 crate，互不依赖（步骤 2b 用 `new_view_only` 不动 `new()` 签名，不破坏 visp-cli 其他 28 处调用）。可并行执行。
+> 三个任务在不同 crate，互不依赖（步骤 2b 用 `new_view_only` 不动 `new()` 签名，不破坏 visp-tui 其他 28 处调用）。可并行执行。
 
 ### Wave 2：DB 实现（1 个任务，串行，依赖 Wave 1 任务 C）
 
@@ -385,7 +385,7 @@ cargo test --test '*' resume_sub_agent && cargo clippy -- -D warnings && cargo f
 ### Wave 3：daemon + CLI 并行实现（2 个并行任务，并行，依赖 Wave 1+2）
 
 - 任务 E: 步骤 5a → 5b → 5c（visp-daemon BFS 回放 + SessionNotActive）
-- 任务 F: 步骤 6a → 6b → 6c（visp-cli route_frame + UI + Error 帧）
+- 任务 F: 步骤 6a → 6b → 6c（visp-tui route_frame + UI + Error 帧）
 
 > daemon 和 CLI 都依赖 Wave 1（proto + AgentStatus + trait）和 Wave 2（DB）。但 daemon 与 CLI 之间无依赖（daemon 输出 proto 帧，CLI 消费 proto 帧，协议已定）。可并行。
 
@@ -415,9 +415,9 @@ Wave 2 (串行)      │           │
 
 | Wave | 并行数 | 模块/包 | 步骤 | 测试用例数 |
 |------|--------|---------|------|-----------|
-| 1 | 3 | visp-proto / visp-cli / visp-core | 1a, 2a, 2b, 3a | 2+3+3+3=11 |
+| 1 | 3 | visp-proto / visp-tui / visp-core | 1a, 2a, 2b, 3a | 2+3+3+3=11 |
 | 2 | 1 | visp-db | 4a | 7 |
-| 3 | 2 | visp-daemon / visp-cli | 5a, 5b, 5c, 6a, 6b, 6c | 10+5+3+4+4+3=29 |
+| 3 | 2 | visp-daemon / visp-tui | 5a, 5b, 5c, 6a, 6b, 6c | 10+5+3+4+4+3=29 |
 | 4 | 1 | 集成测试 | 7a | 3 |
 | **合计** | — | — | 13 个子步骤 | **50** |
 
@@ -425,7 +425,7 @@ Wave 2 (串行)      │           │
 
 ### 计划阶段对设计文档的细化/修正
 
-1. **AgentStatus 归属**：设计文档写 visp-core，实际在 visp-cli。本计划按真实位置实施。回头同步修设计文档"改动范围"表。
+1. **AgentStatus 归属**：设计文档写 visp-core，实际在 visp-tui。本计划按真实位置实施。回头同步修设计文档"改动范围"表。
 2. **list_child_sessions 返回类型**：设计文档用 `SessionMeta`（轻量元信息），计划改为 `Vec<Session>`（复用现有类型，trait 一致性更高）。回头同步设计文档。
 3. **"非 Running session" 判断标准**：设计文档未明确，计划阶段决策为"daemon 内存活跃 loop 集合不包含该 session_id"，不依赖 DB status。
 4. **soft limit 截断策略**：设计文档"BFS 层级优先 + 同层 created_at 倒序"在计划中明确为：BFS 遍历到第 50 个之后停止入队（自然实现层级优先），同层多个时按 created_at 升序访问、超限从队尾丢弃（即保留较早创建的，与设计文档"倒序保留最近"略有出入——计划阶段重新决策为"保留较早创建的直接子节点"，理由：用户更关心初次派生的 agent）。回头同步设计文档。

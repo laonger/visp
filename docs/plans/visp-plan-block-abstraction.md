@@ -20,12 +20,12 @@
 
 #### 🧪 验证
 ```bash
-cargo test -p visp-cli && cargo clippy -p visp-cli -- -D warnings
+cargo test -p visp-tui && cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### 📦 提交
 ```
-refactor(visp-cli): add BlockStyle struct with four type presets
+refactor(visp-tui): add BlockStyle struct with four type presets
 ```
 
 ### 1b：实现 viewport_intersect 和 render_block
@@ -39,12 +39,12 @@ refactor(visp-cli): add BlockStyle struct with four type presets
 
 #### 🧪 验证
 ```bash
-cargo test -p visp-cli && cargo clippy -p visp-cli -- -D warnings
+cargo test -p visp-tui && cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### 📦 提交
 ```
-refactor(visp-cli): add viewport_intersect and unified render_block function
+refactor(visp-tui): add viewport_intersect and unified render_block function
 ```
 
 ---
@@ -65,12 +65,12 @@ refactor(visp-cli): add viewport_intersect and unified render_block function
 
 #### 🧪 验证
 ```bash
-cargo test -p visp-cli && cargo clippy -p visp-cli -- -D warnings && cargo fmt -p visp-cli -- --check
+cargo test -p visp-tui && cargo clippy -p visp-tui -- -D warnings && cargo fmt -p visp-tui -- --check
 ```
 
 #### 📦 提交
 ```
-refactor(visp-cli): rewrite render_chat_area with unified BlockStyle loop
+refactor(visp-tui): rewrite render_chat_area with unified BlockStyle loop
 ```
 
 ### 2b：删除 build_text_stack 旧代码
@@ -82,7 +82,7 @@ refactor(visp-cli): rewrite render_chat_area with unified BlockStyle loop
 
 #### 📦 提交
 ```
-refactor(visp-cli): remove build_text_stack, replaced by ensure_all_caches
+refactor(visp-tui): remove build_text_stack, replaced by ensure_all_caches
 ```
 
 ---
@@ -99,12 +99,12 @@ refactor(visp-cli): remove build_text_stack, replaced by ensure_all_caches
 
 #### 🧪 验证
 ```bash
-cargo test -p visp-cli && cargo clippy -p visp-cli -- -D warnings && cargo fmt -p visp-cli -- --check
+cargo test -p visp-tui && cargo clippy -p visp-tui -- -D warnings && cargo fmt -p visp-tui -- --check
 ```
 
 #### 📦 提交
 ```
-refactor(visp-cli): remove streaming_rendered_len/lines from AppState
+refactor(visp-tui): remove streaming_rendered_len/lines from AppState
 ```
 
 ---
@@ -112,12 +112,12 @@ refactor(visp-cli): remove streaming_rendered_len/lines from AppState
 ## 步骤 4：全量回归验证
 
 ```bash
-cargo test -p visp-cli && cargo clippy -p visp-cli -- -D warnings && cargo fmt -p visp-cli -- --check
+cargo test -p visp-tui && cargo clippy -p visp-tui -- -D warnings && cargo fmt -p visp-tui -- --check
 ```
 
 #### 📦 提交
 ```
-test(visp-cli): verify BlockStyle refactor passes all tests
+test(visp-tui): verify BlockStyle refactor passes all tests
 ```
 
 ---

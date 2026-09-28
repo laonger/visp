@@ -8,26 +8,26 @@
 
 ## 步骤 1：添加依赖（Cargo.toml）
 
-修改 `crates/visp-cli/Cargo.toml`：
+修改 `crates/visp-tui/Cargo.toml`：
 
 - 添加 `ratatui = "0.28"`（features: `crossterm`）
 - 添加 `crossterm = "0.28"`
 - 添加 `tui-textarea = "0.7"`
 - 移除 `rustyline`（不再需要）
 
-验证：`cargo build -p visp-cli` 编译通过。
+验证：`cargo build -p visp-tui` 编译通过。
 
 #### 📦 提交
 
 ```bash
-git add crates/visp-cli/Cargo.toml Cargo.lock && git commit -m "feat(visp-cli): add ratatui, crossterm, tui-textarea deps; remove rustyline"
+git add crates/visp-tui/Cargo.toml Cargo.lock && git commit -m "feat(visp-tui): add ratatui, crossterm, tui-textarea deps; remove rustyline"
 ```
 
 ---
 
 ## 步骤 2：创建 app.rs（应用状态）
 
-新建 `crates/visp-cli/src/app.rs`。在 `main.rs` 添加 `mod app;`。
+新建 `crates/visp-tui/src/app.rs`。在 `main.rs` 添加 `mod app;`。
 
 ### 🔴 红 — 测试
 
@@ -51,20 +51,20 @@ git add crates/visp-cli/Cargo.toml Cargo.lock && git commit -m "feat(visp-cli): 
 #### 🧪 测试 → 🔍 clippy
 
 ```bash
-cargo test -p visp-cli && cargo clippy -p visp-cli -- -D warnings
+cargo test -p visp-tui && cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### 📦 提交
 
 ```bash
-git add crates/visp-cli/ && git commit -m "feat(visp-cli): AppState with ChatLine, streaming text, and scroll state"
+git add crates/visp-tui/ && git commit -m "feat(visp-tui): AppState with ChatLine, streaming text, and scroll state"
 ```
 
 ---
 
 ## 步骤 3：创建 ui.rs（渲染函数）
 
-新建 `crates/visp-cli/src/ui.rs`。在 `main.rs` 添加 `mod ui;`。
+新建 `crates/visp-tui/src/ui.rs`。在 `main.rs` 添加 `mod ui;`。
 
 ### 🟢 绿 — 实现
 
@@ -80,20 +80,20 @@ git add crates/visp-cli/ && git commit -m "feat(visp-cli): AppState with ChatLin
 ### 🔍 clippy
 
 ```bash
-cargo clippy -p visp-cli -- -D warnings
+cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### 📦 提交
 
 ```bash
-git add crates/visp-cli/ && git commit -m "feat(visp-cli): TUI render with List chat area, tui-textarea input, and status bar"
+git add crates/visp-tui/ && git commit -m "feat(visp-tui): TUI render with List chat area, tui-textarea input, and status bar"
 ```
 
 ---
 
 ## 步骤 4：创建 event.rs（事件循环）
 
-新建 `crates/visp-cli/src/event.rs`。在 `main.rs` 添加 `mod event;`。
+新建 `crates/visp-tui/src/event.rs`。在 `main.rs` 添加 `mod event;`。
 
 ### 🟢 绿 — 实现
 
@@ -118,13 +118,13 @@ git add crates/visp-cli/ && git commit -m "feat(visp-cli): TUI render with List 
 ### 🔍 clippy
 
 ```bash
-cargo clippy -p visp-cli -- -D warnings
+cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### 📦 提交
 
 ```bash
-git add crates/visp-cli/ && git commit -m "feat(visp-cli): TUI event loop with crossterm select! and gRPC message handling"
+git add crates/visp-tui/ && git commit -m "feat(visp-tui): TUI event loop with crossterm select! and gRPC message handling"
 ```
 
 ---
@@ -138,13 +138,13 @@ git add crates/visp-cli/ && git commit -m "feat(visp-cli): TUI event loop with c
 ### 🔍 clippy
 
 ```bash
-cargo clippy -p visp-cli -- -D warnings
+cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### 📦 提交
 
 ```bash
-git add crates/visp-cli/ && git commit -m "feat(visp-cli): wire TUI into main, remove old display and repl modules"
+git add crates/visp-tui/ && git commit -m "feat(visp-tui): wire TUI into main, remove old display and repl modules"
 ```
 
 ---
@@ -183,8 +183,8 @@ Agent B: 步骤 5 (main.rs 更新 + 清理)
 
 | Wave | Crate | 步骤 | 测试用例 |
 |---|---|---|---|
-| 1 | visp-cli | 依赖 + app + ui | 3 |
-| 2 | visp-cli | event + main | 0（手动验收） |
+| 1 | visp-tui | 依赖 + app + ui | 3 |
+| 2 | visp-tui | event + main | 0（手动验收） |
 | 3 | 全 workspace | 质量门 | — |
 
 总计：**6 步骤，3 测试用例**。TUI 多为视觉/交互测试，自动化有限。

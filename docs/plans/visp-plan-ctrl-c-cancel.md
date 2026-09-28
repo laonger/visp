@@ -35,12 +35,12 @@ Wave 1 (全并行)        Wave 2 (串行)
 
 #### 🟢 绿 — 实现
 
-在 `crates/visp-cli/src/app.rs` 中：
+在 `crates/visp-tui/src/app.rs` 中：
 
 - `AppState` 增加 `pub stale_done_expected: bool` 字段
 - 在 `AppState::new()` 中初始化 `stale_done_expected: false`
 
-在 `crates/visp-cli/src/event.rs` 中修改 **Esc handler**（`else` 分支，非 Other 模式）：
+在 `crates/visp-tui/src/event.rs` 中修改 **Esc handler**（`else` 分支，非 Other 模式）：
 
 ```rust
 } else {
@@ -59,8 +59,8 @@ Wave 1 (全并行)        Wave 2 (串行)
 #### 🧪 测试 → 🔍 类型检查
 
 ```bash
-cargo test -p visp-cli
-cargo clippy -p visp-cli -- -D warnings
+cargo test -p visp-tui
+cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### 📦 提交
@@ -108,8 +108,8 @@ Some(server_message::Payload::Done(_)) => {
 #### 🧪 测试 → 🔍 类型检查
 
 ```bash
-cargo test -p visp-cli
-cargo clippy -p visp-cli -- -D warnings
+cargo test -p visp-tui
+cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### 📦 提交

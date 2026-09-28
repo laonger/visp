@@ -2,15 +2,15 @@
 
 ## 概述
 
-依据定稿设计 `docs/design/notification.md` 实现终端桌面通知：visp-cli 在「回合完成」与「需要用户输入」两个事件点，按标准终端通知协议（OSC 99 / OSC 777 / OSC 9）向终端写入转义序列。
+依据定稿设计 `docs/design/notification.md` 实现终端桌面通知：visp-tui 在「回合完成」与「需要用户输入」两个事件点，按标准终端通知协议（OSC 99 / OSC 777 / OSC 9）向终端写入转义序列。
 
 > **实现偏离（2026-09-18）**：探测兜底策略已由「未知终端盲发 OSC 9」修订为「未识别终端（含 rmux / tmux 等复用器）回退 BEL」，记录于设计 §1「实现偏离说明」。本计划文内残留的 `Osc9` 兜底描述（探测映射表步骤等）以此修订为准，不再回改，保留原始计划痕迹。
 
 范围：
 
 - visp-config 新增 `[notification]` 配置段（5 字段，serde 默认兜底）
-- visp-cli 新增 `notify` 模块（探测器 / 编码器 / 节流器 / 会话过滤 / 引擎编排）
-- visp-cli `main.rs` 新增配置加载 + 引擎构造；`event.rs` 两处挂接；`app.rs` 新增引擎字段
+- visp-tui 新增 `notify` 模块（探测器 / 编码器 / 节流器 / 会话过滤 / 引擎编排）
+- visp-tui `main.rs` 新增配置加载 + 引擎构造；`event.rs` 两处挂接；`app.rs` 新增引擎字段
 
 设计已明确的硬约束（实现必须遵守）：
 
@@ -75,7 +75,7 @@ cargo clippy -p visp-config -- -D warnings
 
 ## 步骤 2：notify 模块 — 类型骨架与探测器
 
-文件：`crates/visp-cli/src/notify.rs` + `crates/visp-cli/src/notify_tests.rs`；`main.rs:1-9` 增加 `mod notify;`
+文件：`crates/visp-tui/src/notify.rs` + `crates/visp-tui/src/notify_tests.rs`；`main.rs:1-9` 增加 `mod notify;`
 
 ### 2a：类型定义、引擎骨架、协议探测器
 
@@ -110,8 +110,8 @@ cargo clippy -p visp-config -- -D warnings
 #### 🧪 测试 → 🔍 类型检查
 
 ```bash
-cargo test -p visp-cli
-cargo clippy -p visp-cli -- -D warnings
+cargo test -p visp-tui
+cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### ♻️ 重构
@@ -120,11 +120,11 @@ cargo clippy -p visp-cli -- -D warnings
 
 #### 📦 提交
 
-`feat(visp-cli): notify 模块骨架与终端协议探测器`
+`feat(visp-tui): notify 模块骨架与终端协议探测器`
 
 ## 步骤 3：notify 模块 — 编码器、节流器、引擎编排
 
-文件：`crates/visp-cli/src/notify.rs`（同文件，续 2a）
+文件：`crates/visp-tui/src/notify.rs`（同文件，续 2a）
 
 ### 3a：三协议编码器（纯函数）
 
@@ -152,12 +152,12 @@ cargo clippy -p visp-cli -- -D warnings
 #### 🧪 测试 → 🔍 类型检查
 
 ```bash
-cargo test -p visp-cli notify
+cargo test -p visp-tui notify
 ```
 
 #### 📦 提交
 
-`feat(visp-cli): 通知编码器支持 OSC 9/777/99 三协议`
+`feat(visp-tui): 通知编码器支持 OSC 9/777/99 三协议`
 
 ### 3b：节流器与引擎编排
 
@@ -191,17 +191,17 @@ pub fn on_event(&mut self, kind: NotifyKind, is_main: bool, body: &str, now: Ins
 #### 🧪 测试 → 🔍 类型检查
 
 ```bash
-cargo test -p visp-cli
-cargo clippy -p visp-cli -- -D warnings
+cargo test -p visp-tui
+cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### 📦 提交
 
-`feat(visp-cli): 通知引擎节流、会话过滤与事件编排`
+`feat(visp-tui): 通知引擎节流、会话过滤与事件编排`
 
 ## 步骤 4：装配（配置加载与引擎注入）
 
-文件：`crates/visp-cli/src/main.rs`、`event.rs`、`app.rs`
+文件：`crates/visp-tui/src/main.rs`、`event.rs`、`app.rs`
 
 ### 4a：main 早期加载配置、构造引擎、注入 AppState
 
@@ -223,17 +223,17 @@ cargo clippy -p visp-cli -- -D warnings
 #### 🧪 测试 → 🔍 类型检查
 
 ```bash
-cargo build -p visp-cli && cargo test -p visp-cli
-cargo clippy -p visp-cli -- -D warnings
+cargo build -p visp-tui && cargo test -p visp-tui
+cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### 📦 提交
 
-`feat(visp-cli): 启动加载 [notification] 配置并注入通知引擎`
+`feat(visp-tui): 启动加载 [notification] 配置并注入通知引擎`
 
 ## 步骤 5：event.rs 挂接点
 
-文件：`crates/visp-cli/src/event.rs` + `event_tests.rs`
+文件：`crates/visp-tui/src/event.rs` + `event_tests.rs`
 
 ### 5a：Done 挂接（避开 stale 路径）
 
@@ -260,12 +260,12 @@ cargo clippy -p visp-cli -- -D warnings
 #### 🧪 测试 → 🔍 类型检查
 
 ```bash
-cargo test -p visp-cli event
+cargo test -p visp-tui event
 ```
 
 #### 📦 提交
 
-`feat(visp-cli): 回合完成触发终端通知（避让 Cancel 路径）`
+`feat(visp-tui): 回合完成触发终端通知（避让 Cancel 路径）`
 
 ### 5b：UserQuery 挂接（补读 session_id）
 
@@ -286,13 +286,13 @@ cargo test -p visp-cli event
 #### 🧪 测试 → 🔍 类型检查
 
 ```bash
-cargo test -p visp-cli
-cargo clippy -p visp-cli -- -D warnings
+cargo test -p visp-tui
+cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### 📦 提交
 
-`feat(visp-cli): 需要用户输入时触发终端通知（仅根会话）`
+`feat(visp-tui): 需要用户输入时触发终端通知（仅根会话）`
 
 ## 步骤 6：整体验证与收尾
 
@@ -328,7 +328,7 @@ cargo fmt -- --check
 ### Wave 1：基础层（2 个并行任务）
 
 - 任务 A：步骤 1a（`crates/visp-config/src/config.rs`）
-- 任务 B：步骤 2a（`crates/visp-cli/src/notify.rs` + `notify_tests.rs` + `main.rs` 的 `mod` 声明）
+- 任务 B：步骤 2a（`crates/visp-tui/src/notify.rs` + `notify_tests.rs` + `main.rs` 的 `mod` 声明）
 
 无文件重叠，可并行。
 
@@ -359,22 +359,22 @@ Wave 1: 1a ‖ 2a        Wave 2: 3a→3b ‖ 4a        Wave 3: 5a→5b→6
 | Wave | 并行数 | 模块/包 | 步骤 | 测试用例数 |
 |---|---|---|---|---|
 | 1 | 2 | visp-config | 1a | 8 |
-| 1 | 2 | visp-cli notify | 2a | 11 |
-| 2 | 2 | visp-cli notify | 3a | 10 |
-| 2 | 2 | visp-cli notify | 3b | 13 |
-| 2 | 2 | visp-cli 装配 | 4a | 3 |
-| 3 | 1 | visp-cli event | 5a | 4 |
-| 3 | 1 | visp-cli event | 5b | 5 |
+| 1 | 2 | visp-tui notify | 2a | 11 |
+| 2 | 2 | visp-tui notify | 3a | 10 |
+| 2 | 2 | visp-tui notify | 3b | 13 |
+| 2 | 2 | visp-tui 装配 | 4a | 3 |
+| 3 | 1 | visp-tui event | 5a | 4 |
+| 3 | 1 | visp-tui event | 5b | 5 |
 | 3 | 1 | 手动验收 | 6b | 10（手测） |
 
 合计新增自动化单测 54 条 + 手工验收 10 项。
 
 ## 备注
 
-1. **测试文件形态**：visp-cli 用外置测试文件（`notify.rs` + `notify_tests.rs`，末尾 `#[cfg(test)] #[path = "notify_tests.rs"] mod tests;`）；visp-config 用内联 `mod tests`——两 crate 约定不同，勿混用。
+1. **测试文件形态**：visp-tui 用外置测试文件（`notify.rs` + `notify_tests.rs`，末尾 `#[cfg(test)] #[path = "notify_tests.rs"] mod tests;`）；visp-config 用内联 `mod tests`——两 crate 约定不同，勿混用。
 2. **base64**：encoder 需对 `f` 值做 base64。实现前先查 workspace 是否已有 base64 依赖，避免新增；否则手写编码（输入仅 ASCII `visp`）。
-3. **不新增依赖**：crossterm 已是 visp-cli 直接依赖（`crates/visp-cli/Cargo.toml:19`），通知写入用 `std::io::Stdout` 即可。
-4. **不新增 crate**：notify 只被 visp-cli 消费，按设计以模块形态落地。
+3. **不新增依赖**：crossterm 已是 visp-tui 直接依赖（`crates/visp-tui/Cargo.toml:19`），通知写入用 `std::io::Stdout` 即可。
+4. **不新增 crate**：notify 只被 visp-tui 消费，按设计以模块形态落地。
 5. **配置加载失败不阻断启动**：通知是可选功能，`load_config` 出错时用默认值继续并告警（区别于 daemon 的严格策略）。
 6. **`stale_done_expected` 是回归高危点**：5a 的测试 2 必须覆盖，避免破坏既有 Cancel 语义。
 7. **protoc 前置**：workspace 构建需要 protoc（CI `rust.yml:22-23`），本地 `cargo test --workspace` 前确认可用。

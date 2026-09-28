@@ -2,7 +2,7 @@
 
 ## 概述
 
-将工具审批的 y/N 文本输入改造为横向可选项选择栏，支持方向键导航、Enter 确认、Other 自定义输入。涉及 visp-proto / visp-core / visp-daemon / visp-cli 四个 crate。
+将工具审批的 y/N 文本输入改造为横向可选项选择栏，支持方向键导航、Enter 确认、Other 自定义输入。涉及 visp-proto / visp-core / visp-daemon / visp-tui 四个 crate。
 
 ## Wave 并行策略
 
@@ -11,7 +11,7 @@ Wave 1 (并行)        Wave 2 (并行)
 ┌──────────┐       ┌──────────────┐
 │ visp-proto │       │ visp-daemon   │
 ├──────────┤       ├──────────────┤
-│ visp-core  │       │ visp-cli      │
+│ visp-core  │       │ visp-tui      │
 └──────────┘       └──────────────┘
      │                    │
      └── 都完成后 ────────┘
@@ -367,7 +367,7 @@ cargo clippy -p visp-daemon -- -D warnings && cargo clippy -p visp-core -- -D wa
 
 ---
 
-## 步骤 4：visp-cli — TUI 改造
+## 步骤 4：visp-tui — TUI 改造
 
 ### 4a：ConfirmState 更新 + 键盘事件
 
@@ -398,7 +398,7 @@ cargo clippy -p visp-daemon -- -D warnings && cargo clippy -p visp-core -- -D wa
 #### 🧪 测试
 
 ```bash
-cargo test -p visp-cli
+cargo test -p visp-tui
 ```
 
 注意：TUI 测试需要 mock crossterm 事件，或通过测试 AppState 的方法来验证事件处理逻辑。
@@ -440,7 +440,7 @@ cargo test -p visp-cli
 #### 🧪 测试
 
 ```bash
-cargo build -p visp-cli
+cargo build -p visp-tui
 ```
 
 UI 渲染通过 ratatui 的 `TestBackend` 写快照测试验证。
@@ -475,7 +475,7 @@ UI 渲染通过 ratatui 的 `TestBackend` 写快照测试验证。
 #### 🧪 测试
 
 ```bash
-cargo test -p visp-cli
+cargo test -p visp-tui
 ```
 
 #### ♻️ 重构
@@ -509,7 +509,7 @@ cargo test -p visp-cli
 #### 🧪 测试
 
 ```bash
-cargo test -p visp-cli
+cargo test -p visp-tui
 ```
 
 #### ♻️ 重构

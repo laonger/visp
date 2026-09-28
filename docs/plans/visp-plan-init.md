@@ -84,7 +84,7 @@ feat(core): filter skip_context messages from prompt history
 #### 🧪 测试 → 🔍 类型检查
 
 ```bash
-cargo test -p visp-cli && cargo clippy -- -D warnings
+cargo test -p visp-tui && cargo clippy -- -D warnings
 ```
 
 #### 📦 提交

@@ -30,7 +30,7 @@
 |------|---------|
 | **visp-core** | Agent 循环：LLM stream 和 join_all 均改为可被 cancel token 中断；abort 所有工具 task |
 | **visp-daemon** | Cancel handler：清理 pending_queries（需关联 session_id） |
-| **visp-cli** | Ctrl+C handler：统一行为，清理状态；确认模式下先发 deny 再发 cancel |
+| **visp-tui** | Ctrl+C handler：统一行为，清理状态；确认模式下先发 deny 再发 cancel |
 | **visp-proto** | 无改动 |
 
 ## 4. 模块详细设计

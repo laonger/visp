@@ -15,7 +15,7 @@
          │          │          │
          ▼          │          ▼
   ┌──────────┐     CLI       ┌──────────┐
-  │ visp-daemon│   退出信号    │ visp-cli  │
+  │ visp-daemon│   退出信号    │ visp-tui  │
   └──────────┘              └──────────┘
          │
   gRPC shutdown
@@ -28,7 +28,7 @@
 | **vbw**（新建） | Launcher crate，管理 daemon + cli 生命周期 |
 | Cargo.toml | workspace 添加 `vbw` crate |
 | **visp-daemon** | 无改动 |
-| **visp-cli** | 无改动 |
+| **visp-tui** | 无改动 |
 
 ## Launcher 行为
 
@@ -38,8 +38,8 @@
 3. 启动 visp-daemon 子进程（默认地址 [::1]:50051），stdout/stderr 写入日志文件
 4. 轮询 health check（最多 30 次，间隔 500ms，共 15s 超时）
 5. 超时 → 打印错误 → kill daemon → 退出码 1
-6. 启动 visp-cli 子进程，传递 CLI 参数，CLI 的 stdout/stderr 直通终端
-7. 等待 visp-cli 退出
+6. 启动 visp-tui 子进程，传递 CLI 参数，CLI 的 stdout/stderr 直通终端
+7. 等待 visp-tui 退出
 8. 向 daemon 发送 gRPC Shutdown 请求
 9. 等待 daemon 进程退出（超时 5s，超时则 kill）
 10. 以 CLI 的退出码退出

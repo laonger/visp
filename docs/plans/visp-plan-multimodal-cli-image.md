@@ -2,7 +2,7 @@
 
 ## 概述
 
-基于设计文档 `docs/design/visp-design-multimodal-cli-image.md`，实现 CLI TUI 中的图片展示功能。改动涉及 `visp-cli`（主要）、`visp-tools`、`visp-mcp` 三个 crate。
+基于设计文档 `docs/design/visp-design-multimodal-cli-image.md`，实现 CLI TUI 中的图片展示功能。改动涉及 `visp-tui`（主要）、`visp-tools`、`visp-mcp` 三个 crate。
 
 核心链路：用户输入 `@path` -> 替换为 `<image: path>` 标记 -> gRPC 纯文本传输 -> CLI `render_pending`/`flush_streaming` 拆分为 `LineType::Image` ChatLine -> `render_chat_area` 两阶段渲染（文本走 `render_block`，图片走 `StatefulImage`）。
 
@@ -27,16 +27,16 @@
 
 #### 🟢 绿 - 实现
 
-- `crates/visp-cli/Cargo.toml`：新增 `ratatui-image`、`image`、`reqwest`（workspace）依赖
-- `crates/visp-cli/src/app.rs`：`LineType` 新增 `Image { path, alt_text }` 变体
-- `crates/visp-cli/src/image.rs`（新文件）：`split_image_markers(content, base_line_type) -> Vec<ChatLine>` 函数，解析 `<image: path>` 标记，空文本段跳过
-- `crates/visp-cli/src/main.rs`：`mod image;`
+- `crates/visp-tui/Cargo.toml`：新增 `ratatui-image`、`image`、`reqwest`（workspace）依赖
+- `crates/visp-tui/src/app.rs`：`LineType` 新增 `Image { path, alt_text }` 变体
+- `crates/visp-tui/src/image.rs`（新文件）：`split_image_markers(content, base_line_type) -> Vec<ChatLine>` 函数，解析 `<image: path>` 标记，空文本段跳过
+- `crates/visp-tui/src/main.rs`：`mod image;`
 
 #### 🧪 测试 -> 🔍 类型检查
 
 ```bash
-cargo test -p visp-cli -- image::tests
-cargo check -p visp-cli
+cargo test -p visp-tui -- image::tests
+cargo check -p visp-tui
 ```
 
 #### 📦 提交
@@ -63,7 +63,7 @@ cargo check -p visp-cli
 
 #### 🟢 绿 - 实现
 
-- `crates/visp-cli/src/image.rs`：`parse_image_refs(text, project_path) -> String` 函数
+- `crates/visp-tui/src/image.rs`：`parse_image_refs(text, project_path) -> String` 函数
   - 识别词首 `@` 后跟非空白字符序列
   - `http://`/`https://` 前缀 -> 直接匹配为 URL
   - 其他 -> 基于 `project_path` 解析为绝对路径，检查文件存在 + 图片扩展名（`.png`/`.jpg`/`.jpeg`/`.gif`/`.webp`/`.bmp`/`.ico`）
@@ -72,8 +72,8 @@ cargo check -p visp-cli
 #### 🧪 测试 -> 🔍 类型检查
 
 ```bash
-cargo test -p visp-cli -- image::tests
-cargo check -p visp-cli
+cargo test -p visp-tui -- image::tests
+cargo check -p visp-tui
 ```
 
 #### 📦 提交
@@ -102,7 +102,7 @@ cargo check -p visp-cli
 
 #### 🟢 绿 - 实现
 
-- `crates/visp-cli/src/image.rs`：
+- `crates/visp-tui/src/image.rs`：
   - `ImageCache` 结构（`picker` + `cache: HashMap`）
   - `ImageEntry` 枚举（`Ready { protocol, pixel_size }` / `Loading` / `Error(String)`）
   - `ImageHeightInfo` 枚举（`Ready(u16)` / `Placeholder`）
@@ -114,8 +114,8 @@ cargo check -p visp-cli
 #### 🧪 测试 -> 🔍 类型检查
 
 ```bash
-cargo test -p visp-cli -- image::tests
-cargo check -p visp-cli
+cargo test -p visp-tui -- image::tests
+cargo check -p visp-tui
 ```
 
 #### 📦 提交
@@ -139,7 +139,7 @@ cargo check -p visp-cli
 
 #### 🟢 绿 - 实现
 
-- `crates/visp-cli/src/image.rs`：
+- `crates/visp-tui/src/image.rs`：
   - `ImageCache` 新增 `image_ready_tx: Option<mpsc::UnboundedSender<()>>` 字段
   - `get_or_load` 对 URL 前缀：插入 `Loading`，`tokio::spawn` 异步下载（`reqwest` + 10s 超时），完成后更新 cache 为 `Ready` 或 `Error`，通过 `image_ready_tx` 发信号
   - URL 下载中再次调用返回已有 `Loading`，不重复 spawn
@@ -147,8 +147,8 @@ cargo check -p visp-cli
 #### 🧪 测试 -> 🔍 类型检查
 
 ```bash
-cargo test -p visp-cli -- image::tests
-cargo check -p visp-cli
+cargo test -p visp-tui -- image::tests
+cargo check -p visp-tui
 ```
 
 #### 📦 提交
@@ -174,7 +174,7 @@ cargo check -p visp-cli
 
 #### 🟢 绿 - 实现
 
-- `crates/visp-cli/src/app.rs`：
+- `crates/visp-tui/src/app.rs`：
   - `flush_streaming`：调用 `split_image_markers` 替代直接 `push_chat_line`，逐条分配 id
   - `render_pending` 中 `UserMessage` 和 `ToolResult` 分支：调用 `split_image_markers` 替代直接 `push_chat_line`
   - 新增 `push_chat_lines(lines: Vec<ChatLine>)` 方法，逐条分配 id 并 push
@@ -182,8 +182,8 @@ cargo check -p visp-cli
 #### 🧪 测试 -> 🔍 类型检查
 
 ```bash
-cargo test -p visp-cli -- app::tests
-cargo check -p visp-cli
+cargo test -p visp-tui -- app::tests
+cargo check -p visp-tui
 ```
 
 #### 📦 提交
@@ -205,14 +205,14 @@ cargo check -p visp-cli
 
 #### 🟢 绿 - 实现
 
-- `crates/visp-cli/src/app.rs`：新增 `streaming_display_text() -> String` 方法，从尾部扫描未完成 `<image:` 标记并截断
-- `crates/visp-cli/src/ui.rs`：`render_chat_area` 中流式文本渲染改用 `streaming_display_text()`
+- `crates/visp-tui/src/app.rs`：新增 `streaming_display_text() -> String` 方法，从尾部扫描未完成 `<image:` 标记并截断
+- `crates/visp-tui/src/ui.rs`：`render_chat_area` 中流式文本渲染改用 `streaming_display_text()`
 
 #### 🧪 测试 -> 🔍 类型检查
 
 ```bash
-cargo test -p visp-cli -- app::tests
-cargo check -p visp-cli
+cargo test -p visp-tui -- app::tests
+cargo check -p visp-tui
 ```
 
 #### 📦 提交
@@ -238,7 +238,7 @@ cargo check -p visp-cli
 
 #### 🟢 绿 - 实现
 
-- `crates/visp-cli/src/app.rs`：
+- `crates/visp-tui/src/app.rs`：
   - `MessageCache` 新增 `image_state: Option<ImageState>` 字段
   - `ImageState` 枚举（`Loading` / `Ready` / `Error`）
   - `from_message` 签名新增 `image_metrics: Option<&ImageMetrics>` 参数
@@ -249,8 +249,8 @@ cargo check -p visp-cli
 #### 🧪 测试 -> 🔍 类型检查
 
 ```bash
-cargo test -p visp-cli -- app::tests
-cargo check -p visp-cli
+cargo test -p visp-tui -- app::tests
+cargo check -p visp-tui
 ```
 
 #### 📦 提交
@@ -275,7 +275,7 @@ cargo check -p visp-cli
 
 #### 🟢 绿 - 实现
 
-- `crates/visp-cli/src/ui.rs`：
+- `crates/visp-tui/src/ui.rs`：
   - 新增 `LayoutEntry { msg_idx, y_offset, height, is_image }` 结构
   - `render_chat_area` 重构为两阶段：阶段1 `compute_layout`（只读 AppState），阶段2 遍历布局表分流渲染
   - 新增 `render_image_block(f, area, image_cache, msg, y_offset)` 函数：
@@ -286,8 +286,8 @@ cargo check -p visp-cli
 #### 🧪 测试 -> 🔍 类型检查
 
 ```bash
-cargo test -p visp-cli -- ui::tests
-cargo check -p visp-cli
+cargo test -p visp-tui -- ui::tests
+cargo check -p visp-tui
 ```
 
 #### 📦 提交
@@ -310,19 +310,19 @@ cargo check -p visp-cli
 
 #### 🟢 绿 - 实现
 
-- `crates/visp-cli/src/app.rs`：
+- `crates/visp-tui/src/app.rs`：
   - `AppState` 新增 `image_cache: ImageCache` 字段
   - `AppState` 新增 `image_ready_rx: mpsc::UnboundedReceiver<()>` 字段
   - `AppState::new` 中创建 `ImageCache` 和 `image_ready` channel，tx 传入 ImageCache
-- `crates/visp-cli/src/event.rs`：
+- `crates/visp-tui/src/event.rs`：
   - `run` 函数主循环 `tokio::select!` 新增 `image_ready_rx.recv()` 分支，设置 `needs_render = true`
   - `ensure_all_caches` 调用时构造 `ImageMetrics`（从 `app.image_cache` 获取 `font_size` 和缓存引用）
 
 #### 🧪 测试 -> 🔍 类型检查
 
 ```bash
-cargo check -p visp-cli
-cargo test -p visp-cli
+cargo check -p visp-tui
+cargo test -p visp-tui
 ```
 
 #### 📦 提交
@@ -344,14 +344,14 @@ cargo test -p visp-cli
 
 #### 🟢 绿 - 实现
 
-- `crates/visp-cli/src/event.rs`：
+- `crates/visp-tui/src/event.rs`：
   - `handle_key_event` 中 Enter 处理分支（非 `/` 命令路径）：在 `chat_handle.send_input(&text)` 之前调用 `parse_image_refs(&text, &app.project_path)`，用处理后的文本替换原文本
   - `app.add_message` 也使用处理后的文本（这样对话区显示拆分后的 Image 块）
 
 #### 🧪 测试 -> 🔍 类型检查
 
 ```bash
-cargo check -p visp-cli
+cargo check -p visp-tui
 ```
 
 #### 📦 提交
@@ -529,10 +529,10 @@ Wave 5:     v
 
 | Wave | 并行数 | 模块/包 | 步骤 | 测试用例数 |
 |------|--------|---------|------|-----------|
-| 1 | 1 | visp-cli | 1a, 1b | 8 + 9 = 17 |
-| 2 | 1 | visp-cli | 2a, 2b | 9 + 6 = 15 |
-| 3 | 2 | visp-cli + visp-tools/mcp | 3a, 3b, 4a, 6a, 6b | 6 + 4 + 6 + 6 + 3 = 25 |
-| 4 | 1 | visp-cli | 4b, 5a, 5b | 7 + 3 + 4 = 14 |
+| 1 | 1 | visp-tui | 1a, 1b | 8 + 9 = 17 |
+| 2 | 1 | visp-tui | 2a, 2b | 9 + 6 = 15 |
+| 3 | 2 | visp-tui + visp-tools/mcp | 3a, 3b, 4a, 6a, 6b | 6 + 4 + 6 + 6 + 3 = 25 |
+| 4 | 1 | visp-tui | 4b, 5a, 5b | 7 + 3 + 4 = 14 |
 | 5 | 1 | 全 workspace | 7a | - |
 | **合计** | | | | **71** |
 
@@ -544,5 +544,5 @@ Wave 5:     v
 2. **`Picker::from_query_stdio()` 在非 TTY 环境中的行为**：CI 环境可能无 TTY，测试中需 mock 或使用 Halfblocks 降级
 3. **`StatefulProtocol` 的 `Clone`/`Send` 约束**：需确认 `ImageCache` 在 `AppState` 中的线程安全性
 4. **图片测试资源**：测试需要小型 PNG/JPEG 文件，可在 `tests/fixtures/` 下放置或运行时生成
-5. **`reqwest` 在 `visp-cli` 中的异步运行时**：CLI 已有 `tokio` multi-thread runtime，`reqwest` 异步下载可直接使用
+5. **`reqwest` 在 `visp-tui` 中的异步运行时**：CLI 已有 `tokio` multi-thread runtime，`reqwest` 异步下载可直接使用
 6. **已知限制**：图片缓存无 LRU 淘汰；网络图片不持久化；MCP 纯二进制图片不处理（见设计文档 §7）

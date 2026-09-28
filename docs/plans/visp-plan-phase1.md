@@ -84,6 +84,6 @@ Phase 1 创建项目骨架，定义 `visp-core` 的核心 trait 和 `visp-proto`
 
 ## 备注
 
-- Phase 1 不创建 `visp-llm`、`visp-tools`、`visp-daemon`、`visp-cli`、`visp-codegraph`、`visp-mcp` 的目录和源码。它们只在 workspace Cargo.toml 中声明为 member（路径存在即可），但 Phase 2-5 才会创建实际代码。
+- Phase 1 不创建 `visp-llm`、`visp-tools`、`visp-daemon`、`visp-tui`、`visp-codegraph`、`visp-mcp` 的目录和源码。它们只在 workspace Cargo.toml 中声明为 member（路径存在即可），但 Phase 2-5 才会创建实际代码。
 - `Cargo.toml` 的 member 声明需要指向 `crates/visp-*`，Phase 1 仅创建存在的 crate 目录，其他 member 声明加注释或直接省略。
 - 实际做法：workspace Cargo.toml 的 members 字段只列出 Phase 1 实际存在的 crate，后续阶段再追加。

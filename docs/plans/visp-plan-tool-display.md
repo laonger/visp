@@ -7,9 +7,9 @@
 | `visp-proto/proto/visp.proto` | ToolResult 新增 `tool_name` 字段 |
 | `visp-core/src/agent.rs` | AgentEvent::ToolCallResult 新增 `tool_name` 字段 |
 | `visp-daemon/src/service.rs` | agent_event_to_server_message + 测试 |
-| `visp-cli/src/app.rs` | LineType 枚举、MessageCache 截断策略、icon/显示策略函数 |
-| `visp-cli/src/event.rs` | ToolResult 处理改为独立消息 |
-| `visp-cli/src/theme.rs` | BlockStyle 拆分、图标映射 |
+| `visp-tui/src/app.rs` | LineType 枚举、MessageCache 截断策略、icon/显示策略函数 |
+| `visp-tui/src/event.rs` | ToolResult 处理改为独立消息 |
+| `visp-tui/src/theme.rs` | BlockStyle 拆分、图标映射 |
 
 ## Wave 1: 数据链路（proto → agent → daemon）
 

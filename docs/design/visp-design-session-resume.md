@@ -83,7 +83,7 @@ Session ID 保持使用 UUID v4。`SessionStore` 基于字符串 key 的 HashMap
 
 Chat handler 无需修改 — 已有的 `session_mgr.get() + session_mgr.start_loop()` 路径已支持恢复。当 CLI 传入已有 session_id 时，chat handler 走同一条代码路径，加载历史消息继续对话。
 
-### 4. visp-cli
+### 4. visp-tui
 
 新增 `-s/--session` 可选参数。当提供时：
 - 调用 `GetSession` 查询该 session

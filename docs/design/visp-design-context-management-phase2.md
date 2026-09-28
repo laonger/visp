@@ -85,7 +85,7 @@ Phase 1 的实现中，所有预算计算、轮次裁剪、极端保底、工具
 
 ### 3.4 不涉及的模块
 
-- `visp-llm`、`visp-tools`、`visp-codegraph`、`visp-cli`、`visp-proto`、`visp`（launcher）— 无改动
+- `visp-llm`、`visp-tools`、`visp-codegraph`、`visp-tui`、`visp-proto`、`visp`（launcher）— 无改动
 - `visp-proto` 无改动 — `LlmConfig` proto 消息不变，只是 core 中的使用方式变了
 
 ## 4. ContextTrimmer trait 设计

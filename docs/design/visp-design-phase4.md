@@ -12,16 +12,16 @@ Phase 4 涉及一个新 crate：
 
 | Crate | 职责 | 类型 |
 |---|---|---|
-| **visp-cli** | gRPC 客户端、REPL 交互、流式显示 | 新建 |
+| **visp-tui** | gRPC 客户端、REPL 交互、流式显示 | 新建 |
 
 依赖 Phase 3 的 daemon（gRPC 服务端已就绪）。
 
-### 2.1 visp-cli crate
+### 2.1 visp-tui crate
 
 #### 2.1.1 模块结构
 
 ```
-visp-cli/
+visp-tui/
 ├── Cargo.toml
 └── src/
     ├── main.rs       # 入口：解析 CLI 参数、建立连接、启动 REPL
@@ -178,7 +178,7 @@ REPL 主循环 (使用 tokio::select!):
 ## 3. 依赖关系
 
 ```
-visp-cli (二进制)
+visp-tui (二进制)
     ├──→ visp-proto (gRPC 类型 + client)
     ├──→ tonic (gRPC)
     ├──→ tokio (异步)
@@ -186,7 +186,7 @@ visp-cli (二进制)
     └──→ rustyline (REPL 输入)
 ```
 
-visp-cli 只依赖 visp-proto（通过 gRPC 协议与 daemon 通信），不依赖 visp-core/visp-llm/visp-tools。
+visp-tui 只依赖 visp-proto（通过 gRPC 协议与 daemon 通信），不依赖 visp-core/visp-llm/visp-tools。
 
 ## 4. 核心数据流
 
@@ -229,8 +229,8 @@ REPL 循环接收:
 
 ## 6. 验收标准
 
-- `cargo build -p visp-cli` 编译通过
-- `cargo clippy -p visp-cli -- -D warnings` 通过
+- `cargo build -p visp-tui` 编译通过
+- `cargo clippy -p visp-tui -- -D warnings` 通过
 - `cargo fmt --check` 通过
 - daemon 启动后，`vbw` 能成功连接并完成 HealthCheck
 - 输入 prompt 后流式显示 TextDelta

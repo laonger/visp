@@ -53,7 +53,7 @@ DB 里的 `session.status = Running` 既可能是 daemon 重启后的僵尸，�
 | visp-core | `SessionStore` trait | 新增 `list_child_sessions(parent_id) -> Vec<Session>` 接口（复用现有 Session 类型，不引入 SessionMeta） |
 | visp-db | SQLite 实现 | 新增 `SessionRepo::list_child_sessions` SQL 查询；为 `parent_id` 加索引（`CREATE INDEX IF NOT EXISTS`） |
 | visp-daemon | `JoinSession` / `UserInput` handler | 1) 主 session 回放完成后，BFS 遍历后代并依次回放；2) 为每个子 agent 推送一帧 `StatusUpdate` 带 `agent_name` 和 `view_only=true`，task prompt 塞入 `user_inputs`；3) `UserInput` 对非活跃 session 返回 `SessionNotActive` 错误帧（判断标准：daemon 内存活跃 loop 集合不包含该 session_id） |
-| visp-cli | `AgentStatus` 枚举 + `TabEntry` | 1) `AgentStatus` 新增 `ViewOnly` 变体；2) 新增 `TabEntry::new_view_only()` 构造器，不改 `new()` 签名；3) ViewOnly tab 视觉上标注 (View Only) 并禁用输入回车；4) 收到 `SessionNotActive` 错误帧时给用户清晰提示 |
+| visp-tui | `AgentStatus` 枚举 + `TabEntry` | 1) `AgentStatus` 新增 `ViewOnly` 变体；2) 新增 `TabEntry::new_view_only()` 构造器，不改 `new()` 签名；3) ViewOnly tab 视觉上标注 (View Only) 并禁用输入回车；4) 收到 `SessionNotActive` 错误帧时给用户清晰提示 |
 | visp-proto | 协议扩展 | 1) `StatusUpdate` 新增 optional 字段 `view_only: bool`；2) `SessionNotActive` 复用现有 `Error { code, message, session_id, agent_name }` 帧（`code="SessionNotActive"`），不新增 proto。task prompt 复用 `StatusUpdate.user_inputs` 字段传输，不新增 `UserMessage` 帧 |
 
 ### 数据流（恢复一个含子 agent 的主 session）

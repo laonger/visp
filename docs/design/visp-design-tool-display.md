@@ -93,7 +93,7 @@ ServerMessage::ToolResult { call_id, content, is_error, tool_name }
 
 ## 设计方案
 
-### 新增模块：`crates/visp-cli/src/tool_display.rs`
+### 新增模块：`crates/visp-tui/src/tool_display.rs`
 
 包含两个核心函数 + 更新现有函数。
 
@@ -155,10 +155,10 @@ ServerMessage::ToolResult { call_id, content, is_error, tool_name }
 
 | 文件 | 变更 |
 |------|------|
-| `crates/visp-cli/src/tool_display.rs` | **新建**：`format_tool_call()` + `format_tool_result()` |
-| `crates/visp-cli/src/main.rs` | 添加 `mod tool_display;` |
-| `crates/visp-cli/src/app.rs` | `tool_icon()` 补充 task/skill 图标；`result_summary()` 替换为调用 `tool_display::format_tool_result()`；`MessageCache::from_message` 的 ToolCall 分支调用 `format_tool_call()` |
-| `crates/visp-cli/src/event.rs` | 删除死代码 `tc_display()` |
+| `crates/visp-tui/src/tool_display.rs` | **新建**：`format_tool_call()` + `format_tool_result()` |
+| `crates/visp-tui/src/main.rs` | 添加 `mod tool_display;` |
+| `crates/visp-tui/src/app.rs` | `tool_icon()` 补充 task/skill 图标；`result_summary()` 替换为调用 `tool_display::format_tool_result()`；`MessageCache::from_message` 的 ToolCall 分支调用 `format_tool_call()` |
+| `crates/visp-tui/src/event.rs` | 删除死代码 `tc_display()` |
 
 ### ToolCall 渲染改动（`app.rs:777`）
 

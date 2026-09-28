@@ -23,7 +23,7 @@
 
 #### 🧪 测试 → 🔍 类型检查
 ```bash
-cargo test -p visp-cli && cargo clippy -p visp-cli -- -D warnings
+cargo test -p visp-tui && cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### ♻️ 重构
@@ -31,7 +31,7 @@ cargo test -p visp-cli && cargo clippy -p visp-cli -- -D warnings
 
 #### 📦 提交
 ```
-feat(visp-cli): add id/version to ChatLine, auto-assign in add_message
+feat(visp-tui): add id/version to ChatLine, auto-assign in add_message
 ```
 
 ### 1b：新增 update_message 和 clear_messages 方法
@@ -50,7 +50,7 @@ feat(visp-cli): add id/version to ChatLine, auto-assign in add_message
 
 #### 🧪 测试 → 🔍 类型检查
 ```bash
-cargo test -p visp-cli && cargo clippy -p visp-cli -- -D warnings
+cargo test -p visp-tui && cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### ♻️ 重构
@@ -58,7 +58,7 @@ cargo test -p visp-cli && cargo clippy -p visp-cli -- -D warnings
 
 #### 📦 提交
 ```
-feat(visp-cli): add update_message and clear_messages methods
+feat(visp-tui): add update_message and clear_messages methods
 ```
 
 ---
@@ -80,7 +80,7 @@ feat(visp-cli): add update_message and clear_messages methods
 
 #### 🧪 测试 → 🔍 类型检查
 ```bash
-cargo test -p visp-cli && cargo clippy -p visp-cli -- -D warnings
+cargo test -p visp-tui && cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### ♻️ 重构
@@ -88,7 +88,7 @@ cargo test -p visp-cli && cargo clippy -p visp-cli -- -D warnings
 
 #### 📦 提交
 ```
-feat(visp-cli): add MessageCache struct with per-message rendering
+feat(visp-tui): add MessageCache struct with per-message rendering
 ```
 
 ### 2b：MessageCache 按消息类型差异渲染
@@ -105,12 +105,12 @@ feat(visp-cli): add MessageCache struct with per-message rendering
 
 #### 🧪 测试 → 🔍 类型检查
 ```bash
-cargo test -p visp-cli && cargo clippy -p visp-cli -- -D warnings
+cargo test -p visp-tui && cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### 📦 提交
 ```
-feat(visp-cli): add type-aware rendering and cache matching to MessageCache
+feat(visp-tui): add type-aware rendering and cache matching to MessageCache
 ```
 
 ---
@@ -130,12 +130,12 @@ feat(visp-cli): add type-aware rendering and cache matching to MessageCache
 
 #### 🧪 测试 → 🔍 类型检查
 ```bash
-cargo test -p visp-cli && cargo clippy -p visp-cli -- -D warnings
+cargo test -p visp-tui && cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### 📦 提交
 ```
-feat(visp-cli): maintain message_caches in add_message
+feat(visp-tui): maintain message_caches in add_message
 ```
 
 ### 3b：流式分段缓存（frozen_cache）
@@ -154,12 +154,12 @@ feat(visp-cli): maintain message_caches in add_message
 
 #### 🧪 测试 → 🔍 类型检查
 ```bash
-cargo test -p visp-cli && cargo clippy -p visp-cli -- -D warnings
+cargo test -p visp-tui && cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### 📦 提交
 ```
-feat(visp-cli): add frozen_cache for long streaming text
+feat(visp-tui): add frozen_cache for long streaming text
 ```
 
 ---
@@ -186,12 +186,12 @@ feat(visp-cli): add frozen_cache for long streaming text
 
 #### 🧪 测试 → 🔍 类型检查
 ```bash
-cargo test -p visp-cli && cargo clippy -p visp-cli -- -D warnings
+cargo test -p visp-tui && cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### 📦 提交
 ```
-feat(visp-cli): rewrite build_text_stack to assemble from message_caches
+feat(visp-tui): rewrite build_text_stack to assemble from message_caches
 ```
 
 ### 4b：cache_width 变更处理
@@ -208,12 +208,12 @@ feat(visp-cli): rewrite build_text_stack to assemble from message_caches
 
 #### 🧪 测试 → 🔍 类型检查
 ```bash
-cargo test -p visp-cli && cargo clippy -p visp-cli -- -D warnings
+cargo test -p visp-tui && cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### 📦 提交
 ```
-feat(visp-cli): invalidate message caches on terminal resize
+feat(visp-tui): invalidate message caches on terminal resize
 ```
 
 ---
@@ -233,7 +233,7 @@ feat(visp-cli): invalidate message caches on terminal resize
 
 #### 🧪 测试 → 🔍 类型检查
 ```bash
-cargo test -p visp-cli && cargo clippy -p visp-cli -- -D warnings
+cargo test -p visp-tui && cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### ♻️ 重构
@@ -241,7 +241,7 @@ cargo test -p visp-cli && cargo clippy -p visp-cli -- -D warnings
 
 #### 📦 提交
 ```
-refactor(visp-cli): use clear_messages() for /clear command
+refactor(visp-tui): use clear_messages() for /clear command
 ```
 
 ---
@@ -258,12 +258,12 @@ refactor(visp-cli): use clear_messages() for /clear command
 
 #### 🧪 测试 → 🔍 类型检查 → 格式检查
 ```bash
-cargo test -p visp-cli && cargo clippy -p visp-cli -- -D warnings && cargo fmt -p visp-cli -- --check
+cargo test -p visp-tui && cargo clippy -p visp-tui -- -D warnings && cargo fmt -p visp-tui -- --check
 ```
 
 #### 📦 提交
 ```
-test(visp-cli): verify all tests pass after render cache refactor
+test(visp-tui): verify all tests pass after render cache refactor
 ```
 
 ---

@@ -20,7 +20,7 @@
 | **visp-core** | `[USER_QUERY]` 指令格式优化 |
 | **visp-proto** | 无改动 |
 | **visp-daemon** | 无改动 |
-| **visp-cli** | 无改动 |
+| **visp-tui** | 无改动 |
 
 ## 3. 模块详细设计
 

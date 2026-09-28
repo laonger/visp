@@ -70,7 +70,7 @@ CLI 输入框
 
 ## 4. 模块设计
 
-### 4.1 CLI 图片渲染器（`crates/visp-cli/src/image.rs`）
+### 4.1 CLI 图片渲染器（`crates/visp-tui/src/image.rs`）
 
 新模块，负责：
 
@@ -384,7 +384,7 @@ URL 引用（`@https://...`）不经过路径解析，直接替换为 `<image: u
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                         CLI (visp-cli)                        │
+│                         CLI (visp-tui)                        │
 │                                                               │
 │  ┌──────────┐    ┌──────────────┐    ┌───────────────────┐   │
 │  │ 输入框    │───->│ @path 解析   │───->│ <image: path> 标记│   │
@@ -432,12 +432,12 @@ URL 引用（`@https://...`）不经过路径解析，直接替换为 `<image: u
 
 | 模块 | 文件 | 改动类型 | 说明 |
 |------|------|----------|------|
-| visp-cli | `src/image.rs` | **新增** | 图片渲染器、缓存、协议检测 |
-| visp-cli | `src/app.rs` | 修改 | `ChatLine` 新增 `LineType::Image` 变体；`render_pending()` 解析图片标记并拆分为独立 ChatLine；`AppState` 新增 `image_ready_tx` 及 `ImageCache` 字段 |
-| visp-cli | `src/ui.rs` | 修改 | `render_chat_area` 按 `LineType` 分流：文本走 `render_block`，图片走 `render_image_block` |
-| visp-cli | `src/event.rs` | 修改 | 输入文本中的 `@path` 解析为 `<image: path>` 标记；基于 `AppState.project_path` 解析相对路径 |
-| visp-cli | `src/main.rs` | 修改 | 启动时初始化 `Picker` / `ImageCache`，创建 `image_ready` channel，注入 `AppState`；主循环 `select!` 监听 `image_ready_rx` |
-| visp-cli | `Cargo.toml` | 修改 | 新增 `ratatui-image`、`image`、`reqwest`（workspace）依赖 |
+| visp-tui | `src/image.rs` | **新增** | 图片渲染器、缓存、协议检测 |
+| visp-tui | `src/app.rs` | 修改 | `ChatLine` 新增 `LineType::Image` 变体；`render_pending()` 解析图片标记并拆分为独立 ChatLine；`AppState` 新增 `image_ready_tx` 及 `ImageCache` 字段 |
+| visp-tui | `src/ui.rs` | 修改 | `render_chat_area` 按 `LineType` 分流：文本走 `render_block`，图片走 `render_image_block` |
+| visp-tui | `src/event.rs` | 修改 | 输入文本中的 `@path` 解析为 `<image: path>` 标记；基于 `AppState.project_path` 解析相对路径 |
+| visp-tui | `src/main.rs` | 修改 | 启动时初始化 `Picker` / `ImageCache`，创建 `image_ready` channel，注入 `AppState`；主循环 `select!` 监听 `image_ready_rx` |
+| visp-tui | `Cargo.toml` | 修改 | 新增 `ratatui-image`、`image`、`reqwest`（workspace）依赖 |
 | visp-tools | `src/file.rs` | 修改 | `read_file` 读取图片文件时返回 `<image: path>` 标记 |
 | visp-mcp | `src/client.rs` | 修改 | MCP Image content 转为 `<image: path>` 标记（若涉及本地文件） |
 

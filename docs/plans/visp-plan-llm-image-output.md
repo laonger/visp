@@ -14,12 +14,12 @@ Wave 1 (基础层)
 Wave 2 (核心逻辑)                         │    │
   2a: visp-core (类型 + match) ◄──────────┤    │
   2b: visp-daemon (转换) ◄── 2a           │    │
-  2c: visp-cli (LineType + markers) ◄─────┼────┤
+  2c: visp-tui (LineType + markers) ◄─────┼────┤
                                            │    │
 Wave 3 (实现层)                           │    │
   3a: visp-llm/openai.rs ◄── 2a, 1b ◄────┘    │
   3b: visp-llm/anthropic.rs ◄── 2a, 1b        │
-  3c: visp-cli/render_pending ◄── 2c, 1a ◄────┘
+  3c: visp-tui/render_pending ◄── 2c, 1a ◄────┘
 ```
 
 ## Wave 1：基础层（2 个并行任务）
@@ -154,13 +154,13 @@ cargo clippy -p visp-daemon
 
 ---
 
-### 2c：visp-cli LineType 扩展 + split_image_markers + download_and_decode 扩展
+### 2c：visp-tui LineType 扩展 + split_image_markers + download_and_decode 扩展
 
 > 与 2a/2b 并行，仅依赖 1a（proto 类型）
 
 #### 🔴 红 - 测试
 
-在 `crates/visp-cli/src/image_tests.rs`（或对应测试文件）中新增测试：
+在 `crates/visp-tui/src/image_tests.rs`（或对应测试文件）中新增测试：
 
 | # | 测试用例 | 简明描述 |
 |---|---------|---------|
@@ -171,8 +171,8 @@ cargo clippy -p visp-daemon
 
 #### 🟢 绿 - 实现
 
-1. `crates/visp-cli/src/app.rs`：`LineType::Image` 新增 `remote_url: Option<String>` 字段
-2. `crates/visp-cli/src/image.rs`：
+1. `crates/visp-tui/src/app.rs`：`LineType::Image` 新增 `remote_url: Option<String>` 字段
+2. `crates/visp-tui/src/image.rs`：
    - `split_image_markers`：解析 ` | ` 分隔符，前为 path（可为空），后为 remote_url
    - `make_image_line`：支持 remote_url 参数
    - 所有构造 `LineType::Image` 的位置添加 `remote_url: None`（保持向后兼容）
@@ -180,8 +180,8 @@ cargo clippy -p visp-daemon
 #### 🧪 测试 -> 🔍 类型检查
 
 ```bash
-cargo test -p visp-cli image
-cargo clippy -p visp-cli
+cargo test -p visp-tui image
+cargo clippy -p visp-tui
 ```
 
 #### 📦 提交
@@ -260,11 +260,11 @@ cargo clippy -p visp-llm
 
 ---
 
-### 3c：visp-cli render_pending + 地址渲染 + download_and_decode 扩展
+### 3c：visp-tui render_pending + 地址渲染 + download_and_decode 扩展
 
 #### 🔴 红 - 测试
 
-在 `crates/visp-cli/src/app_tests.rs` 和 `image_tests.rs` 中新增测试：
+在 `crates/visp-tui/src/app_tests.rs` 和 `image_tests.rs` 中新增测试：
 
 | # | 测试用例 | 简明描述 |
 |---|---------|---------|
@@ -275,10 +275,10 @@ cargo clippy -p visp-llm
 
 #### 🟢 绿 - 实现
 
-1. `crates/visp-cli/src/app.rs`：
+1. `crates/visp-tui/src/app.rs`：
    - `render_pending` 新增 `ServerMessage::ImageBlock` 分支：flush_streaming -> push_chat_line(LineType::Image)
    - `render_pending` 新增 `ServerMessage::ImageError` 分支：flush_streaming -> push_chat_line(LineType::Error)
-2. `crates/visp-cli/src/image.rs`：
+2. `crates/visp-tui/src/image.rs`：
    - `download_and_decode` 扩展：解码成功后将原始 bytes 写入 `{project_path}/.visp/images/{url_hash}.{ext}` 缓存文件
    - `ImageEntry::Ready` 新增 `local_path: Option<String>` 字段
    - 图片地址渲染：`LineType::Image` 渲染改为复合渲染（image widget + Paragraph 垂直排列），显示 🔗 remote_url + 📁 path
@@ -287,8 +287,8 @@ cargo clippy -p visp-llm
 #### 🧪 测试 -> 🔍 类型检查
 
 ```bash
-cargo test -p visp-cli
-cargo clippy -p visp-cli
+cargo test -p visp-tui
+cargo clippy -p visp-tui
 ```
 
 #### 📦 提交
@@ -308,7 +308,7 @@ cargo clippy -p visp-cli
 
 ```
 任务 A: 2a -> 2b (visp-core -> visp-daemon，串行)
-任务 B: 2c (visp-cli，与 A 并行)
+任务 B: 2c (visp-tui，与 A 并行)
 ```
 
 ### Wave 3：实现层（3 个并行任务）
@@ -316,7 +316,7 @@ cargo clippy -p visp-cli
 ```
 任务 A: 3a (visp-llm/openai.rs)
 任务 B: 3b (visp-llm/anthropic.rs)
-任务 C: 3c (visp-cli/render_pending + image.rs)
+任务 C: 3c (visp-tui/render_pending + image.rs)
 ```
 
 ## 测试覆盖汇总
@@ -327,10 +327,10 @@ cargo clippy -p visp-cli
 | 1 | 2 | visp-llm | 1b | 10 |
 | 2 | 2 | visp-core | 2a | 5 |
 | 2 | 2 | visp-daemon | 2b | 3 |
-| 2 | 2 | visp-cli | 2c | 4 |
+| 2 | 2 | visp-tui | 2c | 4 |
 | 3 | 3 | visp-llm | 3a | 7 |
 | 3 | 3 | visp-llm | 3b | 4 |
-| 3 | 3 | visp-cli | 3c | 4 |
+| 3 | 3 | visp-tui | 3c | 4 |
 | **合计** | | | | **37** |
 
 ## 备注

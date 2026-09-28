@@ -13,7 +13,7 @@
 涉及 4 个 crate，按依赖顺序：
 
 ```
-visp-proto ──→ visp-core ──→ visp-daemon ──→ visp-cli
+visp-proto ──→ visp-core ──→ visp-daemon ──→ visp-tui
   (协议定义)    (核心逻辑)    (消息桥接)      (TUI)
 ```
 
@@ -24,7 +24,7 @@ visp-proto ──→ visp-core ──→ visp-daemon ──→ visp-cli
 | **visp-core** | Agent 系统 prompt 增加 LLM 发起用户选择的指令 |
 | **visp-core** | Agent 循环新增解析 LLM 特殊输出 → UserQuery 的路径 |
 | **visp-daemon** | 适配新协议；UserResponse 到 respond 的桥接逻辑 |
-| **visp-cli** | 确认栏 UI 重写；事件处理改为方向键导航 + Enter 确认 |
+| **visp-tui** | 确认栏 UI 重写；事件处理改为方向键导航 + Enter 确认 |
 
 ## 3. 模块详细设计
 
@@ -129,7 +129,7 @@ proto::UserResponse → respond.send(approved)
 
 主要改动在 `service.rs` 中 `UserResponse` 处理分支和 `AgentEvent::UserQuery` 转换分支。
 
-### 3.4 visp-cli — TUI 改造
+### 3.4 visp-tui — TUI 改造
 
 #### 3.4.1 确认栏 UI
 
@@ -214,7 +214,7 @@ pub struct ConfirmState {
        visp-daemon  ◄── 映射 proto ↔ core 事件
             │
             ▼
-         visp-cli   ◄── TUI 渲染 + 事件处理
+         visp-tui   ◄── TUI 渲染 + 事件处理
 ```
 
 各层向后兼容策略（可选）：

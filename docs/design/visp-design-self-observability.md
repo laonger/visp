@@ -775,7 +775,7 @@ Wave 1 起即用 `tracing::subscriber::with_default` + 自定义 `tracing_subscr
 | 读取 `[observability]` 配置段 | 新增 |
 | gRPC Chat 流的 spawn 加 root span instrument | 新增 |
 
-## 12.6 visp-cli 改动
+## 12.6 visp-tui 改动
 
 **无改动**。CLI 仍通过 AgentEvent mpsc 接收 UI 事件，tracing 与 CLI 完全解耦。
 

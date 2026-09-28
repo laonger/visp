@@ -5,7 +5,7 @@
 - 设计文档已 4 轮 oracle 审核通过：`docs/design/visp-design-cli-tabs.md`（405 行）
 - 当前分支：`agents`
 - proto 已含 `agent_name` 字段（5 处消息）；本计划**不改 proto**
-- 主 session_id 通过 `ChatHandle.session_id`（`crates/visp-cli/src/client.rs:19`）获得
+- 主 session_id 通过 `ChatHandle.session_id`（`crates/visp-tui/src/client.rs:19`）获得
 - `visp-agent` / `visp-daemon` / `visp-core` / `visp-proto` 全部**不改动**——sub-agent Done 已通过 `spawn_sub_agent` 中的 forwarding task 天然到达 CLI
 
 ## TDD 步骤总览
@@ -15,7 +15,7 @@
 **关键约束**：
 - UI 渲染必须使用 `ratatui::widgets::Tabs` widget，不允许自绘 tab bar
 - 所有事件路由必须按 `session_id`，不靠 `agent_name`（Done / UserQuery / UsageInfo 三种消息无 agent_name）
-- 仅 visp-cli 4 个文件改动（app.rs / event.rs / ui.rs / main.rs）
+- 仅 visp-tui 4 个文件改动（app.rs / event.rs / ui.rs / main.rs）
 - 状态守卫：`Running → Done` 是 Done 唯一允许的状态覆盖
 
 ---
@@ -24,7 +24,7 @@
 
 ### 测试（红）
 
-在 `crates/visp-cli/src/app.rs` 内 `#[cfg(test)] mod tests`：
+在 `crates/visp-tui/src/app.rs` 内 `#[cfg(test)] mod tests`：
 
 - `test_agent_status_default_is_running` — TabEntry 默认状态为 Running
 - `test_tab_entry_new_with_session_and_name` — 构造函数正确设置 session_id 和 agent_name
@@ -61,7 +61,7 @@
 
 ### 验证
 
-`cargo test -p visp-cli` → `cargo clippy -p visp-cli -- -D warnings` → `cargo fmt -- --check`
+`cargo test -p visp-tui` → `cargo clippy -p visp-tui -- -D warnings` → `cargo fmt -- --check`
 
 ### 提交
 
@@ -99,7 +99,7 @@
 
 ### 验证
 
-`cargo test -p visp-cli` → clippy → fmt
+`cargo test -p visp-tui` → clippy → fmt
 
 ### 提交
 
@@ -123,7 +123,7 @@
 
 ### 验证
 
-`cargo test -p visp-cli` → clippy → fmt
+`cargo test -p visp-tui` → clippy → fmt
 
 ### 提交
 
@@ -164,7 +164,7 @@
 
 ### 验证
 
-`cargo test -p visp-cli` → clippy → fmt
+`cargo test -p visp-tui` → clippy → fmt
 
 ### 提交
 
@@ -196,7 +196,7 @@
 
 ### 验证
 
-`cargo test -p visp-cli` → clippy → fmt
+`cargo test -p visp-tui` → clippy → fmt
 
 ### 提交
 
@@ -231,7 +231,7 @@
 
 ### 验证
 
-`cargo test -p visp-cli` → clippy → fmt
+`cargo test -p visp-tui` → clippy → fmt
 
 ### 提交
 
@@ -259,7 +259,7 @@
 
 ### 验证
 
-`cargo test -p visp-cli` → clippy → fmt
+`cargo test -p visp-tui` → clippy → fmt
 
 ### 提交
 
@@ -303,7 +303,7 @@
 
 ### 验证
 
-`cargo test -p visp-cli` → clippy → fmt
+`cargo test -p visp-tui` → clippy → fmt
 
 ### 提交
 
@@ -340,7 +340,7 @@
 
 ### 验证
 
-`cargo test -p visp-cli` → clippy → fmt
+`cargo test -p visp-tui` → clippy → fmt
 
 视觉验证：启动 CLI，单 default tab 显示 `▶ default`（黄色），状态符号 + 颜色正确，激活反色。
 
@@ -383,7 +383,7 @@
 
 ### 验证
 
-`cargo test -p visp-cli` → clippy → fmt
+`cargo test -p visp-tui` → clippy → fmt
 
 视觉验证：手动 spawn 多个 subagent 触发分页，Alt+Shift+→ 翻页，default 始终可见。
 
@@ -422,7 +422,7 @@
 
 ### 验证
 
-`cargo test -p visp-cli` → clippy → fmt
+`cargo test -p visp-tui` → clippy → fmt
 
 视觉验证：spawn sub-agent → 等其 Done → 切到 sub tab → Ctrl+W → tab 消失，回到 default；Running 状态下 Ctrl+W 无反应；default 上 Ctrl+W 无反应。
 
@@ -566,7 +566,7 @@ Step 1 ─┬─ Step 2 ─┬─ Step 4 ─ Step 5 ─ Step 6 ─┬─ Step 7 
 1. 同时 launch 多个 @fixer（带完整 step 规格）
 2. 等所有返回
 3. 合并（如有冲突，先看 fixer 是否各自动了独立部分；若撞同一函数则 oracle 评审一次）
-4. 跑 `cargo test -p visp-cli && cargo clippy -p visp-cli -- -D warnings && cargo fmt -- --check`
+4. 跑 `cargo test -p visp-tui && cargo clippy -p visp-tui -- -D warnings && cargo fmt -- --check`
 5. 不通过 → 让对应 fixer 修复
 6. 通过 → 各 step 独立 commit（保持回退粒度）
 

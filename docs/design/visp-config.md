@@ -139,7 +139,7 @@ visp-config (依赖 visp-proto; 不依赖其他 visp-* crate)
 visp-core (依赖 visp-config: RuleEngine, LlmConfig, skills, prompt 等)
 visp-mcp (依赖 visp-config: McpConfig; 依赖 visp-core: Tool trait)
   ↑
-visp-agent, visp-tools, visp-daemon, visp-cli, visp
+visp-agent, visp-tools, visp-daemon, visp-tui, visp
 ```
 
 | crate | 依赖 visp-config 的内容 |
@@ -357,7 +357,7 @@ visp-config 对外暴露：
 4. visp-mcp/Cargo.toml 添加 `visp-config = { path = "../visp-config" }`
 5. visp-agent/Cargo.toml 添加 `visp-config = { path = "../visp-config" }`（如需要）
 6. visp-tools/Cargo.toml 添加 `visp-config = { path = "../visp-config" }`
-7. visp-cli/Cargo.toml 添加 `visp-config = { path = "../visp-config" }`
+7. visp-tui/Cargo.toml 添加 `visp-config = { path = "../visp-config" }`
 8. visp/Cargo.toml 添加 `visp-config = { path = "../visp-config" }`
 9. visp-command/Cargo.toml 添加 `visp-config = { path = "../visp-config" }`
 10. visp-db/Cargo.toml 添加 `visp-config = { path = "../visp-config" }`
@@ -419,7 +419,7 @@ visp-config 对外暴露：
 | visp-tools | codegraph.rs | `.visp/codegraph.db` 路径改用 `visp_config::path::codegraph_db`（5 处） |
 | visp-db | store.rs | `~/` 路径展开改用 `visp_config::path::expand_home`（`home_dir` 通过 re-export 兼容） |
 | visp | main.rs | `get_log_dir()` 改用 `visp_config::path::log_dir`；启动 daemon 前调用 `visp_config::load_config()` 读取配置获取基础 listen_addr，找到可用端口后通过 `VISP_LISTEN_ADDR` 环境变量注入给 daemon 子进程 |
-| visp-cli | image.rs | `.visp/images` 临时缓存路径改用 `visp_config::path::image_cache_dir` |
+| visp-tui | image.rs | `.visp/images` 临时缓存路径改用 `visp_config::path::image_cache_dir` |
 | visp-command | init_agent.rs | `.visp/agents/` 路径改用 `visp_config::path::agents_dir_project` |
 | visp-command | init_skill.rs | `.visp/skills/` 路径改用 `visp_config::path::skills_dir_project` |
 | Cargo.toml | workspace | members 添加 visp-config |
@@ -431,7 +431,7 @@ visp-config 对外暴露：
 - tool 执行逻辑
 - session 管理逻辑
 - 配置文件格式
-- CLI 端 proto `LlmConfig` 构造（`/model`、`/temp`、CLI flags）保留在 visp-cli，属于 gRPC 协议层操作
+- CLI 端 proto `LlmConfig` 构造（`/model`、`/temp`、CLI flags）保留在 visp-tui，属于 gRPC 协议层操作
 - `BuiltinAgentOverride` 及 agent 文件加载逻辑（保留在 visp-agent/agent_loader.rs）
 
 ## 5. 验收标准

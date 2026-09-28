@@ -296,7 +296,7 @@ message ServerMessage {
 
 新增 `AgentEvent::ImageBlock { path, mime_type, remote_url }` 和 `AgentEvent::ImageError { reason }` 分支，转换为对应的 `proto::ServerMessage` 变体。`remote_url` 为 None 时序列化为空字符串。
 
-### 5.5 visp-cli：渲染与懒加载
+### 5.5 visp-tui：渲染与懒加载
 
 #### LineType 扩展（`app.rs:231`）
 
@@ -472,8 +472,8 @@ session 回放时，`Message.content` 中的标记通过 `TextDelta` 发送：
 | visp-llm | `image_util.rs` | 新增文件（base64 解码/落盘/data URI 解析/MIME 映射） | 小 |
 | visp-proto | `visp.proto` | 新增 ImageBlock + ImageError 消息 | 小 |
 | visp-daemon | `service.rs` | agent_event_to_server_message 新增两个分支 | 小 |
-| visp-cli | `app.rs` | render_pending 新增两个分支 + LineType 扩展 | 中 |
-| visp-cli | `image.rs` | split_image_markers 扩展 + download_and_decode 扩展（落盘 + local_path）+ 地址渲染 | 中 |
+| visp-tui | `app.rs` | render_pending 新增两个分支 + LineType 扩展 | 中 |
+| visp-tui | `image.rs` | split_image_markers 扩展 + download_and_decode 扩展（落盘 + local_path）+ 地址渲染 | 中 |
 
 ## 9. 验收标准
 

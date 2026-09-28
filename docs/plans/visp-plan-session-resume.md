@@ -6,7 +6,7 @@
 
 **设计文档**: `docs/design/visp-design-session-resume.md`
 
-**涉及 crate**: visp-proto, visp-daemon, visp-cli, visp (launcher), visp-core
+**涉及 crate**: visp-proto, visp-daemon, visp-tui, visp (launcher), visp-core
 
 ## 步骤
 
@@ -99,7 +99,7 @@ feat(daemon): add GetSession handler with prefix matching
 
 ### 步骤 3：CLI client — get_session 方法
 
-**文件**: `crates/visp-cli/src/client.rs`
+**文件**: `crates/visp-tui/src/client.rs`
 
 CLI gRPC 客户端新增 `get_session` 方法。
 
@@ -110,7 +110,7 @@ CLI gRPC 客户端新增 `get_session` 方法。
 | 1 | get_session 成功 | 调用 gRPC GetSession → 返回 Session |
 | 2 | get_session 未找到 | session 不存在 → 返回 Err/None |
 
-测试位置：`crates/visp-cli/src/client.rs`（已有测试模块）
+测试位置：`crates/visp-tui/src/client.rs`（已有测试模块）
 
 #### 🟢 绿 — 实现
 
@@ -128,8 +128,8 @@ pub async fn get_session(&mut self, session_id: &str) -> Result<proto::Session, 
 #### 🧪 测试 → 🔍 类型检查
 
 ```
-cargo test -p visp-cli
-cargo clippy -p visp-cli -- -D warnings
+cargo test -p visp-tui
+cargo clippy -p visp-tui -- -D warnings
 ```
 
 #### ♻️ 重构
@@ -144,7 +144,7 @@ feat(cli): add get_session client method
 
 ### 步骤 4：CLI — `-s` 参数 + `--list` + resume 流程
 
-**文件**: `crates/visp-cli/src/main.rs`（CLI 入口 + 参数解析）
+**文件**: `crates/visp-tui/src/main.rs`（CLI 入口 + 参数解析）
 
 核心实现：`-s` 参数解析、session 查找、路径校验、未找到引导、`--list` 会话浏览。
 
@@ -160,7 +160,7 @@ feat(cli): add get_session client method
 | 6 | `--list -p /project` 按项目过滤 | 项目限定浏览 |
 | 7 | 不传任何参数 → 正常启动 | 全回归 |
 
-测试位置：`crates/visp-cli/src/main.rs` 或 `crates/visp-cli/tests/`（新建测试目录需确认）
+测试位置：`crates/visp-tui/src/main.rs` 或 `crates/visp-tui/tests/`（新建测试目录需确认）
 
 #### 🟢 绿 — 实现
 
@@ -180,9 +180,9 @@ feat(cli): add get_session client method
 #### 🧪 测试 → 🔍 类型检查
 
 ```
-cargo test -p visp-cli
-cargo clippy -p visp-cli -- -D warnings
-cargo fmt -p visp-cli -- --check
+cargo test -p visp-tui
+cargo clippy -p visp-tui -- -D warnings
+cargo fmt -p visp-tui -- --check
 ```
 
 #### ♻️ 重构
@@ -298,11 +298,11 @@ Wave 1（3 个并行任务）
 
 Wave 2（3 个并行任务，依赖 Wave 1 proto 完成）
 ├── 步骤 2: Daemon — get_session handler  [visp-daemon]
-├── 步骤 3: CLI client — get_session 方法 [visp-cli]
+├── 步骤 3: CLI client — get_session 方法 [visp-tui]
 └── 步骤 5: Launcher — -s 透传            [visp]
 
 Wave 3（1 个任务，依赖 Wave 2 所有任务）
-└── 步骤 4: CLI — -s + --list + resume    [visp-cli]
+└── 步骤 4: CLI — -s + --list + resume    [visp-tui]
      （步骤 3 的 client 和步骤 2 的 daemon 都完成后再集成测试）
 
 Wave 4（最终验证）
@@ -327,9 +327,9 @@ Agent recovery ──→ (独立，任意 Wave 完成)
 | W1 | visp-proto | 0 (编译验证) | proto 编译通过 |
 | W1 | visp-core | 3 | 正常退出、panic 重置、不吞 panic |
 | W2 | visp-daemon | 6 | 精确/前缀/0/多匹配、error 传播 |
-| W2 | visp-cli client | 2 | 成功/失败 |
+| W2 | visp-tui client | 2 | 成功/失败 |
 | W2 | visp launcher | 4 | 透传正误、组合、默认值 |
-| W3 | visp-cli main | 7 | resume/未找到/路径校验/--list/回归 |
+| W3 | visp-tui main | 7 | resume/未找到/路径校验/--list/回归 |
 | W4 | 全量 | 全量 | `cargo test && cargo clippy && cargo fmt` |
 
 ## 备注

@@ -361,10 +361,10 @@ Tab Bar 始终显示（即使只有 default）。
 
 | 模块 | 改动 |
 |------|------|
-| `crates/visp-cli/src/app.rs` | AppState 结构大改：messages → tabs；新增 TabEntry / AgentStatus / TabBar 相关方法；新增 `current_request_usage` 全局字段；`generating` / `pending_usage` 移入 TabEntry |
-| `crates/visp-cli/src/event.rs` | handle_grpc_message 改为按 session_id 路由到 tab；Done 处理加状态守卫；新增 Alt+方向键处理；移除 prefix 调用 |
-| `crates/visp-cli/src/ui.rs` | 新增 render_tab_bar；chat 区域数据源改为 active tab |
-| `crates/visp-cli/src/main.rs` | 初始化 AppState 时构建第一个 default tab（用 ChatHandle.session_id） |
+| `crates/visp-tui/src/app.rs` | AppState 结构大改：messages → tabs；新增 TabEntry / AgentStatus / TabBar 相关方法；新增 `current_request_usage` 全局字段；`generating` / `pending_usage` 移入 TabEntry |
+| `crates/visp-tui/src/event.rs` | handle_grpc_message 改为按 session_id 路由到 tab；Done 处理加状态守卫；新增 Alt+方向键处理；移除 prefix 调用 |
+| `crates/visp-tui/src/ui.rs` | 新增 render_tab_bar；chat 区域数据源改为 active tab |
+| `crates/visp-tui/src/main.rs` | 初始化 AppState 时构建第一个 default tab（用 ChatHandle.session_id） |
 
 `visp-agent` / `visp-daemon` / `visp-core` / `visp-proto` 全部**不改动**。sub-agent Done 已通过 `spawn_sub_agent` 中的 forwarding task 天然到达 CLI；CLI 按 session_id 路由 + Done 状态守卫即可。
 

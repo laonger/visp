@@ -39,7 +39,7 @@
 - BEL 只是响铃/提示音：是否弹桌面通知、是否有横幅，取决于用户终端与系统设置，visp 无法控制。
 - 未识别终端中本就支持 OSC 9 的（如 alacritty）会因此失去文本横幅，只剩响铃 —— 这是本次偏离的主要代价。
 
-**影响面**：§1 协议表（新增 BEL 行）、§2.1 探测器映射表兜底行、§4 边界表（SSH / 复用器 / 未识别终端三行）、§6 验收标准（新增 BEL 项）、`crates/visp-cli/src/notify.rs`（`Protocol::Bel`）、`docs/todo/TODO.md`「已知限制」。
+**影响面**：§1 协议表（新增 BEL 行）、§2.1 探测器映射表兜底行、§4 边界表（SSH / 复用器 / 未识别终端三行）、§6 验收标准（新增 BEL 项）、`crates/visp-tui/src/notify.rs`（`Protocol::Bel`）、`docs/todo/TODO.md`「已知限制」。
 
 **后续方案**：系统通知 fallback 后端（§7）；kitty OSC 99 能力探测（`a=q`）以校准环境变量判定。
 
@@ -47,13 +47,13 @@
 
 | 模块 | 职责 | 变更性质 |
 |---|---|---|
-| visp-cli（新模块 `notify/`） | 通知引擎：协议探测、序列编码、开关与节流 | 新增 |
-| visp-cli `event.rs` | 在 Done / UserQuery 两个事件处理点挂接通知调用；**会话过滤（仅根 session）在挂接点完成** | 小改 |
+| visp-tui（新模块 `notify/`） | 通知引擎：协议探测、序列编码、开关与节流 | 新增 |
+| visp-tui `event.rs` | 在 Done / UserQuery 两个事件处理点挂接通知调用；**会话过滤（仅根 session）在挂接点完成** | 小改 |
 | visp-config | `DaemonConfig` 新增 `[notification]` 配置段 | 小改 |
 
-不做新 crate：通知逻辑只被 visp-cli 消费，先以模块形式落地，未来 daemon 需要时再抽 crate。
+不做新 crate：通知逻辑只被 visp-tui 消费，先以模块形式落地，未来 daemon 需要时再抽 crate。
 
-### 2.1 notify 模块（visp-cli 内）
+### 2.1 notify 模块（visp-tui 内）
 
 三个内部组件：
 
@@ -72,14 +72,14 @@
 - Done 正文：固定文案「任务完成，等待输入」
 - UserQuery 正文：`uq.message` 截断至 200 字符（审批场景 message 即具体工具说明）；控制字符由 Encoder 清洗兜底
 
-写入方式：直接向 stdout 写入转义序列字节（crossterm 已是 visp-cli 直接依赖，Cargo.toml:19，无需新增）。OSC 序列由终端模拟器自身处理、不进入备用屏缓冲，ratatui 全屏模式下通知照常弹出。硬约束：
+写入方式：直接向 stdout 写入转义序列字节（crossterm 已是 visp-tui 直接依赖，Cargo.toml:19，无需新增）。OSC 序列由终端模拟器自身处理、不进入备用屏缓冲，ratatui 全屏模式下通知照常弹出。硬约束：
 
 - 写入必须在主事件循环线程**内联同步**完成，禁止 spawn 异步任务——否则与 ratatui 渲染写 stdout 产生字节交错
 - 仅 `write_all(bytes) + flush()`，序列以 BEL/ST 结尾、无尾随字节；禁止 `println!`（换行会破坏 TUI 布局）
 - fire-and-forget 指「不等待、不处理写入结果」，而非异步写；tty 写入为非阻塞，几十字节无性能影响
 - 通知路径任何失败静默降级为 debug 日志，不影响 TUI 主流程
 
-### 2.2 挂接点（visp-cli/event.rs）
+### 2.2 挂接点（visp-tui/event.rs）
 
 - **回合完成**：`Payload::Done` 处理分支（event.rs:1065）。⚠️ 必须挂在 `stale_done_expected` 提前 return 分支（紧随其后，主 session Cancel 产生的 Done）**之后**——否则用户取消任务也会弹「完成」通知
 - **需要用户输入**：`Payload::UserQuery` 处理分支（event.rs:1006），读 `uq.session_id` 做根会话判别（proto 字段 visp.proto:187，实现中已启用）
@@ -98,7 +98,7 @@
 | protocol | 协议选择：`auto` / `osc9` / `osc777` / `kitty99` | auto |
 | min_interval_secs | 节流间隔秒数 | 3 |
 
-配置读取：visp-cli 启动时调用现有 `load_config()` 读取同一份 daemon.toml（CLI 目前只用 visp-config 的路径能力，经核验现无任何 load_config 调用——此为全新初始化步骤，加载点位于 main 启动早期、TUI 初始化之前，代价为一次 TOML 解析）。备选方案（daemon 经 gRPC 下发）引入协议变更，v1 不采用。
+配置读取：visp-tui 启动时调用现有 `load_config()` 读取同一份 daemon.toml（CLI 目前只用 visp-config 的路径能力，经核验现无任何 load_config 调用——此为全新初始化步骤，加载点位于 main 启动早期、TUI 初始化之前，代价为一次 TOML 解析）。备选方案（daemon 经 gRPC 下发）引入协议变更，v1 不采用。
 
 ## 3. 核心数据流
 
@@ -106,7 +106,7 @@
 [用户提交任务] → daemon agent loop 执行
      │
      ├─(完成)─→ gRPC Done ────┐
-     │                        ├─→ visp-cli 事件循环
+     │                        ├─→ visp-tui 事件循环
      └─(需输入)→ gRPC UserQuery┘        │
                                         ▼
                           notify::on_event(kind, body)

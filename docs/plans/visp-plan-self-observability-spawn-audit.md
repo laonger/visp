@@ -21,7 +21,7 @@
 | visp-agent/orchestrator.rs | 4 | 1 | 1 | 6 |
 | visp-daemon/main.rs | 1 | 1 | — | 2 |
 | visp-daemon/service.rs | 2 | 1 | — | 3 |
-| visp-cli/client.rs | — | 6 | — | 6 |
+| visp-tui/client.rs | — | 6 | — | 6 |
 | visp-mcp/manager.rs | — | 2 | — | 2 |
 | visp-codegraph/watcher.rs | — | 1 | — | 1 |
 | visp-llm/mock.rs | — | — | 1 | 1 |
@@ -75,12 +75,12 @@
 | B1 | `crates/visp-agent/src/orchestrator.rs:667` | `handle_done` — SubAgentComplete 发送 backpressure fallback（inbox full 时 spawn 发送） | 不挂载 parent；可加 `Span::current()` 简单追踪 |
 | B2 | `crates/visp-daemon/src/main.rs:362` | gRPC server 启动（`server::start_server`） | 独立 root span，不挂载 parent |
 | B3 | `crates/visp-daemon/src/service.rs:204` | codegraph background full index build | 独立 root span |
-| B4 | `crates/visp-cli/src/client.rs:112` | `ChatHandle::send_input` — fire-and-forget gRPC 消息发送 | 不挂载；保持轻量 |
-| B5 | `crates/visp-cli/src/client.rs:125` | `ChatHandle::send_ack` — fire-and-forget gRPC 消息发送 | 不挂载 |
-| B6 | `crates/visp-cli/src/client.rs:139` | `ChatHandle::send_response` — fire-and-forget gRPC 消息发送 | 不挂载 |
-| B7 | `crates/visp-cli/src/client.rs:151` | `ChatHandle::send_cancel` — fire-and-forget gRPC 消息发送 | 不挂载 |
-| B8 | `crates/visp-cli/src/client.rs:163` | `ChatHandle::send_join` — fire-and-forget gRPC 消息发送 | 不挂载 |
-| B9 | `crates/visp-cli/src/client.rs:176` | `ChatHandle::send_config_update` — fire-and-forget gRPC 消息发送 | 不挂载 |
+| B4 | `crates/visp-tui/src/client.rs:112` | `ChatHandle::send_input` — fire-and-forget gRPC 消息发送 | 不挂载；保持轻量 |
+| B5 | `crates/visp-tui/src/client.rs:125` | `ChatHandle::send_ack` — fire-and-forget gRPC 消息发送 | 不挂载 |
+| B6 | `crates/visp-tui/src/client.rs:139` | `ChatHandle::send_response` — fire-and-forget gRPC 消息发送 | 不挂载 |
+| B7 | `crates/visp-tui/src/client.rs:151` | `ChatHandle::send_cancel` — fire-and-forget gRPC 消息发送 | 不挂载 |
+| B8 | `crates/visp-tui/src/client.rs:163` | `ChatHandle::send_join` — fire-and-forget gRPC 消息发送 | 不挂载 |
+| B9 | `crates/visp-tui/src/client.rs:176` | `ChatHandle::send_config_update` — fire-and-forget gRPC 消息发送 | 不挂载 |
 | B10 | `crates/visp-mcp/src/manager.rs:86` | `McpManager::start_all` — 启动时逐个连接 MCP 服务器 | 独立 root span |
 | B11 | `crates/visp-mcp/src/manager.rs:238` | `McpManager::reconnect` — 重连 MCP 服务器 | 独立 root span |
 | B12 | `crates/visp-codegraph/src/watcher.rs:58` | `start_watching` — file watcher debounce loop | 独立 root span |
@@ -245,7 +245,7 @@ Step 3 注入时，按以下优先级处理：
 | 369 | **关键** | gRPC Chat stream — inbound handler（CLI→Orch） |
 | 608 | **关键** | gRPC Chat stream — outbound handler（Orch→CLI） |
 
-### visp-cli/src/client.rs（6 处 — 全部后台）
+### visp-tui/src/client.rs（6 处 — 全部后台）
 | 行号 | 分类 | 函数上下文 |
 |------|------|-----------|
 | 112 | 后台 | `send_input` fire-and-forget |

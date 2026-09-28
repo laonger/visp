@@ -75,7 +75,7 @@
 ### 2.2 Crate 依赖关系
 
 ```
-visp-cli ──────► visp-proto ──────► visp-core
+visp-tui ──────► visp-proto ──────► visp-core
                      ▲                   │
 visp-daemon ──────────┘      ┌────────────┼────────────────┐
                             ▼            ▼                ▼
@@ -91,7 +91,7 @@ visp-daemon ──────────┘      ┌────────�
 - **visp-codegraph**：代码智能引擎，依赖 tree-sitter。
 - **visp-mcp**：MCP 协议客户端实现。
 - **visp-daemon**：daemon 二进制，组装所有模块。
-- **visp-cli**：CLI 二进制，gRPC 客户端 + TUI。
+- **visp-tui**：CLI 二进制，gRPC 客户端 + TUI。
 
 ---
 
@@ -474,7 +474,7 @@ visp/
 │   │       ├── config.rs       # 配置加载
 │   │       └── service.rs      # Service 实现
 │   │
-│   └── visp-cli/                # CLI 二进制
+│   └── visp-tui/                # CLI 二进制
 │       └── src/
 │           ├── main.rs         # 入口
 │           ├── repl.rs         # REPL 模式

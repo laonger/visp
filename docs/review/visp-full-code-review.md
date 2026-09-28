@@ -16,7 +16,7 @@
 - **visp-codegraph**：0 严重 / 4 中 / 12 低 — ~~评分算法 bug ✅~~，哨兵值设计脆弱
 - **visp-context**：0 严重 / 0 中 / 5 低 — 无严重问题
 - **visp-daemon**：0 严重 / 3 中 / 9 低 — ~~死代码掩盖 ✅~~、~~MCP 优雅关闭 ✅~~、~~前缀歧义误导 ✅~~
-- **visp-cli**：0 严重 / 2 中 / 9 低 — ~~Box::leak 内存泄漏 ✅~~、~~VbwClient 重命名 ✅~~
+- **visp-tui**：0 严重 / 2 中 / 9 低 — ~~Box::leak 内存泄漏 ✅~~、~~VbwClient 重命名 ✅~~
 - **visp (launcher)**：0 严重 / 1 中 / 5 低 — 参数重复定义
 - **visp-db**：0 严重 / 4 中 / 2 低 — ~~skip_context 持久化丢失 ✅~~
 - **visp-mcp**：0 严重 / 5 中 / 4 低 — ~~SSE 多行解析 ✅~~，Clone 隐患
@@ -60,9 +60,9 @@
 
 **建议**：要么移除 `paths`，要么将 `required` 改为空数组并在 execute 中要求至少提供 path 或 paths 之一。
 
-### ~~A5. visp-cli — `Box::leak` 内存泄漏~~ ✅ 已修复
+### ~~A5. visp-tui — `Box::leak` 内存泄漏~~ ✅ 已修复
 
-**文件**：`crates/visp-cli/src/client.rs:116`、`app.rs:601`、`event.rs:815`
+**文件**：`crates/visp-tui/src/client.rs:116`、`app.rs:601`、`event.rs:815`
 **修复内容**：
 - `send_input()` 返回类型 `&'static str` → `String`
 - 移除 `Box::leak(rid.into_boxed_str())`，直接返回 `rid`
@@ -126,15 +126,15 @@
 5. **B27** — read_file session 不存在时回退到 `"."`（`crates/visp-daemon/src/service.rs:695-696`）。建议返回 `Status::not_found`。
 6. **B28** — search_symbols limit=0 强制变为 20（边界语义模糊）（`crates/visp-daemon/src/service.rs:734-735`）。建议改为 `if limit == 0 { 20 }` 并注释。
 
-### visp-cli
+### visp-tui
 
-1. ~~**B29** — 旧命名 `VbwClient`（`crates/visp-cli/src/main.rs:8`）。建议重命名为 `VispClient`。~~ ✅ 已修复
-2. **B30** — `syntect` 语法集/主题每次调用重新加载（`crates/visp-cli/src/app.rs:37-38`）。建议 `OnceLock` 或 `lazy_static` 缓存。
-3. **B31** — Regex 每次调用重新编译（`crates/visp-cli/src/app.rs:100`）。建议 `OnceLock<Regex>`。
+1. ~~**B29** — 旧命名 `VbwClient`（`crates/visp-tui/src/main.rs:8`）。建议重命名为 `VispClient`。~~ ✅ 已修复
+2. **B30** — `syntect` 语法集/主题每次调用重新加载（`crates/visp-tui/src/app.rs:37-38`）。建议 `OnceLock` 或 `lazy_static` 缓存。
+3. **B31** — Regex 每次调用重新编译（`crates/visp-tui/src/app.rs:100`）。建议 `OnceLock<Regex>`。
 
 ### visp (launcher)
 
-1. **B32** — CLI 参数在两个 crate 中重复定义（`crates/visp/src/main.rs` + `crates/visp-cli/src/main.rs`）。建议共享同一个参数结构。
+1. **B32** — CLI 参数在两个 crate 中重复定义（`crates/visp/src/main.rs` + `crates/visp-tui/src/main.rs`）。建议共享同一个参数结构。
 
 ### visp-db
 
@@ -215,17 +215,17 @@
 - `crates/visp-daemon/src/service.rs`：`create_session` 用值比较判断"是否设置"（脆弱）
 - `crates/visp-daemon/src/command/init.rs`：同步 IO 在 async fn 中
 
-### visp-cli
+### visp-tui
 
-- `crates/visp-cli/src/client.rs`：`#![allow(dead_code)]` 模块级掩盖检查
-- `crates/visp-cli/src/client.rs`：`recv()` 吞掉传输错误
-- `crates/visp-cli/src/app.rs`：`#![allow(dead_code)]` + `#![allow(clippy::bool_assert_comparison)]`
-- `crates/visp-cli/src/app.rs`：`insert_tool_result` 中未找到 call 时创建空 name 的 ToolCall
-- `crates/visp-cli/src/app.rs`：`result_summary` 只处理 `read_file/read_files`
-- `crates/visp-cli/src/event.rs`：Ctrl+C 处理在确认/普通模式中重复
-- `crates/visp-cli/src/theme.rs`：`USAGE_STYLE` 已废弃但映射存在
-- `crates/visp-cli/src/ui.rs`：状态栏 token 统计固定 36 字符宽度
-- `crates/visp-cli/src/ui.rs`：hint 行可能与输入区重叠
+- `crates/visp-tui/src/client.rs`：`#![allow(dead_code)]` 模块级掩盖检查
+- `crates/visp-tui/src/client.rs`：`recv()` 吞掉传输错误
+- `crates/visp-tui/src/app.rs`：`#![allow(dead_code)]` + `#![allow(clippy::bool_assert_comparison)]`
+- `crates/visp-tui/src/app.rs`：`insert_tool_result` 中未找到 call 时创建空 name 的 ToolCall
+- `crates/visp-tui/src/app.rs`：`result_summary` 只处理 `read_file/read_files`
+- `crates/visp-tui/src/event.rs`：Ctrl+C 处理在确认/普通模式中重复
+- `crates/visp-tui/src/theme.rs`：`USAGE_STYLE` 已废弃但映射存在
+- `crates/visp-tui/src/ui.rs`：状态栏 token 统计固定 36 字符宽度
+- `crates/visp-tui/src/ui.rs`：hint 行可能与输入区重叠
 
 ### visp (launcher)
 
@@ -261,7 +261,7 @@
 - **visp-codegraph**（~120+ 测试）— 质量：高。~~测试覆盖较好，但有低价值结构体测试。~~ ✅ 冗余测试已清理
 - **visp-context**（~20+ 测试）— 质量：高。孤儿过滤测试充分，缺少省略标记测试。
 - **visp-daemon**（35 测试）— 质量：**低**。~~缺少冗余测试~~ ✅ 已清理，缺少 read_file/search_symbols RPC 测试，chat 流测试。
-- **visp-cli**（~32 测试）— 质量：中。event.rs 无测试，ui.rs 无测试。
+- **visp-tui**（~32 测试）— 质量：中。event.rs 无测试，ui.rs 无测试。
 - **visp (launcher)**（6 测试）— 质量：**低**。缺少进程管理/健康检查测试。
 - **visp-db**（42 测试）— 质量：高。schema 迁移测试充分，~~但 skip_context 丢失测试未覆盖。~~ ✅ skip_context 持久化测试已补充
 - **visp-mcp**（89 测试）— 质量：高。数量多且覆盖全面，少数 CI 脆性测试。~~SSE 多行解析~~ ✅ 已修复

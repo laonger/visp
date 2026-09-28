@@ -37,7 +37,7 @@ visp 容器支持需要同时满足以下四个场景：
 ┌─────────────────── 宿主机 ───────────────────┐
 │                                               │
 │  ┌─────────┐     gRPC    ┌──────────────┐    │
-│  │ visp-cli │───────────>│ visp-daemon  │    │
+│  │ visp-tui │───────────>│ visp-daemon  │    │
 │  └─────────┘            │              │    │
 │                         │  ┌──────────┐ │    │
 │                         │  │Orchestr. │ │    │
@@ -474,7 +474,7 @@ CodeGraph 只需要读取源码文件，不需要在容器内执行命令。因�
 |---|---|
 | visp-llm | LLM 调用不涉及本地执行 |
 | visp-proto | gRPC 协议不变（project_path 已有） |
-| visp-cli | CLI 逻辑不变（容器对用户透明） |
+| visp-tui | CLI 逻辑不变（容器对用户透明） |
 | visp-db | SQLite 存储不进容器 |
 | visp-context | 上下文裁剪不涉及执行 |
 | visp-command | 斜杠命令解析不涉及执行 |

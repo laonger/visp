@@ -10,7 +10,7 @@
 Phase 1           Phase 2           Phase 3           Phase 4           Phase 5
 项目骨架            LLM + 工具         Agent + Daemon     CLI 前端           CodeGraph
   │                  │                   │                  │                  │
-  │── visp-core       │── visp-llm         │── Rule Engine    │── visp-cli        │── 解析器
+  │── visp-core       │── visp-llm         │── Rule Engine    │── visp-tui        │── 解析器
   │── visp-proto      │── visp-tools       │── Session Mgr    │── 流式输出       │── 索引
   │                  │                   │── Agent 循环     │── REPL           │── 查询
   │                  │                   │── visp-daemon ────│                  │── 持久化
@@ -86,7 +86,7 @@ cargo build      unit tests         首条 gRPC 连通      用户可交互     
 **目标**：实现终端交互界面，用户可通过 `vbw` 命令使用 visp。
 
 **交付物**：
-- `visp-cli` crate：gRPC 客户端、流式输出显示、基础 REPL 模式
+- `visp-tui` crate：gRPC 客户端、流式输出显示、基础 REPL 模式
 
 **验收标准**：
 - `vbw` 命令启动，自动连接 daemon（如 daemon 未运行则报清晰提示）

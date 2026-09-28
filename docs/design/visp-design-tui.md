@@ -237,7 +237,7 @@ thinking_budget_tokens = 2048  # Claude thinking 模式预算
 ### 10.2 CLI 参数
 
 ```bash
-visp-cli --model claude-sonnet-4-6 --thinking-budget 2048
+visp-tui --model claude-sonnet-4-6 --thinking-budget 2048
 ```
 
 `thinking_budget_tokens` 通过 `LlmConfig.extra` 传到 Anthropic API 请求体。
