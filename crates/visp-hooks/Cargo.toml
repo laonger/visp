@@ -6,6 +6,9 @@ edition.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+async-trait.workspace = true
+regex = "1"
+tokio.workspace = true
 
 [dev-dependencies]
 jsonschema = "0.33"

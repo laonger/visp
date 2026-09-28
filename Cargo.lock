@@ -5081,6 +5081,7 @@ dependencies = [
  "visp-core",
  "visp-db",
  "visp-fs",
+ "visp-hooks",
  "visp-llm",
  "visp-mcp",
  "visp-proto",
@@ -5113,9 +5114,12 @@ dependencies = [
 name = "visp-hooks"
 version = "0.5.1"
 dependencies = [
+ "async-trait",
  "jsonschema",
+ "regex",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
