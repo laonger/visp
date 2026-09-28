@@ -25,8 +25,8 @@ use visp_core::{
 use visp_daemon::bus::{BusEnvelope, EventBus};
 use visp_daemon::reload::{ReloadCore, ReloadDomain, ReloadItem};
 use visp_hooks::{
-    HookContext, HookEvent, HookEventName, HookPayload, Origin, SessionEndPayload, SessionSource,
-    VISP_HOOK_SCHEMA,
+    HookContext, HookEvent, HookEventName, HookPayload, Origin, PermissionOutcome,
+    PermissionResultPayload, SessionEndPayload, SessionSource, VISP_HOOK_SCHEMA,
 };
 use visp_mcp::manager::McpManager;
 use visp_proto::visp::{self as proto, coder_daemon_server::CoderDaemon};
@@ -168,6 +168,14 @@ fn create_llm_provider(config: &LlmModelConfig) -> Result<Arc<dyn LlmProvider>, 
     }
 }
 
+/// daemon 侧待响应的用户查询：回传通道 + 关联 session（`PermissionResult` 载荷需要）。
+struct PendingQuery {
+    /// 把 `UserResponse` 直接回传给等待中的 agent loop。
+    respond: mpsc::Sender<UserQueryResult>,
+    /// 该查询所属 session（取自 `UserQuery` 帧）。
+    session_id: String,
+}
+
 pub struct CoderDaemonService {
     #[allow(dead_code)]
     provider: Arc<StdRwLock<Arc<dyn LlmProvider>>>,
@@ -209,7 +217,8 @@ pub struct CoderDaemonService {
     /// 关停期的 hook 有界 drain 宿主（1a 为空实现，1b-2c 接真实执行器）。
     hook_drain: Arc<dyn HookDrainHost>,
     /// 终止态抑制标记：首次关停后置位，`SessionEnd` 只发一次。
-    shutting_down: AtomicBool,
+    /// 以 `Arc` 共享给 Chat 的 inbound 任务，使 `PermissionResult` 发射点也能感知终止态。
+    shutting_down: Arc<AtomicBool>,
 }
 
 // gRPC 辅助方法返回 Result<_, tonic::Status>（约 176 字节），
@@ -314,7 +323,7 @@ impl CoderDaemonService {
             client_tx,
             shutdown_notify,
             hook_drain,
-            shutting_down: AtomicBool::new(false),
+            shutting_down: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -326,7 +335,6 @@ impl CoderDaemonService {
     }
 
     /// 关停是否已开始（终止态：此后不再派发 hook 事件）。
-    #[cfg(test)]
     fn is_shutting_down(&self) -> bool {
         self.shutting_down.load(Ordering::SeqCst)
     }
@@ -334,16 +342,14 @@ impl CoderDaemonService {
     /// 发布 daemon 级关停 `SessionEnd`（设计 D13 / §6.4）。
     ///
     /// `ShutdownRequest` 不携带 session id，故以空 `session_id` 表达 daemon 级终态；
-    /// per-session 细化留待 1b-1c（活跃会话追踪）。
+    /// per-session 细化留待后续（活跃会话追踪，历史会话会误发，见已知限制）。
     fn publish_shutdown_session_end(&self) {
         let event = HookEvent {
             context: HookContext {
                 schema: VISP_HOOK_SCHEMA,
                 hook_event_name: HookEventName::SessionEnd,
                 session_id: String::new(),
-                cwd: std::env::current_dir()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default(),
+                cwd: hook_cwd(),
                 source: SessionSource::Startup,
                 origin: Origin::Other,
                 seq: None,
@@ -351,6 +357,28 @@ impl CoderDaemonService {
             payload: HookPayload::SessionEnd(SessionEndPayload {
                 reason: "shutdown".to_string(),
                 exit_code: Some(0),
+            }),
+        };
+        self.bus.publish(BusEvent::Hook(event));
+    }
+
+    /// 发布会话删除 `SessionEnd`（设计 §6.4：`delete_session` 成功后）。
+    ///
+    /// `reason="delete"`、`exit_code=None`（设计 §6.2）。终止态下跳过。
+    fn publish_session_deleted(&self, session_id: &str) {
+        let event = HookEvent {
+            context: HookContext {
+                schema: VISP_HOOK_SCHEMA,
+                hook_event_name: HookEventName::SessionEnd,
+                session_id: session_id.to_string(),
+                cwd: hook_cwd(),
+                source: SessionSource::Startup,
+                origin: Origin::Other,
+                seq: None,
+            },
+            payload: HookPayload::SessionEnd(SessionEndPayload {
+                reason: "delete".to_string(),
+                exit_code: None,
             }),
         };
         self.bus.publish(BusEvent::Hook(event));
@@ -525,6 +553,10 @@ impl CoderDaemon for CoderDaemonService {
         self.session_mgr
             .delete(&session_id)
             .map_err(|e| Status::internal(e.to_string()))?;
+        // 删除成功后发布会话级 `SessionEnd`（设计 §6.4）；终止态下跳过（幂等抑制）。
+        if !self.is_shutting_down() {
+            self.publish_session_deleted(&session_id);
+        }
         Ok(Response::new(()))
     }
 
@@ -551,12 +583,15 @@ impl CoderDaemon for CoderDaemonService {
         // Shared pending user queries: maps query_id → respond sender
         // Used to route UserResponse from CLI back to the agent loop that's waiting
         // for it. This is necessary because the event bypasses global_tx.
-        let pending_queries: Arc<Mutex<HashMap<String, mpsc::Sender<UserQueryResult>>>> =
+        let pending_queries: Arc<Mutex<HashMap<String, PendingQuery>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         // ── Inbound: CLI → Orchestrator / Pending Queries ──
         let pending_inbound = pending_queries.clone();
         let response_tx_inbound = response_tx.clone();
+        // `PermissionResult` 发射点需要总线与终止态标记（设计 §6.4）。
+        let bus_inbound = self.bus.clone();
+        let shutting_down_inbound = self.shutting_down.clone();
         tokio::spawn(async move {
             while let Some(msg_result) = in_stream.next().await {
                 let msg = match msg_result {
@@ -690,21 +725,18 @@ impl CoderDaemon for CoderDaemonService {
                         let text = resp.text;
                         let selected_index = resp.selected_index;
 
-                        // Try daemon-level pending queries first (direct route to agent loop)
-                        let responded = {
-                            let mut map = pending_inbound.lock().unwrap();
-                            if let Some(respond) = map.remove(&query_id) {
-                                let _ = respond.try_send(UserQueryResult {
-                                    selected_index,
-                                    text: text.clone(),
-                                });
-                                true
-                            } else {
-                                false
-                            }
-                        };
+                        // 先路由 daemon 侧 pending 查询（直达等待中的 agent loop）；
+                        // 命中的单一发布点在此发出 `PermissionResult`（设计 §6.4）。
+                        let responded = route_daemon_user_response(
+                            &bus_inbound,
+                            &pending_inbound,
+                            &shutting_down_inbound,
+                            &query_id,
+                            selected_index,
+                            &text,
+                        );
                         if !responded {
-                            // Fall back to orchestrator
+                            // 未命中：过期/外部响应，回退 orchestrator（不发布 hook 事件）。
                             let cli_msg =
                                 visp_agent::orchestrator::ClientMessage::UserQueryResponse {
                                     query_id,
@@ -1196,13 +1228,102 @@ impl CoderDaemon for CoderDaemonService {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/// hook 事件信封的 `cwd`：daemon 侧事实无固定工作目录，取进程当前目录。
+fn hook_cwd() -> String {
+    std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default()
+}
+
+/// 由 `UserResponse` 的 `selected_index`/`text` 推导 `PermissionResult.outcome`。
+///
+/// `-1` 在协议中承载两种语义（`visp.proto`：-1 = "Other" 自定义输入，`text` 为原文）；
+/// agent_loop 亦以 `-1` 表达取消。故：非负索引或带文本的 -1 视为 `selected`，
+/// 仅 -1 且文本为空视为 `cancelled`。
+fn permission_outcome(selected_index: i32, text: &str) -> PermissionOutcome {
+    if selected_index >= 0 || !text.is_empty() {
+        PermissionOutcome::Selected
+    } else {
+        PermissionOutcome::Cancelled
+    }
+}
+
+/// 发布 `PermissionResult`（设计 §6.4：daemon 响应路由成功后的**单一发布点**）。
+fn publish_permission_result(
+    bus: &EventBus,
+    session_id: &str,
+    query_id: &str,
+    selected_index: i32,
+    text: &str,
+) {
+    let event = HookEvent {
+        context: HookContext {
+            schema: VISP_HOOK_SCHEMA,
+            hook_event_name: HookEventName::PermissionResult,
+            session_id: session_id.to_string(),
+            cwd: hook_cwd(),
+            // daemon 侧无 `source`/`origin` 事实来源，沿用既有约定（唯一客户端为 TUI）。
+            source: SessionSource::Startup,
+            origin: Origin::Tui,
+            seq: None,
+        },
+        payload: HookPayload::PermissionResult(PermissionResultPayload {
+            query_id: query_id.to_string(),
+            outcome: permission_outcome(selected_index, text),
+            selected_index: selected_index as i64,
+        }),
+    };
+    bus.publish(BusEvent::Hook(event));
+}
+
+/// 把一条 `UserResponse` 路由回 daemon 侧等待中的 agent loop（`pending` 命中），
+/// 并在**路由成功后**发布一次 `PermissionResult`。
+///
+/// 返回 `true` 表示已在 daemon 层消费（命中），调用方**不得**再走 orchestrator 回退；
+/// 返回 `false` 表示未命中（过期/外部响应），由调用方回退，且**不发布**任何 hook 事件。
+///
+/// 仅当 `try_send` 成功（确实送达等待者）才发布：通道已关闭/已满（等待者已退出）视为
+/// 过期响应，不产生事实。终止态（`shutting_down`）下跳过发布（设计：`SessionEnd` 之后
+/// 不再派发 hook 事件）。
+fn route_daemon_user_response(
+    bus: &EventBus,
+    pending: &Mutex<HashMap<String, PendingQuery>>,
+    shutting_down: &AtomicBool,
+    query_id: &str,
+    selected_index: i32,
+    text: &str,
+) -> bool {
+    let entry = pending.lock().unwrap().remove(query_id);
+    let Some(entry) = entry else {
+        // 未命中：过期/外部响应，交由调用方回退，不发布。
+        return false;
+    };
+
+    if entry
+        .respond
+        .try_send(UserQueryResult {
+            selected_index,
+            text: text.to_string(),
+        })
+        .is_err()
+    {
+        // 命中但送达失败（等待者已退出/通道满）：视为过期，既不发布也不回退。
+        return true;
+    }
+
+    if !shutting_down.load(Ordering::SeqCst) {
+        publish_permission_result(bus, &entry.session_id, query_id, selected_index, text);
+    }
+    true
+}
+
 /// outbound 任务：把总线显示域帧转发给连接；订阅者滞后（`Lagged`）时对连接
 /// 当前的**目标 session** 做一次 join 式增量 replay（去重 + 节流）。`Closed`
 /// 仍 `break`；replay 失败仅日志，绝不影响主转发流程。
 fn spawn_outbound(
     mut bus_rx: tokio::sync::broadcast::Receiver<BusEnvelope>,
     response_tx: mpsc::Sender<Result<proto::ServerMessage, Status>>,
-    pending_queries: Arc<Mutex<HashMap<String, mpsc::Sender<UserQueryResult>>>>,
+    pending_queries: Arc<Mutex<HashMap<String, PendingQuery>>>,
     session_mgr: Arc<SessionManager>,
     replay_state: Arc<Mutex<ReplayState>>,
 ) -> tokio::task::JoinHandle<()> {
@@ -1233,10 +1354,13 @@ fn spawn_outbound(
                 } => {
                     // Store the respond sender so the inbound task can route
                     // UserResponse back directly to the waiting agent loop.
-                    pending_queries
-                        .lock()
-                        .unwrap()
-                        .insert(query_id.clone(), respond);
+                    pending_queries.lock().unwrap().insert(
+                        query_id.clone(),
+                        PendingQuery {
+                            respond,
+                            session_id: sid.clone(),
+                        },
+                    );
                     let proto_msg = proto::ServerMessage {
                         payload: Some(proto::server_message::Payload::UserQuery(
                             proto::UserQuery {
@@ -1849,7 +1973,7 @@ mod tests {
             client_tx,
             shutdown_notify: Arc::new(Notify::new()),
             hook_drain: Arc::new(crate::shutdown::NoopHookDrain),
-            shutting_down: AtomicBool::new(false),
+            shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1877,7 +2001,7 @@ mod tests {
         let shutdown_notify = Arc::new(Notify::new());
         service.shutdown_notify = shutdown_notify.clone();
         service.hook_drain = hook_drain;
-        service.shutting_down = AtomicBool::new(false);
+        service.shutting_down = Arc::new(AtomicBool::new(false));
         (service, cancel_rx, shutdown_notify, bus)
     }
 
@@ -2191,7 +2315,7 @@ mod tests {
             client_tx,
             shutdown_notify: Arc::new(Notify::new()),
             hook_drain: Arc::new(crate::shutdown::NoopHookDrain),
-            shutting_down: AtomicBool::new(false),
+            shutting_down: Arc::new(AtomicBool::new(false)),
         };
 
         let request = tonic::Request::new(proto::CreateSessionRequest {
@@ -2244,7 +2368,7 @@ mod tests {
             client_tx,
             shutdown_notify: Arc::new(Notify::new()),
             hook_drain: Arc::new(crate::shutdown::NoopHookDrain),
-            shutting_down: AtomicBool::new(false),
+            shutting_down: Arc::new(AtomicBool::new(false)),
         };
 
         let request = tonic::Request::new(proto::CreateSessionRequest {
@@ -2322,7 +2446,7 @@ mod tests {
             client_tx,
             shutdown_notify: Arc::new(Notify::new()),
             hook_drain: Arc::new(crate::shutdown::NoopHookDrain),
-            shutting_down: AtomicBool::new(false),
+            shutting_down: Arc::new(AtomicBool::new(false)),
         };
 
         let request = tonic::Request::new(proto::CreateSessionRequest {
@@ -2398,7 +2522,7 @@ mod tests {
             client_tx,
             shutdown_notify: Arc::new(Notify::new()),
             hook_drain: Arc::new(crate::shutdown::NoopHookDrain),
-            shutting_down: AtomicBool::new(false),
+            shutting_down: Arc::new(AtomicBool::new(false)),
         };
 
         let request = tonic::Request::new(proto::CreateSessionRequest {
@@ -4821,4 +4945,187 @@ mod tests {
             .await
             .expect("Notify 仍须触发");
     }
+
+    // ── 1b-1c：daemon 侧事件发射（PermissionResult / 会话删除 SessionEnd）──────
+
+    /// 构造一个已登记 `query_id` → 等待者的 daemon 侧 pending 表。
+    fn pending_with(
+        query_id: &str,
+        session_id: &str,
+    ) -> (
+        Arc<Mutex<HashMap<String, PendingQuery>>>,
+        mpsc::Receiver<UserQueryResult>,
+    ) {
+        let (respond, rx) = mpsc::channel(1);
+        let mut map = HashMap::new();
+        map.insert(
+            query_id.to_string(),
+            PendingQuery {
+                respond,
+                session_id: session_id.to_string(),
+            },
+        );
+        (Arc::new(Mutex::new(map)), rx)
+    }
+
+    fn hook_events_after(
+        sub: &mut tokio::sync::broadcast::Receiver<BusEnvelope>,
+    ) -> Vec<HookEvent> {
+        let mut hooks = Vec::new();
+        while let Ok(env) = sub.try_recv() {
+            if let BusEvent::Hook(event) = env.event {
+                hooks.push(event);
+            }
+        }
+        hooks
+    }
+
+    /// 29 / 31. daemon map 命中 → 发布**一次** `PermissionResult`（query_id 关联正确、
+    /// outcome/selected_index 正确）；重复响应不再发布。
+    #[tokio::test]
+    async fn permission_result_published_once_on_daemon_hit() {
+        let bus = Arc::new(EventBus::new());
+        let mut sub = bus.subscribe();
+        let (pending, mut respond_rx) = pending_with("q-1", "sess-1");
+        let flag = AtomicBool::new(false);
+
+        assert!(
+            route_daemon_user_response(&bus, &pending, &flag, "q-1", 2, ""),
+            "命中 daemon map 应返回 true"
+        );
+        // 响应确实路由回等待者。
+        assert_eq!(respond_rx.try_recv().unwrap().selected_index, 2);
+
+        let env = sub.try_recv().expect("命中应发布 PermissionResult");
+        match env.event {
+            BusEvent::Hook(event) => {
+                assert_eq!(event.event_name(), HookEventName::PermissionResult);
+                assert_eq!(event.context.session_id, "sess-1");
+                match event.payload {
+                    HookPayload::PermissionResult(p) => {
+                        assert_eq!(p.query_id, "q-1");
+                        assert_eq!(p.outcome, PermissionOutcome::Selected);
+                        assert_eq!(p.selected_index, 2);
+                    }
+                    other => panic!("expected PermissionResult payload, got {other:?}"),
+                }
+            }
+            BusEvent::Frame(_) => panic!("expected Hook bus event, got Frame"),
+        }
+        assert!(sub.try_recv().is_err(), "命中只应发布一次");
+
+        // 重复/过期响应：map 已空 → 不命中、不再发布，返回 false 供调用方回退。
+        assert!(
+            !route_daemon_user_response(&bus, &pending, &flag, "q-1", 2, ""),
+            "重复响应不应再命中"
+        );
+        assert!(sub.try_recv().is_err(), "重复响应不得重复发布");
+    }
+
+    /// 30. 未命中（过期/外部响应）→ 不发布，返回 false 走 orchestrator 回退。
+    #[tokio::test]
+    async fn permission_result_not_published_on_fallback() {
+        let bus = Arc::new(EventBus::new());
+        let mut sub = bus.subscribe();
+        let (pending, _respond_rx) = pending_with("q-1", "sess-1");
+        let flag = AtomicBool::new(false);
+
+        assert!(
+            !route_daemon_user_response(&bus, &pending, &flag, "other-q", 0, ""),
+            "未命中应返回 false"
+        );
+        assert!(
+            sub.try_recv().is_err(),
+            "orchestrator 回退路径不得发布 PermissionResult"
+        );
+    }
+
+    /// `PermissionResult.outcome` 映射：非负索引为选择；-1 且带文本为 "Other" 选择；
+    /// -1 且文本为空为取消。
+    #[test]
+    fn permission_outcome_maps_selection_other_and_cancel() {
+        assert_eq!(permission_outcome(1, ""), PermissionOutcome::Selected);
+        assert_eq!(
+            permission_outcome(-1, "custom"),
+            PermissionOutcome::Selected
+        );
+        assert_eq!(permission_outcome(-1, ""), PermissionOutcome::Cancelled);
+    }
+
+    /// 32. `delete_session` → `SessionEnd(reason=delete, exit_code=None, session_id)`。
+    #[tokio::test]
+    async fn delete_session_emits_session_end() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let (service, bus) = make_service_with_bus(mgr.clone());
+        let mut sub = bus.subscribe();
+
+        let session = mgr.create(Path::new("/tmp"), LlmConfig::default()).unwrap();
+        service
+            .delete_session(Request::new(proto::DeleteSessionRequest {
+                session_id: session.id.clone(),
+            }))
+            .await
+            .unwrap();
+
+        let env = sub.try_recv().expect("删除会话应发布 SessionEnd");
+        match env.event {
+            BusEvent::Hook(event) => {
+                assert_eq!(event.event_name(), HookEventName::SessionEnd);
+                assert_eq!(event.context.session_id, session.id);
+                match event.payload {
+                    HookPayload::SessionEnd(p) => {
+                        assert_eq!(p.reason, "delete");
+                        assert_eq!(p.exit_code, None);
+                    }
+                    other => panic!("expected SessionEnd payload, got {other:?}"),
+                }
+            }
+            BusEvent::Frame(_) => panic!("expected Hook bus event, got Frame"),
+        }
+    }
+
+    /// 34. 终止态抑制：关停 `SessionEnd` 之后，daemon 侧发射点不再派发任何 hook 事件
+    /// （删除会话不发 `SessionEnd`；即使 map 命中也不发 `PermissionResult`）。
+    #[tokio::test]
+    async fn daemon_emitters_suppressed_after_shutdown() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let drain = Arc::new(CountingDrain::new());
+        let (service, _cancel_rx, _notify, bus) = make_service_with_shutdown(mgr.clone(), drain);
+        let mut sub = bus.subscribe();
+
+        service.shutdown(shutdown_request()).await.unwrap();
+        assert!(service.is_shutting_down());
+
+        // 终止态下删除会话：不得再发 SessionEnd。
+        let session = mgr.create(Path::new("/tmp"), LlmConfig::default()).unwrap();
+        service
+            .delete_session(Request::new(proto::DeleteSessionRequest {
+                session_id: session.id,
+            }))
+            .await
+            .unwrap();
+
+        // 终止态下 map 命中：路由仍成功，但不得发 PermissionResult。
+        let (pending, mut respond_rx) = pending_with("q-1", "sess-1");
+        assert!(route_daemon_user_response(
+            &bus,
+            &pending,
+            service.shutting_down.as_ref(),
+            "q-1",
+            0,
+            ""
+        ));
+        assert_eq!(respond_rx.try_recv().unwrap().selected_index, 0);
+
+        let hooks = hook_events_after(&mut sub);
+        assert_eq!(hooks.len(), 1, "SessionEnd 之后不得再派发 hook 事件");
+        assert_eq!(hooks[0].event_name(), HookEventName::SessionEnd);
+        assert_eq!(
+            hooks[0].context.session_id, "",
+            "唯一事件应为 daemon 级关停 SessionEnd"
+        );
+    }
+
+    // 35. 异常退出（进程被杀 / panic / SIGKILL）无 `SessionEnd`：
+    // 该场景无法在进程内自动断言（进程已消失），标注为手工验收项。
 }
