@@ -4,12 +4,15 @@
 # herdr 集成的外置形态（herdr 设计 §11.1）：用户在 visp 配置中自行添加一条
 # [hooks] 规则指向本脚本，visp 不内置任何 herdr Rust 代码。
 #
-# 规则示意（用户按文档自行添加，真实字段以 [hooks] 文档为准）：
-#   id      = "herdr"
-#   event   = ["UserPromptSubmit", "PermissionRequest", "Stop", "StopFailure",
-#              "AgentRunEnd", "SubagentStop", "SessionStart"]
-#   command = "sh"
-#   args    = ["/path/to/visp/assets/hooks/herdr.hook.sh"]
+# 规则示意（用户自行添加到 ~/.config/visp/daemon.toml；注意是 [[hooks.rules]]，
+# command 用脚本绝对路径、直接执行、无需 sh；~ 不会被展开）：
+#   [[hooks.rules]]
+#   id         = "herdr"
+#   event      = ["SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop",
+#                 "StopFailure", "AgentRunEnd", "SubagentStop"]
+#   command    = "/abs/path/to/.config/visp/hooks/herdr.hook.sh"
+#   on_full    = "coalesce_latest"
+#   timeout_ms = 2000
 #
 # 依赖环境变量（visp hook 执行器白名单继承 + herdr pane 注入）：
 #   VISP_HOOK_EVENT  事件名（PascalCase）——仅以此判定，**不解析 stdin JSON**
