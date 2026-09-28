@@ -65,6 +65,12 @@ impl EventBus {
     pub fn seq(&self) -> u64 {
         self.seq.load(Ordering::Relaxed)
     }
+
+    /// 当前订阅者数量（含常持的 sentinel）；接线测试用于验证「零规则不订阅」。
+    #[cfg(test)]
+    pub(crate) fn receiver_count(&self) -> usize {
+        self.tx.receiver_count()
+    }
 }
 
 /// 让 daemon 总线满足 `visp-core` 的发布抽象，供 `Orchestrator` / reload / watch

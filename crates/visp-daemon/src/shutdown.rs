@@ -3,8 +3,8 @@
 //! 三个触发源——Ctrl+C、Shutdown RPC 经 [`Notify`] 的唤醒、SIGTERM——汇入同一
 //! 清理路径：停 watcher → 关 MCP → abort gRPC server。
 //!
-//! hook 侧的**有界 drain** 由可注入的 [`HookDrainHost`] 承接：1a 阶段用
-//! [`NoopHookDrain`]（无执行器），真实执行器在 1b-2c 接线。
+//! hook 侧的**有界 drain** 由可注入的 [`HookDrainHost`] 承接：有 hook 规则时为真实
+//! 执行器（`main` 启动接线），零规则时用 [`NoopHookDrain`]（无执行器）。
 
 use std::sync::Arc;
 use std::time::Duration;

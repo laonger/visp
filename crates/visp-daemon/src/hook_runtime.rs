@@ -23,8 +23,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::sync::broadcast;
 
-use visp_config::hooks::{HookRule, OnFull};
+use visp_config::hooks::{HookRule, HookScope, HooksConfig, OnFull};
 use visp_config::trust::{HookTrustStore, TrustStatus, verify};
 use visp_core::bus::BusEvent;
 use visp_hooks::{
@@ -32,6 +33,7 @@ use visp_hooks::{
     ProcessSpec, QueuePolicy, SessionSource, SpawnHandler,
 };
 
+use crate::bus::EventBus;
 use crate::hook_map::{MapCtx, map_frame};
 
 /// 关停期的 hook drain 宿主（设计 D13）。
@@ -113,6 +115,100 @@ fn resolve_cwd(cwd: Option<&str>, project_path: &str) -> Option<PathBuf> {
 /// 调用方按「无项目规则」处理）。
 pub fn project_rules_trusted(project: &Path, rules: &[HookRule], store: &HookTrustStore) -> bool {
     matches!(verify(project, rules, store), TrustStatus::Trusted)
+}
+
+/// 未受信任的项目规则被排除时的统一告警。
+fn warn_untrusted_project_rules(project_rules: &[HookRule]) {
+    tracing::warn!(
+        count = project_rules.len(),
+        "项目 hook 规则未受信任，本次不加载"
+    );
+}
+
+/// 接线 hook 运行时到事件总线（进程装配入口）。
+///
+/// 规则取自合并后的 [`HooksConfig`]：按 [`HookScope`] 拆分全局/项目规则，项目规则经
+/// [`project_rules_trusted`] 门控。**生效规则为空**（无规则，或仅有未受信任的项目规则）
+/// 时返回 `None`——不构建执行器、不订阅总线、零开销。有生效规则时以默认
+/// [`SpawnHandler`] 构建运行时、订阅总线并 spawn 消费循环：`BusEnvelope.event` 与 `seq`
+/// 逐条交给 [`HookRuntime::dispatch_event`]（`Lagged` 记 warn 后继续，`Closed` 退出）。
+///
+/// 返回的运行时兼作关停期 [`HookDrainHost`]。
+pub fn setup_hook_runtime(
+    config: &HooksConfig,
+    project_path: &Path,
+    trust_store: &HookTrustStore,
+    bus: &Arc<EventBus>,
+) -> Option<Arc<HookRuntime>> {
+    setup_hook_runtime_inner(config, project_path, trust_store, bus, None)
+}
+
+/// 可注入 [`Handler`] 的接线入口（测试 / 内嵌消费者用）。
+///
+/// 与 [`setup_hook_runtime`] 行为一致，仅以 `handler` 替代默认 [`SpawnHandler`]。
+pub fn setup_hook_runtime_with_handler(
+    config: &HooksConfig,
+    project_path: &Path,
+    trust_store: &HookTrustStore,
+    bus: &Arc<EventBus>,
+    handler: Arc<dyn Handler>,
+) -> Option<Arc<HookRuntime>> {
+    setup_hook_runtime_inner(config, project_path, trust_store, bus, Some(handler))
+}
+
+/// 接线主体：规则拆分 + 信任门控 + 零开销短路 + 构建 + 订阅 + 消费循环。
+fn setup_hook_runtime_inner(
+    config: &HooksConfig,
+    project_path: &Path,
+    trust_store: &HookTrustStore,
+    bus: &Arc<EventBus>,
+    handler: Option<Arc<dyn Handler>>,
+) -> Option<Arc<HookRuntime>> {
+    let global: Vec<HookRule> = config
+        .rules
+        .iter()
+        .filter(|rule| rule.scope == HookScope::Global)
+        .cloned()
+        .collect();
+    let project: Vec<HookRule> = config
+        .rules
+        .iter()
+        .filter(|rule| rule.scope == HookScope::Project)
+        .cloned()
+        .collect();
+    let trusted = project_rules_trusted(project_path, &project, trust_store);
+
+    // 生效规则为零 → 不构建、不订阅（零开销）。未受信任的项目规则在此显式告警，
+    // 不进入下方 [`HookRuntime::build`] 的 `select_rules` 路径。
+    if global.is_empty() && (project.is_empty() || !trusted) {
+        if !project.is_empty() {
+            warn_untrusted_project_rules(&project);
+        }
+        return None;
+    }
+
+    let map_ctx = session_ctx(project_path.to_string_lossy());
+    let runtime = match handler {
+        Some(handler) => {
+            HookRuntime::build_with_handler(&global, &project, trusted, map_ctx, handler)
+        }
+        None => HookRuntime::build(&global, &project, trusted, map_ctx),
+    };
+    let runtime = Arc::new(runtime);
+    let mut receiver = bus.subscribe();
+    let consumer = Arc::clone(&runtime);
+    tokio::spawn(async move {
+        loop {
+            match receiver.recv().await {
+                Ok(envelope) => consumer.dispatch_event(envelope.event, envelope.seq),
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(skipped, "hook 运行时消费滞后，丢弃部分事件");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+    Some(runtime)
 }
 
 /// hook 运行时：持有执行器与映射上下文，向总线消费方提供分发与 drain 入口。
@@ -209,10 +305,7 @@ fn select_rules<'a>(
     if trusted {
         selected.extend(project_rules.iter());
     } else if !project_rules.is_empty() {
-        tracing::warn!(
-            count = project_rules.len(),
-            "项目 hook 规则未受信任，本次不加载"
-        );
+        warn_untrusted_project_rules(project_rules);
     }
     selected
 }
@@ -267,7 +360,9 @@ mod tests {
     use std::collections::HashMap as Map;
     use std::time::Instant;
 
-    use visp_config::hooks::{DEFAULT_HOOK_TIMEOUT_MS, HookScope};
+    use crate::bus::EventBus;
+    use visp_config::hooks::{DEFAULT_HOOK_TIMEOUT_MS, HookScope, HooksConfig};
+    use visp_config::trust::HookTrustStore;
     use visp_core::agent::{AgentEvent, AgentEventFrame};
     use visp_hooks::{
         HookContext, HookEventName, RecordingHandler, StopPayload, StopStatus, VISP_HOOK_SCHEMA,
@@ -602,5 +697,146 @@ mod tests {
         let runtime = runtime_with(&[], &[], false, handler);
         let host: Arc<dyn HookDrainHost> = Arc::new(runtime);
         host.drain(Duration::from_millis(10)).await;
+    }
+
+    // ── 接线 helper（bus → dispatch；任务 1b-2c-b） ──
+
+    /// 10a. 零规则 → 不构建、不订阅（零开销）。
+    #[tokio::test]
+    async fn setup_without_rules_returns_none_and_does_not_subscribe() {
+        let bus = Arc::new(EventBus::new());
+        let before = bus.receiver_count();
+
+        assert!(
+            setup_hook_runtime(
+                &HooksConfig::default(),
+                Path::new(PROJECT),
+                &HookTrustStore::default(),
+                &bus,
+            )
+            .is_none()
+        );
+        assert_eq!(bus.receiver_count(), before, "零规则不应订阅总线");
+    }
+
+    /// 10b. 有全局规则 → `Some`；总线发布可映射 `Frame` 后 handler 被调用；
+    ///      返回的运行时可用作 `Arc<dyn HookDrainHost>`。
+    #[tokio::test]
+    async fn setup_with_global_rule_wires_bus_frame_to_handler() {
+        let bus = Arc::new(EventBus::new());
+        let handler = Arc::new(RecordingHandler::new());
+        let mut rule = rule("global");
+        rule.event = vec![HookEventName::ToolCallRequested];
+        rule.matcher = Some("^Bash$".to_string());
+        let config = HooksConfig { rules: vec![rule] };
+
+        let runtime = setup_hook_runtime_with_handler(
+            &config,
+            Path::new(PROJECT),
+            &HookTrustStore::default(),
+            &bus,
+            handler.clone(),
+        )
+        .expect("有规则应构建运行时");
+
+        bus.publish(tool_frame());
+        tokio::time::timeout(Duration::from_secs(1), handler.wait_for(1))
+            .await
+            .expect("Frame 应经总线映射后被派发");
+        let records = handler.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].rule_id, "global");
+
+        let host: Arc<dyn HookDrainHost> = runtime;
+        host.drain(Duration::from_millis(10)).await;
+    }
+
+    /// 10c. 未注入 handler 时走默认 `SpawnHandler` 构建路径。
+    #[tokio::test]
+    async fn setup_with_default_handler_returns_runtime() {
+        let bus = Arc::new(EventBus::new());
+        let mut rule = rule("global");
+        rule.command = "/bin/true".to_string();
+        let config = HooksConfig { rules: vec![rule] };
+
+        let runtime = setup_hook_runtime(
+            &config,
+            Path::new(PROJECT),
+            &HookTrustStore::default(),
+            &bus,
+        )
+        .expect("有全局规则应构建运行时");
+
+        let host: Arc<dyn HookDrainHost> = runtime;
+        host.drain(Duration::from_millis(10)).await;
+    }
+
+    /// 10d. 项目级规则未受信任 → 被排除（不派发）；全局规则不受影响。
+    #[tokio::test]
+    async fn setup_excludes_untrusted_project_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        std::fs::create_dir_all(project.join(".visp/hooks")).unwrap();
+        std::fs::write(project.join(".visp/hooks/a.sh"), "#!/bin/sh\n").unwrap();
+
+        let mut project_rule = rule("project-rule");
+        project_rule.scope = HookScope::Project;
+        project_rule.command = ".visp/hooks/a.sh".to_string();
+        project_rule.event = vec![HookEventName::ToolCallRequested];
+
+        let mut global_rule = rule("global");
+        global_rule.event = vec![HookEventName::ToolCallRequested];
+
+        let config = HooksConfig {
+            rules: vec![global_rule, project_rule],
+        };
+        let bus = Arc::new(EventBus::new());
+        let handler = Arc::new(RecordingHandler::new());
+        setup_hook_runtime_with_handler(
+            &config,
+            project,
+            &HookTrustStore::default(),
+            &bus,
+            handler.clone(),
+        )
+        .expect("有全局规则应构建运行时");
+
+        bus.publish(tool_frame());
+        tokio::time::timeout(Duration::from_secs(1), handler.wait_for(1))
+            .await
+            .expect("全局规则应被派发");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let ids: Vec<String> = handler
+            .records()
+            .into_iter()
+            .map(|record| record.rule_id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["global".to_string()],
+            "未受信任的项目规则不得派发"
+        );
+    }
+
+    /// 10e. 仅有未受信任的项目规则 → 生效规则为零 → 返回 `None`（不订阅）。
+    #[tokio::test]
+    async fn setup_with_only_untrusted_project_rules_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        std::fs::create_dir_all(project.join(".visp/hooks")).unwrap();
+        std::fs::write(project.join(".visp/hooks/a.sh"), "#!/bin/sh\n").unwrap();
+
+        let mut project_rule = rule("project-rule");
+        project_rule.scope = HookScope::Project;
+        project_rule.command = ".visp/hooks/a.sh".to_string();
+        let config = HooksConfig {
+            rules: vec![project_rule],
+        };
+        let bus = Arc::new(EventBus::new());
+        let before = bus.receiver_count();
+
+        assert!(setup_hook_runtime(&config, project, &HookTrustStore::default(), &bus).is_none());
+        assert_eq!(bus.receiver_count(), before, "未信任项目规则不应订阅总线");
     }
 }

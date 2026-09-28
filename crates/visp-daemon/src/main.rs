@@ -558,6 +558,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //         orchestrator/reload/watch 发布，每个 Chat 连接独立订阅。
     let bus = Arc::new(visp_daemon::bus::EventBus::new());
 
+    // 8.7.2. hook 运行时接线（设计 §5 D13）：零生效规则 → None（不订阅、零开销）；
+    //         有规则 → 订阅总线（Frame 经 hook_map 映射后派发），同一运行时在下方
+    //         作为关停 drain 宿主注入 service。订阅先于 orchestrator 启动，避免丢早期帧。
+    let hook_trust_store = visp_config::HookTrustStore::load();
+    let hook_runtime =
+        visp_daemon::hook_runtime::setup_hook_runtime(&config.hooks, &cwd, &hook_trust_store, &bus);
+
     // 8.7.5. Register agent tools from AgentRegistry (skip in single-agent mode)
     let agent_registry_snapshot = agent_registry.load_full();
     register_agent_tools(&tool_registry, &agent_registry_snapshot, Some(&global_tx))
@@ -601,10 +608,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 9. Assemble service
     let mcp_shutdown = mcp_manager.clone();
     // 优雅关停管道（设计 D13）：Shutdown RPC 经此 Notify 唤醒 main；hook 有界
-    // drain 宿主在 1a 为空实现，1b-2c 接真实执行器。
+    // drain 宿主：有 hook 规则时为真实执行器（8.7.2 接线），否则维持空实现。
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
-    let hook_drain: Arc<dyn crate::shutdown::HookDrainHost> =
-        Arc::new(crate::shutdown::NoopHookDrain);
+    let hook_drain: Arc<dyn crate::shutdown::HookDrainHost> = match hook_runtime {
+        Some(runtime) => runtime,
+        None => Arc::new(crate::shutdown::NoopHookDrain),
+    };
     let service = CoderDaemonService::new(
         model_configs,
         tool_registry,
