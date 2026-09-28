@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, RwLock as StdRwLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use tokio::sync::{Notify, RwLock, mpsc};
@@ -22,7 +22,7 @@ use visp_core::{
     tool::ToolContext,
     tool_registry::ToolRegistry,
 };
-use visp_daemon::bus::EventBus;
+use visp_daemon::bus::{BusEnvelope, EventBus};
 use visp_daemon::reload::{ReloadCore, ReloadDomain, ReloadItem};
 use visp_hooks::{
     HookContext, HookEvent, HookEventName, HookPayload, Origin, SessionEndPayload, SessionSource,
@@ -38,6 +38,60 @@ use crate::shutdown::{HOOK_DRAIN_BUDGET, HookDrainHost};
 type ResponseStream =
     Pin<Box<dyn futures::Stream<Item = Result<proto::ServerMessage, tonic::Status>> + Send>>;
 type CodeGraphMap = Arc<RwLock<HashMap<String, Arc<CodeGraph>>>>;
+
+/// `Lagged` 回放的节流窗口：同一连接在窗口内最多回放一次，避免风暴下重复回放。
+const LAGGED_REPLAY_THROTTLE: Duration = Duration::from_millis(500);
+
+/// 连接级回放状态（inbound 与 outbound 共享）。
+///
+/// - `target`：inbound 收到 `JoinSession` 时登记的「当前正在查看的 session」；
+/// - `replayed_upto`：各 session 已回放到的 history 长度，用于增量回放去重
+///   （避免把已收帧再发一遍）；
+/// - `last_replay`：上次回放时刻，配合 `window` 做节流。
+struct ReplayState {
+    target: Option<String>,
+    replayed_upto: HashMap<String, usize>,
+    last_replay: Option<Instant>,
+    window: Duration,
+}
+
+impl ReplayState {
+    fn new(window: Duration) -> Self {
+        Self {
+            target: None,
+            replayed_upto: HashMap::new(),
+            last_replay: None,
+            window,
+        }
+    }
+
+    /// 登记目标 session 及其已回放水位（inbound `JoinSession` 回放完成后调用）。
+    fn set_target(&mut self, session_id: &str, replayed_upto: usize) {
+        self.target = Some(session_id.to_owned());
+        self.replayed_upto
+            .insert(session_id.to_owned(), replayed_upto);
+    }
+
+    /// 该 session 下一次增量回放的起始下标。
+    fn replay_from(&self, session_id: &str) -> usize {
+        self.replayed_upto.get(session_id).copied().unwrap_or(0)
+    }
+
+    /// 节流：距上次回放是否已过窗口（首次恒允许）。
+    fn throttle_allows(&self, now: Instant) -> bool {
+        match self.last_replay {
+            None => true,
+            Some(last) => now.saturating_duration_since(last) >= self.window,
+        }
+    }
+
+    /// 记录一次回放：推进水位并刷新节流时刻。
+    fn note_replayed(&mut self, session_id: &str, replayed_upto: usize, now: Instant) {
+        self.replayed_upto
+            .insert(session_id.to_owned(), replayed_upto);
+        self.last_replay = Some(now);
+    }
+}
 
 fn create_llm_provider(config: &LlmModelConfig) -> Result<Arc<dyn LlmProvider>, String> {
     match config.protocol.as_str() {
@@ -482,13 +536,17 @@ impl CoderDaemon for CoderDaemonService {
         let (tx, rx) = mpsc::channel::<Result<proto::ServerMessage, Status>>(128);
 
         // 每连接独立订阅事件总线（无 take，重连天然允许）。
-        let mut bus_rx = self.bus.subscribe();
+        let bus_rx = self.bus.subscribe();
 
         // Clone channels for the two forwarding tasks
         let client_tx = self.client_tx.clone();
         let response_tx = tx.clone();
         let session_mgr = self.session_mgr.clone();
         let daemon_config = self.daemon_config.clone();
+
+        // 连接级回放状态：inbound 登记目标 session，outbound 在 Lagged 时增量回放。
+        let replay_state = Arc::new(Mutex::new(ReplayState::new(LAGGED_REPLAY_THROTTLE)));
+        let replay_state_inbound = replay_state.clone();
 
         // Shared pending user queries: maps query_id → respond sender
         // Used to route UserResponse from CLI back to the agent loop that's waiting
@@ -735,6 +793,16 @@ impl CoderDaemon for CoderDaemonService {
                     }
                     Some(proto::client_message::Payload::JoinSession(join)) => {
                         let session_id = join.session_id;
+                        // 登记目标 session 与已回放水位：本次 join 将回放完整历史，
+                        // 后续 Lagged 只做增量回放，避免与已收帧重复。
+                        let join_history_len = session_mgr
+                            .get(&session_id)
+                            .map(|s| s.history.len())
+                            .unwrap_or(0);
+                        replay_state_inbound
+                            .lock()
+                            .unwrap()
+                            .set_target(&session_id, join_history_len);
                         let user_inputs: Vec<String> = match session_mgr.get(&session_id) {
                             Ok(session) => session
                                 .history
@@ -929,70 +997,13 @@ impl CoderDaemon for CoderDaemonService {
         });
 
         // ── Outbound: Orchestrator → CLI ──
-        let pending_outbound = pending_queries.clone();
-        tokio::spawn(async move {
-            loop {
-                let envelope = match bus_rx.recv().await {
-                    Ok(envelope) => envelope,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        // replay 属 1a-3；本步仅记日志并继续，绝不 break。
-                        tracing::warn!(skipped, "chat 订阅者滞后，已丢弃最旧帧");
-                        continue;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                };
-                // 出站仅转发显示域帧；hook 域事件不面向 TUI，仅供 hook 执行器消费。
-                let frame = match envelope.event {
-                    BusEvent::Frame(frame) => frame,
-                    BusEvent::Hook(_) => continue,
-                };
-                let sid = frame.session_id.clone();
-                match frame.event {
-                    AgentEvent::UserQuery {
-                        query_id,
-                        message,
-                        options,
-                        allow_other,
-                        respond,
-                    } => {
-                        // Store the respond sender so the inbound task can route
-                        // UserResponse back directly to the waiting agent loop.
-                        pending_outbound
-                            .lock()
-                            .unwrap()
-                            .insert(query_id.clone(), respond);
-                        let proto_msg = proto::ServerMessage {
-                            payload: Some(proto::server_message::Payload::UserQuery(
-                                proto::UserQuery {
-                                    query_id,
-                                    message,
-                                    options,
-                                    allow_other,
-                                    session_id: sid,
-                                },
-                            )),
-                        };
-                        if response_tx.send(Ok(proto_msg)).await.is_err() {
-                            break;
-                        }
-                    }
-                    _ => {
-                        if let Some(proto_msg) =
-                            agent_event_to_server_message(frame.event, &sid, &frame.agent_name)
-                            && let Some(payload) = proto_msg.payload
-                            && response_tx
-                                .send(Ok(proto::ServerMessage {
-                                    payload: Some(payload),
-                                }))
-                                .await
-                                .is_err()
-                        {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
+        spawn_outbound(
+            bus_rx,
+            response_tx,
+            pending_queries.clone(),
+            self.session_mgr.clone(),
+            replay_state,
+        );
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         Ok(Response::new(Box::pin(stream) as Self::ChatStream))
@@ -1185,6 +1196,122 @@ impl CoderDaemon for CoderDaemonService {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/// outbound 任务：把总线显示域帧转发给连接；订阅者滞后（`Lagged`）时对连接
+/// 当前的**目标 session** 做一次 join 式增量 replay（去重 + 节流）。`Closed`
+/// 仍 `break`；replay 失败仅日志，绝不影响主转发流程。
+fn spawn_outbound(
+    mut bus_rx: tokio::sync::broadcast::Receiver<BusEnvelope>,
+    response_tx: mpsc::Sender<Result<proto::ServerMessage, Status>>,
+    pending_queries: Arc<Mutex<HashMap<String, mpsc::Sender<UserQueryResult>>>>,
+    session_mgr: Arc<SessionManager>,
+    replay_state: Arc<Mutex<ReplayState>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let envelope = match bus_rx.recv().await {
+                Ok(envelope) => envelope,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(skipped, "chat 订阅者滞后，已丢弃最旧帧");
+                    replay_target_session(&response_tx, &session_mgr, &replay_state).await;
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
+            // 出站仅转发显示域帧；hook 域事件不面向 TUI，仅供 hook 执行器消费。
+            let frame = match envelope.event {
+                BusEvent::Frame(frame) => frame,
+                BusEvent::Hook(_) => continue,
+            };
+            let sid = frame.session_id.clone();
+            match frame.event {
+                AgentEvent::UserQuery {
+                    query_id,
+                    message,
+                    options,
+                    allow_other,
+                    respond,
+                } => {
+                    // Store the respond sender so the inbound task can route
+                    // UserResponse back directly to the waiting agent loop.
+                    pending_queries
+                        .lock()
+                        .unwrap()
+                        .insert(query_id.clone(), respond);
+                    let proto_msg = proto::ServerMessage {
+                        payload: Some(proto::server_message::Payload::UserQuery(
+                            proto::UserQuery {
+                                query_id,
+                                message,
+                                options,
+                                allow_other,
+                                session_id: sid,
+                            },
+                        )),
+                    };
+                    if response_tx.send(Ok(proto_msg)).await.is_err() {
+                        break;
+                    }
+                }
+                _ => {
+                    if let Some(proto_msg) =
+                        agent_event_to_server_message(frame.event, &sid, &frame.agent_name)
+                        && let Some(payload) = proto_msg.payload
+                        && response_tx
+                            .send(Ok(proto::ServerMessage {
+                                payload: Some(payload),
+                            }))
+                            .await
+                            .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// 对连接当前目标 session 做一次 join 式**增量** replay。
+///
+/// 仅当存在目标 session 且已过节流窗口时执行；从 `replay_from` 水位起回放，
+/// 避免与已收帧重复。任何失败仅记日志，不影响主转发流程。
+async fn replay_target_session(
+    response_tx: &mpsc::Sender<Result<proto::ServerMessage, Status>>,
+    session_mgr: &SessionManager,
+    replay_state: &Arc<Mutex<ReplayState>>,
+) {
+    let (session_id, from, allowed) = {
+        let state = replay_state.lock().unwrap();
+        let Some(target) = state.target.clone() else {
+            return;
+        };
+        let from = state.replay_from(&target);
+        (target, from, state.throttle_allows(Instant::now()))
+    };
+    if !allowed {
+        return;
+    }
+    let session = match session_mgr.get(&session_id) {
+        Ok(session) => session,
+        Err(e) => {
+            tracing::warn!(session_id = %session_id, error = %e, "lagged replay: 加载 session 失败，跳过");
+            return;
+        }
+    };
+    // 先记录（回放中标记 + 节流），确保回放进行中再次 Lagged 不叠加。
+    let upto = session.history.len();
+    replay_state
+        .lock()
+        .unwrap()
+        .note_replayed(&session_id, upto, Instant::now());
+    if replay_session_history_from(response_tx, &session, from)
+        .await
+        .is_err()
+    {
+        tracing::warn!(session_id = %session_id, "lagged replay: 发送中断，忽略");
+    }
+}
+
 fn session_to_proto(
     session: &visp_core::session::Session,
     available_models: &[String],
@@ -1301,6 +1428,16 @@ async fn replay_session_history(
     response_tx: &mpsc::Sender<Result<proto::ServerMessage, Status>>,
     session: &visp_core::session::Session,
 ) -> Result<(), ()> {
+    replay_session_history_from(response_tx, session, 0).await
+}
+
+/// 从 `from` 下标起回放 session 历史的尾部（增量回放，避免重复已收帧）。
+/// 始终先发 StatusUpdate(view_only=true)，末尾发 Done；`from` 之前的消息跳过。
+async fn replay_session_history_from(
+    response_tx: &mpsc::Sender<Result<proto::ServerMessage, Status>>,
+    session: &visp_core::session::Session,
+    from: usize,
+) -> Result<(), ()> {
     let session_id = session.id.clone();
     let agent_name = session.agent_name.clone();
 
@@ -1331,7 +1468,7 @@ async fn replay_session_history(
     }
 
     // 回放历史：Assistant→TextDelta(+ToolCall)，Tool→ToolResult，User→跳过
-    for msg in &session.history {
+    for msg in session.history.iter().skip(from) {
         match msg.role {
             Role::Assistant => {
                 // 文本
@@ -4313,6 +4450,209 @@ mod tests {
                 assert_eq!(td.session_id, "s-9");
             }
             other => panic!("expected TextDelta, got {other:?}"),
+        }
+    }
+
+    // ── 1a-3：Lagged → daemon 侧 join 式 replay（目标 session + 去重/节流）──
+
+    /// 发布帧数须超过总线容量（bus.rs `BUS_CAPACITY = 1024`）以触发 `Lagged`。
+    const OVER_CAPACITY: usize = 1200;
+
+    /// outbound 响应通道（不经 tonic Streaming），直接从 mpsc 读回放/转发帧。
+    type OutboundRx = mpsc::Receiver<Result<proto::ServerMessage, Status>>;
+
+    async fn next_rx(rx: &mut OutboundRx) -> proto::ServerMessage {
+        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("应在时限内收到消息")
+            .expect("outbound 通道不应关闭")
+            .expect("消息不应为错误")
+    }
+
+    /// 构造直接驱动 outbound 的测试环境：自有总线订阅 + 响应接收端 + 连接回放状态。
+    /// `target` = (session_id, 已回放水位)，模拟 inbound `JoinSession` 的登记。
+    fn outbound_harness(
+        mgr: StdArc<SessionManager>,
+        target: Option<(&str, usize)>,
+    ) -> (Arc<EventBus>, OutboundRx, Arc<Mutex<ReplayState>>) {
+        let bus = Arc::new(EventBus::new());
+        let bus_rx = bus.subscribe();
+        let (tx, rx) = mpsc::channel(128);
+        let replay_state = Arc::new(Mutex::new(ReplayState::new(Duration::from_secs(60))));
+        if let Some((session_id, upto)) = target {
+            replay_state.lock().unwrap().set_target(session_id, upto);
+        }
+        spawn_outbound(
+            bus_rx,
+            tx,
+            Arc::new(Mutex::new(HashMap::new())),
+            mgr,
+            replay_state.clone(),
+        );
+        (bus, rx, replay_state)
+    }
+
+    fn store_with(sessions: Vec<Session>) -> StdArc<SessionManager> {
+        let mut store = InMemorySessionStore::new();
+        for session in sessions {
+            store.create(session).unwrap();
+        }
+        StdArc::new(SessionManager::new(store))
+    }
+
+    /// 1. `Lagged` 触发一次 join 式 replay，且目标为连接当前 session，而非全局广播。
+    #[tokio::test]
+    async fn lagged_replay_targets_current_session_not_broadcast() {
+        let mgr = store_with(vec![
+            make_session(
+                "sess-A",
+                None,
+                "agent",
+                vec![Message::assistant("A-reply")],
+                SessionStatus::Idle,
+            ),
+            make_session(
+                "sess-B",
+                None,
+                "agent",
+                vec![Message::assistant("B-reply")],
+                SessionStatus::Idle,
+            ),
+        ]);
+        let (bus, mut rx, _state) = outbound_harness(mgr, Some(("sess-A", 0)));
+
+        // 滞后源帧全部属于 sess-B；回放必须只针对目标 sess-A。
+        for _ in 0..OVER_CAPACITY {
+            bus.publish(BusEvent::Frame(bus_text_frame("B-live", "sess-B")));
+        }
+
+        match next_rx(&mut rx).await.payload {
+            Some(proto::server_message::Payload::StatusUpdate(s)) => {
+                assert_eq!(s.session_id, "sess-A", "回放目标须为当前 session");
+                assert!(s.view_only, "join 式回放应 view_only=true");
+            }
+            other => panic!("expected replay StatusUpdate, got {other:?}"),
+        }
+        assert_eq!(text_delta_of(&next_rx(&mut rx).await), "A-reply");
+        match next_rx(&mut rx).await.payload {
+            Some(proto::server_message::Payload::Done(d)) => assert_eq!(d.session_id, "sess-A"),
+            other => panic!("expected replay Done, got {other:?}"),
+        }
+    }
+
+    /// 2. 连续 `Lagged` 去重：节流窗口内不再回放，窗口过后恢复。
+    #[test]
+    fn lagged_replay_is_throttled_within_window() {
+        let mut state = ReplayState::new(Duration::from_millis(500));
+        let t0 = Instant::now();
+
+        assert!(state.throttle_allows(t0), "首次 Lagged 应允许回放");
+        state.note_replayed("sess-A", 3, t0);
+
+        assert!(
+            !state.throttle_allows(t0 + Duration::from_millis(100)),
+            "风暴下窗口内再次 Lagged 不得重复回放"
+        );
+        assert!(
+            state.throttle_allows(t0 + Duration::from_millis(500)),
+            "窗口过后允许再次回放"
+        );
+    }
+
+    /// 3. replay 与已收帧去重：只回放水位之后的历史，已收消息不重复。
+    #[tokio::test]
+    async fn lagged_replay_skips_already_received_history() {
+        let mgr = store_with(vec![make_session(
+            "sess-A",
+            None,
+            "agent",
+            vec![
+                Message::assistant("A1"),
+                Message::assistant("A2"),
+                Message::assistant("A3"),
+            ],
+            SessionStatus::Idle,
+        )]);
+        // 水位 2：A1/A2 已通过 join 回放收到。
+        let (bus, mut rx, _state) = outbound_harness(mgr, Some(("sess-A", 2)));
+
+        for _ in 0..OVER_CAPACITY {
+            bus.publish(BusEvent::Frame(bus_text_frame("live", "other")));
+        }
+
+        match next_rx(&mut rx).await.payload {
+            Some(proto::server_message::Payload::StatusUpdate(s)) => {
+                assert_eq!(s.session_id, "sess-A");
+            }
+            other => panic!("expected StatusUpdate, got {other:?}"),
+        }
+        // 仅增量 A3；A1/A2 绝不重发。
+        assert_eq!(
+            text_delta_of(&next_rx(&mut rx).await),
+            "A3",
+            "只应回放已回放水位之后的历史"
+        );
+        match next_rx(&mut rx).await.payload {
+            Some(proto::server_message::Payload::Done(d)) => assert_eq!(d.session_id, "sess-A"),
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    /// 4. 回归：非 `Lagged` 路径不得触发 replay。
+    #[tokio::test]
+    async fn non_lagged_frames_do_not_trigger_replay() {
+        let mgr = store_with(vec![make_session(
+            "sess-A",
+            None,
+            "agent",
+            vec![Message::assistant("A-reply")],
+            SessionStatus::Idle,
+        )]);
+        let (bus, mut rx, _state) = outbound_harness(mgr, Some(("sess-A", 0)));
+
+        // 未超容量：正常转发，若误触 replay 首帧会是 StatusUpdate。
+        bus.publish(BusEvent::Frame(bus_text_frame("f1", "sess-A")));
+        bus.publish(BusEvent::Frame(bus_text_frame("f2", "sess-A")));
+
+        assert_eq!(text_delta_of(&next_rx(&mut rx).await), "f1");
+        assert_eq!(text_delta_of(&next_rx(&mut rx).await), "f2");
+    }
+
+    /// 5. TUI 零改动：replay 仅产出 TUI 既已处理的 join 协议帧序列
+    ///    （StatusUpdate(view_only) → UserMessage → TextDelta → Done）。
+    #[tokio::test]
+    async fn lagged_replay_uses_existing_join_frame_contract() {
+        let mgr = store_with(vec![make_session(
+            "sess-A",
+            None,
+            "agent",
+            vec![Message::user("task"), Message::assistant("answer")],
+            SessionStatus::Idle,
+        )]);
+        let (bus, mut rx, _state) = outbound_harness(mgr, Some(("sess-A", 0)));
+
+        for _ in 0..OVER_CAPACITY {
+            bus.publish(BusEvent::Frame(bus_text_frame("live", "other")));
+        }
+
+        match next_rx(&mut rx).await.payload {
+            Some(proto::server_message::Payload::StatusUpdate(s)) => {
+                assert!(s.view_only);
+                assert_eq!(s.session_id, "sess-A");
+            }
+            other => panic!("expected StatusUpdate, got {other:?}"),
+        }
+        match next_rx(&mut rx).await.payload {
+            Some(proto::server_message::Payload::UserMessage(u)) => {
+                assert_eq!(u.content, "task");
+                assert_eq!(u.session_id, "sess-A");
+            }
+            other => panic!("expected UserMessage, got {other:?}"),
+        }
+        assert_eq!(text_delta_of(&next_rx(&mut rx).await), "answer");
+        match next_rx(&mut rx).await.payload {
+            Some(proto::server_message::Payload::Done(d)) => assert_eq!(d.session_id, "sess-A"),
+            other => panic!("expected Done, got {other:?}"),
         }
     }
 
