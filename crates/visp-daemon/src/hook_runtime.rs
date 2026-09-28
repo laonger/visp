@@ -44,6 +44,13 @@ use crate::hook_map::{MapCtx, map_frame};
 pub trait HookDrainHost: Send + Sync {
     /// 在 `budget` 内排空在飞的 hook 执行。
     async fn drain(&self, budget: Duration);
+
+    /// 关停期**同步直投**终态事件（如 `SessionEnd`）。
+    ///
+    /// 与总线投递不同，本方法不经消费者任务、不受 `accepting` 门控限制：即使已在
+    /// [`HookDrainHost::drain`] 之后调用，终态事件仍会入队执行，杜绝「终态 hook 因
+    /// 总线/关停竞态被丢弃」。
+    async fn emit_terminal(&self, event: HookEvent);
 }
 
 /// 生效规则摘要：`id` / 作用域 / 启用状态（设计 §15 `GetHookStats` 规则列表）。
@@ -432,6 +439,14 @@ impl HookRuntime {
                 None => return,
             },
         };
+        self.dispatch_hook(hook_event, seq);
+    }
+
+    /// 直接派发已映射的 [`HookEvent`]（**不做 `accepting` 检查**）。
+    ///
+    /// 供 [`HookDrainHost::emit_terminal`] 在关停期绕过门控直投终态事件；普通总线
+    /// 分发路径经 [`HookRuntime::dispatch_event`] 复用之。
+    fn dispatch_hook(&self, hook_event: HookEvent, seq: u64) {
         self.emitted.fetch_add(1, Ordering::Relaxed);
         self.executor.dispatch(dispatch_input(hook_event, seq));
     }
@@ -465,6 +480,11 @@ impl HookStatsSource for HookRuntime {
 impl HookDrainHost for HookRuntime {
     async fn drain(&self, budget: Duration) {
         let _ = HookRuntime::drain(self, budget).await;
+    }
+
+    async fn emit_terminal(&self, event: HookEvent) {
+        // 绕过 `accepting` 门控：drain 之后（accepting=false）仍能入队。
+        self.dispatch_hook(event, 0);
     }
 }
 
@@ -573,8 +593,8 @@ mod tests {
         }
     }
 
-    fn stop_event() -> BusEvent {
-        BusEvent::Hook(HookEvent {
+    fn stop_hook_event() -> HookEvent {
+        HookEvent {
             context: HookContext {
                 schema: VISP_HOOK_SCHEMA,
                 hook_event_name: HookEventName::Stop,
@@ -590,7 +610,11 @@ mod tests {
                 output_tokens: 5,
                 tool_calls: 1,
             }),
-        })
+        }
+    }
+
+    fn stop_event() -> BusEvent {
+        BusEvent::Hook(stop_hook_event())
     }
 
     fn tool_frame() -> BusEvent {
@@ -870,6 +894,50 @@ mod tests {
         let runtime = runtime_with(&[], &[], false, handler);
         let host: Arc<dyn HookDrainHost> = Arc::new(runtime);
         host.drain(Duration::from_millis(10)).await;
+    }
+
+    /// 9d. 回归（SessionEnd 竞态修复）：`emit_terminal` 绕过 `accepting` 门控——
+    ///     `drain`（accepting=false）之后仍能把事件入队并被 handler 观察到；
+    ///     对照 `dispatch_event` 此时被丢弃。
+    #[tokio::test]
+    async fn emit_terminal_delivers_after_drain() {
+        let handler = Arc::new(RecordingHandler::new());
+        let runtime = Arc::new(runtime_with(&[rule("r")], &[], false, handler.clone()));
+        let host: Arc<dyn HookDrainHost> = runtime.clone();
+
+        // 先 drain → accepting=false。
+        host.drain(Duration::from_millis(200)).await;
+
+        // drain 之后经总线派发 → 丢弃，不触发 handler。
+        runtime.dispatch_event(stop_event(), 1);
+        assert_eq!(runtime.hook_stats().dropped, 1);
+        assert!(handler.records().is_empty());
+
+        // drain 之后直投终态 → 不被丢弃，handler 观察到。
+        host.emit_terminal(stop_hook_event()).await;
+        tokio::time::timeout(Duration::from_secs(1), handler.wait_for(1))
+            .await
+            .expect("emit_terminal 应在 drain 之后仍被派发");
+        assert_eq!(handler.records()[0].rule_id, "r");
+        assert_eq!(runtime.hook_stats().emitted, 1);
+        assert_eq!(runtime.hook_stats().dropped, 1, "直投不计入丢弃");
+    }
+
+    /// 9e. 回归（关停顺序）：先 `emit_terminal` 再 `drain`，终态事件不会丢失
+    ///     （与 daemon `shutdown` 的顺序一致）。
+    #[tokio::test]
+    async fn emit_terminal_then_drain_keeps_event() {
+        let handler = Arc::new(RecordingHandler::new());
+        let runtime = Arc::new(runtime_with(&[rule("r")], &[], false, handler.clone()));
+        let host: Arc<dyn HookDrainHost> = runtime.clone();
+
+        host.emit_terminal(stop_hook_event()).await;
+        host.drain(Duration::from_millis(500)).await;
+
+        tokio::time::timeout(Duration::from_secs(1), handler.wait_for(1))
+            .await
+            .expect("先 emit_terminal 再 drain，终态事件不应丢失");
+        assert_eq!(handler.records()[0].rule_id, "r");
     }
 
     // ── 计数与只读快照（步骤 1b-3a：设计 §15） ──

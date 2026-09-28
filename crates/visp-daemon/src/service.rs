@@ -344,11 +344,15 @@ impl CoderDaemonService {
         self.shutting_down.load(Ordering::SeqCst)
     }
 
-    /// 发布 daemon 级关停 `SessionEnd`（设计 D13 / §6.4）。
+    /// 直投 daemon 级关停 `SessionEnd`（设计 D13 / §6.4）。
     ///
     /// `ShutdownRequest` 不携带 session id，故以空 `session_id` 表达 daemon 级终态；
     /// per-session 细化留待后续（活跃会话追踪，历史会话会误发，见已知限制）。
-    fn publish_shutdown_session_end(&self) {
+    ///
+    /// **不经总线**：经 [`HookDrainHost::emit_terminal`] 同步直投 hook 执行器。若走总线，
+    /// 关停随后立即置 `accepting=false`（drain），总线消费者可能尚未取走该事件即被丢弃，
+    /// 导致终态 hook（如 herdr `release-agent`）不执行。直投绕过该竞态。
+    async fn publish_shutdown_session_end(&self) {
         let event = HookEvent {
             context: HookContext {
                 schema: VISP_HOOK_SCHEMA,
@@ -364,7 +368,7 @@ impl CoderDaemonService {
                 exit_code: Some(0),
             }),
         };
-        self.bus.publish(BusEvent::Hook(event));
+        self.hook_drain.emit_terminal(event).await;
     }
 
     /// 发布会话删除 `SessionEnd`（设计 §6.4：`delete_session` 成功后）。
@@ -1230,8 +1234,9 @@ impl CoderDaemon for CoderDaemonService {
         if self.begin_shutdown() {
             tracing::info!("shutdown requested, running graceful shutdown pipeline");
 
-            // 1. 终态 SessionEnd：此后 daemon 不再派发 hook 事件（终止态抑制）。
-            self.publish_shutdown_session_end();
+            // 1. 终态 SessionEnd：同步直投 hook 执行器（不经总线，规避关停竞态），
+            //    此后 daemon 不再派发 hook 事件（终止态抑制）。
+            self.publish_shutdown_session_end().await;
 
             // 2. 有界 drain：宿主自身应遵守 budget，调用方再加同长硬超时兜底。
             let drain = self.hook_drain.drain(HOOK_DRAIN_BUDGET);
@@ -4829,10 +4834,11 @@ mod tests {
 
     // ── 优雅关停管道（设计 D13，计划 1a-4b）────────────────────────────────
 
-    /// 记录调用的 drain 宿主：计数 + 记录收到的 budget。
+    /// 记录调用的 drain 宿主：计数 + 记录收到的 budget + 记录终态直投事件。
     struct CountingDrain {
         calls: std::sync::atomic::AtomicUsize,
         budget: Mutex<Option<std::time::Duration>>,
+        terminal: Mutex<Vec<HookEvent>>,
     }
 
     impl CountingDrain {
@@ -4840,11 +4846,17 @@ mod tests {
             Self {
                 calls: std::sync::atomic::AtomicUsize::new(0),
                 budget: Mutex::new(None),
+                terminal: Mutex::new(Vec::new()),
             }
         }
 
         fn calls(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
+        }
+
+        /// 已收到的终态直投事件快照。
+        fn terminal(&self) -> Vec<HookEvent> {
+            self.terminal.lock().unwrap().clone()
         }
     }
 
@@ -4853,6 +4865,10 @@ mod tests {
         async fn drain(&self, budget: std::time::Duration) {
             self.calls.fetch_add(1, Ordering::SeqCst);
             *self.budget.lock().unwrap() = Some(budget);
+        }
+
+        async fn emit_terminal(&self, event: HookEvent) {
+            self.terminal.lock().unwrap().push(event);
         }
     }
 
@@ -4864,19 +4880,20 @@ mod tests {
         async fn drain(&self, _budget: std::time::Duration) {
             std::future::pending::<()>().await;
         }
+
+        async fn emit_terminal(&self, _event: HookEvent) {}
     }
 
     fn shutdown_request() -> Request<proto::ShutdownRequest> {
         Request::new(proto::ShutdownRequest { force: false })
     }
 
-    /// 8. Shutdown RPC 串起完整管道：SessionEnd → 有界 drain → cancel_tx → Notify。
+    /// 8. Shutdown RPC 串起完整管道：SessionEnd（直投）→ 有界 drain → cancel_tx → Notify。
     #[tokio::test]
     async fn shutdown_rpc_runs_graceful_pipeline() {
         let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
         let drain = Arc::new(CountingDrain::new());
-        let (service, mut cancel_rx, notify, bus) = make_service_with_shutdown(mgr, drain.clone());
-        let mut sub = bus.subscribe();
+        let (service, mut cancel_rx, notify, _bus) = make_service_with_shutdown(mgr, drain.clone());
 
         // main 侧等待被唤醒。
         let waiter = {
@@ -4897,20 +4914,16 @@ mod tests {
             .expect("main 应被 Notify 唤醒")
             .unwrap();
 
-        // 终态 SessionEnd 经总线发布。
-        let env = sub.try_recv().expect("shutdown 应发布 SessionEnd");
-        match env.event {
-            BusEvent::Hook(event) => {
-                assert_eq!(event.event_name(), HookEventName::SessionEnd);
-                match event.payload {
-                    HookPayload::SessionEnd(payload) => {
-                        assert_eq!(payload.reason, "shutdown");
-                        assert_eq!(payload.exit_code, Some(0));
-                    }
-                    other => panic!("expected SessionEnd payload, got {other:?}"),
-                }
+        // 终态 SessionEnd 同步直投 hook 执行器（不经总线，规避关停竞态）。
+        let terminal = drain.terminal();
+        assert_eq!(terminal.len(), 1, "shutdown 应直投一次 SessionEnd");
+        assert_eq!(terminal[0].event_name(), HookEventName::SessionEnd);
+        match &terminal[0].payload {
+            HookPayload::SessionEnd(payload) => {
+                assert_eq!(payload.reason, "shutdown");
+                assert_eq!(payload.exit_code, Some(0));
             }
-            BusEvent::Frame(_) => panic!("expected Hook bus event, got Frame"),
+            other => panic!("expected SessionEnd payload, got {other:?}"),
         }
 
         assert_eq!(drain.calls(), 1);
@@ -4956,6 +4969,7 @@ mod tests {
         service.shutdown(shutdown_request()).await.unwrap();
 
         assert_eq!(drain.calls(), 1, "drain 只应在首次关停执行");
+        assert_eq!(drain.terminal().len(), 1, "SessionEnd 只应直投一次");
 
         let mut hook_events = 0usize;
         while let Ok(env) = sub.try_recv() {
@@ -4963,7 +4977,10 @@ mod tests {
                 hook_events += 1;
             }
         }
-        assert_eq!(hook_events, 1, "SessionEnd 之后不得再派发 hook 事件");
+        assert_eq!(
+            hook_events, 0,
+            "终态 SessionEnd 不经总线，且二次关停不再派发"
+        );
     }
 
     /// 11. `mcp.shutdown_all` 双调幂等（handler 与 main 各调一次）。
@@ -5137,7 +5154,8 @@ mod tests {
     async fn daemon_emitters_suppressed_after_shutdown() {
         let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
         let drain = Arc::new(CountingDrain::new());
-        let (service, _cancel_rx, _notify, bus) = make_service_with_shutdown(mgr.clone(), drain);
+        let (service, _cancel_rx, _notify, bus) =
+            make_service_with_shutdown(mgr.clone(), drain.clone());
         let mut sub = bus.subscribe();
 
         service.shutdown(shutdown_request()).await.unwrap();
@@ -5164,12 +5182,20 @@ mod tests {
         ));
         assert_eq!(respond_rx.try_recv().unwrap().selected_index, 0);
 
+        // 终态 SessionEnd 走直投（不经总线），此后不得再派发任何 hook 事件。
         let hooks = hook_events_after(&mut sub);
-        assert_eq!(hooks.len(), 1, "SessionEnd 之后不得再派发 hook 事件");
-        assert_eq!(hooks[0].event_name(), HookEventName::SessionEnd);
         assert_eq!(
-            hooks[0].context.session_id, "",
-            "唯一事件应为 daemon 级关停 SessionEnd"
+            hooks.len(),
+            0,
+            "终态 SessionEnd 直投 drain host，不经总线；此后不得再派发 hook 事件"
+        );
+
+        let terminal = drain.terminal();
+        assert_eq!(terminal.len(), 1, "SessionEnd 只应直投一次");
+        assert_eq!(terminal[0].event_name(), HookEventName::SessionEnd);
+        assert_eq!(
+            terminal[0].context.session_id, "",
+            "唯一终态事件应为 daemon 级关停 SessionEnd"
         );
     }
 

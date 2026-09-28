@@ -14,6 +14,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use visp_daemon::watch::FileWatcher;
+use visp_hooks::HookEvent;
 use visp_mcp::manager::McpManager;
 
 /// hook drain 的硬上限（设计 D13：≤2s）。
@@ -32,6 +33,8 @@ pub struct NoopHookDrain;
 #[async_trait]
 impl HookDrainHost for NoopHookDrain {
     async fn drain(&self, _budget: Duration) {}
+
+    async fn emit_terminal(&self, _event: HookEvent) {}
 }
 
 /// 关停触发源；三者走同一清理路径（设计 D13）。
