@@ -94,6 +94,13 @@ pub fn agents_dir_global() -> Option<PathBuf> {
     global_config_dir().map(|d| d.join("agents"))
 }
 
+/// 返回 `~/.visp/hook-trust.toml`（项目级 hook 信任存储）。
+///
+/// 信任存储位于**全局数据目录**（[`global_data_dir`]），绝不写入项目仓库（设计 §8.2 / 计划 2a）。
+pub fn hook_trust_file() -> Option<PathBuf> {
+    global_data_dir().map(|d| d.join("hook-trust.toml"))
+}
+
 /// 返回 `{project}/.visp/webfetch.toml`
 pub fn webfetch_toml_project(project: &Path) -> PathBuf {
     visp_dir(project).join("webfetch.toml")
