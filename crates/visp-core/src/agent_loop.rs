@@ -1304,6 +1304,18 @@ async fn execute_tool_calls(
                         };
                     }
                 };
+
+                // Real pre-execution point: no-approval, approved, Always Allow and
+                // sub-agent runs all converge here. Denial, cancellation and
+                // truncated/malformed arguments returned above, so they never emit.
+                let _ = tx
+                    .send(AgentEvent::PreToolUse {
+                        call_id: tc.id.clone(),
+                        tool_name: tc.name.clone(),
+                        requires_approval,
+                    })
+                    .await;
+
                 let tool_ctx = ToolContext {
                     working_dir: working_dir.clone(),
                     session_id: Some(session_id),
@@ -5594,6 +5606,409 @@ mod tests {
         assert!(
             found,
             "empty stream with output_tokens=11 must produce Internal error mentioning token count"
+        );
+    }
+
+    // ── 计划 1b-1 测试 22–23：PreToolUse 发射点 ─────────────────────────────
+
+    /// 参数无关、恒需审批的 mock 工具。
+    struct ApprovalMockTool {
+        name: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tool::Tool for ApprovalMockTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "approval mock tool"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        fn requires_approval(&self) -> bool {
+            true
+        }
+        async fn execute(
+            &self,
+            _: serde_json::Value,
+            _: &crate::tool::ToolContext,
+        ) -> crate::tool::ToolResult {
+            crate::tool::ToolResult::success("ok")
+        }
+    }
+
+    /// 审批弹窗的自动应答策略。
+    #[derive(Clone, Copy)]
+    enum ApprovalAction {
+        /// 以给定索引应答（0=批准，2=Always Allow，-1=拒绝）。
+        Select(i32),
+        /// 取消 agent run（等价用户按 Stop）。
+        Cancel,
+        /// 不作答。
+        Ignore,
+    }
+
+    /// 建立测试环境：独立 session store + 已 `start_loop` 的 ctx。
+    fn make_loop_env() -> (StdArc<SessionManager>, String, AgentLoopContext) {
+        use crate::session::InMemorySessionStore;
+        use std::path::Path;
+
+        let session_mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = session_mgr
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sid = session.id.clone();
+        let trimmer: StdArc<dyn crate::context::ContextTrimmer + Send + Sync> =
+            StdArc::new(Phase2MockTrimmer);
+        let ctx = session_mgr.start_loop(&sid, &trimmer, None, None).unwrap();
+        (session_mgr, sid, ctx)
+    }
+
+    /// 运行 agent loop 并收集全部 `AgentEvent`；审批弹窗按 `action` 自动应答。
+    async fn run_loop_capture(
+        provider: StdArc<dyn LlmProvider>,
+        registry: StdArc<ToolRegistry>,
+        session_mgr: StdArc<SessionManager>,
+        ctx: AgentLoopContext,
+        config: AgentConfig,
+        user_message: Message,
+        action: ApprovalAction,
+    ) -> Vec<AgentEvent> {
+        use std::path::Path;
+
+        let cancel_token = ctx.cancel_token.clone();
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(64);
+        let handle = tokio::spawn(async move {
+            run_agent_loop(
+                provider,
+                registry,
+                StdArc::new(RuleEngine::new(Path::new("/tmp")).unwrap()),
+                session_mgr,
+                ctx,
+                &config,
+                user_message,
+                tx,
+            )
+            .await;
+        });
+
+        let mut events = Vec::new();
+        while let Some(e) = rx.recv().await {
+            if let AgentEvent::UserQuery { respond, .. } = &e {
+                match action {
+                    ApprovalAction::Select(idx) => {
+                        let _ = respond.try_send(UserQueryResult {
+                            selected_index: idx,
+                            text: String::new(),
+                        });
+                    }
+                    ApprovalAction::Cancel => cancel_token.cancel(),
+                    ApprovalAction::Ignore => {}
+                }
+            }
+            events.push(e);
+        }
+        handle.await.expect("agent loop task should not panic");
+        events
+    }
+
+    /// 两轮 provider：首轮请求 `tool`，次轮 Done。
+    fn one_tool_then_done(tool: &str, arguments: String) -> StdArc<dyn LlmProvider> {
+        StdArc::new(SimpleProvider::new(vec![
+            vec![
+                ChatEvent::ToolCall {
+                    id: format!("call_{tool}"),
+                    name: tool.into(),
+                    arguments,
+                },
+                ChatEvent::Done,
+            ],
+            vec![ChatEvent::Done],
+        ]))
+    }
+
+    fn pre_tool_use_of(events: &[AgentEvent]) -> Vec<(String, String, bool)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::PreToolUse {
+                    call_id,
+                    tool_name,
+                    requires_approval,
+                } => Some((call_id.clone(), tool_name.clone(), *requires_approval)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 测试 22a：无审批路径发一次 `PreToolUse`，且早于 `ToolCallResult`。
+    #[serial]
+    #[tokio::test]
+    async fn test_pre_tool_use_emitted_on_no_approval_path() {
+        let (session_mgr, _sid, ctx) = make_loop_env();
+        let registry = StdArc::new(ToolRegistry::new());
+        registry
+            .register(StdArc::new(MockTestTool { name: "noargs" }))
+            .unwrap();
+        let provider = one_tool_then_done("noargs", "{}".into());
+
+        let events = run_loop_capture(
+            provider,
+            registry,
+            session_mgr,
+            ctx,
+            AgentConfig::default(),
+            Message::user("call the tool"),
+            ApprovalAction::Ignore,
+        )
+        .await;
+
+        let pre = pre_tool_use_of(&events);
+        assert_eq!(
+            pre.len(),
+            1,
+            "no-approval path must emit exactly one PreToolUse, got {pre:?}"
+        );
+        assert_eq!(pre[0].1, "noargs");
+        assert!(!pre[0].2, "requires_approval must be false");
+        let pre_idx = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::PreToolUse { .. }))
+            .unwrap();
+        let res_idx = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::ToolCallResult { .. }))
+            .unwrap();
+        assert!(pre_idx < res_idx, "PreToolUse must precede ToolCallResult");
+    }
+
+    /// 测试 22b：审批通过路径发一次 `PreToolUse`。
+    #[serial]
+    #[tokio::test]
+    async fn test_pre_tool_use_emitted_on_approved_path() {
+        let (session_mgr, _sid, ctx) = make_loop_env();
+        let registry = StdArc::new(ToolRegistry::new());
+        registry
+            .register(StdArc::new(ApprovalMockTool {
+                name: "needs_approval",
+            }))
+            .unwrap();
+        let provider = one_tool_then_done("needs_approval", "{}".into());
+
+        let events = run_loop_capture(
+            provider,
+            registry,
+            session_mgr,
+            ctx,
+            AgentConfig::default(),
+            Message::user("call the tool"),
+            ApprovalAction::Select(0),
+        )
+        .await;
+
+        let pre = pre_tool_use_of(&events);
+        assert_eq!(
+            pre.len(),
+            1,
+            "approved path must emit exactly one PreToolUse"
+        );
+        assert!(pre[0].2, "requires_approval must be true");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::UserQuery { .. })),
+            "approval dialog must have been shown"
+        );
+    }
+
+    /// 测试 22c：Always Allow（already_approved）路径发一次 `PreToolUse`，且不再弹窗。
+    #[serial]
+    #[tokio::test]
+    async fn test_pre_tool_use_emitted_on_always_allow_path() {
+        let (session_mgr, sid, ctx) = make_loop_env();
+        session_mgr
+            .add_approved_tool(&sid, "needs_approval")
+            .unwrap();
+        let registry = StdArc::new(ToolRegistry::new());
+        registry
+            .register(StdArc::new(ApprovalMockTool {
+                name: "needs_approval",
+            }))
+            .unwrap();
+        let provider = one_tool_then_done("needs_approval", "{}".into());
+
+        let events = run_loop_capture(
+            provider,
+            registry,
+            session_mgr,
+            ctx,
+            AgentConfig::default(),
+            Message::user("call the tool"),
+            ApprovalAction::Ignore,
+        )
+        .await;
+
+        let pre = pre_tool_use_of(&events);
+        assert_eq!(
+            pre.len(),
+            1,
+            "always-allow path must emit exactly one PreToolUse"
+        );
+        assert!(pre[0].2);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::UserQuery { .. })),
+            "already-approved tool must skip the dialog"
+        );
+    }
+
+    /// 测试 22d：子 agent 的真实执行路径同样发一次 `PreToolUse`。
+    #[serial]
+    #[tokio::test]
+    async fn test_pre_tool_use_emitted_for_subagent() {
+        let (session_mgr, sid, mut ctx) = make_loop_env();
+        ctx.agent_kind = AgentKind::Sub;
+        ctx.depth = 1;
+        session_mgr
+            .add_approved_tool(&sid, "needs_approval")
+            .unwrap();
+        let registry = StdArc::new(ToolRegistry::new());
+        registry
+            .register(StdArc::new(ApprovalMockTool {
+                name: "needs_approval",
+            }))
+            .unwrap();
+        let provider = one_tool_then_done("needs_approval", "{}".into());
+
+        let events = run_loop_capture(
+            provider,
+            registry,
+            session_mgr,
+            ctx,
+            AgentConfig::default(),
+            Message::user("call the tool"),
+            ApprovalAction::Ignore,
+        )
+        .await;
+
+        let pre = pre_tool_use_of(&events);
+        assert_eq!(
+            pre.len(),
+            1,
+            "sub-agent real execution path must emit PreToolUse"
+        );
+        assert!(pre[0].2);
+    }
+
+    /// 测试 23a：拒绝路径不发 `PreToolUse`（但仍产出 Denied 结果）。
+    #[serial]
+    #[tokio::test]
+    async fn test_pre_tool_use_not_emitted_on_denied_path() {
+        let (session_mgr, _sid, ctx) = make_loop_env();
+        let registry = StdArc::new(ToolRegistry::new());
+        registry
+            .register(StdArc::new(ApprovalMockTool {
+                name: "needs_approval",
+            }))
+            .unwrap();
+        let provider = one_tool_then_done("needs_approval", "{}".into());
+
+        let events = run_loop_capture(
+            provider,
+            registry,
+            session_mgr,
+            ctx,
+            AgentConfig::default(),
+            Message::user("call the tool"),
+            ApprovalAction::Select(-1),
+        )
+        .await;
+
+        assert!(
+            pre_tool_use_of(&events).is_empty(),
+            "denied path must not emit PreToolUse"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::ToolCallResult {
+                    outcome: ToolOutcome::Denied,
+                    ..
+                }
+            )),
+            "denied path should still emit a Denied ToolCallResult"
+        );
+    }
+
+    /// 测试 23b：取消路径不发 `PreToolUse`。
+    #[serial]
+    #[tokio::test]
+    async fn test_pre_tool_use_not_emitted_on_cancel_path() {
+        let (session_mgr, _sid, ctx) = make_loop_env();
+        let registry = StdArc::new(ToolRegistry::new());
+        registry
+            .register(StdArc::new(ApprovalMockTool {
+                name: "needs_approval",
+            }))
+            .unwrap();
+        let provider = one_tool_then_done("needs_approval", "{}".into());
+
+        let events = run_loop_capture(
+            provider,
+            registry,
+            session_mgr,
+            ctx,
+            AgentConfig::default(),
+            Message::user("call the tool"),
+            ApprovalAction::Cancel,
+        )
+        .await;
+
+        assert!(
+            pre_tool_use_of(&events).is_empty(),
+            "cancel path must not emit PreToolUse"
+        );
+    }
+
+    /// 测试 23c：参数截断/畸形路径不发 `PreToolUse`（仍产出 Truncated 结果）。
+    #[serial]
+    #[tokio::test]
+    async fn test_pre_tool_use_not_emitted_on_truncated_arguments() {
+        let (session_mgr, _sid, ctx) = make_loop_env();
+        let registry = StdArc::new(ToolRegistry::new());
+        registry
+            .register(StdArc::new(MockTestTool { name: "noargs" }))
+            .unwrap();
+        // 非法 JSON（截断） → 参数解析失败路径
+        let provider = one_tool_then_done("noargs", "{".into());
+
+        let events = run_loop_capture(
+            provider,
+            registry,
+            session_mgr,
+            ctx,
+            AgentConfig::default(),
+            Message::user("call the tool"),
+            ApprovalAction::Ignore,
+        )
+        .await;
+
+        assert!(
+            pre_tool_use_of(&events).is_empty(),
+            "truncated/malformed arguments path must not emit PreToolUse"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::ToolCallResult {
+                    outcome: ToolOutcome::Truncated,
+                    ..
+                }
+            )),
+            "truncated arguments should still emit a Truncated ToolCallResult"
         );
     }
 }
