@@ -2,11 +2,12 @@ use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, RwLock as StdRwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Notify, RwLock, mpsc};
 use tonic::{Request, Response, Status, Streaming};
 
 use visp_codegraph::CodeGraph;
@@ -23,11 +24,16 @@ use visp_core::{
 };
 use visp_daemon::bus::EventBus;
 use visp_daemon::reload::{ReloadCore, ReloadDomain, ReloadItem};
+use visp_hooks::{
+    HookContext, HookEvent, HookEventName, HookPayload, Origin, SessionEndPayload, SessionSource,
+    VISP_HOOK_SCHEMA,
+};
 use visp_mcp::manager::McpManager;
 use visp_proto::visp::{self as proto, coder_daemon_server::CoderDaemon};
 
 use crate::config::DaemonConfig;
 use crate::config::LlmModelConfig;
+use crate::shutdown::{HOOK_DRAIN_BUDGET, HookDrainHost};
 
 type ResponseStream =
     Pin<Box<dyn futures::Stream<Item = Result<proto::ServerMessage, tonic::Status>> + Send>>;
@@ -138,12 +144,18 @@ pub struct CoderDaemonService {
     model_config_keys: Vec<String>,
     // ── 多 Agent Orchestrator 通道 ──
     /// 向 Orchestrator 发送取消信号
-    #[allow(dead_code)]
     cancel_tx: mpsc::Sender<visp_agent::orchestrator::CancelSignal>,
     /// 显示面事件总线：每个 Chat 连接 `subscribe()` 独立订阅（设计 §5 D3）。
     bus: Arc<EventBus>,
     /// 向 Orchestrator 发送 ClientMessage（CLI 输入）
     client_tx: mpsc::Sender<visp_agent::orchestrator::ClientMessage>,
+    // ── 优雅关停管道（设计 D13）──
+    /// Shutdown RPC 完成后唤醒 daemon main 执行进程级清理。
+    shutdown_notify: Arc<Notify>,
+    /// 关停期的 hook 有界 drain 宿主（1a 为空实现，1b-2c 接真实执行器）。
+    hook_drain: Arc<dyn HookDrainHost>,
+    /// 终止态抑制标记：首次关停后置位，`SessionEnd` 只发一次。
+    shutting_down: AtomicBool,
 }
 
 // gRPC 辅助方法返回 Result<_, tonic::Status>（约 176 字节），
@@ -166,6 +178,8 @@ impl CoderDaemonService {
         cancel_tx: mpsc::Sender<visp_agent::orchestrator::CancelSignal>,
         bus: Arc<EventBus>,
         client_tx: mpsc::Sender<visp_agent::orchestrator::ClientMessage>,
+        shutdown_notify: Arc<Notify>,
+        hook_drain: Arc<dyn HookDrainHost>,
     ) -> Result<Self, String> {
         // 查找默认模型（匹配 {provider}/{name} 或 {provider}/{model} 格式）
         let default_idx = if let Some(ref default_key) = daemon_config.llm.default {
@@ -244,7 +258,48 @@ impl CoderDaemonService {
             cancel_tx,
             bus,
             client_tx,
+            shutdown_notify,
+            hook_drain,
+            shutting_down: AtomicBool::new(false),
         })
+    }
+
+    /// 标记关停开始；`true` 表示本次是首次（一次性终态动作的前置判定）。
+    fn begin_shutdown(&self) -> bool {
+        self.shutting_down
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    /// 关停是否已开始（终止态：此后不再派发 hook 事件）。
+    #[cfg(test)]
+    fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::SeqCst)
+    }
+
+    /// 发布 daemon 级关停 `SessionEnd`（设计 D13 / §6.4）。
+    ///
+    /// `ShutdownRequest` 不携带 session id，故以空 `session_id` 表达 daemon 级终态；
+    /// per-session 细化留待 1b-1c（活跃会话追踪）。
+    fn publish_shutdown_session_end(&self) {
+        let event = HookEvent {
+            context: HookContext {
+                schema: VISP_HOOK_SCHEMA,
+                hook_event_name: HookEventName::SessionEnd,
+                session_id: String::new(),
+                cwd: std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                source: SessionSource::Startup,
+                origin: Origin::Other,
+                seq: None,
+            },
+            payload: HookPayload::SessionEnd(SessionEndPayload {
+                reason: "shutdown".to_string(),
+                exit_code: Some(0),
+            }),
+        };
+        self.bus.publish(BusEvent::Hook(event));
     }
 
     /// Phase 5: lazy-load a CodeGraph for a project path.
@@ -1089,8 +1144,41 @@ impl CoderDaemon for CoderDaemonService {
         &self,
         _request: Request<proto::ShutdownRequest>,
     ) -> Result<Response<()>, Status> {
+        // 一次性终态动作（SessionEnd / drain / cancel）只在首次关停执行；
+        // 重复调用退化为幂等兜底清理（设计 D13）。
+        if self.begin_shutdown() {
+            tracing::info!("shutdown requested, running graceful shutdown pipeline");
+
+            // 1. 终态 SessionEnd：此后 daemon 不再派发 hook 事件（终止态抑制）。
+            self.publish_shutdown_session_end();
+
+            // 2. 有界 drain：宿主自身应遵守 budget，调用方再加同长硬超时兜底。
+            let drain = self.hook_drain.drain(HOOK_DRAIN_BUDGET);
+            if tokio::time::timeout(HOOK_DRAIN_BUDGET, drain)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    budget_ms = HOOK_DRAIN_BUDGET.as_millis(),
+                    "hook drain exceeded budget, proceeding with shutdown"
+                );
+            }
+
+            // 3. 取消在飞 agent（通道可能已满/接收端已退出，尽力而为）。
+            if let Err(error) = self
+                .cancel_tx
+                .try_send(visp_agent::orchestrator::CancelSignal)
+            {
+                tracing::warn!(%error, "cancel signal not delivered on shutdown");
+            }
+        }
+
+        // 4. 关停 MCP（幂等，重复调用无副作用）。
         tracing::info!("shutdown requested, stopping MCP servers");
         self.mcp_manager.shutdown_all().await;
+
+        // 5. 唤醒 daemon main 执行进程级清理（watcher.stop / MCP / server.abort）。
+        self.shutdown_notify.notify_one();
         Ok(Response::new(()))
     }
 }
@@ -1622,12 +1710,38 @@ mod tests {
             cancel_tx,
             bus: Arc::new(EventBus::new()),
             client_tx,
+            shutdown_notify: Arc::new(Notify::new()),
+            hook_drain: Arc::new(crate::shutdown::NoopHookDrain),
+            shutting_down: AtomicBool::new(false),
         }
     }
 
     fn make_service(mgr: StdArc<SessionManager>) -> CoderDaemonService {
         let (rule_engine, reload_core) = build_reload_core(Path::new("/tmp"));
         make_service_with_core(mgr, rule_engine, reload_core)
+    }
+
+    /// 构造带可控关停句柄的 service：保留 cancel 接收端、暴露总线与 `Notify`，
+    /// 并注入 drain 宿主。供优雅关停管道（设计 D13）测试使用。
+    fn make_service_with_shutdown(
+        mgr: StdArc<SessionManager>,
+        hook_drain: Arc<dyn HookDrainHost>,
+    ) -> (
+        CoderDaemonService,
+        mpsc::Receiver<visp_agent::orchestrator::CancelSignal>,
+        Arc<Notify>,
+        Arc<EventBus>,
+    ) {
+        let mut service = make_service(mgr);
+        let (cancel_tx, cancel_rx) = mpsc::channel(16);
+        service.cancel_tx = cancel_tx;
+        let bus = Arc::new(EventBus::new());
+        service.bus = bus.clone();
+        let shutdown_notify = Arc::new(Notify::new());
+        service.shutdown_notify = shutdown_notify.clone();
+        service.hook_drain = hook_drain;
+        service.shutting_down = AtomicBool::new(false);
+        (service, cancel_rx, shutdown_notify, bus)
     }
 
     /// 构造 service 并暴露其总线句柄，供 Chat 订阅语义测试发布帧。
@@ -1938,6 +2052,9 @@ mod tests {
             cancel_tx,
             bus: Arc::new(EventBus::new()),
             client_tx,
+            shutdown_notify: Arc::new(Notify::new()),
+            hook_drain: Arc::new(crate::shutdown::NoopHookDrain),
+            shutting_down: AtomicBool::new(false),
         };
 
         let request = tonic::Request::new(proto::CreateSessionRequest {
@@ -1988,6 +2105,9 @@ mod tests {
             cancel_tx,
             bus: Arc::new(EventBus::new()),
             client_tx,
+            shutdown_notify: Arc::new(Notify::new()),
+            hook_drain: Arc::new(crate::shutdown::NoopHookDrain),
+            shutting_down: AtomicBool::new(false),
         };
 
         let request = tonic::Request::new(proto::CreateSessionRequest {
@@ -2063,6 +2183,9 @@ mod tests {
             cancel_tx,
             bus: Arc::new(EventBus::new()),
             client_tx,
+            shutdown_notify: Arc::new(Notify::new()),
+            hook_drain: Arc::new(crate::shutdown::NoopHookDrain),
+            shutting_down: AtomicBool::new(false),
         };
 
         let request = tonic::Request::new(proto::CreateSessionRequest {
@@ -2136,6 +2259,9 @@ mod tests {
             cancel_tx,
             bus: Arc::new(EventBus::new()),
             client_tx,
+            shutdown_notify: Arc::new(Notify::new()),
+            hook_drain: Arc::new(crate::shutdown::NoopHookDrain),
+            shutting_down: AtomicBool::new(false),
         };
 
         let request = tonic::Request::new(proto::CreateSessionRequest {
@@ -4188,5 +4314,171 @@ mod tests {
             }
             other => panic!("expected TextDelta, got {other:?}"),
         }
+    }
+
+    // ── 优雅关停管道（设计 D13，计划 1a-4b）────────────────────────────────
+
+    /// 记录调用的 drain 宿主：计数 + 记录收到的 budget。
+    struct CountingDrain {
+        calls: std::sync::atomic::AtomicUsize,
+        budget: Mutex<Option<std::time::Duration>>,
+    }
+
+    impl CountingDrain {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                budget: Mutex::new(None),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HookDrainHost for CountingDrain {
+        async fn drain(&self, budget: std::time::Duration) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.budget.lock().unwrap() = Some(budget);
+        }
+    }
+
+    /// 永不返回的 drain 宿主：验证调用方硬超时兜底（不悬挂）。
+    struct HangingDrain;
+
+    #[async_trait::async_trait]
+    impl HookDrainHost for HangingDrain {
+        async fn drain(&self, _budget: std::time::Duration) {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    fn shutdown_request() -> Request<proto::ShutdownRequest> {
+        Request::new(proto::ShutdownRequest { force: false })
+    }
+
+    /// 8. Shutdown RPC 串起完整管道：SessionEnd → 有界 drain → cancel_tx → Notify。
+    #[tokio::test]
+    async fn shutdown_rpc_runs_graceful_pipeline() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let drain = Arc::new(CountingDrain::new());
+        let (service, mut cancel_rx, notify, bus) = make_service_with_shutdown(mgr, drain.clone());
+        let mut sub = bus.subscribe();
+
+        // main 侧等待被唤醒。
+        let waiter = {
+            let notify = notify.clone();
+            tokio::spawn(async move { notify.notified().await })
+        };
+
+        service.shutdown(shutdown_request()).await.unwrap();
+
+        // cancel_tx → CancelSignal 送达（orchestrator `run()` 退出由 visp-agent 既有测试覆盖）。
+        cancel_rx
+            .try_recv()
+            .expect("shutdown 应投递 CancelSignal 给 orchestrator");
+
+        // Notify 唤醒 daemon main。
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("main 应被 Notify 唤醒")
+            .unwrap();
+
+        // 终态 SessionEnd 经总线发布。
+        let env = sub.try_recv().expect("shutdown 应发布 SessionEnd");
+        match env.event {
+            BusEvent::Hook(event) => {
+                assert_eq!(event.event_name(), HookEventName::SessionEnd);
+                match event.payload {
+                    HookPayload::SessionEnd(payload) => {
+                        assert_eq!(payload.reason, "shutdown");
+                        assert_eq!(payload.exit_code, Some(0));
+                    }
+                    other => panic!("expected SessionEnd payload, got {other:?}"),
+                }
+            }
+            BusEvent::Frame(_) => panic!("expected Hook bus event, got Frame"),
+        }
+
+        assert_eq!(drain.calls(), 1);
+        assert_eq!(*drain.budget.lock().unwrap(), Some(HOOK_DRAIN_BUDGET));
+        assert!(service.is_shutting_down());
+    }
+
+    /// 9. drain 有界：宿主永不返回时仍按 ≤2s 退出，不悬挂。
+    #[tokio::test]
+    async fn shutdown_drain_is_bounded() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let (service, _cancel_rx, _notify, _bus) =
+            make_service_with_shutdown(mgr, Arc::new(HangingDrain));
+
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            HOOK_DRAIN_BUDGET + std::time::Duration::from_secs(2),
+            service.shutdown(shutdown_request()),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            result.is_ok(),
+            "stuck drain host must not hang shutdown, elapsed {elapsed:?}"
+        );
+        assert!(result.unwrap().is_ok());
+        assert!(
+            elapsed < HOOK_DRAIN_BUDGET + std::time::Duration::from_secs(2),
+            "drain must be bounded by budget, elapsed {elapsed:?}"
+        );
+    }
+
+    /// 10. 终止态抑制：二次 shutdown 不再发 SessionEnd、不再 drain。
+    #[tokio::test]
+    async fn second_shutdown_emits_no_more_hook_events() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let drain = Arc::new(CountingDrain::new());
+        let (service, _cancel_rx, _notify, bus) = make_service_with_shutdown(mgr, drain.clone());
+        let mut sub = bus.subscribe();
+
+        service.shutdown(shutdown_request()).await.unwrap();
+        service.shutdown(shutdown_request()).await.unwrap();
+
+        assert_eq!(drain.calls(), 1, "drain 只应在首次关停执行");
+
+        let mut hook_events = 0usize;
+        while let Ok(env) = sub.try_recv() {
+            if matches!(env.event, BusEvent::Hook(_)) {
+                hook_events += 1;
+            }
+        }
+        assert_eq!(hook_events, 1, "SessionEnd 之后不得再派发 hook 事件");
+    }
+
+    /// 11. `mcp.shutdown_all` 双调幂等（handler 与 main 各调一次）。
+    #[tokio::test]
+    async fn mcp_shutdown_all_is_idempotent() {
+        let mcp = McpManager::new(vec![]);
+        mcp.shutdown_all().await;
+        mcp.shutdown_all().await;
+    }
+
+    /// 12. 无 hook（NoopHookDrain）时关停行为不变：即返、cancel 仍送达、Notify 仍触发。
+    #[tokio::test]
+    async fn shutdown_without_hooks_behaves_like_before() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let (service, mut cancel_rx, notify, _bus) =
+            make_service_with_shutdown(mgr, Arc::new(crate::shutdown::NoopHookDrain));
+
+        let started = Instant::now();
+        service.shutdown(shutdown_request()).await.unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "空 drain 不应拖慢关停"
+        );
+        assert!(cancel_rx.try_recv().is_ok(), "cancel 仍须送达");
+        tokio::time::timeout(std::time::Duration::from_secs(1), notify.notified())
+            .await
+            .expect("Notify 仍须触发");
     }
 }

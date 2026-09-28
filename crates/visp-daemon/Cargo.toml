@@ -17,6 +17,7 @@ visp-mcp = { path = "../visp-mcp" }
 visp-agent = { path = "../visp-agent" }
 visp-config = { path = "../visp-config" }
 visp-fs = { path = "../visp-fs" }
+visp-hooks = { path = "../visp-hooks" }
 serde.workspace = true
 serde_json.workspace = true
 arc-swap.workspace = true
@@ -44,4 +45,4 @@ serial_test = "3"
 tokio-util = "0.7"
 async-trait = { workspace = true }
 futures = { workspace = true }
-visp-hooks = { path = "../visp-hooks" }
+libc = "0.2"

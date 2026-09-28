@@ -2,6 +2,7 @@ mod config;
 mod observability;
 mod server;
 mod service;
+mod shutdown;
 
 use arc_swap::ArcSwap;
 use std::collections::HashMap;
@@ -599,6 +600,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 9. Assemble service
     let mcp_shutdown = mcp_manager.clone();
+    // 优雅关停管道（设计 D13）：Shutdown RPC 经此 Notify 唤醒 main；hook 有界
+    // drain 宿主在 1a 为空实现，1b-2c 接真实执行器。
+    let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+    let hook_drain: Arc<dyn crate::shutdown::HookDrainHost> =
+        Arc::new(crate::shutdown::NoopHookDrain);
     let service = CoderDaemonService::new(
         model_configs,
         tool_registry,
@@ -613,6 +619,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cancel_tx,
         bus.clone(),
         client_tx,
+        shutdown_notify.clone(),
+        hook_drain,
     )
     .inspect_err(|error| {
         // The desktop launcher redirects release stdout/stderr to a log file.
@@ -647,20 +655,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // 11. Wait for Ctrl+C
-    tokio::signal::ctrl_c().await?;
-    tracing::info!("shutdown signal received, stopping server");
+    // 11. 等待关停信号：Ctrl+C / Shutdown RPC（shutdown_notify）/ SIGTERM
+    //     三者走同一清理路径（设计 D13）。
+    let trigger = crate::shutdown::wait_for_shutdown(&shutdown_notify).await?;
+    tracing::info!(?trigger, "shutdown signal received, stopping server");
 
-    // 先停 watcher：关闭路径上不再有 reload 触发（设计 §5.6 生命周期）。
-    // stop 为尽力而为（abort 后台任务 + 释放监听），不阻断后续 shutdown。
-    if let Some(watcher) = file_watcher {
-        watcher.stop();
-    }
-
-    // Gracefully shut down MCP connections before aborting the server
-    mcp_shutdown.shutdown_all().await;
-
-    server_handle.abort();
+    // 12. 进程级清理：停 watcher → 关 MCP → abort server（三入口共用）。
+    crate::shutdown::run_shutdown_cleanup(file_watcher, mcp_shutdown, &server_handle).await;
 
     Ok(())
 }

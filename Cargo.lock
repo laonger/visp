@@ -5054,6 +5054,7 @@ dependencies = [
  "async-trait",
  "dashmap",
  "futures",
+ "libc",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
