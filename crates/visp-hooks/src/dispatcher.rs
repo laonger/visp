@@ -59,6 +59,11 @@ pub struct DispatchInput {
     pub source: Option<String>,
     /// `PermissionRequest.kind`（`{approval, question}`）。
     pub kind: Option<String>,
+    /// 预序列化的**完整事件 JSON**（设计 D5：作为子进程 stdin 载荷）。
+    ///
+    /// 由接线层从 [`crate::event::HookEvent`] 序列化后填入；决策内核只透传，
+    /// 不解析。为 `None` 时进程 Handler 退化为「由事件视图生成的精简 JSON」。
+    pub payload: Option<String>,
 }
 
 impl DispatchInput {
@@ -69,6 +74,7 @@ impl DispatchInput {
             tool_name: None,
             source: None,
             kind: None,
+            payload: None,
         }
     }
 
@@ -87,6 +93,12 @@ impl DispatchInput {
     /// 设置 `kind`。
     pub fn with_kind(mut self, kind: impl Into<String>) -> Self {
         self.kind = Some(kind.into());
+        self
+    }
+
+    /// 设置完整事件 JSON 载荷（写入子进程 stdin）。
+    pub fn with_payload(mut self, payload: impl Into<String>) -> Self {
+        self.payload = Some(payload.into());
         self
     }
 
