@@ -562,16 +562,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //         有规则 → 订阅总线（Frame 经 hook_map 映射后派发），同一运行时在下方
     //         作为关停 drain 宿主注入 service。订阅先于 orchestrator 启动，避免丢早期帧。
     let hook_trust_store = visp_config::HookTrustStore::load();
-    // herdr 门控默认 auto：仅当 HERDR_ENV=1 且 BIN/PANE 可用时注册内置绑定，否则零行为。
-    let herdr_env: Vec<(String, String)> = std::env::vars().collect();
-    let hook_runtime = visp_daemon::hook_runtime::setup_hook_runtime_with_herdr(
-        &config.hooks,
-        visp_hooks::HerdrEnabled::Auto,
-        &herdr_env,
-        &cwd,
-        &hook_trust_store,
-        &bus,
-    );
+    let hook_runtime =
+        visp_daemon::hook_runtime::setup_hook_runtime(&config.hooks, &cwd, &hook_trust_store, &bus);
 
     // 8.7.5. Register agent tools from AgentRegistry (skip in single-agent mode)
     let agent_registry_snapshot = agent_registry.load_full();

@@ -1,6 +1,6 @@
 //! `visp hooks` 子命令：`list` / `doctor` / `test` / `logs`（设计 §15 / D10 / D11）。
 //!
-//! - `list`：列出规则（`id` / 来源 `global|project|builtin` / `enabled` / 信任状态）。
+//! - `list`：列出规则（`id` / 来源 `global|project` / `enabled` / 信任状态）。
 //!   静态读配置 + 信任存储；daemon 可达时附运行时计数。
 //! - `doctor`：静态检查（配置可解析性、`command` 可解析性、`timeout_ms` 合理性、
 //!   项目信任、env 白名单）+ 经只读 `GetHookStats` 的运行时计数（不可达则提示）
@@ -154,16 +154,6 @@ pub fn render_list_from(
             rule.id, source, rule.enabled, trust_col
         );
     }
-    // 内置规则（当前唯一：builtin:herdr），enabled 由 herdr 环境护栏判定。
-    let builtin = visp_hooks::builtin_rule();
-    let _ = writeln!(
-        out,
-        "{:<28} {:<9} {:<8} n/a",
-        builtin.id,
-        "builtin",
-        herdr_active()
-    );
-
     match stats {
         Some(s) => {
             let _ = writeln!(
@@ -188,14 +178,6 @@ fn trust_label(trust: &TrustStatus) -> String {
         TrustStatus::Trusted => "trusted".to_string(),
         TrustStatus::Untrusted(_) => "untrusted".to_string(),
     }
-}
-
-/// herdr 内置绑定是否处于活动护栏（与 [`visp_hooks::HerdrBinding::from_env`] 同源判定）。
-fn herdr_active() -> bool {
-    let get = |key: &str| std::env::var(key).ok();
-    get(visp_hooks::HERDR_ENV).as_deref() == Some(visp_hooks::HERDR_ENV_ON)
-        && get(visp_hooks::HERDR_BIN_PATH).is_some_and(|v| !v.is_empty())
-        && get(visp_hooks::HERDR_PANE_ID).is_some_and(|v| !v.is_empty())
 }
 
 // ============================ doctor ============================
@@ -734,7 +716,6 @@ mod tests {
         assert!(out.contains("global"), "{out}");
         assert!(out.contains("project"), "{out}");
         assert!(out.contains("untrusted"), "{out}");
-        assert!(out.contains("builtin:herdr"), "{out}");
     }
 
     #[test]
