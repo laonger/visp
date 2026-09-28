@@ -4968,6 +4968,7 @@ dependencies = [
  "uuid",
  "visp-config",
  "visp-core",
+ "visp-hooks",
  "visp-llm",
  "visp-tools",
 ]

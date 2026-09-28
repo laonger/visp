@@ -3118,3 +3118,369 @@ async fn test_agent_definition_clone_from_snapshot_survives_across_await() {
     assert_eq!(definition.name, "vision");
     assert_eq!(definition.description, "original");
 }
+
+// ── 1b-1b: SessionStart / UserPromptSubmit hook 发射 ──────────────────
+//
+// 依据：设计 §6.2/§6.4、实施计划 1b-1b 测试表第 1–10 条。
+
+use visp_hooks::{HookEvent, HookEventName, HookPayload, Origin, SessionSource};
+
+/// 从记录发布器中提取 hook 域事件（忽略显示域 Frame）。
+fn recorded_hooks(recorder: &Arc<RecordingPublisher>) -> Vec<HookEvent> {
+    recorder
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            BusEvent::Hook(h) => Some(h.clone()),
+            BusEvent::Frame(_) => None,
+        })
+        .collect()
+}
+
+fn count_event(hooks: &[HookEvent], name: HookEventName) -> usize {
+    hooks.iter().filter(|h| h.event_name() == name).count()
+}
+
+/// 构造可成功启动主 agent 的 orchestrator：注册 `default` agent + `Mock` provider，
+/// 并创建一个空历史的主会话。返回 (orch, 主 session_id)。
+fn make_orchestrator_for_main_agent(recorder: Arc<RecordingPublisher>) -> (Orchestrator, String) {
+    let (_cancel_tx, cancel_rx) = mpsc::channel(16);
+    let (global_tx, global_rx) = mpsc::channel(256);
+    let (_client_tx, client_rx) = mpsc::channel(64);
+
+    let store: Box<dyn visp_core::session::SessionStore> = Box::new(InMemorySessionStore::new());
+    let session_mgr = Arc::new(SessionManager::new(store));
+    let session = session_mgr
+        .create(&PathBuf::from("/tmp"), LlmConfig::default())
+        .unwrap();
+    let session_id = session.id.clone();
+
+    let mut agent_registry = AgentRegistry::new();
+    agent_registry
+        .register(AgentDefinition {
+            name: "default".to_string(),
+            description: String::new(),
+            mode: AgentMode::All,
+            model: None,
+            temperature: None,
+            steps: None,
+            permission: vec![],
+            allowed_sub_agents: Vec::new(),
+            system_prompt: String::new(),
+        })
+        .ok();
+    let agent_registry = Arc::new(ArcSwap::from_pointee(agent_registry));
+
+    let tool_registry = Arc::new(ToolRegistry::new());
+    let rule_engine = Arc::new(RuleEngine::new(&PathBuf::from(".")).unwrap());
+    let context_trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(NoopTrimmer);
+
+    let provider: Arc<dyn LlmProvider> = Arc::new(visp_llm::mock::MockProvider::new(vec![]));
+    let mut providers = HashMap::new();
+    providers.insert("Mock/mock-model".to_string(), provider);
+
+    let daemon_config = daemon_config_with_models(vec![visp_config::LlmModelConfig {
+        name: "mock-model".to_string(),
+        protocol: "openai".to_string(),
+        provider: Some("Mock".to_string()),
+        model: "mock-model".to_string(),
+        api_key: None,
+        base_url: None,
+        temperature: None,
+        max_tokens: None,
+        max_context_tokens: None,
+        thinking_budget_tokens: None,
+        use_tool: None,
+        image_generation: None,
+        extra: HashMap::new(),
+    }]);
+
+    let orch = Orchestrator::new(
+        cancel_rx,
+        global_rx,
+        global_tx,
+        client_rx,
+        session_mgr,
+        agent_registry,
+        tool_registry,
+        rule_engine,
+        AgentConfig::default(),
+        context_trimmer,
+        daemon_config,
+        providers,
+        recorder,
+    );
+
+    (orch, session_id)
+}
+
+/// 第 1 条：主 session 首次 `start_loop` 成功 → 发一次 `SessionStart`（字段齐备）。
+#[tokio::test]
+async fn test_session_start_emitted_once_on_first_start_loop() {
+    let recorder = recording_publisher();
+    let (mut orch, sid) = make_orchestrator_for_main_agent(recorder.clone());
+
+    orch.start_main_agent(&sid, "hello").await;
+
+    let hooks = recorded_hooks(&recorder);
+    let starts: Vec<&HookEvent> = hooks
+        .iter()
+        .filter(|h| h.event_name() == HookEventName::SessionStart)
+        .collect();
+    assert_eq!(
+        starts.len(),
+        1,
+        "首次 start_loop 成功应恰好发一次 SessionStart"
+    );
+
+    let event = starts[0];
+    assert_eq!(event.context.session_id, sid);
+    assert_eq!(event.context.source, SessionSource::Startup);
+    match &event.payload {
+        HookPayload::SessionStart(p) => {
+            assert_eq!(p.short_id, sid.chars().take(8).collect::<String>());
+            assert_eq!(p.agent_name, "default");
+            assert_eq!(p.parent_session_id, None, "主会话省略 parent_session_id");
+        }
+        other => panic!("期望 SessionStart 载荷，得到 {other:?}"),
+    }
+}
+
+/// 第 2 条：同 session 第二回合 `start_loop` → 不再发 `SessionStart`（per-session 标记集合）。
+#[tokio::test]
+async fn test_session_start_not_repeated_on_second_turn() {
+    let recorder = recording_publisher();
+    let (mut orch, sid) = make_orchestrator_for_main_agent(recorder.clone());
+
+    orch.start_main_agent(&sid, "first").await;
+    // 模拟下一回合 user input：handle_client_message 会先把会话重置为 Idle
+    orch.session_mgr
+        .finish_loop(&sid, SessionStatus::Idle)
+        .unwrap();
+    orch.start_main_agent(&sid, "second").await;
+
+    let hooks = recorded_hooks(&recorder);
+    assert_eq!(
+        count_event(&hooks, HookEventName::SessionStart),
+        1,
+        "同一 session 第二回合不应再发 SessionStart"
+    );
+    assert_eq!(
+        count_event(&hooks, HookEventName::UserPromptSubmit),
+        2,
+        "两回合各受理一次 UserInput，应各发一次 UserPromptSubmit"
+    );
+}
+
+/// 第 3 条：同一 daemon 内第二个新建主会话 → 仍发 `SessionStart`。
+#[tokio::test]
+async fn test_session_start_emitted_for_second_session_in_same_daemon() {
+    let recorder = recording_publisher();
+    let (mut orch, sid1) = make_orchestrator_for_main_agent(recorder.clone());
+    let sid2 = orch
+        .session_mgr
+        .create(&PathBuf::from("/tmp"), LlmConfig::default())
+        .unwrap()
+        .id;
+
+    orch.start_main_agent(&sid1, "a").await;
+    orch.start_main_agent(&sid2, "b").await;
+
+    let hooks = recorded_hooks(&recorder);
+    let starts: Vec<&HookEvent> = hooks
+        .iter()
+        .filter(|h| h.event_name() == HookEventName::SessionStart)
+        .collect();
+    assert_eq!(
+        starts.len(),
+        2,
+        "同一 daemon 内第二个新建会话仍应发 SessionStart"
+    );
+    assert!(starts.iter().any(|h| h.context.session_id == sid1));
+    assert!(starts.iter().any(|h| h.context.session_id == sid2));
+}
+
+/// 第 4 条：子 agent `start_loop` → 不发（`parent_id.is_none()` 过滤）。
+#[tokio::test]
+async fn test_sub_agent_start_loop_emits_no_session_start() {
+    let recorder = recording_publisher();
+    let (mut orch, sid) = make_orchestrator_for_main_agent(recorder.clone());
+
+    orch.handle_agent_message(Envelope {
+        session_id: sid,
+        message: AgentMessage::SpawnRequest {
+            call_id: "call-sub-1".to_string(),
+            subagent_type: "default".to_string(),
+            description: "sub task".to_string(),
+            prompt: "do something".into(),
+            task_id: None,
+            trace_context: None,
+            response_tx: None,
+        },
+        trace_context: None,
+    })
+    .await;
+
+    let hooks = recorded_hooks(&recorder);
+    assert_eq!(
+        count_event(&hooks, HookEventName::SessionStart),
+        0,
+        "子 agent 的 start_loop 不应触发 SessionStart"
+    );
+}
+
+/// 第 5 条：`source` 由绑定时刻 `history` 是否为空推导。
+#[tokio::test]
+async fn test_session_start_source_derived_from_history() {
+    let recorder = recording_publisher();
+    let (mut orch, sid) = make_orchestrator_for_main_agent(recorder.clone());
+
+    // 空 history → startup
+    orch.start_main_agent(&sid, "hello").await;
+    let hooks = recorded_hooks(&recorder);
+    let first = hooks
+        .iter()
+        .find(|h| h.event_name() == HookEventName::SessionStart && h.context.session_id == sid)
+        .expect("应发出 SessionStart");
+    assert_eq!(first.context.source, SessionSource::Startup);
+
+    // 新会话带既有历史 → resume
+    let resumed_sid = orch
+        .session_mgr
+        .create(&PathBuf::from("/tmp"), LlmConfig::default())
+        .unwrap()
+        .id;
+    orch.session_mgr
+        .append_message(&resumed_sid, visp_core::message::Message::user("old"))
+        .unwrap();
+    orch.start_main_agent(&resumed_sid, "new").await;
+
+    let hooks = recorded_hooks(&recorder);
+    let resumed: Vec<&HookEvent> = hooks
+        .iter()
+        .filter(|h| {
+            h.event_name() == HookEventName::SessionStart && h.context.session_id == resumed_sid
+        })
+        .collect();
+    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed[0].context.source, SessionSource::Resume);
+}
+
+/// 第 6 条：`origin` 本步固定 `tui`（当前唯一客户端；headless/other 由 daemon 透传，后续接入）。
+#[tokio::test]
+async fn test_hook_events_origin_is_tui() {
+    let recorder = recording_publisher();
+    let (mut orch, sid) = make_orchestrator_for_main_agent(recorder.clone());
+
+    orch.start_main_agent(&sid, "hello").await;
+
+    let hooks = recorded_hooks(&recorder);
+    assert!(!hooks.is_empty());
+    for h in &hooks {
+        assert_eq!(
+            h.context.origin,
+            Origin::Tui,
+            "本步所有 hook 事件 origin 应为 tui（daemon 透传 headless/other 为后续步骤）"
+        );
+    }
+}
+
+/// 第 7 条：`start_loop` 失败 → 不发 `SessionStart`。
+#[tokio::test]
+async fn test_no_hook_events_when_start_loop_fails() {
+    let recorder = recording_publisher();
+    let (mut orch, sid) = make_orchestrator_for_main_agent(recorder.clone());
+
+    // 预置 Running：start_loop 将返回 SessionBusy 失败
+    orch.session_mgr
+        .finish_loop(&sid, SessionStatus::Running)
+        .unwrap();
+    orch.start_main_agent(&sid, "hello").await;
+
+    assert!(
+        recorded_hooks(&recorder).is_empty(),
+        "start_loop 失败不应发任何 hook 事件"
+    );
+}
+
+/// 第 8 条：`UserPromptSubmit` 主 agent 受理且 `start_loop` 成功 → 发一次。
+#[tokio::test]
+async fn test_user_prompt_submit_emitted_once_per_accepted_turn() {
+    let recorder = recording_publisher();
+    let (mut orch, sid) = make_orchestrator_for_main_agent(recorder.clone());
+
+    orch.start_main_agent(&sid, "hello").await;
+
+    let hooks = recorded_hooks(&recorder);
+    let ups: Vec<&HookEvent> = hooks
+        .iter()
+        .filter(|h| h.event_name() == HookEventName::UserPromptSubmit)
+        .collect();
+    assert_eq!(ups.len(), 1, "主 agent 受理一回合应发一次 UserPromptSubmit");
+    assert_eq!(ups[0].context.session_id, sid);
+}
+
+/// 第 9 条：子 session / 被拒输入 → 不发 `UserPromptSubmit`。
+#[tokio::test]
+async fn test_user_prompt_submit_not_emitted_for_rejected_or_sub_session() {
+    let recorder = recording_publisher();
+    let (mut orch, sid) = make_orchestrator_for_main_agent(recorder.clone());
+
+    // 被拒：不存在的 session
+    orch.handle_client_message(ClientMessage::UserInput {
+        session_id: "does-not-exist".to_string(),
+        text: "hi".to_string(),
+    })
+    .await;
+
+    // 子会话：parent_id 非空 → handle_client_message 直接忽略
+    let child = orch
+        .session_mgr
+        .create_sub(SubSessionParams {
+            parent_id: Some(sid.clone()),
+            agent_name: "default".to_string(),
+            session_id: None,
+            project_path: PathBuf::from("/tmp"),
+            config: LlmConfig::default(),
+            permission: vec![],
+            approved_tools: HashSet::new(),
+        })
+        .unwrap();
+    orch.handle_client_message(ClientMessage::UserInput {
+        session_id: child.id.clone(),
+        text: "hi".to_string(),
+    })
+    .await;
+
+    let hooks = recorded_hooks(&recorder);
+    assert_eq!(
+        count_event(&hooks, HookEventName::UserPromptSubmit),
+        0,
+        "子会话/被拒输入不应发 UserPromptSubmit"
+    );
+}
+
+/// 第 10 条：`prompt_chars` 为字符数；默认不含原文（`prompt` 省略）。
+#[tokio::test]
+async fn test_user_prompt_submit_prompt_chars_and_no_raw_prompt() {
+    let recorder = recording_publisher();
+    let (mut orch, sid) = make_orchestrator_for_main_agent(recorder.clone());
+
+    // "héllo🙂" = 6 个字符（非字节数）
+    orch.start_main_agent(&sid, "héllo🙂").await;
+
+    let hooks = recorded_hooks(&recorder);
+    let ups = hooks
+        .iter()
+        .find(|h| h.event_name() == HookEventName::UserPromptSubmit)
+        .expect("应发出 UserPromptSubmit");
+    match &ups.payload {
+        HookPayload::UserPromptSubmit(p) => {
+            assert_eq!(p.prompt_chars, 6, "prompt_chars 应为字符数而非字节数");
+            assert!(p.prompt.is_none(), "默认脱敏：不应携带原文");
+        }
+        other => panic!("期望 UserPromptSubmit 载荷，得到 {other:?}"),
+    }
+}

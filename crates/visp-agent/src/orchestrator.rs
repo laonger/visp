@@ -7,7 +7,7 @@
 //! - 管理子 Agent 的创建（spawn_sub_agent）、销毁（handle_done）、取消（cancel_agent）
 //! - 管理 pending_queries 将用户响应路由到对应 agent
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -18,7 +18,7 @@ use tracing::Instrument;
 
 use visp_core::agent::run_agent_loop;
 use visp_core::agent::{
-    AgentConfig, AgentEvent, AgentEventFrame, AgentKind, AgentMessage, Envelope,
+    AgentConfig, AgentEvent, AgentEventFrame, AgentKind, AgentLoopContext, AgentMessage, Envelope,
     OrchestratorMessage, UserQueryResult,
 };
 use visp_core::agent_definition::{AgentDefinition, merge_permissions};
@@ -34,6 +34,10 @@ use visp_core::tool::ToolType;
 use visp_core::tool_registry::ToolRegistry;
 
 use visp_config::DaemonConfig;
+use visp_hooks::{
+    HookContext, HookEvent, HookEventName, HookPayload, Origin, SessionSource, SessionStartPayload,
+    UserPromptSubmitPayload, VISP_HOOK_SCHEMA,
+};
 
 use crate::active_agent::{ActiveAgent, ActiveAgentRegistry};
 
@@ -62,6 +66,20 @@ fn filter_tools_for_sub_agent(
         }
     }
     Arc::new(filtered)
+}
+
+/// 会话短标识（前 8 个字符；session id 为 UUID/ASCII，设计 §6.2 `short_id`）。
+fn short_session_id(session_id: &str) -> String {
+    session_id.chars().take(8).collect()
+}
+
+/// 绑定时刻 `history` 是否为空 → 会话来源（设计 §6.2：空 → `startup`，非空 → `resume`）。
+fn session_source(ctx: &AgentLoopContext) -> SessionSource {
+    if ctx.history.is_empty() {
+        SessionSource::Startup
+    } else {
+        SessionSource::Resume
+    }
 }
 
 /// 从 AgentRegistry 动态构建子 agent 列表（用于注入 system prompt）
@@ -155,6 +173,9 @@ pub struct Orchestrator {
     pending_responses: HashMap<String, tokio::sync::oneshot::Sender<String>>,
     /// 因并发上限而排队等待的 spawn 请求（FIFO，subagent 完成释放空位后消费）
     queued_spawns: std::collections::VecDeque<QueuedSpawn>,
+    /// 本 daemon 内已发射过 `SessionStart` 的 session（设计 §6.2 裁定 #2：
+    /// 该 session 首次 `start_loop` 成功；同一 daemon 内第二个新建会话仍会发）。
+    session_start_emitted: HashSet<String>,
 
     // ── 共享依赖 ─────────────────────────────────────────────
     session_mgr: Arc<SessionManager>,
@@ -196,6 +217,7 @@ impl Orchestrator {
             sub_agent_handles: HashMap::new(),
             pending_responses: HashMap::new(),
             queued_spawns: std::collections::VecDeque::new(),
+            session_start_emitted: HashSet::new(),
             session_mgr,
             agent_registry,
             tool_registry,
@@ -382,8 +404,8 @@ impl Orchestrator {
 
     /// 启动主 Agent（根，无 parent）
     async fn start_main_agent(&mut self, session_id: &str, user_message: &str) {
-        let agent_name = match self.session_mgr.get(session_id) {
-            Ok(s) => s.agent_name.clone(),
+        let (agent_name, is_main) = match self.session_mgr.get(session_id) {
+            Ok(s) => (s.agent_name.clone(), s.parent_id.is_none()),
             Err(e) => {
                 tracing::error!(session_id, error = %e, "failed to get session");
                 return;
@@ -530,6 +552,18 @@ impl Orchestrator {
                 m.images.clear();
             }
         }
+
+        // hook 域（设计 §6.2 / §6.4）：start_loop 已成功，主会话在上述模型覆盖
+        // 之后发射生命周期事件。
+        //
+        // `SessionStart` 仅在「该 session 本次 daemon 内首次 start_loop 成功」时发射：
+        // per-session 标记集合保证同会话第二回合不再发，但同 daemon 内第二个新建
+        // 会话仍会发；`is_main` 过滤（`parent_id.is_none()`）排除子 agent。
+        if is_main && self.session_start_emitted.insert(session_id.to_string()) {
+            self.publish_session_start(session_id, &ctx, &agent_name);
+        }
+        // `UserPromptSubmit`：主 agent 受理 UserInput 且 start_loop 成功时发一次。
+        self.publish_user_prompt_submit(session_id, &ctx, user_message);
 
         let mut msg = Message::user(&clean_text);
         msg.images = images;
@@ -1234,6 +1268,57 @@ impl Orchestrator {
                 error: error.to_string(),
             });
         }
+    }
+
+    /// 发布 `SessionStart`（设计 §6.2：该 session 本次 daemon 内首次 `start_loop` 成功）。
+    ///
+    /// `origin` 本步固定为 [`Origin::Tui`]：当前唯一客户端是 TUI-over-gRPC。
+    /// `headless`/`other` 预留给未来的非 TUI 客户端，届时由 daemon 在会话被对应
+    /// 客户端驱动时写入 session 并透传（设计 §6.2），此处再改为读取透传值。
+    fn publish_session_start(&self, session_id: &str, ctx: &AgentLoopContext, agent_name: &str) {
+        let cwd = ctx.working_dir.display().to_string();
+        let event = HookEvent {
+            context: HookContext {
+                schema: VISP_HOOK_SCHEMA,
+                hook_event_name: HookEventName::SessionStart,
+                session_id: session_id.to_string(),
+                cwd: cwd.clone(),
+                source: session_source(ctx),
+                origin: Origin::Tui,
+                seq: None,
+            },
+            payload: HookPayload::SessionStart(SessionStartPayload {
+                short_id: short_session_id(session_id),
+                project_path: cwd,
+                model: ctx.config.model.clone(),
+                model_key: ctx.config.model_key.clone().unwrap_or_default(),
+                agent_name: agent_name.to_string(),
+                parent_session_id: None,
+            }),
+        };
+        self.bus.publish(BusEvent::Hook(event));
+    }
+
+    /// 发布 `UserPromptSubmit`（主 agent 受理 `UserInput` 且 `start_loop` 成功）。
+    ///
+    /// 载荷默认脱敏：仅给 `prompt_chars`，不含原文；显式 `include` 由后续执行器阶段补。
+    fn publish_user_prompt_submit(&self, session_id: &str, ctx: &AgentLoopContext, prompt: &str) {
+        let event = HookEvent {
+            context: HookContext {
+                schema: VISP_HOOK_SCHEMA,
+                hook_event_name: HookEventName::UserPromptSubmit,
+                session_id: session_id.to_string(),
+                cwd: ctx.working_dir.display().to_string(),
+                source: session_source(ctx),
+                origin: Origin::Tui,
+                seq: None,
+            },
+            payload: HookPayload::UserPromptSubmit(UserPromptSubmitPayload {
+                prompt_chars: prompt.chars().count() as u64,
+                prompt: None,
+            }),
+        };
+        self.bus.publish(BusEvent::Hook(event));
     }
 
     pub fn resolve_provider(
