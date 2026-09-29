@@ -3967,3 +3967,134 @@ async fn test_normal_single_turn_still_finishes_idle() {
         "正常完成应被置回 Idle"
     );
 }
+
+/// 第 21 条（G5·错误路径）：先起新回合（`Running`）再投递旧回合迟到错误 →
+/// `handle_agent_error` 收尾为幂等空操作：新循环令牌仍在、状态仍 `Running`、
+/// registration 未被移除。
+#[tokio::test]
+async fn test_stale_error_does_not_tear_down_new_turn() {
+    let recorder = recording_publisher();
+    let (mut orch, sid) = make_orchestrator_for_main_agent(recorder.clone());
+
+    // 新回合：新循环已启动（Running + 令牌）
+    let _ctx = orch
+        .session_mgr
+        .start_loop(&sid, &orch.context_trimmer, None, None)
+        .expect("新循环应能启动");
+    assert!(orch.session_mgr.has_inflight_loop(&sid));
+
+    // 旧回合的 root registration（同 session_id）
+    register_root_agent(&mut orch, &sid);
+
+    // 旧回合错误迟到
+    orch.handle_agent_error(&sid, AgentErrorCode::Internal, "stale boom".to_string())
+        .await;
+
+    assert!(
+        orch.session_mgr.has_inflight_loop(&sid),
+        "旧错误不应移除新循环令牌"
+    );
+    assert_eq!(
+        orch.session_mgr.get(&sid).unwrap().status,
+        SessionStatus::Running,
+        "旧错误不应把新回合状态改写为 Error"
+    );
+    assert!(
+        orch.active_agents.get(&sid).is_some(),
+        "旧错误不应移除新循环的 registration"
+    );
+}
+
+/// 第 22 条（G5·不误伤）：单回合错误路径正常收尾 → 状态置 `Error`、
+/// registration 清理、会话级 `StopFailure` 仍发布（G5 判据不吞掉正常终止）。
+#[tokio::test]
+async fn test_single_turn_error_still_finishes_error() {
+    let recorder = recording_publisher();
+    let (mut orch, sid) = make_orchestrator_for_main_agent(recorder.clone());
+
+    register_root_agent(&mut orch, &sid);
+
+    orch.handle_agent_error(&sid, AgentErrorCode::Internal, "boom".to_string())
+        .await;
+
+    assert!(
+        orch.active_agents.get(&sid).is_none(),
+        "单回合错误应正常清理 registration"
+    );
+    assert!(
+        !orch.session_mgr.has_inflight_loop(&sid),
+        "单回合错误应清理循环令牌，无泄漏"
+    );
+    assert_eq!(
+        orch.session_mgr.get(&sid).unwrap().status,
+        SessionStatus::Error,
+        "单回合错误应置为 Error"
+    );
+    let hooks = recorded_hooks(&recorder);
+    assert_eq!(
+        count_event(&hooks, HookEventName::StopFailure),
+        1,
+        "单回合真错误仍应发布会话级 StopFailure"
+    );
+}
+
+/// 第 23 条（G5·子会话不受判据）：子会话即便处于 `Running`，错误收尾也正常
+/// 清理（G5 仅主会话适用），registration 与令牌均无泄漏。
+#[tokio::test]
+async fn test_sub_session_error_is_not_treated_as_stale() {
+    let recorder = recording_publisher();
+    let (mut orch, parent_id) = make_orchestrator_for_main_agent(recorder.clone());
+    register_root_agent(&mut orch, &parent_id);
+
+    let child = orch
+        .session_mgr
+        .create_sub(SubSessionParams {
+            parent_id: Some(parent_id.clone()),
+            agent_name: "default".to_string(),
+            session_id: None,
+            project_path: PathBuf::from("/tmp"),
+            config: LlmConfig::default(),
+            permission: vec![],
+            approved_tools: HashSet::new(),
+        })
+        .unwrap();
+
+    // 子会话也标记为 Running + 持有令牌：若 G5 误丢 parent_id 判据，会错误地空操作
+    let _child_ctx = orch
+        .session_mgr
+        .start_loop(&child.id, &orch.context_trimmer, None, None)
+        .expect("子循环应能启动");
+    assert!(orch.session_mgr.has_inflight_loop(&child.id));
+
+    let (child_inbox_tx, _child_inbox_rx) = mpsc::channel(16);
+    orch.active_agents.register(ActiveAgent {
+        session_id: child.id.clone(),
+        parent_session_id: Some(parent_id.clone()),
+        agent_name: "default".to_string(),
+        cancel_token: CancellationToken::new(),
+        inbox: child_inbox_tx,
+        pending_call_id: Some("call-1".to_string()),
+        started_at: Instant::now(),
+    });
+
+    orch.handle_agent_error(
+        &child.id,
+        AgentErrorCode::Internal,
+        "child boom".to_string(),
+    )
+    .await;
+
+    assert!(
+        orch.active_agents.get(&child.id).is_none(),
+        "子会话错误收尾应清理 registration，不套用 G5 空操作"
+    );
+    assert!(
+        !orch.session_mgr.has_inflight_loop(&child.id),
+        "子会话错误收尾应移除令牌，无泄漏"
+    );
+    assert_eq!(
+        orch.session_mgr.get(&child.id).unwrap().status,
+        SessionStatus::Error,
+        "子会话错误收尾应置为 Error"
+    );
+}
