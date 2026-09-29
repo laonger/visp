@@ -192,9 +192,14 @@ message UserQuery {
     bool allow_other = 5;
 }
 
-// Claude thinking 块信息。用于流式显示 LLM 的推理过程。
+// 思考/推理块信息。用于流式显示 LLM 的推理过程。
+//
+// 语义约定（重要）：`thinking` 是**增量**文本——相对同一思考块上一帧的**新增**部分，
+// 消费方应把它**追加**到同一条消息（ACP 中即同一 `messageId` 的 chunk），**不是**累积全文。
+// 该语义由 `visp-core` 的流收集契约保证；「连续同块快照 → 只发增量」与「流式期间不产生
+// 快照变体」两条测试是该契约的回归护栏——若修改本字段语义，必须同步更新它们。
 message ThinkingBlock {
-    // 推理/思考内容文本。
+    // 增量思考文本（相对上一帧的新增部分，消费方追加；非累积全文）。
     string thinking = 1;
     // 加密签名，Claude API 用于验证 thinking 内容未被篡改。
     string signature = 2;
