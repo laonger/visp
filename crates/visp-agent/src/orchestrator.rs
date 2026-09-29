@@ -386,8 +386,13 @@ impl Orchestrator {
             ClientMessage::UserInput { session_id, text } => {
                 match self.session_mgr.get(&session_id) {
                     Ok(session) if session.parent_id.is_none() => {
-                        // 恢复场景主 session 可能是 Completed/Error，重置为 Idle 再启动
-                        if session.status != SessionStatus::Idle {
+                        // 恢复场景主 session 可能是 Completed/Error，重置为 Idle 再启动。
+                        // 仅终态（Completed/Error）→ Idle；`Running` 不再重置——由 `start_loop`
+                        // 的状态闸以 `SessionBusy` 拒绝，避免覆盖在途循环。
+                        if matches!(
+                            session.status,
+                            SessionStatus::Completed | SessionStatus::Error
+                        ) {
                             let _ = self
                                 .session_mgr
                                 .finish_loop(&session_id, SessionStatus::Idle);
@@ -469,6 +474,44 @@ impl Orchestrator {
             }
         };
 
+        // Resolve provider - when images are present, use the vision agent's
+        // model (multimodal) to avoid non-multimodal LLM errors.
+        // For normal requests, session.config is the single source of truth;
+        // user's /model switch won't be overridden by agent definition.
+        let provider = match self
+            .resolve_provider(if has_images { Some(&agent_def) } else { None }, session_id)
+        {
+            Some(p) => p,
+            None => {
+                tracing::error!(agent_name, "no provider available for main agent");
+                return;
+            }
+        };
+
+        // Permission rules (root agent: use agent default)
+        let permissions = merge_permissions(&[], &[], &agent_def.permission);
+
+        // Create loop context. 状态闸：非 Idle 会以 `SessionBusy` 失败。
+        let mut ctx = match self.session_mgr.start_loop(
+            session_id,
+            &self.context_trimmer,
+            Some(self.global_tx.clone()),
+            Some(Arc::new(permissions)),
+        ) {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                // 会话忙：不再静默丢弃，向客户端发布「会话忙」错误帧。
+                if matches!(e, SessionError::SessionBusy { .. }) {
+                    tracing::warn!(session_id, "start_loop rejected: session busy");
+                    self.publish_session_busy(session_id, &agent_name);
+                } else {
+                    tracing::error!(session_id, error = %e, "start_loop_v2 failed");
+                }
+                return;
+            }
+        };
+
+        // ── start_loop 成功后的准备工作（失败路径不再残留 / 累积）──────────────
         // Append agent-specific system prompt (from .visp/agents/*.md)
         if !agent_def.system_prompt.is_empty()
             && let Err(e) = self
@@ -498,10 +541,8 @@ impl Orchestrator {
             }
         }
 
-        // Create inbox
+        // Register active agent（start_loop 成功后才注册，避免忙失败残留 registration）
         let (inbox_tx, _inbox_rx) = mpsc::channel(64);
-
-        // Register active agent
         self.active_agents.register(ActiveAgent {
             session_id: session_id.to_string(),
             parent_session_id: None,
@@ -511,37 +552,6 @@ impl Orchestrator {
             pending_call_id: None,
             started_at: std::time::Instant::now(),
         });
-
-        // Resolve provider - when images are present, use the vision agent's
-        // model (multimodal) to avoid non-multimodal LLM errors.
-        // For normal requests, session.config is the single source of truth;
-        // user's /model switch won't be overridden by agent definition.
-        let provider = match self
-            .resolve_provider(if has_images { Some(&agent_def) } else { None }, session_id)
-        {
-            Some(p) => p,
-            None => {
-                tracing::error!(agent_name, "no provider available for main agent");
-                return;
-            }
-        };
-
-        // Permission rules (root agent: use agent default)
-        let permissions = merge_permissions(&[], &[], &agent_def.permission);
-
-        // Create loop context
-        let mut ctx = match self.session_mgr.start_loop(
-            session_id,
-            &self.context_trimmer,
-            Some(self.global_tx.clone()),
-            Some(Arc::new(permissions)),
-        ) {
-            Ok(ctx) => ctx,
-            Err(e) => {
-                tracing::error!(session_id, error = %e, "start_loop_v2 failed");
-                return;
-            }
-        };
 
         // When images are present, we route to the vision agent's provider
         // (multimodal model).  However, ctx.config still holds the session's
@@ -1036,6 +1046,17 @@ impl Orchestrator {
 
         let (pending_call_id, parent_id, agent_name) = agent_info;
 
+        // G5 收尾归属判据：主会话存在「新回合覆盖旧回合」的竞争——旧回合 `Done`
+        // 迟到时若会话已被新回合改写为 `Running`，本次收尾为幂等空操作，避免移除
+        // 新循环令牌 / 把状态改回 `Idle`。（子会话 id 每次 spawn 唯一，不适用。）
+        if parent_id.is_none() && self.session_is_running(session_id) {
+            tracing::warn!(
+                session_id,
+                "handle_done: stale Done for a newer running turn, ignoring"
+            );
+            return;
+        }
+
         // Remove from registry
         self.active_agents.remove(session_id);
         self.sub_agent_handles.remove(session_id);
@@ -1175,6 +1196,16 @@ impl Orchestrator {
 
         let (pending_call_id, parent_id, agent_name) = agent_info;
 
+        // G5 收尾归属判据：同 `handle_done`，旧回合错误迟到且会话已被新回合改写为
+        // `Running` 时，本次收尾为幂等空操作（仅主会话适用）。
+        if parent_id.is_none() && self.session_is_running(session_id) {
+            tracing::warn!(
+                session_id,
+                "handle_agent_error: stale error for a newer running turn, ignoring"
+            );
+            return;
+        }
+
         self.active_agents.remove(session_id);
         self.sub_agent_handles.remove(session_id);
         let _ = self
@@ -1309,6 +1340,32 @@ impl Orchestrator {
                 error: error.to_string(),
             });
         }
+    }
+
+    /// 发布「会话忙」错误帧（显示面通路；code 语义 = `SessionBusy`）。
+    ///
+    /// 用于 `start_loop` 因忙（会话非 `Idle`）被拒绝时向客户端给出反馈，
+    /// 不再静默丢弃；文案明确不含 `cancelled` 语义。
+    fn publish_session_busy(&self, session_id: &str, agent_name: &str) {
+        let frame = AgentEventFrame {
+            event: AgentEvent::Error {
+                code: AgentErrorCode::SessionBusy,
+                message: "正在生成，请稍候".to_string(),
+            },
+            session_id: session_id.to_string(),
+            agent_name: agent_name.to_string(),
+            parent_session_id: None,
+            parent_session_name: None,
+        };
+        self.bus.publish(BusEvent::Frame(frame));
+    }
+
+    /// G5：读取会话当前状态，判断是否处于 `Running`（收尾归属判据用）。
+    fn session_is_running(&self, session_id: &str) -> bool {
+        self.session_mgr
+            .get(session_id)
+            .map(|s| s.status == SessionStatus::Running)
+            .unwrap_or(false)
     }
 
     /// 发布 `SessionStart`（设计 §6.2：该 session 本次 daemon 内首次 `start_loop` 成功）。

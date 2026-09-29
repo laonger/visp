@@ -3387,7 +3387,7 @@ async fn test_hook_events_origin_is_tui() {
     }
 }
 
-/// 第 7 条：`start_loop` 失败 → 不发 `SessionStart`。
+/// 第 7 条：`start_loop` 失败 → 不发 `SessionStart`；且向客户端发布忙错误帧。
 #[tokio::test]
 async fn test_no_hook_events_when_start_loop_fails() {
     let recorder = recording_publisher();
@@ -3402,6 +3402,11 @@ async fn test_no_hook_events_when_start_loop_fails() {
     assert!(
         recorded_hooks(&recorder).is_empty(),
         "start_loop 失败不应发任何 hook 事件"
+    );
+    assert_eq!(
+        busy_error_frames(&recorder).len(),
+        1,
+        "start_loop 因忙失败应发布一条忙错误帧（不再静默丢弃）"
     );
 }
 
@@ -3498,6 +3503,26 @@ fn count_done_frames(recorder: &Arc<RecordingPublisher>) -> usize {
         .iter()
         .filter(|e| matches!(e, BusEvent::Frame(f) if matches!(f.event, AgentEvent::Done)))
         .count()
+}
+
+/// 收集总线上发布的「会话忙」错误帧（`AgentErrorCode::SessionBusy`）。
+fn busy_error_frames(recorder: &Arc<RecordingPublisher>) -> Vec<AgentEventFrame> {
+    recorder
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            BusEvent::Frame(f) => match &f.event {
+                AgentEvent::Error {
+                    code: AgentErrorCode::SessionBusy,
+                    ..
+                } => Some(f.clone()),
+                _ => None,
+            },
+            BusEvent::Hook(_) => None,
+        })
+        .collect()
 }
 
 /// 注册一个 root ActiveAgent（无真实 loop），供生命周期 hook 断言使用。
@@ -3713,4 +3738,232 @@ async fn test_sub_agent_completion_emits_no_session_level_hook() {
             "子 agent 不产生会话级 StopFailure"
         );
     }
+}
+
+// ── 会话 loop 所有权与收尾：窄化重置 / 忙失败上报 / 准备动作后移 / G5 ──────────
+
+/// 第 2 条：`Completed` 主会话经 `handle_client_message` → 重置 → 成功启动第二回合。
+#[tokio::test]
+async fn test_completed_main_session_recovers_and_starts_second_turn() {
+    let recorder = recording_publisher();
+    let (mut orch, sid) = make_orchestrator_for_main_agent(recorder.clone());
+
+    orch.session_mgr
+        .finish_loop(&sid, SessionStatus::Completed)
+        .unwrap();
+
+    orch.handle_client_message(ClientMessage::UserInput {
+        session_id: sid.clone(),
+        text: "second".to_string(),
+    })
+    .await;
+
+    assert_eq!(
+        orch.session_mgr.get(&sid).unwrap().status,
+        SessionStatus::Running,
+        "Completed 终态应被重置并成功启动第二回合"
+    );
+    assert!(
+        busy_error_frames(&recorder).is_empty(),
+        "合法恢复不应发布忙错误帧"
+    );
+}
+
+/// 第 3 条：`Error` 主会话经 `handle_client_message` → 重置 → 成功启动第二回合。
+#[tokio::test]
+async fn test_error_main_session_recovers_and_starts_second_turn() {
+    let recorder = recording_publisher();
+    let (mut orch, sid) = make_orchestrator_for_main_agent(recorder.clone());
+
+    orch.session_mgr
+        .finish_loop(&sid, SessionStatus::Error)
+        .unwrap();
+
+    orch.handle_client_message(ClientMessage::UserInput {
+        session_id: sid.clone(),
+        text: "second".to_string(),
+    })
+    .await;
+
+    assert_eq!(
+        orch.session_mgr.get(&sid).unwrap().status,
+        SessionStatus::Running,
+        "Error 终态应被重置并成功启动第二回合"
+    );
+    assert!(
+        busy_error_frames(&recorder).is_empty(),
+        "合法恢复不应发布忙错误帧"
+    );
+}
+
+/// 第 4 条：`Running` 主会话经 `handle_client_message` → 不重置、不启动、不发第二组 hook。
+#[tokio::test]
+async fn test_running_main_session_is_not_reset_or_restarted() {
+    let recorder = recording_publisher();
+    let (mut orch, sid) = make_orchestrator_for_main_agent(recorder.clone());
+
+    orch.session_mgr
+        .finish_loop(&sid, SessionStatus::Running)
+        .unwrap();
+
+    orch.handle_client_message(ClientMessage::UserInput {
+        session_id: sid.clone(),
+        text: "while running".to_string(),
+    })
+    .await;
+
+    assert_eq!(
+        orch.session_mgr.get(&sid).unwrap().status,
+        SessionStatus::Running,
+        "Running 不应被重置为 Idle"
+    );
+    let hooks = recorded_hooks(&recorder);
+    assert_eq!(
+        count_event(&hooks, HookEventName::SessionStart),
+        0,
+        "Running 被拒不应发 SessionStart"
+    );
+    assert_eq!(
+        count_event(&hooks, HookEventName::UserPromptSubmit),
+        0,
+        "Running 被拒不应发 UserPromptSubmit"
+    );
+}
+
+/// 第 5 条：`Running` 被拒时错误帧 code 语义为 `SessionBusy`，文案不含 `cancelled`。
+#[tokio::test]
+async fn test_running_rejection_error_frame_is_session_busy() {
+    let recorder = recording_publisher();
+    let (mut orch, sid) = make_orchestrator_for_main_agent(recorder.clone());
+
+    orch.session_mgr
+        .finish_loop(&sid, SessionStatus::Running)
+        .unwrap();
+
+    orch.handle_client_message(ClientMessage::UserInput {
+        session_id: sid.clone(),
+        text: "while running".to_string(),
+    })
+    .await;
+
+    let frames = busy_error_frames(&recorder);
+    assert_eq!(frames.len(), 1, "Running 被拒应恰发一条忙错误帧");
+    match &frames[0].event {
+        AgentEvent::Error { code, message } => {
+            assert_eq!(
+                code.to_string(),
+                "SessionBusy",
+                "Display 文本即 daemon 侧 proto code 语义"
+            );
+            assert!(
+                !message.contains("cancelled"),
+                "忙文案不得含 cancelled，实际: {message}"
+            );
+        }
+        _ => panic!("期望 Error 帧"),
+    }
+}
+
+/// 第 8 条：忙失败后无残留 registration、system prompt 模板不累积。
+#[tokio::test]
+async fn test_busy_failure_leaves_no_registration_or_prompt_accumulation() {
+    let recorder = recording_publisher();
+    let (mut orch, sid) = make_orchestrator_for_main_agent(recorder.clone());
+
+    // 替换 registry：default 带非空 system_prompt，使 append 检查有实际写入
+    let mut registry = AgentRegistry::new();
+    registry
+        .register(AgentDefinition {
+            name: "default".to_string(),
+            description: String::new(),
+            mode: AgentMode::All,
+            model: None,
+            temperature: None,
+            steps: None,
+            permission: vec![],
+            allowed_sub_agents: Vec::new(),
+            system_prompt: "SYS-PROMPT".to_string(),
+        })
+        .unwrap();
+    orch.agent_registry.store(Arc::new(registry));
+
+    let before = orch.session_mgr.get(&sid).unwrap().system_prompt_template;
+    orch.session_mgr
+        .finish_loop(&sid, SessionStatus::Running)
+        .unwrap();
+
+    orch.start_main_agent(&sid, "hello").await;
+
+    assert!(
+        orch.active_agents.get(&sid).is_none(),
+        "忙失败不应残留 active registration"
+    );
+    assert_eq!(
+        orch.session_mgr.get(&sid).unwrap().system_prompt_template,
+        before,
+        "忙失败不应累积 system prompt 模板"
+    );
+}
+
+/// 第 9 条（G5）：先起新循环、再投递旧回合 `Done` → 新循环令牌仍在、状态仍 `Running`。
+#[tokio::test]
+async fn test_stale_done_does_not_tear_down_new_turn() {
+    let recorder = recording_publisher();
+    let (mut orch, sid) = make_orchestrator_for_main_agent(recorder.clone());
+
+    // 新回合：新循环已启动（Running + 令牌）
+    let _ctx = orch
+        .session_mgr
+        .start_loop(&sid, &orch.context_trimmer, None, None)
+        .expect("新循环应能启动");
+    assert!(orch.session_mgr.has_inflight_loop(&sid));
+
+    // 旧回合的 root registration（同 session_id）
+    register_root_agent(&mut orch, &sid);
+
+    // 旧回合 `Done` 迟到
+    orch.handle_done(&sid).await;
+
+    assert!(
+        orch.session_mgr.has_inflight_loop(&sid),
+        "旧 Done 不应移除新循环令牌"
+    );
+    assert_eq!(
+        orch.session_mgr.get(&sid).unwrap().status,
+        SessionStatus::Running,
+        "旧 Done 不应把新回合状态改回 Idle"
+    );
+    assert!(
+        orch.active_agents.get(&sid).is_some(),
+        "旧 Done 不应移除新循环的 registration"
+    );
+}
+
+/// 第 10 条（G5）：单回合正常完成仍能被置回 `Idle`（判据不误伤正常路径）。
+#[tokio::test]
+async fn test_normal_single_turn_still_finishes_idle() {
+    let recorder = recording_publisher();
+    let (mut orch, sid) = make_orchestrator_for_main_agent(recorder.clone());
+
+    orch.start_main_agent(&sid, "hello").await;
+
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            while let Ok(envelope) = orch.global_rx.try_recv() {
+                orch.handle_agent_message(envelope).await;
+            }
+            if orch.active_agents.get(&sid).is_none() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(finished.is_ok(), "单回合应在超时前结束");
+
+    assert_eq!(
+        orch.session_mgr.get(&sid).unwrap().status,
+        SessionStatus::Idle,
+        "正常完成应被置回 Idle"
+    );
 }

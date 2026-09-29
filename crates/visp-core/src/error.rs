@@ -78,6 +78,7 @@ pub enum AgentErrorCode {
     StuckInLoop,
     Cancelled,
     Internal,
+    SessionBusy,
 }
 
 impl std::fmt::Display for AgentErrorCode {
@@ -92,6 +93,7 @@ impl std::fmt::Display for AgentErrorCode {
             AgentErrorCode::StuckInLoop => write!(f, "Agent stuck in repeated tool call loop"),
             AgentErrorCode::Cancelled => write!(f, "Operation cancelled"),
             AgentErrorCode::Internal => write!(f, "Internal error"),
+            AgentErrorCode::SessionBusy => write!(f, "SessionBusy"),
         }
     }
 }
@@ -131,6 +133,7 @@ mod tests_session {
                 AgentErrorCode::StuckInLoop,
                 "Agent stuck in repeated tool call loop",
             ),
+            (AgentErrorCode::SessionBusy, "SessionBusy"),
         ];
         for (code, expected) in cases {
             assert_eq!(code.to_string(), expected);
