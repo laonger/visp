@@ -1,6 +1,6 @@
 # TODO & 已知限制
 
-> 最后更新：2026-09-23
+> 最后更新：2026-09-30
 > 基于真实代码状态核实，旧文档中 3 项「待实现」经确认已完成。
 
 ## Phase 完成状态
@@ -239,5 +239,40 @@ Agent 循环在等待 UserQuery 确认时 panic，mpsc sender 被 drop，daemon 
 **状态**：未识别终端（含 rmux / tmux 等复用器）统一回退 BEL（`0x07`）兜底——保响铃/🔔 提示，无文本横幅。**已修订进设计正文**：`docs/design/notification.md` §1「实现偏离说明（2026-09-18）」，原决策「未知终端盲发 OSC 9」作废。该兜底属事实上的复用器适配（不特殊识别某个复用器，通用「未识别 → BEL」）。已识别终端仍按 OSC 9/777/99 发送；复用器拦截 OSC 时不做绕行，是否透传由复用器自身负责（tmux 的 allow-passthrough、rmux 的透传实现）。
 
 **后续方案**：系统通知 fallback 后端（协议不可用或复用器拦截场景）。
+
+---
+
+## 2026-09-30 新增：思考增量语义 + daemon 双 loop 加固 的已知边界与另立项
+
+> 来源：`docs/design/2026-09-29-thinking-delta-and-double-loop-design.md`（**已实施**）。
+> 本清单记录**本期显式接受**的边界与**建议另立项**项，避免随设计文档沉没。
+
+### 另立项（建议单独立项）
+
+1. **回放路径不下发思考块**（daemon）：`JoinSession` 回放把思考消息当普通 `TextDelta` 重放、`extra_blocks` 不回放。增量改造不使其恶化，但重连后思考缺失是既有行为。
+2. **Anthropic `signature_delta` 未解析**（llm）：落入 `_ => Skip`，签名仅来自 `content_block_start`，真实流式下签名保真度受损。**同族**：`content_block_stop` 的「发射最终完整块」分支疑似不可达（累积键与查找键不一致）；core「只保留最后一块」导致多块丢失。→ 与 `docs/todo/thinking-history-issues.md` 的**问题 1/2/3 同族，建议合并立项**。
+3. **多思考块完整性**：同上（core 只保留最后一块；Anthropic 交错思考/工具时签名丢失）。
+4. **`status` 失步的常态化收敛**（core / daemon）：当前仅依赖 daemon 重启时的孤儿 `Running` 重置（设计 §12.4 B3 未定案）。
+5. **取消动作移除令牌的时机**（core）：`cancel_agent` 现为「取消即移除」，造成取消后短暂窗口内守卫放行、由状态闸拒绝（设计 §12.4 B4 未定案）。
+6. **ACP 纵深（原计划步骤 5a）未实施**：结束本轮前确认 daemon 终态 + 兜底超时补发 Cancel。计划中标记为**可选**，本期未做；当前仍以 10s 兜底自行收尾。
+
+### 已知限制（本期显式接受）
+
+7. **`ThinkingBlock.thinking` 语义静默变更为「增量」**（proto）：不加标记字段，仅以注释声明语义并指向回归测试。**发布说明须点明**；存在混合版本本地部署时，旧客户端会静默降级为只显示最后一片。
+8. **思考丢帧不自愈**：增量语义下丢失的增量永久缺失；但该自愈窗口仅存在于同一连接内的后续帧，Lagged replay 与重连回放本就不含思考帧。
+9. **多块时显示内容多于持久化内容**：TUI/ACP 显示「块1+块2」拼接，而落库仍只有最后一块（设计 §4.4）。
+10. **跨轮追加到同一 TUI 行**：thinking-only 跨多轮时，新块首帧被追加到上一轮仍在的同一 Thinking 行（设计 §4.4）。
+11. **TUI `event.rs` 层对 `SessionBusy` 仍会 `stop_generating()`**：`app.rs` 三处站点已特判（不置 `Error`、不 flush、不提前 stop），但 `event.rs` 的 `handle_grpc_message` Error 分支对任何 Error 都会释放门禁——属既有行为，符合「输入门禁不改」的决策。真实取消窗口内会因 `stale_done_expected` 提前 return，不影响主缺陷。
+12. **思考/文本交替会轮换 `messageId`**（acp，既有策略）：`translate.rs` 中 `TextDelta` 带 `agent_name`、`ThinkingBlock` 固定传 `""`，二者共用 `last_agent` 做轮换。
+
+### 工程卫生（本次实施发现）
+
+13. **既有 flaky 测试**（core）：`crates/visp-core/src/session.rs` 中 `unsafe { std::env::set_var("HOME", ...) }` 与并行测试竞态，导致 `agent_loop::tests::test_agent_run_carries_session_id_field` **间歇失败**；因测试过滤是子串匹配，`cargo test -p visp-core session` 会把它捞进来。→ 建议加互斥，或实施时改用 `session::tests` 精确过滤。
+14. **文档同步**：`docs/design/visp-design-acp.md` 已与代码过时——仍把「LLM 提问等待中取消无收尾信号」列为 V10 例外，而 `agent_loop` 已补发 `Error{Cancelled}` 并收尾（§13.10 方案 A 已落地）；V10/V11、§6.6、§13 风险表等条目需同步修订。
+15. **Polyglot 提醒**：`ThinkingBlock` 语义变更的机器可检测护栏是两条 core 契约测试（「连续同块快照 → 只发增量」与「流式期间不产生快照变体」）；proto 注释已指向它们，改动语义须同步更新。
+
+### 发布说明条目（草案）
+
+> **行为变更**：`ThinkingBlock.thinking` 的语义由「累积全文快照」改为「**增量**」（相对同一思考块上一帧的新增部分）。这是 proto 契约的**静默语义变更**——字段名与编号未变，消费方应改为「**追加**」消费（ACP 的 `agent_thought_chunk` 消费方式天然正确；TUI 已同步改为追加）。若存在与本仓库**不同批构建**的旧客户端，其思考显示会降级为只显示最后一片。
 
 
