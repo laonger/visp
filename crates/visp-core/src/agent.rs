@@ -80,7 +80,17 @@ pub enum AgentEvent {
     /// 文本增量
     TextDelta(String),
     /// 思考块（如 DeepSeek thinking mode）
+    ///
+    /// 承载 provider 下发的**累积快照**（截至当前的完整思考文本）。流式路径已不再
+    /// 发射本变体，仅保留用于兼容既有匹配臂；新增下游请使用
+    /// [`AgentEvent::ThinkingDelta`]。
     ThinkingBlock(serde_json::Value),
+    /// 思考文本的**真增量**（相对同一轮 LLM 响应内上一帧快照的差集尾部）。
+    ///
+    /// provider/core 内部契约仍是累积快照，本变体由 core 的流收集阶段换算而来，
+    /// 只承载新增文本，供 ACP 等消费方按「同 messageId 追加」消费，避免把快照
+    /// 当增量重复追加导致的 O(n²) 复读。发射点唯一：流式路径只发本变体。
+    ThinkingDelta(String),
     /// token 用量及工具调用统计
     UsageInfo {
         input_tokens: u32,

@@ -1872,6 +1872,17 @@ fn agent_event_to_server_message(
                 )),
             })
         }
+        // 思考增量：proto 语义下的思考块帧，thinking=增量文本、signature 为空。
+        // 消费方按「同 messageId 追加」消费，从而 O(n)。
+        AgentEvent::ThinkingDelta(delta) => Some(proto::ServerMessage {
+            payload: Some(proto::server_message::Payload::ThinkingBlock(
+                proto::ThinkingBlock {
+                    thinking: delta,
+                    signature: String::new(),
+                    session_id: sid,
+                },
+            )),
+        }),
         AgentEvent::StatusUpdate(message) => Some(proto::ServerMessage {
             payload: Some(proto::server_message::Payload::StatusUpdate(
                 proto::StatusUpdate {
@@ -2719,6 +2730,76 @@ mod tests {
             }
             _ => panic!("expected TextDelta"),
         }
+    }
+
+    /// 用例 8：增量事件 → proto 思考块帧，thinking=增量文本、signature 为空。
+    #[test]
+    fn test_agent_event_to_server_message_thinking_delta() {
+        let msg = agent_event_to_server_message(
+            AgentEvent::ThinkingDelta("inc".into()),
+            "sess-1",
+            "agent",
+        )
+        .unwrap();
+        match msg.payload {
+            Some(proto::server_message::Payload::ThinkingBlock(tb)) => {
+                assert_eq!(tb.thinking, "inc");
+                assert!(tb.signature.is_empty(), "增量帧 signature 必须为空");
+                assert_eq!(tb.session_id, "sess-1");
+            }
+            _ => panic!("expected ThinkingBlock payload"),
+        }
+    }
+
+    /// 用例 9：快照事件 → 既有映射不变（不回归）。
+    #[test]
+    fn test_agent_event_to_server_message_thinking_block_snapshot_unchanged() {
+        let block = serde_json::json!({
+            "type": "thinking",
+            "thinking": "full text",
+            "signature": "base64sig",
+        });
+        let msg =
+            agent_event_to_server_message(AgentEvent::ThinkingBlock(block), "sess-1", "").unwrap();
+        match msg.payload {
+            Some(proto::server_message::Payload::ThinkingBlock(tb)) => {
+                assert_eq!(tb.thinking, "full text");
+                assert_eq!(tb.signature, "base64sig");
+                assert_eq!(tb.session_id, "sess-1");
+            }
+            _ => panic!("expected ThinkingBlock payload"),
+        }
+    }
+
+    /// 用例 10：k 个增量事件 → 客户端帧总字节 == 全文长度（O(n)，非 O(n²)）。
+    #[test]
+    fn test_thinking_delta_frames_total_bytes_linear() {
+        let full = "ABCDEFGHIJ";
+        let deltas = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"];
+
+        let total: usize = deltas
+            .iter()
+            .map(|d| {
+                let msg = agent_event_to_server_message(
+                    AgentEvent::ThinkingDelta((*d).to_string()),
+                    "sess-1",
+                    "",
+                )
+                .unwrap();
+                match msg.payload {
+                    Some(proto::server_message::Payload::ThinkingBlock(tb)) => tb.thinking.len(),
+                    _ => panic!("expected ThinkingBlock payload"),
+                }
+            })
+            .sum();
+        assert_eq!(total, full.len(), "增量语义下总字节应等于全文长度");
+
+        // 反面对照：若误发累积快照，总字节呈 O(k²) 严格更大。
+        let snapshot_total: usize = (1..=deltas.len()).map(|k| full[..k].len()).sum();
+        assert!(
+            snapshot_total > total,
+            "快照语义总字节应严格大于增量语义（证明 O(n) vs O(n²)）"
+        );
     }
 
     /// 计划 0c-2 测试 4：PreToolUse 在 daemon 映射路径上显式不产出 ServerMessage。

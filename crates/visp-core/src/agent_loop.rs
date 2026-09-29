@@ -45,6 +45,9 @@ fn event_to_msg(event: &AgentEvent) -> Option<AgentMessage> {
     match event {
         AgentEvent::TextDelta(s) => Some(AgentMessage::TextDelta(s.clone())),
         AgentEvent::ThinkingBlock(v) => Some(AgentMessage::ThinkingBlock(v.clone())),
+        // 思考增量：不转发给 orchestrator（与既有思考事件一致，orchestrator
+        // 本就不转发思考文本；显示域由 tx/daemon 直接消费）。
+        AgentEvent::ThinkingDelta(_) => None,
         AgentEvent::UsageInfo {
             input_tokens,
             output_tokens,
@@ -414,6 +417,20 @@ struct StreamOutput {
     provider_metadata: Option<ProviderMetadata>,
 }
 
+/// 将 provider 下发的累积思考**快照**换算为相对本轮上一帧的**真增量**。
+///
+/// - `snapshot` 以 `previous` 为前缀 → 返回差集尾部（正常累积增长）；
+/// - 否则（新块 / 内容跳变 / 回退变短）→ 返回全文，调用方据此重置基线；
+/// - 两者相等 → 返回空串，调用方据此抑制发射（如仅带签名的终帧）。
+///
+/// 基线是 `collect_stream_events` 的函数局部状态，天然以「一轮 LLM 响应」为界。
+fn thinking_increment(previous: &str, snapshot: &str) -> String {
+    match snapshot.strip_prefix(previous) {
+        Some(tail) => tail.to_string(),
+        None => snapshot.to_string(),
+    }
+}
+
 /// e. Collect stream events (TextDelta, ThinkingBlock, ToolCall, UsageInfo)
 /// Returns None on error (stream dropped, cancelled, or LLM error).
 async fn collect_stream_events(
@@ -426,6 +443,8 @@ async fn collect_stream_events(
     let mut text_buffer = String::new();
     let mut tool_calls: Vec<ToolCallRequest> = Vec::new();
     let mut thinking_blocks: Vec<serde_json::Value> = Vec::new();
+    // 本轮当前思考块的基线快照（相对增量的参照物），以一轮 LLM 响应为界。
+    let mut thinking_baseline = String::new();
     let mut input_tokens: u32 = 0;
     let mut output_tokens: u32 = 0;
     let mut cache_creation_input_tokens: u32 = 0;
@@ -497,12 +516,24 @@ async fn collect_stream_events(
                         ).await.ok()?;
                     }
                     Some(Ok(ChatEvent::ThinkingBlock(block))) => {
+                        // 内部装配保持不变：保留本轮完整块（用于持久化与签名回传）。
                         thinking_blocks.clear();
                         thinking_blocks.push(block.clone());
-                        send_event(
-                            tx, sm, sid, &ctx.global_tx, &ctx.session_id,
-                            AgentEvent::ThinkingBlock(block),
-                        ).await.ok()?;
+                        // 事件层语义：快照 → 真增量。仅发射增量变体，流式路径
+                        // 不得再发快照变体（否则消费方会再追加一次快照）。
+                        let snapshot = block
+                            .get("thinking")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let delta = thinking_increment(&thinking_baseline, snapshot);
+                        thinking_baseline.clear();
+                        thinking_baseline.push_str(snapshot);
+                        if !delta.is_empty() {
+                            send_event(
+                                tx, sm, sid, &ctx.global_tx, &ctx.session_id,
+                                AgentEvent::ThinkingDelta(delta),
+                            ).await.ok()?;
+                        }
                     }
                     Some(Ok(ChatEvent::UsageInfo { input_tokens: it, output_tokens: ot, cache_creation_input_tokens: ccit, cache_read_input_tokens: crit, cost: c, .. })) => {
                         input_tokens = it;
@@ -5474,6 +5505,240 @@ mod tests {
             )),
             "thinking-only iterations must not trigger StuckInLoop error event"
         );
+    }
+
+    // ── 思考真增量（快照 → ThinkingDelta）─────────────────────────────────
+
+    fn thinking_snapshot(text: &str) -> ChatEvent {
+        ChatEvent::ThinkingBlock(serde_json::json!({
+            "type": "thinking",
+            "thinking": text,
+        }))
+    }
+
+    fn thinking_deltas_of(events: &[AgentEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ThinkingDelta(d) => Some(d.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 纯函数：前缀增长 → 差集尾部。
+    #[test]
+    fn test_thinking_increment_prefix_emits_tail() {
+        assert_eq!(thinking_increment("", "A"), "A");
+        assert_eq!(thinking_increment("AB", "ABC"), "C");
+    }
+
+    /// 纯函数：非前缀（新块 / 跳变 / 回退变短）→ 全文。
+    #[test]
+    fn test_thinking_increment_non_prefix_emits_full() {
+        assert_eq!(thinking_increment("AB", "XYZ"), "XYZ");
+        assert_eq!(thinking_increment("ABC", "AB"), "AB");
+    }
+
+    /// 纯函数：文本未变 → 空串（调用方据此抑制发射）。
+    #[test]
+    fn test_thinking_increment_unchanged_emits_empty() {
+        assert_eq!(thinking_increment("same", "same"), "");
+    }
+
+    /// 用例 1 + 7 + 10：连续同块快照只发增量；增量拼接 == 最终全文；
+    /// 流式路径无快照变体；下游总字节 == 全文长度（O(n)）。
+    #[serial]
+    #[tokio::test]
+    async fn test_thinking_snapshots_emit_increments_only() {
+        let (session_mgr, _sid, ctx) = make_loop_env();
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![vec![
+            thinking_snapshot("A"),
+            thinking_snapshot("AB"),
+            thinking_snapshot("ABC"),
+            ChatEvent::Done,
+        ]]));
+        let events = run_loop_capture(
+            provider,
+            StdArc::new(ToolRegistry::new()),
+            session_mgr,
+            ctx,
+            AgentConfig::default(),
+            Message::user("think"),
+            ApprovalAction::Ignore,
+        )
+        .await;
+
+        let deltas = thinking_deltas_of(&events);
+        assert_eq!(deltas, vec!["A", "B", "C"], "只发真增量");
+        assert_eq!(deltas.concat(), "ABC", "增量拼接必须等于最终全文");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ThinkingBlock(_))),
+            "流式路径不得再发射快照变体"
+        );
+        let total: usize = deltas.iter().map(String::len).sum();
+        assert_eq!(total, "ABC".len(), "下游总字节必须线性等于全文长度");
+    }
+
+    /// 用例 2：文本未变的终帧（如仅带签名）→ 不发射。
+    #[serial]
+    #[tokio::test]
+    async fn test_thinking_unchanged_terminal_snapshot_not_emitted() {
+        let (session_mgr, _sid, ctx) = make_loop_env();
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![vec![
+            thinking_snapshot("same"),
+            ChatEvent::ThinkingBlock(serde_json::json!({
+                "type": "thinking",
+                "thinking": "same",
+                "signature": "base64sig",
+            })),
+            ChatEvent::Done,
+        ]]));
+        let events = run_loop_capture(
+            provider,
+            StdArc::new(ToolRegistry::new()),
+            session_mgr,
+            ctx,
+            AgentConfig::default(),
+            Message::user("think"),
+            ApprovalAction::Ignore,
+        )
+        .await;
+
+        assert_eq!(
+            thinking_deltas_of(&events),
+            vec!["same"],
+            "文本未变的终帧不得发射增量"
+        );
+    }
+
+    /// 用例 3：非前缀快照 → 首发全文并重置基线，后续继续取其差集。
+    #[serial]
+    #[tokio::test]
+    async fn test_thinking_non_prefix_snapshot_resets_baseline() {
+        let (session_mgr, _sid, ctx) = make_loop_env();
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![vec![
+            thinking_snapshot("AB"),
+            thinking_snapshot("XYZ"),
+            thinking_snapshot("XYZW"),
+            ChatEvent::Done,
+        ]]));
+        let events = run_loop_capture(
+            provider,
+            StdArc::new(ToolRegistry::new()),
+            session_mgr,
+            ctx,
+            AgentConfig::default(),
+            Message::user("think"),
+            ApprovalAction::Ignore,
+        )
+        .await;
+
+        assert_eq!(thinking_deltas_of(&events), vec!["AB", "XYZ", "W"]);
+    }
+
+    /// 用例 4：回退/更短快照（异常）→ 视为新块起点，发全文，不产生负增量。
+    #[serial]
+    #[tokio::test]
+    async fn test_thinking_rollback_snapshot_emits_full() {
+        let (session_mgr, _sid, ctx) = make_loop_env();
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![vec![
+            thinking_snapshot("ABC"),
+            thinking_snapshot("AB"),
+            ChatEvent::Done,
+        ]]));
+        let events = run_loop_capture(
+            provider,
+            StdArc::new(ToolRegistry::new()),
+            session_mgr,
+            ctx,
+            AgentConfig::default(),
+            Message::user("think"),
+            ApprovalAction::Ignore,
+        )
+        .await;
+
+        assert_eq!(
+            thinking_deltas_of(&events),
+            vec!["ABC", "AB"],
+            "回退快照视为新块起点，发全文而非负增量"
+        );
+    }
+
+    /// 用例 5：仅思考无正文轮次，控制流不变——内部完整块仍触发既有
+    /// 「继续循环」判定，且完整块被装配持久化（不因改成增量而削弱）。
+    #[serial]
+    #[tokio::test]
+    async fn test_thinking_only_snapshot_round_still_continues() {
+        use crate::ProviderMetadata;
+
+        let (session_mgr, sid, ctx) = make_loop_env();
+        let inspect = session_mgr.clone();
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![
+            vec![
+                thinking_snapshot("thinking about the task"),
+                thinking_snapshot("thinking about the task more"),
+                ChatEvent::OutputMetadata(ProviderMetadata {
+                    model: "test".into(),
+                    finish_reasons: vec!["length".into()],
+                    input_tokens: 10,
+                    output_tokens: 4096,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    latency_ms: 100,
+                }),
+                ChatEvent::Done,
+            ],
+            vec![ChatEvent::TextDelta("final answer".into()), ChatEvent::Done],
+        ]));
+        let events = run_loop_capture(
+            provider,
+            StdArc::new(ToolRegistry::new()),
+            session_mgr,
+            ctx,
+            AgentConfig::default(),
+            Message::user("think"),
+            ApprovalAction::Ignore,
+        )
+        .await;
+
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
+            "仅思考轮次不应报错"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TextDelta(t) if t.contains("final answer"))),
+            "仅思考轮次仍应继续循环并产出正文"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ThinkingDelta(_)))
+        );
+
+        let saved = inspect.get(&sid).unwrap();
+        let has_full_block = saved.history.iter().any(|m| {
+            m.extra_blocks.as_ref().is_some_and(|blocks| {
+                blocks.iter().any(|b| {
+                    b.get("thinking").and_then(|v| v.as_str())
+                        == Some("thinking about the task more")
+                })
+            })
+        });
+        assert!(
+            has_full_block,
+            "本轮完整思考块必须被装配持久化（extra_blocks），不得被增量语义削弱"
+        );
+    }
+
+    /// 用例 6：`event_to_msg(增量变体)` 不转发给 orchestrator。
+    #[test]
+    fn test_event_to_msg_thinking_delta_is_not_forwarded() {
+        assert!(event_to_msg(&AgentEvent::ThinkingDelta("inc".into())).is_none());
     }
 
     /// Provider that always returns a tool call whose arguments are malformed
