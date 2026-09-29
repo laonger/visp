@@ -160,14 +160,24 @@ async fn spawn_scripted(
 // ===== agent + 测试侧行客户端 =====
 
 async fn spawn_agent(script: Vec<Vec<ServerMessage>>) -> LineClient {
-    let (addr, _requests) = spawn_scripted(script).await;
+    spawn_agent_full(script, std::time::Duration::from_secs(10))
+        .await
+        .0
+}
+
+/// 与 `spawn_agent` 相同,但可覆盖 cancel 兜底窗口,并返回 ScriptedDaemon 收到的
+/// 出站消息(用于断言补发 cancel)。
+async fn spawn_agent_full(
+    script: Vec<Vec<ServerMessage>>,
+    cancel_fallback: std::time::Duration,
+) -> (LineClient, Arc<Mutex<Vec<ClientMessage>>>) {
+    let (addr, requests) = spawn_scripted(script).await;
     let session = visp_acp::grpc::GrpcSession::connect(&addr).await.unwrap();
     let (outbound, inbound, client_channel) = session.into_parts();
-    let state = Arc::new(visp_acp::agent::AgentState::new(
-        outbound,
-        inbound,
-        client_channel,
-    ));
+    let state = Arc::new(
+        visp_acp::agent::AgentState::new(outbound, inbound, client_channel)
+            .with_cancel_fallback(cancel_fallback),
+    );
 
     // agent 侧与测试侧行客户端之间用一对 duplex
     let (client_side, agent_side) = tokio::io::duplex(256 * 1024);
@@ -182,10 +192,13 @@ async fn spawn_agent(script: Vec<Vec<ServerMessage>>) -> LineClient {
     });
 
     let (r_half, w_half) = tokio::io::split(client_side);
-    LineClient {
-        reader: BufReader::new(r_half),
-        writer: w_half,
-    }
+    (
+        LineClient {
+            reader: BufReader::new(r_half),
+            writer: w_half,
+        },
+        requests,
+    )
 }
 
 struct LineClient {
@@ -613,4 +626,123 @@ async fn approval_selected_maps_to_v4_index() {
     // (ScriptedDaemon 的 requests 收集已在 spawn_scripted 暴露;此处省略双端校验,
     //  V4 映射的正确性由 approval 单测覆盖)
     let _ = user_response("q-9", 0);
+}
+
+// ===== 兜底补发 cancel(G4 纵深) =====
+
+/// 统计 ScriptedDaemon 已收到的 Cancel 条数。
+fn cancel_count(requests: &Arc<Mutex<Vec<ClientMessage>>>) -> usize {
+    requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|m| matches!(m.payload, Some(client_message::Payload::Cancel(_))))
+        .count()
+}
+
+/// 轮询等待 Cancel 到达至少 `expected` 条(出站异步,响应返回时未必已抵达)。
+async fn await_cancel_count(requests: &Arc<Mutex<Vec<ClientMessage>>>, expected: usize) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while cancel_count(requests) < expected {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "等待 {expected} 条 Cancel 超时,实际 {}",
+            cancel_count(requests)
+        )
+    });
+}
+
+/// 读帧直至出现首个 `session/update`(用于确认事件泵已启动,避免与
+/// `begin_prompt` 的 cancel_requested_at 复位竞争)。
+async fn recv_until_update(client: &mut LineClient) {
+    loop {
+        let (method, _id, _v) = client.recv_any().await;
+        if method.as_deref() == Some("session/update") {
+            return;
+        }
+    }
+}
+
+async fn init_and_new_session(client: &mut LineClient) {
+    let v = client
+        .request(
+            1,
+            "initialize",
+            json!({"protocolVersion":1,"clientCapabilities":{}}),
+        )
+        .await;
+    assert_eq!(v["result"]["protocolVersion"], 1);
+    let v = client
+        .request(2, "session/new", json!({"cwd":"/tmp","mcpServers":[]}))
+        .await;
+    assert_eq!(v["result"]["sessionId"], "visp-new");
+}
+
+/// 兜底窗口内无终态信号 → 收尾前补发一次 Cancel,且本轮以 cancelled 收尾、不悬挂。
+#[tokio::test]
+#[serial]
+async fn fallback_timeout_resends_cancel_before_finishing() {
+    // 输入1(UserInput)→ 一条增量(用于确认泵已启动);输入2(Cancel)→ 无任何
+    // 输出(模拟 daemon 未收敛);兜底窗口(短)到期 → 适配层补发第二次 Cancel
+    // 并以 cancelled 收尾(= 输入3)。
+    let script = vec![vec![text_delta("visp-new", "default", "…")], vec![]];
+    let (mut client, requests) =
+        spawn_agent_full(script, std::time::Duration::from_millis(300)).await;
+    init_and_new_session(&mut client).await;
+
+    client
+        .send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"visp-new","prompt":[{"type":"text","text":"hi"}]}}))
+        .await;
+    recv_until_update(&mut client).await;
+
+    // 显式取消(第一次 Cancel);daemon 按脚本不回终态 → 触发兜底
+    client
+        .send(&json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"visp-new"}}))
+        .await;
+
+    // 本轮以 cancelled 收尾,不悬挂
+    let (_chunks, resp) = client.recv_turn(3).await;
+    assert_eq!(resp["result"]["stopReason"], "cancelled");
+
+    // 断言确实向 daemon 补发了 Cancel(显式取消 + 兜底补发 = 至少 2 条)
+    await_cancel_count(&requests, 2).await;
+    assert_eq!(cancel_count(&requests), 2, "兜底路径应恰好补发一次 Cancel");
+}
+
+/// 已收到终态信号 → 不补发取消(幂等/不误发)。
+#[tokio::test]
+#[serial]
+async fn terminal_signal_suppresses_fallback_cancel() {
+    // 兜底窗口虽是短窗,但 daemon 立即回 Error{Cancelled} → 走正常收尾,
+    // 兜底路径不触发,故 Cancel 恰为 1 条(仅显式取消那次)。
+    let script = vec![
+        vec![text_delta("visp-new", "default", "…")],
+        vec![error_cancelled("visp-new")],
+    ];
+    let (mut client, requests) =
+        spawn_agent_full(script, std::time::Duration::from_millis(300)).await;
+    init_and_new_session(&mut client).await;
+
+    client
+        .send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"visp-new","prompt":[{"type":"text","text":"hi"}]}}))
+        .await;
+    recv_until_update(&mut client).await;
+
+    client
+        .send(&json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"visp-new"}}))
+        .await;
+    let (_chunks, resp) = client.recv_turn(3).await;
+    assert_eq!(resp["result"]["stopReason"], "cancelled");
+
+    // 留足超过兜底窗口的时间,确认不会事后补发
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(
+        cancel_count(&requests),
+        1,
+        "已由终态信号收尾,不应再补发 Cancel"
+    );
 }

@@ -46,6 +46,8 @@ pub struct AgentState {
     cancel_requested_at: tokio::sync::Mutex<Option<Instant>>,
     /// 当前 turn 的取消令牌(session/cancel 时触发,唤醒审批/提问等待)
     cancel_token: tokio::sync::Mutex<Option<tokio_util::sync::CancellationToken>>,
+    /// cancel 兜底收尾窗口(生产 `CANCEL_FALLBACK`;测试可缩短)
+    cancel_fallback: Duration,
     /// client 是否支持 `elicitation.form`(initialize 时记录,§7.5)
     supports_elicitation_form: AtomicBool,
     request_seq: AtomicU64,
@@ -64,9 +66,17 @@ impl AgentState {
             registry: tokio::sync::Mutex::new(SessionRegistry::new()),
             cancel_requested_at: tokio::sync::Mutex::new(None),
             cancel_token: tokio::sync::Mutex::new(None),
+            cancel_fallback: CANCEL_FALLBACK,
             supports_elicitation_form: AtomicBool::new(false),
             request_seq: AtomicU64::new(1),
         }
+    }
+
+    /// 覆盖 cancel 兜底窗口(仅测试用;生产保持 `CANCEL_FALLBACK`)。
+    #[doc(hidden)]
+    pub fn with_cancel_fallback(mut self, fallback: Duration) -> Self {
+        self.cancel_fallback = fallback;
+        self
     }
 
     /// 供集成冒烟:懒连接的空 state(`initialize` 类用例不触 gRPC)。
@@ -219,9 +229,15 @@ async fn prompt_task(
                 // cancelled;core 修复落地后此路径仅作防御层,§6.6)
                 let cancel_elapsed = {
                     let cancel = state.cancel_requested_at.lock().await;
-                    cancel.is_some_and(|t| t.elapsed() >= CANCEL_FALLBACK)
+                    cancel.is_some_and(|t| t.elapsed() >= state.cancel_fallback)
                 };
                 if cancel_elapsed {
+                    // 兜底窗口到期仍无终态信号:补发一次 cancel(让 daemon 侧尽快
+                    // 收敛,而非适配器单方面结束),再自行以 cancelled 收尾
+                    // (§6.6 防御层,core 修复落地后此路径仅作纵深)。
+                    if let Err(e) = state.outbound.send_cancel(&visp_sid).await {
+                        tracing::warn!(error = %e, "fallback send cancel failed");
+                    }
                     state.registry.lock().await.end_prompt(&visp_sid);
                     return responder.respond(PromptResponse::new(StopReason::Cancelled));
                 }
