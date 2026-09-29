@@ -463,6 +463,11 @@ impl SessionManager {
         }
     }
 
+    /// 只读查询：按会话 id 判断是否存在在途循环的取消令牌
+    pub fn has_inflight_loop(&self, session_id: &str) -> bool {
+        self.running_tokens.lock().unwrap().contains_key(session_id)
+    }
+
     /// 检查工具是否已被审批（Always Allow）
     pub fn is_tool_approved(&self, session_id: &str, tool_name: &str) -> bool {
         let store = self.store.lock().unwrap();
@@ -899,5 +904,115 @@ mod tests {
 
         // Other tool still not approved
         assert!(!manager.is_tool_approved(&sid, "write_file"));
+    }
+
+    // ── SessionManager::has_inflight_loop ─────────────────────────────────
+
+    #[test]
+    fn test_has_inflight_loop_true_after_start() {
+        let manager = SessionManager::new(InMemorySessionStore::new());
+        let session = manager
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        assert!(!manager.has_inflight_loop(&session.id));
+
+        let trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(MockTrimmer);
+        let _ctx = manager
+            .start_loop(&session.id, &trimmer, None, None)
+            .unwrap();
+        assert!(manager.has_inflight_loop(&session.id));
+    }
+
+    #[test]
+    fn test_has_inflight_loop_false_after_finish() {
+        let manager = SessionManager::new(InMemorySessionStore::new());
+        let session = manager
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+
+        let trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(MockTrimmer);
+        let _ctx = manager
+            .start_loop(&session.id, &trimmer, None, None)
+            .unwrap();
+        manager
+            .finish_loop(&session.id, SessionStatus::Completed)
+            .unwrap();
+        assert!(!manager.has_inflight_loop(&session.id));
+    }
+
+    #[test]
+    fn test_has_inflight_loop_false_after_cancel() {
+        let manager = SessionManager::new(InMemorySessionStore::new());
+        let session = manager
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+
+        let trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(MockTrimmer);
+        let _ctx = manager
+            .start_loop(&session.id, &trimmer, None, None)
+            .unwrap();
+        assert!(manager.has_inflight_loop(&session.id));
+
+        manager.cancel_agent(&session.id);
+        assert!(!manager.has_inflight_loop(&session.id));
+    }
+
+    #[test]
+    fn test_has_inflight_loop_unknown_session() {
+        let manager = SessionManager::new(InMemorySessionStore::new());
+        assert!(!manager.has_inflight_loop("nonexistent-session"));
+    }
+
+    #[test]
+    fn test_has_inflight_loop_idle_session() {
+        let manager = SessionManager::new(InMemorySessionStore::new());
+        let session = manager
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        assert_eq!(session.status, SessionStatus::Idle);
+        assert!(!manager.has_inflight_loop(&session.id));
+    }
+
+    #[test]
+    fn test_finish_loop_removes_token_without_cancelling() {
+        let manager = SessionManager::new(InMemorySessionStore::new());
+        let session = manager
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+
+        let trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(MockTrimmer);
+        let ctx = manager
+            .start_loop(&session.id, &trimmer, None, None)
+            .unwrap();
+        let token = ctx.cancel_token.clone();
+
+        manager
+            .finish_loop(&session.id, SessionStatus::Completed)
+            .unwrap();
+        assert!(!manager.has_inflight_loop(&session.id));
+        assert!(!token.is_cancelled());
+    }
+
+    #[test]
+    fn test_has_inflight_loop_counts_sub_session() {
+        let manager = SessionManager::new(InMemorySessionStore::new());
+        let parent = manager
+            .create(Path::new("/tmp"), LlmConfig::default())
+            .unwrap();
+        let sub = manager
+            .create_sub(SubSessionParams {
+                parent_id: Some(parent.id.clone()),
+                agent_name: "fixer".into(),
+                permission: vec![],
+                session_id: None,
+                project_path: PathBuf::from("/tmp"),
+                config: LlmConfig::default(),
+                approved_tools: HashSet::new(),
+            })
+            .unwrap();
+
+        let trimmer: Arc<dyn ContextTrimmer + Send + Sync> = Arc::new(MockTrimmer);
+        let _ctx = manager.start_loop(&sub.id, &trimmer, None, None).unwrap();
+        assert!(manager.has_inflight_loop(&sub.id));
     }
 }
