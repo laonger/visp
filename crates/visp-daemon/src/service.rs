@@ -610,26 +610,18 @@ impl CoderDaemon for CoderDaemonService {
                 match msg.payload {
                     Some(proto::client_message::Payload::UserInput(input)) => {
                         let session_id = input.session_id;
-                        // 检查 session 是否可接受新输入：
-                        // 主 session（无 parent_id）的 Idle/Completed/Error 均可接受；
-                        // Running 理论上不会出现在恢复场景，若有则重置为 Idle。
-                        // 子 session（有 parent_id）一律 view-only。
-                        let can_accept = match session_mgr.get(&session_id) {
-                            Ok(s) => {
-                                let is_main = s.parent_id.is_none();
-                                if is_main && s.status == visp_core::session::SessionStatus::Running
-                                {
-                                    // 恢复场景不应出现 Running，防御性重置
-                                    let _ = session_mgr.finish_loop(
-                                        &session_id,
-                                        visp_core::session::SessionStatus::Idle,
-                                    );
-                                }
-                                is_main
-                            }
-                            Err(_) => false,
+                        // 受理守卫（设计 §5.6 / G1）：分类必须排在斜杠命令解析之前。
+                        // 非主会话（有 parent_id）→ 拒绝（SessionNotActive，保持现状）；
+                        // 主会话存在在途循环令牌 → 忙拒绝（SessionBusy）；其余受理。
+                        // 判据只用 `has_inflight_loop`，不看 `status`；被拒路径零副作用。
+                        let decision = match session_mgr.get(&session_id) {
+                            Ok(s) => decide_user_input(
+                                s.parent_id.is_none(),
+                                session_mgr.has_inflight_loop(&session_id),
+                            ),
+                            Err(_) => UserInputDecision::RejectNotActive,
                         };
-                        if can_accept {
+                        if decision == UserInputDecision::Accept {
                             // Intercept daemon-side slash commands and either
                             // replace the prompt (for /init) or execute file
                             // operations (for /init-agent, /init-skill).
@@ -717,15 +709,21 @@ impl CoderDaemon for CoderDaemonService {
                                 }
                             }
                         } else {
-                            // 已知限制：DB 持久化场景下 status 可能不可靠（见设计文档）
-                            let err_msg = session_error_msg(
-                                "SessionNotActive",
-                                &format!(
-                                    "Session {} is not active",
-                                    &session_id[..session_id.len().min(8)]
+                            // 被拒路径零副作用：不改 status、不移除令牌、不解析命令、不转发。
+                            let (code, message) = match decision {
+                                UserInputDecision::RejectBusy => {
+                                    (SESSION_BUSY_CODE, SESSION_BUSY_MESSAGE.to_string())
+                                }
+                                // RejectNotActive（含未知会话）保持现状文案。
+                                _ => (
+                                    SESSION_NOT_ACTIVE_CODE,
+                                    format!(
+                                        "Session {} is not active",
+                                        &session_id[..session_id.len().min(8)]
+                                    ),
                                 ),
-                                &session_id,
-                            );
+                            };
+                            let err_msg = session_error_msg(code, &message, &session_id);
                             let _ = response_tx_inbound.send(Ok(err_msg)).await;
                         }
                     }
@@ -1529,6 +1527,39 @@ fn session_to_proto(
         available_models: available_models.to_vec(),
         model_keys: model_keys.to_vec(),
         model_key: display_model_key,
+    }
+}
+
+/// 忙拒绝错误码（设计 §5.6）：会话存在在途循环时拒绝新用户输入。
+const SESSION_BUSY_CODE: &str = "SessionBusy";
+/// 忙拒绝文案。**不得**含 `cancelled`（大小写不敏感），否则 ACP 会误判为用户取消。
+const SESSION_BUSY_MESSAGE: &str = "Session is busy: generation in progress, please wait";
+/// 非主会话 / 未知会话拒绝码（语义保持现状）。
+const SESSION_NOT_ACTIVE_CODE: &str = "SessionNotActive";
+
+/// 用户输入受理决策三态（无副作用纯函数出参）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UserInputDecision {
+    /// 受理：主会话且无在途循环。
+    Accept,
+    /// 拒绝：非主会话 / 未知会话。
+    RejectNotActive,
+    /// 拒绝：主会话存在在途循环。
+    RejectBusy,
+}
+
+/// 判定用户输入是否受理（纯函数，无副作用）。
+///
+/// - 入参：`is_main`（是否主会话）、`has_inflight_loop`（是否存在在途循环令牌）。
+/// - 判据只用 `has_inflight_loop`，**不读取、不修改**会话 `status`。
+/// - 真实分支与测试共用本函数，避免「测试内复制判定逻辑」的假覆盖。
+fn decide_user_input(is_main: bool, has_inflight_loop: bool) -> UserInputDecision {
+    if !is_main {
+        UserInputDecision::RejectNotActive
+    } else if has_inflight_loop {
+        UserInputDecision::RejectBusy
+    } else {
+        UserInputDecision::Accept
     }
 }
 
@@ -3648,7 +3679,32 @@ mod tests {
         }
     }
 
-    // ── 5c: UserInput SessionNotActive tests (3) ──────────────────────────────
+    // ── 5c: UserInput 受理守卫（真实判定函数 `decide_user_input`） ────────────
+
+    #[test]
+    fn test_decide_user_input_child_session_is_rejected_not_active() {
+        // 非主会话（有父会话）一律拒绝，语义保持现状。
+        assert_eq!(
+            decide_user_input(false, false),
+            UserInputDecision::RejectNotActive
+        );
+        assert_eq!(
+            decide_user_input(false, true),
+            UserInputDecision::RejectNotActive
+        );
+    }
+
+    #[test]
+    fn test_decide_user_input_main_session_without_inflight_loop_is_accepted() {
+        // 主会话无在途令牌 → 受理（Idle / Completed / Error 均走此路）。
+        assert_eq!(decide_user_input(true, false), UserInputDecision::Accept);
+    }
+
+    #[test]
+    fn test_decide_user_input_main_session_with_inflight_loop_is_busy() {
+        // 判据是在途令牌而非 `status`：函数签名不含 `status`，有令牌即忙拒绝。
+        assert_eq!(decide_user_input(true, true), UserInputDecision::RejectBusy);
+    }
 
     #[tokio::test]
     async fn test_user_input_to_view_only_session_returns_session_not_active() {
@@ -3668,19 +3724,15 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<Result<proto::ServerMessage, Status>>(16);
         let response_tx = tx.clone();
 
-        // Simulate what the inbound handler does for UserInput
-        let session_mgr = mgr.clone();
-        let can_accept = match session_mgr.get("child-1") {
-            Ok(s) => s.parent_id.is_none(),
-            Err(_) => false,
-        };
-
-        if can_accept {
-            panic!("child session should NOT be accepted for UserInput");
-        }
+        // 真实判定函数：子会话（有 parent_id）→ 拒绝（非活跃）
+        let decision = decide_user_input(
+            mgr.get("child-1").unwrap().parent_id.is_none(),
+            mgr.has_inflight_loop("child-1"),
+        );
+        assert_eq!(decision, UserInputDecision::RejectNotActive);
 
         let err_msg = session_error_msg(
-            "SessionNotActive",
+            SESSION_NOT_ACTIVE_CODE,
             "Session child-1 is not active",
             "child-1",
         );
@@ -3689,43 +3741,128 @@ mod tests {
         let frame = rx.recv().await.unwrap().unwrap();
         match frame.payload {
             Some(proto::server_message::Payload::Error(e)) => {
-                assert_eq!(e.code, "SessionNotActive");
+                assert_eq!(e.code, SESSION_NOT_ACTIVE_CODE);
             }
             _ => panic!("expected Error payload"),
         }
     }
 
     #[tokio::test]
-    async fn test_user_input_to_running_session_resets_and_accepts() {
+    async fn test_user_input_to_running_session_with_inflight_loop_is_rejected_busy() {
         let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
         let session = mgr.create(Path::new("/tmp"), LlmConfig::default()).unwrap();
         let sid = session.id.clone();
 
-        // Manually set session to Running via start_loop
+        // 有在途循环：start_loop 装入令牌并把状态置为 Running
         let trimmer: Arc<dyn ContextTrimmer + Send + Sync> =
             Arc::new(visp_core::context::NoopTrimmer);
         mgr.start_loop(&sid, &trimmer, None, None).unwrap();
 
-        // Simulate the handler check — Running main session should be reset to Idle and accepted
-        let session_mgr = mgr.clone();
-        let can_accept = match session_mgr.get(&sid) {
-            Ok(s) => {
-                let is_main = s.parent_id.is_none();
-                if is_main && s.status == SessionStatus::Running {
-                    let _ = session_mgr.finish_loop(&sid, SessionStatus::Idle);
-                }
-                is_main
-            }
-            Err(_) => false,
-        };
-
-        assert!(
-            can_accept,
-            "Running main session should be accepted after reset"
+        // 真实判定函数：主会话 + 在途令牌 → 忙拒绝
+        let decision = decide_user_input(
+            mgr.get(&sid).unwrap().parent_id.is_none(),
+            mgr.has_inflight_loop(&sid),
         );
-        // Verify the session is now Idle
-        let s = session_mgr.get(&sid).unwrap();
-        assert_eq!(s.status, SessionStatus::Idle);
+        assert_eq!(decision, UserInputDecision::RejectBusy);
+        // 静默重置已移除：状态仍为 Running、令牌仍在（不再被重置为 Idle）。
+        assert_eq!(mgr.get(&sid).unwrap().status, SessionStatus::Running);
+        assert!(mgr.has_inflight_loop(&sid));
+    }
+
+    #[tokio::test]
+    async fn test_running_status_without_inflight_loop_is_accepted_and_not_reset() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = mgr.create(Path::new("/tmp"), LlmConfig::default()).unwrap();
+        let sid = session.id.clone();
+
+        let trimmer: Arc<dyn ContextTrimmer + Send + Sync> =
+            Arc::new(visp_core::context::NoopTrimmer);
+        mgr.start_loop(&sid, &trimmer, None, None).unwrap();
+        // 取消动作立即移除令牌，但状态仍残留 Running（既有行为）。
+        mgr.cancel_agent(&sid);
+        assert!(!mgr.has_inflight_loop(&sid));
+        assert_eq!(mgr.get(&sid).unwrap().status, SessionStatus::Running);
+
+        // 判据只看令牌：无令牌 → 放行。
+        let decision = decide_user_input(
+            mgr.get(&sid).unwrap().parent_id.is_none(),
+            mgr.has_inflight_loop(&sid),
+        );
+        assert_eq!(decision, UserInputDecision::Accept);
+        // 守卫不再静默重置状态（后续由 orchestrator 状态闸兜底）。
+        assert_eq!(mgr.get(&sid).unwrap().status, SessionStatus::Running);
+    }
+
+    #[test]
+    fn test_session_busy_error_code_and_message_are_compliant() {
+        let msg = session_error_msg(SESSION_BUSY_CODE, SESSION_BUSY_MESSAGE, "sess-1");
+        match msg.payload {
+            Some(proto::server_message::Payload::Error(e)) => {
+                assert_eq!(e.code, "SessionBusy");
+                assert!(!e.message.is_empty(), "busy message must not be empty");
+                assert!(
+                    !e.message.to_lowercase().contains("cancelled"),
+                    "busy message must not contain 'cancelled' (ACP would misread it): {}",
+                    e.message
+                );
+                assert_ne!(e.message, "Operation cancelled");
+                assert!(!e.code.to_lowercase().contains("cancelled"));
+            }
+            _ => panic!("expected Error payload"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_busy_guard_blocks_init_commands_without_side_effects() {
+        let project = TempDir::new().unwrap();
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = mgr.create(project.path(), LlmConfig::default()).unwrap();
+        let sid = session.id.clone();
+
+        let trimmer: Arc<dyn ContextTrimmer + Send + Sync> =
+            Arc::new(visp_core::context::NoopTrimmer);
+        mgr.start_loop(&sid, &trimmer, None, None).unwrap();
+
+        // 生成期提交 /init 与 /init-agent：守卫排在斜杠解析之前 → 忙拒绝。
+        for text in ["/init", "/init-agent my-agent"] {
+            let decision = decide_user_input(
+                mgr.get(&sid).unwrap().parent_id.is_none(),
+                mgr.has_inflight_loop(&sid),
+            );
+            assert_eq!(
+                decision,
+                UserInputDecision::RejectBusy,
+                "busy guard must reject command: {text}"
+            );
+        }
+
+        // 被拒即不解析、不转发、不写文件（对照 /init-agent 的 WriteFile 路径）。
+        assert!(
+            !project.path().join(".visp").exists(),
+            "busy rejection must not create .visp or write agent files"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_busy_rejection_is_idempotent_without_side_effects() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = mgr.create(Path::new("/tmp"), LlmConfig::default()).unwrap();
+        let sid = session.id.clone();
+
+        let trimmer: Arc<dyn ContextTrimmer + Send + Sync> =
+            Arc::new(visp_core::context::NoopTrimmer);
+        mgr.start_loop(&sid, &trimmer, None, None).unwrap();
+
+        // 连续两次被拒后，状态与「是否有在途令牌」均不变。
+        for _ in 0..2 {
+            let decision = decide_user_input(
+                mgr.get(&sid).unwrap().parent_id.is_none(),
+                mgr.has_inflight_loop(&sid),
+            );
+            assert_eq!(decision, UserInputDecision::RejectBusy);
+        }
+        assert_eq!(mgr.get(&sid).unwrap().status, SessionStatus::Running);
+        assert!(mgr.has_inflight_loop(&sid));
     }
 
     #[tokio::test]
@@ -3745,17 +3882,15 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<Result<proto::ServerMessage, Status>>(16);
         let response_tx = tx.clone();
 
-        // Simulate handler
-        let session_mgr = mgr.clone();
-        let can_accept = match session_mgr.get("child-99") {
-            Ok(s) => s.parent_id.is_none(),
-            Err(_) => false,
-        };
-
-        assert!(!can_accept, "child session should not be accepted");
+        // 真实判定函数：子会话 → 拒绝（非活跃）
+        let decision = decide_user_input(
+            mgr.get("child-99").unwrap().parent_id.is_none(),
+            mgr.has_inflight_loop("child-99"),
+        );
+        assert_eq!(decision, UserInputDecision::RejectNotActive);
 
         let err_msg = session_error_msg(
-            "SessionNotActive",
+            SESSION_NOT_ACTIVE_CODE,
             "Session child-99 is not active",
             "child-99",
         );
@@ -3764,14 +3899,35 @@ mod tests {
         let frame = rx.recv().await.unwrap().unwrap();
         match frame.payload {
             Some(proto::server_message::Payload::Error(e)) => {
-                assert_eq!(e.code, "SessionNotActive");
+                assert_eq!(e.code, SESSION_NOT_ACTIVE_CODE);
                 assert_eq!(e.session_id, "child-99");
             }
             _ => panic!("expected Error payload"),
         }
     }
 
-    // ── 5d: Completed/Error 主 session 可接受输入 (2) ────────────────────
+    // ── 5d: Idle/Completed/Error 主 session 可接受输入 (3) ────────────────
+
+    #[tokio::test]
+    async fn test_user_input_to_idle_main_session_is_accepted() {
+        let mut store = InMemorySessionStore::new();
+        store
+            .create(make_session(
+                "main-idle",
+                None,
+                "orchestrator",
+                vec![],
+                SessionStatus::Idle,
+            ))
+            .unwrap();
+        let mgr = StdArc::new(SessionManager::new(store));
+
+        let decision = decide_user_input(
+            mgr.get("main-idle").unwrap().parent_id.is_none(),
+            mgr.has_inflight_loop("main-idle"),
+        );
+        assert_eq!(decision, UserInputDecision::Accept);
+    }
 
     #[tokio::test]
     async fn test_user_input_to_completed_main_session_is_accepted() {
@@ -3786,20 +3942,12 @@ mod tests {
             ))
             .unwrap();
         let mgr = StdArc::new(SessionManager::new(store));
-        let session_mgr = mgr.clone();
 
-        let can_accept = match session_mgr.get("main-completed") {
-            Ok(s) => {
-                let is_main = s.parent_id.is_none();
-                if is_main && s.status == SessionStatus::Running {
-                    let _ = session_mgr.finish_loop("main-completed", SessionStatus::Idle);
-                }
-                is_main
-            }
-            Err(_) => false,
-        };
-
-        assert!(can_accept, "Completed main session should be accepted");
+        let decision = decide_user_input(
+            mgr.get("main-completed").unwrap().parent_id.is_none(),
+            mgr.has_inflight_loop("main-completed"),
+        );
+        assert_eq!(decision, UserInputDecision::Accept);
     }
 
     #[tokio::test]
@@ -3815,20 +3963,12 @@ mod tests {
             ))
             .unwrap();
         let mgr = StdArc::new(SessionManager::new(store));
-        let session_mgr = mgr.clone();
 
-        let can_accept = match session_mgr.get("main-error") {
-            Ok(s) => {
-                let is_main = s.parent_id.is_none();
-                if is_main && s.status == SessionStatus::Running {
-                    let _ = session_mgr.finish_loop("main-error", SessionStatus::Idle);
-                }
-                is_main
-            }
-            Err(_) => false,
-        };
-
-        assert!(can_accept, "Error main session should be accepted");
+        let decision = decide_user_input(
+            mgr.get("main-error").unwrap().parent_id.is_none(),
+            mgr.has_inflight_loop("main-error"),
+        );
+        assert_eq!(decision, UserInputDecision::Accept);
     }
 
     // ── 7a: End-to-end integration tests (3) ───────────────────────────────────
