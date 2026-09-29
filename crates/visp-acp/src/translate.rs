@@ -372,7 +372,8 @@ mod tests {
 
     /// 回归护栏(问题一):`ThinkingBlock.thinking` 是**增量**语义,消费方对同一
     /// `messageId` 追加。连续增量帧拼接必须还原全文,且总字符数恰等于全文长度——
-    /// 若下游仍按「累积快照」消费,拼接将得 `S1+S1S2+…` 式的平方级复读,本断言即失败。
+    /// 覆盖边界：本断言只证明 ACP 自身「messageId 不轮换 + 逐帧透传」；
+    /// 它够不到上游 core 是否又改回快照发射，也够不到客户端（Zed）的渲染行为。
     #[test]
     fn thinking_incremental_frames_append_to_same_message_id_without_duplication() {
         // 10 段增量,每段仅携带相对上一帧的新增部分
