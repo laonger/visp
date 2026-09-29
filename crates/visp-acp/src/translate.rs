@@ -250,6 +250,28 @@ mod tests {
         }))
     }
 
+    /// 从 translate 输出提取思考 chunk 的 `(messageId, 文本)`;非单帧 thought chunk → panic。
+    fn thought_chunk_of(out: &[Outbound]) -> (MessageId, String) {
+        assert_eq!(out.len(), 1, "单帧思考应产出恰好一条 Outbound");
+        match &out[0] {
+            Outbound::Update(u) => match u.as_ref() {
+                SessionUpdate::AgentThoughtChunk(chunk) => {
+                    let text = match &chunk.content {
+                        ContentBlock::Text(t) => t.text.clone(),
+                        other => panic!("expected Text content, got {other:?}"),
+                    };
+                    let mid = chunk
+                        .message_id
+                        .clone()
+                        .expect("思考 chunk 必须带 messageId");
+                    (mid, text)
+                }
+                other => panic!("expected AgentThoughtChunk, got {other:?}"),
+            },
+            other => panic!("expected Update, got {other:?}"),
+        }
+    }
+
     fn tool_call(sid: &str, agent: &str, call_id: &str, name: &str) -> ServerMessage {
         msg(server_message::Payload::ToolCall(ProtoToolCall {
             call_id: call_id.into(),
@@ -337,14 +359,45 @@ mod tests {
     }
 
     #[test]
-    fn thinking_parent_chunk_and_child_suppressed() {
+    fn thinking_parent_chunk_carries_incremental_text_and_child_suppressed() {
         let mut c = ctx();
-        let out = translate(&thinking(PARENT, "思考中"), &mut c);
-        assert!(matches!(
-            &out[0],
-            Outbound::Update(u) if matches!(u.as_ref(), SessionUpdate::AgentThoughtChunk(_))
-        ));
-        assert!(translate(&thinking(CHILD, "子思考"), &mut c).is_empty());
+        let (mid, text) = thought_chunk_of(&translate(&thinking(PARENT, "思考中"), &mut c));
+        assert_eq!(text, "思考中");
+        assert!(!mid.0.is_empty(), "思考 chunk 应携带 messageId");
+        assert!(
+            translate(&thinking(CHILD, "子思考"), &mut c).is_empty(),
+            "子 agent 思考帧应被抑制(与 TextDelta 策略对齐)"
+        );
+    }
+
+    /// 回归护栏(问题一):`ThinkingBlock.thinking` 是**增量**语义,消费方对同一
+    /// `messageId` 追加。连续增量帧拼接必须还原全文,且总字符数恰等于全文长度——
+    /// 若下游仍按「累积快照」消费,拼接将得 `S1+S1S2+…` 式的平方级复读,本断言即失败。
+    #[test]
+    fn thinking_incremental_frames_append_to_same_message_id_without_duplication() {
+        // 10 段增量,每段仅携带相对上一帧的新增部分
+        let parts: Vec<String> = (0..10).map(|i| format!("增量片段{i}；")).collect();
+        let full: String = parts.concat();
+
+        let mut c = ctx();
+        let mut mids = Vec::new();
+        let mut streamed = String::new();
+        for part in &parts {
+            let (mid, text) = thought_chunk_of(&translate(&thinking(PARENT, part), &mut c));
+            mids.push(mid);
+            streamed.push_str(&text);
+        }
+
+        assert!(
+            mids.windows(2).all(|w| w[0] == w[1]),
+            "同一思考流的所有 chunk 必须共享 messageId"
+        );
+        assert_eq!(streamed, full, "增量帧按序追加应还原全文,无重复");
+        assert_eq!(
+            streamed.chars().count(),
+            full.chars().count(),
+            "总字符数应等于全文长度,不得出现平方级膨胀"
+        );
     }
 
     // ===== messageId 轮换(§7.3 近似策略) =====

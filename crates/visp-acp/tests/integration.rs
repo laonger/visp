@@ -23,8 +23,8 @@ use visp_proto::visp::{
     GetHookStatsRequest, GetSessionRequest, GetSymbolDetailsRequest, HealthStatus,
     HookStatsResponse, ListSessionsResponse, ReadFileRequest, ReadFileResponse,
     ReloadConfigRequest, ReloadConfigResponse, SearchSymbolsRequest, SearchSymbolsResponse,
-    ServerMessage, Session, ShutdownRequest, SymbolDetails, TextDelta, UserQuery, UserResponse,
-    client_message, server_message,
+    ServerMessage, Session, ShutdownRequest, SymbolDetails, TextDelta, ThinkingBlock, UserQuery,
+    UserResponse, client_message, server_message,
 };
 
 // ===== ScriptedDaemon:第 N 条输入触发回放 per_input[N] 输出段 =====
@@ -257,6 +257,40 @@ impl LineClient {
         let (_, resp) = self.recv_turn(id).await;
         resp
     }
+
+    /// 循环读帧直至目标响应到达;收集 session/update 的
+    /// `(sessionUpdate 类型, 内容文本, messageId)` 三元组(类型/文本缺省为空)。
+    async fn recv_turn_updates(
+        &mut self,
+        target_id: u64,
+    ) -> (Vec<(String, String, Option<String>)>, Value) {
+        let mut updates = Vec::new();
+        loop {
+            let (method, id, v) = self.recv_any().await;
+            match (method.as_deref(), id) {
+                (Some("session/update"), None) => {
+                    let kind = v
+                        .pointer("/params/update/sessionUpdate")
+                        .and_then(|k| k.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let text = v
+                        .pointer("/params/update/content/text")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let mid = v
+                        .pointer("/params/update/messageId")
+                        .and_then(|m| m.as_str())
+                        .map(String::from);
+                    updates.push((kind, text, mid));
+                }
+                (Some("elicitation/create"), _) | (Some("$/cancel_request"), _) => {}
+                (_, Some(i)) if i == target_id => return (updates, v),
+                _ => {}
+            }
+        }
+    }
 }
 
 // ===== 消息构造辅助 =====
@@ -274,6 +308,16 @@ fn text_delta(sid: &str, _agent: &str, delta: &str) -> ServerMessage {
 fn done(sid: &str) -> ServerMessage {
     ServerMessage {
         payload: Some(server_message::Payload::Done(Done {
+            session_id: sid.into(),
+        })),
+    }
+}
+
+fn thinking_block(sid: &str, text: &str) -> ServerMessage {
+    ServerMessage {
+        payload: Some(server_message::Payload::ThinkingBlock(ThinkingBlock {
+            thinking: text.into(),
+            signature: String::new(),
             session_id: sid.into(),
         })),
     }
@@ -358,6 +402,62 @@ async fn full_turn_streams_chunks_and_ends() {
         .await;
     let (chunks, resp) = client.recv_turn(3).await;
     assert_eq!(chunks, vec!["你好".to_string(), "世界".to_string()]);
+    assert_eq!(resp["result"]["stopReason"], "end_turn");
+}
+
+/// 问题一端到端:daemon 发送**增量**思考帧 → 客户端可见的 thought chunk 追加到同一
+/// `messageId`,拼接还原全文;子 agent 思考仍被抑制(与单测抑制策略一致)。
+#[tokio::test]
+#[serial]
+async fn thinking_increments_append_to_same_message_id_end_to_end() {
+    let script = vec![vec![
+        thinking_block("visp-new", "第一步；"),
+        thinking_block("visp-child", "子思考不应可见"),
+        thinking_block("visp-new", "第二步；"),
+        thinking_block("visp-new", "第三步。"),
+        done("visp-new"),
+    ]];
+    let mut client = spawn_agent(script).await;
+
+    let v = client
+        .request(
+            1,
+            "initialize",
+            json!({"protocolVersion":1,"clientCapabilities":{}}),
+        )
+        .await;
+    assert_eq!(v["result"]["protocolVersion"], 1);
+    let v = client
+        .request(2, "session/new", json!({"cwd":"/tmp","mcpServers":[]}))
+        .await;
+    assert_eq!(v["result"]["sessionId"], "visp-new");
+
+    client
+        .send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"visp-new","prompt":[{"type":"text","text":"hi"}]}}))
+        .await;
+    let (updates, resp) = client.recv_turn_updates(3).await;
+
+    let thoughts: Vec<&(String, String, Option<String>)> = updates
+        .iter()
+        .filter(|(kind, _, _)| kind == "agent_thought_chunk")
+        .collect();
+    assert_eq!(
+        thoughts.len(),
+        3,
+        "仅父 agent 的 3 帧思考应可见(子帧被抑制):{updates:?}"
+    );
+
+    // 同一 messageId:ACP 对同 id 的 chunk 为追加语义,不得轮换
+    let mids: Vec<&Option<String>> = thoughts.iter().map(|(_, _, m)| m).collect();
+    assert!(
+        mids.windows(2).all(|w| w[0] == w[1] && w[0].is_some()),
+        "所有思考 chunk 必须共享同一 messageId:{mids:?}"
+    );
+
+    // 拼接还原全文:无子内容、无重复、无平方级膨胀
+    let joined: String = thoughts.iter().map(|(_, t, _)| t.as_str()).collect();
+    assert_eq!(joined, "第一步；第二步；第三步。");
+    assert!(!joined.contains("子思考"), "子 agent 思考必须被抑制");
     assert_eq!(resp["result"]["stopReason"], "end_turn");
 }
 
