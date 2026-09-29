@@ -5741,6 +5741,164 @@ mod tests {
         assert!(event_to_msg(&AgentEvent::ThinkingDelta("inc".into())).is_none());
     }
 
+    // ── 集成不变量：增量拼接 == 全文；extra_blocks 仍为完整块 ─────────────
+
+    /// 用例 11a-1：思考与正文**交错**时，思考增量序列拼接必须等于本轮完整思考
+    /// 文本，且正文增量拼接等于正文全文（交错不得打乱任一侧的累积）。
+    #[serial]
+    #[tokio::test]
+    async fn test_thinking_increments_with_interleaved_text_concat_to_full() {
+        let (session_mgr, _sid, ctx) = make_loop_env();
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![vec![
+            thinking_snapshot("I think "),
+            ChatEvent::TextDelta("Hello".into()),
+            thinking_snapshot("I think more"),
+            ChatEvent::TextDelta(" world".into()),
+            thinking_snapshot("I think more clearly"),
+            ChatEvent::Done,
+        ]]));
+        let events = run_loop_capture(
+            provider,
+            StdArc::new(ToolRegistry::new()),
+            session_mgr,
+            ctx,
+            AgentConfig::default(),
+            Message::user("think and answer"),
+            ApprovalAction::Ignore,
+        )
+        .await;
+
+        let deltas = thinking_deltas_of(&events);
+        assert_eq!(deltas, vec!["I think ", "more", " clearly"]);
+        assert_eq!(
+            deltas.concat(),
+            "I think more clearly",
+            "交错场景下思考增量拼接必须等于最终完整思考文本"
+        );
+
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::TextDelta(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "Hello world", "正文增量拼接 == 正文全文");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ThinkingBlock(_))),
+            "流式路径不得再发射快照变体"
+        );
+    }
+
+    /// 用例 11a-2：走**正文装配路径**时，落库消息的 `extra_blocks` 仍为本轮完整
+    /// 思考块且保留 signature——这是 Anthropic 历史回传的硬约束，不得被增量
+    /// 语义削弱。
+    #[serial]
+    #[tokio::test]
+    async fn test_extra_blocks_keep_full_signed_block_on_text_path() {
+        let (session_mgr, sid, ctx) = make_loop_env();
+        let inspect = session_mgr.clone();
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![vec![
+            thinking_snapshot("deep "),
+            ChatEvent::ThinkingBlock(serde_json::json!({
+                "type": "thinking",
+                "thinking": "deep thought here",
+                "signature": "sig-abc123",
+            })),
+            ChatEvent::TextDelta("final answer".into()),
+            ChatEvent::Done,
+        ]]));
+        let events = run_loop_capture(
+            provider,
+            StdArc::new(ToolRegistry::new()),
+            session_mgr,
+            ctx,
+            AgentConfig::default(),
+            Message::user("go"),
+            ApprovalAction::Ignore,
+        )
+        .await;
+
+        assert_eq!(
+            thinking_deltas_of(&events).concat(),
+            "deep thought here",
+            "增量拼接 == 完整思考文本"
+        );
+
+        let saved = inspect.get(&sid).unwrap();
+        let text_msg = saved
+            .history
+            .iter()
+            .find(|m| m.kind == MessageType::Text && m.content.contains("final answer"))
+            .expect("正文装配路径应落库一条 text 消息");
+        let blocks = text_msg
+            .extra_blocks
+            .as_ref()
+            .expect("正文消息必须携带本轮完整思考块（extra_blocks）");
+        assert_eq!(blocks.len(), 1, "本轮只有一块，extra_blocks 应恰含一块");
+        assert_eq!(
+            blocks[0].get("thinking").and_then(|v| v.as_str()),
+            Some("deep thought here"),
+            "extra_blocks 必须保留完整思考文本"
+        );
+        assert_eq!(
+            blocks[0].get("signature").and_then(|v| v.as_str()),
+            Some("sig-abc123"),
+            "extra_blocks 必须保留 signature（Anthropic 回传硬约束）"
+        );
+    }
+
+    /// 用例 11a-4：一轮内出现**多个思考块**时，对外增量为各块累积（显示侧
+    /// 「两段拼接」），但落库/history 的 `extra_blocks` 仍只有最后一块——固化
+    /// 设计 §4.4 的已知差异（持久化部分）。
+    #[serial]
+    #[tokio::test]
+    async fn test_multiple_thinking_blocks_deltas_accumulate_but_persist_last_only() {
+        let (session_mgr, sid, ctx) = make_loop_env();
+        let inspect = session_mgr.clone();
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![vec![
+            thinking_snapshot("first segment"),
+            thinking_snapshot("second segment"),
+            ChatEvent::TextDelta("final answer".into()),
+            ChatEvent::Done,
+        ]]));
+        let events = run_loop_capture(
+            provider,
+            StdArc::new(ToolRegistry::new()),
+            session_mgr,
+            ctx,
+            AgentConfig::default(),
+            Message::user("go"),
+            ApprovalAction::Ignore,
+        )
+        .await;
+
+        assert_eq!(
+            thinking_deltas_of(&events),
+            vec!["first segment", "second segment"],
+            "非前缀快照按「新块起点」各发全文（显示侧为两段拼接）"
+        );
+
+        let saved = inspect.get(&sid).unwrap();
+        let text_msg = saved
+            .history
+            .iter()
+            .find(|m| m.kind == MessageType::Text && m.content.contains("final answer"))
+            .expect("正文装配路径应落库一条 text 消息");
+        let blocks = text_msg.extra_blocks.as_ref().expect("extra_blocks 应存在");
+        let persisted: Vec<&str> = blocks
+            .iter()
+            .filter_map(|b| b.get("thinking").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(
+            persisted,
+            vec!["second segment"],
+            "落库/history 仍只有最后一块（与显示侧两段拼接互为对照）"
+        );
+    }
+
     /// Provider that always returns a tool call whose arguments are malformed
     /// (empty or invalid JSON), cycling through *different* contents — mirrors
     /// streaming interruptions that produce 0-byte/truncated arguments.
