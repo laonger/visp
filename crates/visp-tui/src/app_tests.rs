@@ -1585,9 +1585,10 @@ fn test_route_frame_session_busy_active_main_tab_keeps_streaming() {
     );
     assert!(tab.generating, "忙拒绝不得提前放开输入门禁");
     assert_eq!(tab.streaming_text, "半截输出", "忙拒绝不得丢掉在途流式内容");
-    assert!(
-        status_lines(tab).contains(&"正在生成，请稍候"),
-        "应给出 Status 提示"
+    assert_eq!(
+        status_lines(tab),
+        vec!["正在生成，请稍候"],
+        "活跃路径经 route_frame + render_pending 应去重为恰好一行 Status 提示"
     );
 }
 

@@ -453,6 +453,20 @@ impl TabEntry {
         });
     }
 
+    /// 推送一行 Status 提示，但若最后一行已是**完全相同文本**的 Status 则跳过。
+    /// 用于忙拒绝（SessionBusy）提示：活跃 tab 路径会先经 `route_frame` 追加
+    /// 一次、再经 `render_pending` 处理同一帧追加第二次，去重后可收敛为一行；
+    /// 只比较紧邻的末行，不影响其它行类型或其他位置的 Status。
+    pub fn push_status_line_dedup(&mut self, content: String) {
+        if let Some(last) = self.messages.last()
+            && last.line_type == LineType::Status
+            && last.content == content
+        {
+            return;
+        }
+        self.push_chat_line(LineType::Status, content, None);
+    }
+
     pub fn push_chat_lines(&mut self, lines: Vec<ChatLine>) {
         for mut line in lines {
             line.id = self.next_message_id;
@@ -713,8 +727,9 @@ impl TabEntry {
                 Some(server_message::Payload::Error(err)) => {
                     if err.code == "SessionBusy" {
                         // 忙拒绝不代表本轮失败：不置 Error、不 flush 在途流式内容、
-                        // 不提前放开输入门禁，仅追加一行提示
-                        self.push_chat_line(LineType::Status, err.message.clone(), None);
+                        // 不提前放开输入门禁，仅追加一行提示（去重，避免与
+                        // route_frame 的状态更新块重复）
+                        self.push_status_line_dedup(err.message.clone());
                     } else {
                         self.flush_streaming();
                         self.push_chat_line(
@@ -1915,7 +1930,7 @@ impl AppState {
                 Some(server_message::Payload::Error(err)) => {
                     if err.code == "SessionBusy" {
                         // 忙拒绝不代表本轮失败：不置 Error，仅追加一行提示
-                        tab.push_chat_line(LineType::Status, err.message.clone(), None);
+                        tab.push_status_line_dedup(err.message.clone());
                     } else {
                         tab.status = AgentStatus::Error;
                     }
@@ -1942,11 +1957,8 @@ impl AppState {
             Some(server_message::Payload::Error(err)) => {
                 if err.code == "SessionBusy" {
                     // 忙拒绝不代表本轮失败：不置 Error，仅追加一行提示
-                    self.tab_bar.tabs[idx].push_chat_line(
-                        LineType::Status,
-                        err.message.clone(),
-                        None,
-                    );
+                    // （去重，避免随后的 render_pending 针对同一帧再追加）
+                    self.tab_bar.tabs[idx].push_status_line_dedup(err.message.clone());
                 } else {
                     self.tab_bar.tabs[idx].status = AgentStatus::Error;
                     if err.code == "SessionNotActive" {
