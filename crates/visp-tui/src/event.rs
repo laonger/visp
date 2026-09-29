@@ -1295,17 +1295,22 @@ fn handle_grpc_message(
                 return;
             }
 
-            // 按 session_id 定位 tab 并设置 generating = false
-            let idx = if is_main {
-                Some(0)
-            } else {
-                app.tab_bar.find_index_by_session(&e.session_id)
-            };
-            if let Some(idx) = idx {
-                app.tab_bar.tabs[idx].stop_generating();
-                // current_request_id 仅与主 session 相关
-                if is_main {
-                    app.current_request_id = None;
+            // 忙拒绝（SessionBusy）不代表本轮失败：不提前释放输入门禁、
+            // 不清 current_request_id，让该帧继续走到 route_frame，由既有特判
+            // 渲染成一行 Status 提示（否则会丢失时钟并绕过门禁保护）
+            if e.code != "SessionBusy" {
+                // 按 session_id 定位 tab 并设置 generating = false
+                let idx = if is_main {
+                    Some(0)
+                } else {
+                    app.tab_bar.find_index_by_session(&e.session_id)
+                };
+                if let Some(idx) = idx {
+                    app.tab_bar.tabs[idx].stop_generating();
+                    // current_request_id 仅与主 session 相关
+                    if is_main {
+                        app.current_request_id = None;
+                    }
                 }
             }
             // 未知 session 的 Error 会 fall through 到 route_frame 创建 tab 并处理

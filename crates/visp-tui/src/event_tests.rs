@@ -1,5 +1,5 @@
 use super::*;
-use crate::app::{AppState, LineType};
+use crate::app::{AgentStatus, AppState, LineType};
 use crate::connection::{ConnState, Recovered};
 use crate::notify::{NotifyEngine, NotifyKind};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -684,6 +684,94 @@ async fn test_esc_on_confirm_releases_input_gate() {
     assert!(app.confirm.is_none(), "Esc 应关闭确认框");
     assert!(!app.generating(), "Esc 取消后输入门禁应放开");
     assert!(app.stale_done_expected);
+}
+
+// ── 步骤 4c：event.rs 层 SessionBusy 不提前释放输入门禁 ──────────
+
+/// event.rs 层：SessionBusy 不得提前 stop_generating / 清时钟 / 清 request_id，
+/// 也不得把 tab 置为 Error（该帧继续走 route_frame，由既有特判渲染成一行 Status）。
+#[test]
+fn test_session_busy_does_not_release_input_gate() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    let chat = ChatHandle::new_mock("main");
+
+    app.tab_bar.tabs[0].generating = true;
+    app.tab_bar.tabs[0].stream_started_at = Some(std::time::Instant::now());
+    app.current_request_id = Some("req-1".to_string());
+
+    handle_grpc_message(
+        make_error_msg("main", "SessionBusy", "正在生成，请稍候"),
+        &mut app,
+        &chat,
+    );
+
+    assert!(
+        app.tab_bar.tabs[0].generating,
+        "SessionBusy 不得 stop_generating（输入门禁保持关闭）"
+    );
+    assert_eq!(
+        app.current_request_id,
+        Some("req-1".to_string()),
+        "SessionBusy 不得清空 current_request_id"
+    );
+    assert!(
+        app.tab_bar.tabs[0].stream_started_at.is_some(),
+        "SessionBusy 不得清空 stream_started_at（时钟保留）"
+    );
+    assert_ne!(
+        app.tab_bar.tabs[0].status,
+        AgentStatus::Error,
+        "SessionBusy 不得把 tab 置为 Error"
+    );
+}
+
+/// 非 SessionBusy 错误码仍按原行为提前释放门禁并清 request_id（不回归）。
+#[test]
+fn test_other_error_still_stops_generating() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    let chat = ChatHandle::new_mock("main");
+
+    app.tab_bar.tabs[0].generating = true;
+    app.tab_bar.tabs[0].stream_started_at = Some(std::time::Instant::now());
+    app.current_request_id = Some("req-1".to_string());
+
+    handle_grpc_message(
+        make_error_msg("main", "SessionNotActive", "会话已结束"),
+        &mut app,
+        &chat,
+    );
+
+    assert!(
+        !app.tab_bar.tabs[0].generating,
+        "其它错误码仍应 stop_generating"
+    );
+    assert!(
+        app.current_request_id.is_none(),
+        "其它错误码仍应清空 current_request_id"
+    );
+}
+
+/// stale_done_expected 早退优先于 SessionBusy 特判：仍被消费且不释放门禁（不回归）。
+#[test]
+fn test_stale_session_busy_still_early_returns() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    let chat = ChatHandle::new_mock("main");
+
+    app.stale_done_expected = true;
+    app.tab_bar.tabs[0].generating = true;
+    app.current_request_id = Some("req-1".to_string());
+
+    handle_grpc_message(
+        make_error_msg("main", "SessionBusy", "正在生成，请稍候"),
+        &mut app,
+        &chat,
+    );
+
+    assert!(!app.stale_done_expected, "stale 守卫应被消费（早退生效）");
+    assert!(
+        app.tab_bar.tabs[0].generating,
+        "stale 早退不得 stop_generating"
+    );
 }
 
 // ── idle 看门狗接线（计划 7c）────────────────────────────────
