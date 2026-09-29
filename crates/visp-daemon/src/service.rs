@@ -1533,7 +1533,7 @@ fn session_to_proto(
 /// 忙拒绝错误码（设计 §5.6）：会话存在在途循环时拒绝新用户输入。
 const SESSION_BUSY_CODE: &str = "SessionBusy";
 /// 忙拒绝文案。**不得**含 `cancelled`（大小写不敏感），否则 ACP 会误判为用户取消。
-const SESSION_BUSY_MESSAGE: &str = "Session is busy: generation in progress, please wait";
+const SESSION_BUSY_MESSAGE: &str = "正在生成，请稍候";
 /// 非主会话 / 未知会话拒绝码（语义保持现状）。
 const SESSION_NOT_ACTIVE_CODE: &str = "SessionNotActive";
 
