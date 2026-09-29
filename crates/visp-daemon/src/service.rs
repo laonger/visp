@@ -5449,4 +5449,438 @@ mod tests {
         );
         assert!(response.rules.is_empty());
     }
+
+    // ── 5e: 真实入站 harness（gRPC 往返）────────────────────────────────────
+    //
+    // 直接经 `chat` 的双向流驱动真实入站任务（非「复制 handler 逻辑」）：
+    // 客户端 → HTTP/2 → `chat` inbound 任务；断言错误帧 / 副作用 / 答复路由。
+    // 用例 4 额外接线真实 `Orchestrator` + 可闸控 provider 驱动真实 loop 与 `Done` 时序。
+
+    use futures::stream;
+    use tokio_stream::wrappers::ReceiverStream;
+    use visp_agent::orchestrator::{CancelSignal, ClientMessage, Orchestrator};
+    use visp_core::agent::{AgentEventFrame, Envelope, PermissionKind};
+    use visp_core::agent_definition::{AgentDefinition, AgentMode};
+    use visp_core::agent_registry::AgentRegistry;
+    use visp_core::error::LlmError;
+    use visp_core::message::ToolDefinition;
+    use visp_core::provider::ChatEvent;
+    use visp_proto::visp::coder_daemon_client::CoderDaemonClient;
+
+    /// 以临时端口启动真实 gRPC server；返回 (addr, server task 句柄)。
+    async fn spawn_grpc_server(
+        service: CoderDaemonService,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        drop(listener);
+        let server_addr = addr.clone();
+        let handle = tokio::spawn(async move {
+            let _ = crate::server::start_server(&server_addr, service).await;
+        });
+        (addr, handle)
+    }
+
+    /// 连接真实 server（重试以跨过 bind→serve 启动窗口）。
+    async fn connect_daemon_client(addr: &str) -> CoderDaemonClient<tonic::transport::Channel> {
+        for _ in 0..200 {
+            if let Ok(client) = CoderDaemonClient::connect(format!("http://{addr}")).await {
+                return client;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("test gRPC server 未能在超时前就绪: {addr}");
+    }
+
+    fn user_input_msg(session_id: &str, text: &str) -> proto::ClientMessage {
+        proto::ClientMessage {
+            payload: Some(proto::client_message::Payload::UserInput(
+                proto::UserInput {
+                    text: text.to_string(),
+                    session_id: session_id.to_string(),
+                    request_id: String::new(),
+                },
+            )),
+        }
+    }
+
+    fn user_response_msg(query_id: &str, selected_index: i32, text: &str) -> proto::ClientMessage {
+        proto::ClientMessage {
+            payload: Some(proto::client_message::Payload::UserResponse(
+                proto::UserResponse {
+                    query_id: query_id.to_string(),
+                    selected_index,
+                    text: text.to_string(),
+                },
+            )),
+        }
+    }
+
+    /// 读取下一帧（带超时，避免用例挂死）。
+    async fn next_frame(stream: &mut Streaming<proto::ServerMessage>) -> proto::ServerMessage {
+        tokio::time::timeout(Duration::from_secs(5), stream.message())
+            .await
+            .expect("等待 server 帧超时")
+            .expect("server stream 出错")
+            .expect("server stream 提前结束")
+    }
+
+    /// 读取下一帧并断言其为 `SessionBusy` 错误帧。
+    async fn expect_busy_error(stream: &mut Streaming<proto::ServerMessage>) -> proto::Error {
+        match next_frame(stream).await.payload {
+            Some(proto::server_message::Payload::Error(e)) => {
+                assert_eq!(e.code, SESSION_BUSY_CODE);
+                assert_eq!(e.message, SESSION_BUSY_MESSAGE);
+                e
+            }
+            other => panic!("expected SessionBusy Error, got {other:?}"),
+        }
+    }
+
+    /// 构造 service 并持有 `client_rx`，用于断言「未转发到 orchestrator」。
+    fn make_service_holding_client(
+        mgr: StdArc<SessionManager>,
+    ) -> (
+        CoderDaemonService,
+        mpsc::Receiver<visp_agent::orchestrator::ClientMessage>,
+    ) {
+        let mut service = make_service(mgr);
+        let (client_tx, client_rx) = mpsc::channel(64);
+        service.client_tx = client_tx;
+        (service, client_rx)
+    }
+
+    /// 用例 1（V12 防死锁回归）：输入被拒期间，答复仍按 `query_id` 回填等待中的 loop。
+    #[tokio::test]
+    async fn v12_user_response_still_reaches_loop_while_input_rejected_busy() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = mgr.create(Path::new("/tmp"), LlmConfig::default()).unwrap();
+        let sid = session.id.clone();
+        let trimmer: Arc<dyn ContextTrimmer + Send + Sync> =
+            Arc::new(visp_core::context::NoopTrimmer);
+        mgr.start_loop(&sid, &trimmer, None, None).unwrap();
+
+        let (service, mut client_rx) = make_service_holding_client(mgr.clone());
+        let bus = service.bus.clone();
+        let (addr, server) = spawn_grpc_server(service).await;
+        let mut client = connect_daemon_client(&addr).await;
+
+        let (tx, rx) = mpsc::channel::<proto::ClientMessage>(16);
+        let mut inbound = client
+            .chat(ReceiverStream::new(rx))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // 发布一条 UserQuery：outbound 登记 pending 等待者并下发给客户端。
+        let (respond_tx, mut respond_rx) = mpsc::channel::<UserQueryResult>(1);
+        bus.publish(BusEvent::Frame(AgentEventFrame {
+            event: AgentEvent::UserQuery {
+                query_id: "q-1".into(),
+                message: "Allow?".into(),
+                options: vec![],
+                allow_other: false,
+                kind: PermissionKind::Question,
+                respond: respond_tx,
+            },
+            session_id: sid.clone(),
+            agent_name: "default".into(),
+            parent_session_id: None,
+            parent_session_name: None,
+        }));
+        match next_frame(&mut inbound).await.payload {
+            Some(proto::server_message::Payload::UserQuery(q)) => assert_eq!(q.query_id, "q-1"),
+            other => panic!("expected UserQuery, got {other:?}"),
+        }
+
+        // 在途循环期间的新用户输入 → 忙拒绝。
+        tx.send(user_input_msg(&sid, "hello")).await.unwrap();
+        let err = expect_busy_error(&mut inbound).await;
+        assert_eq!(err.session_id, sid);
+
+        // 随后发送答复：守卫只拦用户输入，答复仍按 query_id 回填等待中的 loop。
+        tx.send(user_response_msg("q-1", 2, "")).await.unwrap();
+        let delivered = tokio::time::timeout(Duration::from_secs(2), respond_rx.recv())
+            .await
+            .expect("答复应在超时前送达等待中的 loop")
+            .expect("respond 通道应仍存活");
+        assert_eq!(delivered.selected_index, 2);
+
+        // 命中 daemon pending 表 → 不得回退 orchestrator（client_rx 不应收到任何帧）。
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            client_rx.try_recv().is_err(),
+            "答复已命中 daemon pending 表，不得回退 orchestrator"
+        );
+
+        server.abort();
+    }
+
+    /// 用例 2：端到端忙拒绝——唯一错误帧、忙态与令牌保持、无第二个 loop、令牌仍可取消。
+    #[tokio::test]
+    async fn e2e_busy_rejection_is_single_and_token_preserved() {
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = mgr.create(Path::new("/tmp"), LlmConfig::default()).unwrap();
+        let sid = session.id.clone();
+        let trimmer: Arc<dyn ContextTrimmer + Send + Sync> =
+            Arc::new(visp_core::context::NoopTrimmer);
+        mgr.start_loop(&sid, &trimmer, None, None).unwrap();
+
+        let (service, mut client_rx) = make_service_holding_client(mgr.clone());
+        let (addr, server) = spawn_grpc_server(service).await;
+        let mut client = connect_daemon_client(&addr).await;
+
+        let (tx, rx) = mpsc::channel::<proto::ClientMessage>(16);
+        let mut inbound = client
+            .chat(ReceiverStream::new(rx))
+            .await
+            .unwrap()
+            .into_inner();
+
+        tx.send(user_input_msg(&sid, "hello")).await.unwrap();
+        expect_busy_error(&mut inbound).await;
+
+        // 唯一性：短窗口内不得再出现第二帧（重复忙错误 / prompt 转发）。
+        let extra = tokio::time::timeout(Duration::from_millis(200), inbound.message()).await;
+        assert!(extra.is_err(), "忙拒绝后不应再发帧");
+
+        // 会话仍处忙态、令牌仍在。
+        assert_eq!(mgr.get(&sid).unwrap().status, SessionStatus::Running);
+        assert!(mgr.has_inflight_loop(&sid));
+
+        // 不存在第二个 loop：在途令牌存在时再次 start_loop 仍以 SessionBusy 失败。
+        assert!(
+            mgr.start_loop(&sid, &trimmer, None, None).is_err(),
+            "在途令牌存在时不得再启动第二个 loop"
+        );
+
+        // 该令牌仍可被取消。
+        mgr.cancel_agent(&sid);
+        assert!(
+            !mgr.has_inflight_loop(&sid),
+            "被拒输入不应影响原令牌的可取消性"
+        );
+
+        // 被拒输入未被守卫放行 → 不转发给 orchestrator。
+        assert!(client_rx.try_recv().is_err(), "忙拒绝不得转发 prompt");
+
+        server.abort();
+    }
+
+    /// 用例 3：命令顺序端到端——生成期 `/init`、`/init-agent` 被守卫拦下，
+    /// 不转发为 prompt、不产生文件副作用（`.visp` 未被创建）。
+    #[tokio::test]
+    async fn e2e_busy_guard_blocks_init_commands_before_parse() {
+        let project = TempDir::new().unwrap();
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = mgr.create(project.path(), LlmConfig::default()).unwrap();
+        let sid = session.id.clone();
+        let trimmer: Arc<dyn ContextTrimmer + Send + Sync> =
+            Arc::new(visp_core::context::NoopTrimmer);
+        mgr.start_loop(&sid, &trimmer, None, None).unwrap();
+
+        let (service, mut client_rx) = make_service_holding_client(mgr.clone());
+        let (addr, server) = spawn_grpc_server(service).await;
+        let mut client = connect_daemon_client(&addr).await;
+
+        let (tx, rx) = mpsc::channel::<proto::ClientMessage>(16);
+        let mut inbound = client
+            .chat(ReceiverStream::new(rx))
+            .await
+            .unwrap()
+            .into_inner();
+
+        for text in ["/init", "/init-agent my-agent"] {
+            tx.send(user_input_msg(&sid, text)).await.unwrap();
+            expect_busy_error(&mut inbound).await;
+        }
+
+        // `/init` 的受理路径会创建 `.visp/{rules,skills}`；被守卫拦下则无任何文件副作用。
+        assert!(
+            !project.path().join(".visp").exists(),
+            "忙期被拒的命令不得产生文件副作用"
+        );
+        assert!(client_rx.try_recv().is_err(), "被拒命令不得转发为 prompt");
+
+        server.abort();
+    }
+
+    /// 可闸控 LLM provider：进入 `chat_stream` 时通知 `started`，等待 `release`
+    /// 后产出文本 + Done，使测试可确定性控制真实 loop 的在途窗口与收尾时序。
+    struct GatedProvider {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for GatedProvider {
+        async fn chat_stream(
+            &self,
+            _messages: &[visp_core::message::Message],
+            _tools: &[ToolDefinition],
+            _config: &LlmConfig,
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> Result<
+            Pin<Box<dyn futures::Stream<Item = Result<ChatEvent, LlmError>> + Send>>,
+            LlmError,
+        > {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(Box::pin(stream::iter(vec![
+                Ok(ChatEvent::TextDelta("hello".to_string())),
+                Ok(ChatEvent::Done),
+            ])))
+        }
+    }
+
+    /// 用例 4：忙拒绝后旧 loop 收尾 → 会话只有唯一终态；不存在交错重复回合。
+    #[tokio::test]
+    async fn busy_rejected_then_old_loop_finishes_with_single_terminal_state() {
+        let project = TempDir::new().unwrap();
+
+        let mut registry = AgentRegistry::new();
+        registry
+            .register(AgentDefinition {
+                name: "default".to_string(),
+                description: String::new(),
+                mode: AgentMode::All,
+                model: None,
+                temperature: None,
+                steps: None,
+                permission: vec![],
+                allowed_sub_agents: Vec::new(),
+                system_prompt: String::new(),
+            })
+            .unwrap();
+        let agent_registry = Arc::new(ArcSwap::from_pointee(registry));
+
+        let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+        let session = mgr.create(project.path(), LlmConfig::default()).unwrap();
+        let sid = session.id.clone();
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let provider: Arc<dyn LlmProvider> = Arc::new(GatedProvider {
+            started: started.clone(),
+            release: release.clone(),
+        });
+
+        let daemon_config = Arc::new(visp_config::DaemonConfig {
+            llm: visp_config::LlmSection {
+                models: vec![visp_config::LlmModelConfig {
+                    name: "mock-model".to_string(),
+                    protocol: "openai".to_string(),
+                    provider: Some("Mock".to_string()),
+                    model: "mock-model".to_string(),
+                    api_key: None,
+                    base_url: None,
+                    temperature: None,
+                    max_tokens: None,
+                    max_context_tokens: None,
+                    thinking_budget_tokens: None,
+                    use_tool: None,
+                    image_generation: None,
+                    extra: HashMap::new(),
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
+        providers.insert("Mock/mock-model".to_string(), provider);
+
+        // 真实 Orchestrator 接线：与 service 共享 session_mgr / bus / client_tx。
+        let (cancel_tx, cancel_rx) = mpsc::channel::<CancelSignal>(16);
+        let (global_tx, global_rx) = mpsc::channel::<Envelope>(256);
+        let (client_tx, client_rx) = mpsc::channel::<ClientMessage>(64);
+        let bus = Arc::new(EventBus::new());
+
+        let orch_rule_engine = Arc::new(RuleEngine::new(project.path()).unwrap());
+        let orch_trimmer: Arc<dyn ContextTrimmer + Send + Sync> =
+            Arc::new(visp_core::context::NoopTrimmer);
+        let mut orchestrator = Orchestrator::new(
+            cancel_rx,
+            global_rx,
+            global_tx.clone(),
+            client_rx,
+            mgr.clone(),
+            agent_registry,
+            Arc::new(ToolRegistry::new()),
+            orch_rule_engine,
+            AgentConfig::default(),
+            orch_trimmer,
+            daemon_config,
+            providers,
+            bus.clone(),
+        );
+        tokio::spawn(async move {
+            orchestrator.run().await;
+        });
+
+        let (service_rule_engine, reload_core) = build_reload_core(project.path());
+        let mut service = make_service_with_core(mgr.clone(), service_rule_engine, reload_core);
+        service.bus = bus.clone();
+        service.client_tx = client_tx.clone();
+        service.cancel_tx = cancel_tx.clone();
+
+        let (addr, server) = spawn_grpc_server(service).await;
+        let mut client = connect_daemon_client(&addr).await;
+        let (tx, rx) = mpsc::channel::<proto::ClientMessage>(16);
+        let mut inbound = client
+            .chat(ReceiverStream::new(rx))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // 第一回合：真实 loop 启动并被 provider 闸停 → 处于在途。
+        tx.send(user_input_msg(&sid, "first")).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("真实 loop 应在超时前进入 provider");
+        assert_eq!(mgr.get(&sid).unwrap().status, SessionStatus::Running);
+        assert!(mgr.has_inflight_loop(&sid));
+
+        // 生成期第二次输入 → 忙拒绝（唯一错误帧）。
+        tx.send(user_input_msg(&sid, "second")).await.unwrap();
+        expect_busy_error(&mut inbound).await;
+
+        // 放行旧 loop：产出文本 + Done，orchestrator 收尾。
+        release.notify_one();
+
+        // 等待会话回到唯一终态（Idle）。
+        let mut terminal = false;
+        for _ in 0..500 {
+            if matches!(mgr.get(&sid).map(|s| s.status), Ok(SessionStatus::Idle)) {
+                terminal = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(terminal, "旧 loop 应在超时前收尾为 Idle");
+        assert!(!mgr.has_inflight_loop(&sid), "收尾后令牌应被清除");
+
+        // 收集放行后帧：唯一回合恰好一条 TextDelta + 一条 Done，无交错重复。
+        let (mut done, mut text) = (0usize, 0usize);
+        loop {
+            match tokio::time::timeout(Duration::from_millis(300), inbound.message()).await {
+                Ok(Ok(Some(msg))) => match msg.payload {
+                    Some(proto::server_message::Payload::Done(_)) => done += 1,
+                    Some(proto::server_message::Payload::TextDelta(_)) => text += 1,
+                    _ => {}
+                },
+                _ => break,
+            }
+        }
+        assert_eq!(done, 1, "唯一终态回合应恰好一条 Done");
+        assert_eq!(text, 1, "唯一回合应恰好一条 TextDelta");
+
+        let history = mgr.get(&sid).unwrap().history;
+        let users = history.iter().filter(|m| m.role == Role::User).count();
+        let assistants = history.iter().filter(|m| m.role == Role::Assistant).count();
+        assert_eq!(users, 1, "被拒的第二次输入不得进入历史");
+        assert_eq!(assistants, 1, "不得出现交错重复回合");
+
+        server.abort();
+    }
 }
