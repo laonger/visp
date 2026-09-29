@@ -273,6 +273,7 @@ Agent 循环在等待 UserQuery 确认时 panic，mpsc sender 被 drop，daemon 
 16. **G5 判据的理论窗口（可达性极低，记录备查）**：G5 以「当前状态是否为 `Running`」近似「是否已被新回合改写」。若旧回合收尾迟到到**新回合自身也已走到终态**，判据不生效，旧收尾会以错误的终态发布会话级 `Stop`，并抢先移除（此刻属于新回合的）registration。需 orchestrator 被饥饿整个新回合才可能触发。
 17. **死变体待清理**：`AgentEvent::ThinkingBlock` 已**无生产者**（唯一发射点是新增的 `AgentEvent::ThinkingDelta`），其 `event_to_msg` 与 daemon 映射臂仅为维持穷尽匹配而保留。确认无其它路径后应删除该变体与其映射臂。
 18. **显示层反例缺断言**：设计 §4.4 已记录两类显示层已知差异（回退时的显示残留 `ABCAB`；前缀碰撞导致块合并），但**当前没有显示层用例覆盖**；如需防回归，应在 TUI / ACP 侧补显示断言。
+19. **测试代码的潜在 lint**：`crates/visp-daemon/src/service.rs` 测试模块内有一处 `while_let_loop`（约 :5946，来自忙拒绝 e2e 用例）。CI 门禁的 `cargo clippy` 不带 `--all-targets`、不检查测试代码，故**不影响门禁**；但 `cargo clippy --all-targets` 会报。建议顺手修掉。
 
 ### 发布说明条目（草案）
 
