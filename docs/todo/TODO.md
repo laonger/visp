@@ -270,6 +270,9 @@ Agent 循环在等待 UserQuery 确认时 panic，mpsc sender 被 drop，daemon 
 13. **既有 flaky 测试**（core）：`crates/visp-core/src/session.rs` 中 `unsafe { std::env::set_var("HOME", ...) }` 与并行测试竞态，导致 `agent_loop::tests::test_agent_run_carries_session_id_field` **间歇失败**；因测试过滤是子串匹配，`cargo test -p visp-core session` 会把它捞进来。→ 建议加互斥，或实施时改用 `session::tests` 精确过滤。
 14. **文档同步**：`docs/design/visp-design-acp.md` 已与代码过时——仍把「LLM 提问等待中取消无收尾信号」列为 V10 例外，而 `agent_loop` 已补发 `Error{Cancelled}` 并收尾（§13.10 方案 A 已落地）；V10/V11、§6.6、§13 风险表等条目需同步修订。
 15. **Polyglot 提醒**：`ThinkingBlock` 语义变更的机器可检测护栏是两条 core 契约测试（「连续同块快照 → 只发增量」与「流式期间不产生快照变体」）；proto 注释已指向它们，改动语义须同步更新。
+16. **G5 判据的理论窗口（可达性极低，记录备查）**：G5 以「当前状态是否为 `Running`」近似「是否已被新回合改写」。若旧回合收尾迟到到**新回合自身也已走到终态**，判据不生效，旧收尾会以错误的终态发布会话级 `Stop`，并抢先移除（此刻属于新回合的）registration。需 orchestrator 被饥饿整个新回合才可能触发。
+17. **死变体待清理**：`AgentEvent::ThinkingBlock` 已**无生产者**（唯一发射点是新增的 `AgentEvent::ThinkingDelta`），其 `event_to_msg` 与 daemon 映射臂仅为维持穷尽匹配而保留。确认无其它路径后应删除该变体与其映射臂。
+18. **显示层反例缺断言**：设计 §4.4 已记录两类显示层已知差异（回退时的显示残留 `ABCAB`；前缀碰撞导致块合并），但**当前没有显示层用例覆盖**；如需防回归，应在 TUI / ACP 侧补显示断言。
 
 ### 发布说明条目（草案）
 
