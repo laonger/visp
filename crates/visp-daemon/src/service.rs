@@ -5964,4 +5964,316 @@ mod tests {
 
         server.abort();
     }
+
+    // ── 5f: 取消后立即重提的拒绝式语义（固化计划备注 F）────────────────────
+    //
+    // 「取消即移除令牌」使守卫判据短暂消失，但旧 loop 尚未收尾、会话仍
+    // `Running`；此时立即重提会越过守卫，却被第二道门（`start_loop` 状态闸）
+    // 以 `SessionBusy` 拒绝。净效果仍是拒绝，且不产生第二个循环。
+
+    /// 入站 `Cancel` 消息（经真实 gRPC 路径送达 orchestrator）。
+    fn cancel_msg(session_id: &str) -> proto::ClientMessage {
+        proto::ClientMessage {
+            payload: Some(proto::client_message::Payload::Cancel(proto::Cancel {
+                session_id: session_id.to_string(),
+            })),
+        }
+    }
+
+    /// 真实 gRPC + 真实 `Orchestrator` 端到端 harness。
+    ///
+    /// 与用例 4 同一套接线（临时端口 + 可闸控 provider + 真实 loop），额外在
+    /// `service.client_tx` 与 orchestrator 之间插入转发探针：每当一条
+    /// `UserInput` **越过守卫**进入 orchestrator 时 `forwarded` 收到一个信号，
+    /// 用以区分「被守卫拦下」与「被状态闸拒绝」。
+    struct OrchestratorE2e {
+        _project: TempDir,
+        sid: String,
+        mgr: StdArc<SessionManager>,
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+        forwarded: mpsc::Receiver<()>,
+        addr: String,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    impl OrchestratorE2e {
+        async fn new() -> Self {
+            let project = TempDir::new().unwrap();
+
+            let mut registry = AgentRegistry::new();
+            registry
+                .register(AgentDefinition {
+                    name: "default".to_string(),
+                    description: String::new(),
+                    mode: AgentMode::All,
+                    model: None,
+                    temperature: None,
+                    steps: None,
+                    permission: vec![],
+                    allowed_sub_agents: Vec::new(),
+                    system_prompt: String::new(),
+                })
+                .unwrap();
+            let agent_registry = Arc::new(ArcSwap::from_pointee(registry));
+
+            let mgr = StdArc::new(SessionManager::new(InMemorySessionStore::new()));
+            let session = mgr.create(project.path(), LlmConfig::default()).unwrap();
+            let sid = session.id.clone();
+
+            let started = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let provider: Arc<dyn LlmProvider> = Arc::new(GatedProvider {
+                started: started.clone(),
+                release: release.clone(),
+            });
+
+            let daemon_config = Arc::new(visp_config::DaemonConfig {
+                llm: visp_config::LlmSection {
+                    models: vec![visp_config::LlmModelConfig {
+                        name: "mock-model".to_string(),
+                        protocol: "openai".to_string(),
+                        provider: Some("Mock".to_string()),
+                        model: "mock-model".to_string(),
+                        api_key: None,
+                        base_url: None,
+                        temperature: None,
+                        max_tokens: None,
+                        max_context_tokens: None,
+                        thinking_budget_tokens: None,
+                        use_tool: None,
+                        image_generation: None,
+                        extra: HashMap::new(),
+                    }],
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+
+            let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
+            providers.insert("Mock/mock-model".to_string(), provider);
+
+            let (cancel_tx, cancel_rx) = mpsc::channel::<CancelSignal>(16);
+            let (global_tx, global_rx) = mpsc::channel::<Envelope>(256);
+            let (orch_client_tx, orch_client_rx) = mpsc::channel::<ClientMessage>(64);
+            let (guard_tx, mut guard_rx) = mpsc::channel::<ClientMessage>(64);
+            let (forwarded_tx, forwarded_rx) = mpsc::channel::<()>(64);
+            let bus = Arc::new(EventBus::new());
+
+            // 守卫后转发探针：仅对 `UserInput` 记录（证明其越过了守卫）。
+            tokio::spawn(async move {
+                while let Some(msg) = guard_rx.recv().await {
+                    if matches!(&msg, ClientMessage::UserInput { .. }) {
+                        let _ = forwarded_tx.send(()).await;
+                    }
+                    if orch_client_tx.send(msg).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            let orch_rule_engine = Arc::new(RuleEngine::new(project.path()).unwrap());
+            let orch_trimmer: Arc<dyn ContextTrimmer + Send + Sync> =
+                Arc::new(visp_core::context::NoopTrimmer);
+            let mut orchestrator = Orchestrator::new(
+                cancel_rx,
+                global_rx,
+                global_tx.clone(),
+                orch_client_rx,
+                mgr.clone(),
+                agent_registry,
+                Arc::new(ToolRegistry::new()),
+                orch_rule_engine,
+                AgentConfig::default(),
+                orch_trimmer,
+                daemon_config,
+                providers,
+                bus.clone(),
+            );
+            tokio::spawn(async move {
+                orchestrator.run().await;
+            });
+
+            let (service_rule_engine, reload_core) = build_reload_core(project.path());
+            let mut service = make_service_with_core(mgr.clone(), service_rule_engine, reload_core);
+            service.bus = bus.clone();
+            service.client_tx = guard_tx;
+            service.cancel_tx = cancel_tx;
+
+            let (addr, server) = spawn_grpc_server(service).await;
+            Self {
+                _project: project,
+                sid,
+                mgr,
+                started,
+                release,
+                forwarded: forwarded_rx,
+                addr,
+                server,
+            }
+        }
+
+        async fn connect(&self) -> CoderDaemonClient<tonic::transport::Channel> {
+            connect_daemon_client(&self.addr).await
+        }
+
+        /// 等待一条 `UserInput` 越过守卫进入 orchestrator。
+        async fn next_forwarded(&mut self) -> Option<()> {
+            self.forwarded.recv().await
+        }
+    }
+
+    impl Drop for OrchestratorE2e {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    /// 用例 5：在途循环取消后**立即重提**——守卫判据（令牌）已消失而放行，
+    /// 会话仍 `Running`，第二道门（`start_loop` 状态闸）以 `SessionBusy` 拒绝。
+    #[tokio::test]
+    async fn cancel_then_immediate_resubmit_is_rejected_by_state_gate() {
+        let mut h = OrchestratorE2e::new().await;
+        let mut client = h.connect().await;
+        let (tx, rx) = mpsc::channel::<proto::ClientMessage>(16);
+        let mut inbound = client
+            .chat(ReceiverStream::new(rx))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // 第一回合：真实 loop 启动并被 provider 闸停 → 处于在途。
+        tx.send(user_input_msg(&h.sid, "first")).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), h.started.notified())
+            .await
+            .expect("真实 loop 应在超时前进入 provider");
+        assert_eq!(h.mgr.get(&h.sid).unwrap().status, SessionStatus::Running);
+        assert!(h.mgr.has_inflight_loop(&h.sid));
+
+        // 用户取消（真实入站路径）：令牌被立即移除，守卫判据消失；
+        // 但旧 loop 仍在 provider 内阻塞、尚未收尾 → 会话保持 `Running`。
+        tx.send(cancel_msg(&h.sid)).await.unwrap();
+        let mut token_cleared = false;
+        for _ in 0..500 {
+            if !h.mgr.has_inflight_loop(&h.sid) {
+                token_cleared = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(token_cleared, "取消应移除在途令牌（守卫判据消失）");
+        assert_eq!(
+            h.mgr.get(&h.sid).unwrap().status,
+            SessionStatus::Running,
+            "旧 loop 未收尾前会话状态仍为 Running"
+        );
+
+        // 立即重提：守卫因无令牌而放行 → 转发探针收到 → 状态闸拒绝。
+        tx.send(user_input_msg(&h.sid, "second")).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), h.next_forwarded())
+            .await
+            .expect("输入应在超时前越过守卫进入 orchestrator")
+            .expect("转发探针通道应存活");
+
+        // 客户端唯一一条 SessionBusy——来自状态闸而非守卫。
+        expect_busy_error(&mut inbound).await;
+        let extra = tokio::time::timeout(Duration::from_millis(200), inbound.message()).await;
+        assert!(extra.is_err(), "状态闸拒绝后不应再发帧");
+
+        // 会话仍 Running；状态闸在插入令牌前失败 → 不存在第二个循环。
+        assert_eq!(h.mgr.get(&h.sid).unwrap().status, SessionStatus::Running);
+        assert!(
+            !h.mgr.has_inflight_loop(&h.sid),
+            "状态闸拒绝不得产生第二个循环令牌"
+        );
+
+        // 放行旧 loop，等待唯一终态收敛（取消路径 → 终态）。
+        h.release.notify_one();
+        let mut terminal = false;
+        for _ in 0..500 {
+            if matches!(
+                h.mgr.get(&h.sid).map(|s| s.status),
+                Ok(s) if s != SessionStatus::Running
+            ) {
+                terminal = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(terminal, "旧 loop 应在超时前收尾为唯一终态");
+        assert!(!h.mgr.has_inflight_loop(&h.sid), "收尾后不得残留令牌");
+
+        // 被拒的第二次输入未进入历史；唯一回合未产出助手消息。
+        let history = h.mgr.get(&h.sid).unwrap().history;
+        let users = history.iter().filter(|m| m.role == Role::User).count();
+        let assistants = history.iter().filter(|m| m.role == Role::Assistant).count();
+        assert_eq!(users, 1, "被拒的第二次输入不得进入历史");
+        assert_eq!(assistants, 0, "被中途取消的回合不应产出助手消息");
+    }
+
+    /// 用例 6（对照）：取消后**等旧循环收尾**再重提 → 正常受理并启动新回合，
+    /// 证明上述窗口是瞬时的，而非永久拒绝。
+    #[tokio::test]
+    async fn resubmit_after_old_loop_finishes_is_accepted_as_new_turn() {
+        let mut h = OrchestratorE2e::new().await;
+        let mut client = h.connect().await;
+        let (tx, rx) = mpsc::channel::<proto::ClientMessage>(16);
+        let _inbound = client
+            .chat(ReceiverStream::new(rx))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // 第一回合进入在途后取消。
+        tx.send(user_input_msg(&h.sid, "first")).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), h.started.notified())
+            .await
+            .expect("真实 loop 应在超时前进入 provider");
+        tx.send(cancel_msg(&h.sid)).await.unwrap();
+
+        // 放行旧 loop 并等待收尾（离开 Running）。
+        h.release.notify_one();
+        let mut terminal = false;
+        for _ in 0..500 {
+            if matches!(
+                h.mgr.get(&h.sid).map(|s| s.status),
+                Ok(s) if s != SessionStatus::Running
+            ) {
+                terminal = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(terminal, "旧 loop 应在超时前收尾");
+
+        // 窗口已过：重提越过守卫并被正常受理，启动全新回合。
+        tx.send(user_input_msg(&h.sid, "second")).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), h.next_forwarded())
+            .await
+            .expect("收尾后重提应越过守卫")
+            .expect("转发探针通道应存活");
+        tokio::time::timeout(Duration::from_secs(5), h.started.notified())
+            .await
+            .expect("重提应启动新回合（provider 再次被调用）");
+        assert_eq!(h.mgr.get(&h.sid).unwrap().status, SessionStatus::Running);
+        assert!(h.mgr.has_inflight_loop(&h.sid), "新回合应持有在途令牌");
+
+        // 放行新回合 → 正常完成。
+        h.release.notify_one();
+        let mut finished = false;
+        for _ in 0..500 {
+            if matches!(
+                h.mgr.get(&h.sid).map(|s| s.status),
+                Ok(SessionStatus::Idle) | Ok(SessionStatus::Completed)
+            ) {
+                finished = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(finished, "新回合应正常收尾");
+        let history = h.mgr.get(&h.sid).unwrap().history;
+        let users = history.iter().filter(|m| m.role == Role::User).count();
+        assert_eq!(users, 2, "新回合的用户输入应进入历史");
+    }
 }
