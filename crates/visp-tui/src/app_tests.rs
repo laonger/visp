@@ -1070,11 +1070,107 @@ fn test_update_thinking_to_session_routes_by_session_id() {
         app.tab_bar.tabs[1].messages[0].line_type,
         LineType::Thinking
     );
-    assert_eq!(app.tab_bar.tabs[1].messages[0].content, "thinking...");
-    // Update existing thinking
+    // 首帧新建行：仅此一次加 [Thinking] 前缀
+    assert_eq!(
+        app.tab_bar.tabs[1].messages[0].content,
+        "[Thinking] thinking..."
+    );
+    // 增量语义：第二次到达为追加而非覆盖，行数仍为 1
     app.update_thinking_to_session("sub-1", "updated thinking".into());
     assert_eq!(app.tab_bar.tabs[1].messages.len(), 1);
-    assert_eq!(app.tab_bar.tabs[1].messages[0].content, "updated thinking");
+    assert_eq!(
+        app.tab_bar.tabs[1].messages[0].content,
+        "[Thinking] thinking...updated thinking"
+    );
+}
+
+#[test]
+fn test_thinking_deltas_append_to_same_line_without_repeating_prefix() {
+    let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
+    app.route_frame(make_thinking_frame("", "abc"));
+    app.route_frame(make_thinking_frame("", "def"));
+    app.route_frame(make_thinking_frame("", "ghi"));
+    let msgs = &app.active_tab().messages;
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].line_type, LineType::Thinking);
+    // 行内为累积全文，前缀只出现一次
+    assert_eq!(msgs[0].content, "[Thinking] abcdefghi");
+    assert_eq!(msgs[0].content.matches("[Thinking] ").count(), 1);
+}
+
+#[test]
+fn test_thinking_first_delta_creates_line_with_single_prefix() {
+    let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
+    app.route_frame(make_thinking_frame("", "first"));
+    let msgs = &app.active_tab().messages;
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].line_type, LineType::Thinking);
+    assert_eq!(msgs[0].content, "[Thinking] first");
+    assert_eq!(msgs[0].content.matches("[Thinking] ").count(), 1);
+}
+
+#[test]
+fn test_thinking_to_session_appends_like_main_path() {
+    let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
+    app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
+    app.update_thinking_to_session("sub-1", "aa".into());
+    app.update_thinking_to_session("sub-1", "bb".into());
+    app.update_thinking_to_session("sub-1", "cc".into());
+    let msgs = &app.tab_bar.tabs[1].messages;
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].line_type, LineType::Thinking);
+    assert_eq!(msgs[0].content, "[Thinking] aabbcc");
+    assert_eq!(msgs[0].content.matches("[Thinking] ").count(), 1);
+    assert_eq!(app.tab_bar.tabs[0].messages.len(), 0);
+}
+
+#[test]
+fn test_tokens_per_second_uses_appended_thinking_full_text() {
+    let mut tab = TabEntry::new("sid", "agent");
+    tab.stream_started_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+    tab.update_thinking("a".repeat(200));
+    tab.update_thinking("b".repeat(200));
+    // 行内为全文（剥前缀后 400 字符）→ 100 tokens / 2s = 50 t/s
+    let tps = tab.tokens_per_second().unwrap();
+    assert!((tps - 50.0).abs() < 1.0, "got {tps}");
+}
+
+#[test]
+fn test_thinking_across_rounds_appends_to_same_line() {
+    // 设计 §4.4：thinking-only 跨多轮时，新块首帧追加到上一轮仍在的同一 Thinking 行
+    let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
+    app.route_frame(make_thinking_frame("", "round1"));
+    app.route_frame(make_done_frame(""));
+    app.route_frame(make_thinking_frame("", "round2"));
+    let msgs = &app.active_tab().messages;
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].content, "[Thinking] round1round2");
+}
+
+#[test]
+fn test_multiple_thinking_blocks_display_concatenated() {
+    // 设计 §4.4：一轮内多块时 TUI 显示「块1 + 块2」拼接（持久化断言在 core 侧）
+    let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
+    app.route_frame(make_thinking_frame("", "block1"));
+    app.route_frame(make_thinking_frame("", "block2"));
+    let msgs = &app.active_tab().messages;
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].content, "[Thinking] block1block2");
+}
+
+#[test]
+fn test_thinking_after_interruption_creates_new_line_with_suffix_only() {
+    let mut app = AppState::new("sid".into(), "m".into(), "".into(), String::new());
+    app.route_frame(make_thinking_frame("", "first"));
+    // 工具调用打断（末行不再是 Thinking）
+    app.route_frame(make_tool_call_frame("", "", "call-1", "bash", "{}"));
+    app.route_frame(make_thinking_frame("", "second"));
+    let msgs = &app.active_tab().messages;
+    assert_eq!(msgs.len(), 3);
+    assert_eq!(msgs[0].content, "[Thinking] first");
+    assert_eq!(msgs[2].line_type, LineType::Thinking);
+    // 新建行只含本次增量后缀（带一次前缀）
+    assert_eq!(msgs[2].content, "[Thinking] second");
 }
 
 #[test]
@@ -1116,6 +1212,18 @@ fn make_text_delta_frame(sid: &str, agent_name: &str, delta: &str) -> ServerMess
                 delta: delta.into(),
                 session_id: sid.into(),
                 agent_name: agent_name.into(),
+            },
+        )),
+    }
+}
+
+fn make_thinking_frame(sid: &str, content: &str) -> ServerMessage {
+    ServerMessage {
+        payload: Some(visp_proto::visp::server_message::Payload::ThinkingBlock(
+            visp_proto::visp::ThinkingBlock {
+                thinking: content.into(),
+                signature: String::new(),
+                session_id: sid.into(),
             },
         )),
     }

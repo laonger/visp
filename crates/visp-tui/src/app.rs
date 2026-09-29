@@ -591,14 +591,20 @@ impl TabEntry {
         }
     }
 
+    /// 消费一帧思考**增量**（相对同一思考块上一帧的新增文本）。
+    /// 语义（proto `ThinkingBlock.thinking`）已改为增量，故：
+    /// - 末行是 Thinking → 追加后缀，行内保持累积全文；
+    /// - 否则新建 Thinking 行，且仅此时加一次 `[Thinking] ` 前缀。
+    ///
+    /// 行内始终为全文，`tokens_per_second` 的估算依赖此性质。
     pub fn update_thinking(&mut self, content: String) {
         if let Some(last) = self.messages.last_mut()
             && matches!(last.line_type, LineType::Thinking)
         {
-            last.content = content;
+            last.content.push_str(&content);
             last.version += 1;
         } else {
-            self.push_chat_line(LineType::Thinking, content, None);
+            self.push_chat_line(LineType::Thinking, format!("[Thinking] {content}"), None);
         }
     }
 
@@ -710,8 +716,8 @@ impl TabEntry {
                     if self.stream_started_at.is_none() {
                         self.stream_started_at = Some(std::time::Instant::now());
                     }
-                    let text = format!("[Thinking] {}", tb.thinking);
-                    self.update_thinking(text);
+                    // 增量语义：仅传增量文本，前缀与追加语义由 update_thinking 统一处理
+                    self.update_thinking(tb.thinking);
                 }
                 Some(server_message::Payload::StatusUpdate(su)) => {
                     // NOTE: user_inputs handling deferred to later step
