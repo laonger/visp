@@ -2,7 +2,7 @@ use super::*;
 use crate::app::{AppState, LineType};
 use crate::connection::{ConnState, Recovered};
 use crate::notify::{NotifyEngine, NotifyKind};
-use crossterm::event::{Event, KeyCode, KeyEvent};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use std::time::Duration;
 use visp_proto::visp::{
     Done, Error, ServerMessage, UsageDelta, UserMessage, UserQuery, reload_config_response,
@@ -634,6 +634,56 @@ fn test_generation_interrupted_hint_on_disconnect() {
                 && m.content.contains("连接中断，生成已终止")),
         "断线时正在生成应提示生成已终止"
     );
+}
+
+// ── 步骤 4b：SessionBusy 触发窗口（取消/重连）特征化（非红）──────
+
+/// 特征化：Ctrl+C 取消后输入门禁确实放开（B1a/B1b 窗口存在性）。
+#[tokio::test]
+async fn test_ctrl_c_releases_input_gate() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    let mut chat = ChatHandle::new_mock("main");
+    app.tab_bar.tabs[0].generating = true;
+    app.current_request_id = Some("req-1".into());
+
+    handle_key_event(
+        Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        &mut app,
+        &mut chat,
+    );
+
+    assert!(!app.generating(), "Ctrl+C 后输入门禁应放开");
+    assert!(app.stale_done_expected, "应标记 stale Done");
+    assert!(
+        app.current_request_id.is_none(),
+        "应清除 current_request_id"
+    );
+}
+
+/// 特征化：Esc 关闭确认框并取消后输入门禁确实放开（B1c 窗口存在性）。
+#[tokio::test]
+async fn test_esc_on_confirm_releases_input_gate() {
+    let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
+    let mut chat = ChatHandle::new_mock("main");
+    app.tab_bar.tabs[0].generating = true;
+    app.current_request_id = Some("req-1".into());
+    app.confirm = Some(crate::app::ConfirmState {
+        query_id: "q-1".into(),
+        message: "approve?".into(),
+        options: Vec::new(),
+        selected_index: 0,
+        other_active: false,
+    });
+
+    handle_key_event(
+        Event::Key(KeyEvent::from(KeyCode::Esc)),
+        &mut app,
+        &mut chat,
+    );
+
+    assert!(app.confirm.is_none(), "Esc 应关闭确认框");
+    assert!(!app.generating(), "Esc 取消后输入门禁应放开");
+    assert!(app.stale_done_expected);
 }
 
 // ── idle 看门狗接线（计划 7c）────────────────────────────────

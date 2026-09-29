@@ -1470,6 +1470,161 @@ fn route_frame_error_routes_by_session_id() {
 }
 
 // ════════════════════════════════════════════════════════════
+// Step 4b: SessionBusy 错误码特判（三处站点一致）
+// ════════════════════════════════════════════════════════════
+
+fn status_lines(tab: &TabEntry) -> Vec<&str> {
+    tab.messages
+        .iter()
+        .filter(|m| m.line_type == LineType::Status)
+        .map(|m| m.content.as_str())
+        .collect()
+}
+
+/// 站点 3：`render_pending` 的 Error 臂——SessionBusy 不置 Error、
+/// 不 flush 在途流式内容、不提前 stop_generating，仅追加一行 Status。
+#[test]
+fn test_render_pending_session_busy_preserves_streaming_and_generating() {
+    let mut tab = TabEntry::new("sid", "agent");
+    tab.status = AgentStatus::Running;
+    tab.generating = true;
+    tab.streaming_text = "正在流式的内容".into();
+    tab.frames
+        .push(error_msg("SessionBusy", "正在生成，请稍候"));
+    tab.render_pending();
+
+    assert_eq!(
+        tab.status,
+        AgentStatus::Running,
+        "SessionBusy 不得把 tab 置为 Error"
+    );
+    assert!(tab.generating, "SessionBusy 不得提前 stop_generating");
+    assert_eq!(
+        tab.streaming_text, "正在流式的内容",
+        "SessionBusy 不得 flush 在途流式内容"
+    );
+    assert_eq!(
+        status_lines(&tab),
+        vec!["正在生成，请稍候"],
+        "应仅追加一行 Status 提示"
+    );
+    assert!(
+        !tab.messages
+            .iter()
+            .any(|m| matches!(m.line_type, LineType::Error)),
+        "SessionBusy 不得生成 Error 行"
+    );
+}
+
+/// 站点 2：`route_frame` 活跃分支的状态更新块——非活跃子 tab 收到
+/// SessionBusy 时状态不变且追加一行 Status（该路径不触发 render_pending）。
+#[test]
+fn test_route_frame_session_busy_inactive_tab_not_error() {
+    let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
+    app.tab_bar.insert_sub_agent("sub-1", "agentA", false);
+    assert_eq!(
+        app.tab_bar.active, 0,
+        "子 tab 非活跃，render_pending 不触发"
+    );
+
+    app.route_frame(make_error_frame(
+        "sub-1",
+        "agentA",
+        "SessionBusy",
+        "正在生成，请稍候",
+    ));
+
+    let tab = &app.tab_bar.tabs[1];
+    assert_eq!(tab.status, AgentStatus::Running, "SessionBusy 不得置 Error");
+    assert_eq!(status_lines(tab), vec!["正在生成，请稍候"]);
+}
+
+/// 站点 1：`route_frame` 的 hidden_tab 分支状态更新块——未知会话的
+/// SessionBusy 帧路由到 hidden_tabs，状态不变且追加一行 Status。
+#[test]
+fn test_route_frame_session_busy_hidden_tab_not_error() {
+    let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
+    app.route_frame(make_error_frame(
+        "sub-x",
+        "agentX",
+        "SessionBusy",
+        "正在生成，请稍候",
+    ));
+
+    assert_eq!(app.tab_bar.hidden_tabs.len(), 1);
+    let tab = &app.tab_bar.hidden_tabs[0];
+    assert_eq!(tab.status, AgentStatus::Running, "SessionBusy 不得置 Error");
+    assert_eq!(status_lines(tab), vec!["正在生成，请稍候"]);
+    assert_eq!(tab.frames.len(), 1, "帧仍应入队");
+}
+
+/// 复现原始缺陷场景：正在正常流式的主 tab 收到忙拒绝，不得被永久置 Error、
+/// 不得丢掉在途流式内容、不得提前放开输入门禁。
+#[test]
+fn test_route_frame_session_busy_active_main_tab_keeps_streaming() {
+    let mut app = AppState::new("main-sid".into(), "m".into(), "".into(), String::new());
+    {
+        let tab = &mut app.tab_bar.tabs[0];
+        tab.generating = true;
+        tab.streaming_text = "半截输出".into();
+    }
+    assert_eq!(app.tab_bar.active, 0);
+
+    app.route_frame(make_error_frame(
+        "main-sid",
+        "default",
+        "SessionBusy",
+        "正在生成，请稍候",
+    ));
+
+    let tab = &app.tab_bar.tabs[0];
+    assert_eq!(
+        tab.status,
+        AgentStatus::Running,
+        "忙拒绝不得把正在流式的主 tab 置为 Error"
+    );
+    assert!(tab.generating, "忙拒绝不得提前放开输入门禁");
+    assert_eq!(tab.streaming_text, "半截输出", "忙拒绝不得丢掉在途流式内容");
+    assert!(
+        status_lines(tab).contains(&"正在生成，请稍候"),
+        "应给出 Status 提示"
+    );
+}
+
+/// SessionNotActive 行为不回归：仍置 Error，且 render_pending 仍 flush + stop_generating。
+#[test]
+fn test_render_pending_session_not_active_still_errors() {
+    let mut tab = TabEntry::new("sid", "agent");
+    tab.status = AgentStatus::Running;
+    tab.generating = true;
+    tab.streaming_text = "半截输出".into();
+    tab.frames
+        .push(error_msg("SessionNotActive", "session expired"));
+    tab.render_pending();
+
+    assert_eq!(tab.status, AgentStatus::Error);
+    assert!(!tab.generating);
+    assert!(tab.streaming_text.is_empty(), "SessionNotActive 仍应 flush");
+    assert!(
+        tab.messages
+            .iter()
+            .any(|m| matches!(m.line_type, LineType::Error))
+    );
+}
+
+/// 特征化（非红）：重连硬置「非生成」——输入门禁确实放开（B4）。
+#[test]
+fn test_reset_after_reconnect_releases_input_gate() {
+    let mut tab = TabEntry::new("sid", "agent");
+    tab.generating = true;
+    tab.streaming_text = "残留".into();
+
+    tab.reset_after_reconnect();
+
+    assert!(!tab.generating, "重连后输入门禁应放开");
+}
+
+// ════════════════════════════════════════════════════════════
 // Step 6b: ViewOnly tab UI behavior tests
 // ════════════════════════════════════════════════════════════
 

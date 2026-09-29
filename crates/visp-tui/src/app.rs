@@ -711,14 +711,20 @@ impl TabEntry {
                     self.push_chat_lines(lines);
                 }
                 Some(server_message::Payload::Error(err)) => {
-                    self.flush_streaming();
-                    self.push_chat_line(
-                        LineType::Error,
-                        format!("{}: {}", err.code, err.message),
-                        None,
-                    );
-                    self.stop_generating();
-                    self.status = AgentStatus::Error;
+                    if err.code == "SessionBusy" {
+                        // 忙拒绝不代表本轮失败：不置 Error、不 flush 在途流式内容、
+                        // 不提前放开输入门禁，仅追加一行提示
+                        self.push_chat_line(LineType::Status, err.message.clone(), None);
+                    } else {
+                        self.flush_streaming();
+                        self.push_chat_line(
+                            LineType::Error,
+                            format!("{}: {}", err.code, err.message),
+                            None,
+                        );
+                        self.stop_generating();
+                        self.status = AgentStatus::Error;
+                    }
                 }
                 Some(server_message::Payload::Done(_)) => {
                     // 将 token 统计 + 时间戳追加到对话区
@@ -1906,8 +1912,13 @@ impl AppState {
                         tab.status = AgentStatus::Done;
                     }
                 }
-                Some(server_message::Payload::Error(_)) => {
-                    tab.status = AgentStatus::Error;
+                Some(server_message::Payload::Error(err)) => {
+                    if err.code == "SessionBusy" {
+                        // 忙拒绝不代表本轮失败：不置 Error，仅追加一行提示
+                        tab.push_chat_line(LineType::Status, err.message.clone(), None);
+                    } else {
+                        tab.status = AgentStatus::Error;
+                    }
                 }
                 _ => {}
             }
@@ -1929,13 +1940,22 @@ impl AppState {
                 }
             }
             Some(server_message::Payload::Error(err)) => {
-                self.tab_bar.tabs[idx].status = AgentStatus::Error;
-                if err.code == "SessionNotActive" {
+                if err.code == "SessionBusy" {
+                    // 忙拒绝不代表本轮失败：不置 Error，仅追加一行提示
                     self.tab_bar.tabs[idx].push_chat_line(
                         LineType::Status,
-                        "该会话已结束，无法继续输入".into(),
+                        err.message.clone(),
                         None,
                     );
+                } else {
+                    self.tab_bar.tabs[idx].status = AgentStatus::Error;
+                    if err.code == "SessionNotActive" {
+                        self.tab_bar.tabs[idx].push_chat_line(
+                            LineType::Status,
+                            "该会话已结束，无法继续输入".into(),
+                            None,
+                        );
+                    }
                 }
             }
             _ => {}

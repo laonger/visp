@@ -302,6 +302,17 @@ fn error_cancelled(sid: &str) -> ServerMessage {
     }
 }
 
+fn error_session_busy(sid: &str) -> ServerMessage {
+    ServerMessage {
+        payload: Some(server_message::Payload::Error(ProtoError {
+            code: "SessionBusy".into(),
+            message: "正在生成，请稍候".into(),
+            session_id: sid.into(),
+            ..Default::default()
+        })),
+    }
+}
+
 fn user_response(qid: &str, idx: i32) -> ClientMessage {
     ClientMessage {
         payload: Some(client_message::Payload::UserResponse(UserResponse {
@@ -400,6 +411,50 @@ async fn cancel_during_question_yields_cancelled() {
     let (chunks, resp) = client.recv_turn(3).await;
     assert!(chunks.is_empty(), "M1 不流式子内容,cancel 收尾无 chunk");
     assert_eq!(resp["result"]["stopReason"], "cancelled");
+}
+
+/// 忙拒绝(B2/B3 兜底路径):daemon 返回 SessionBusy → turn 以错误(Refusal)
+/// 收尾、不悬挂;结束后会话不再忙——第二回合可正常发起并收尾,证明旧 pump
+/// 已收尾、无残留在途(不双循环)。
+#[tokio::test]
+#[serial]
+async fn session_busy_error_ends_turn_without_hang() {
+    let script = vec![vec![error_session_busy("visp-new")], vec![done("visp-new")]];
+    let mut client = spawn_agent(script).await;
+
+    let v = client
+        .request(
+            1,
+            "initialize",
+            json!({"protocolVersion":1,"clientCapabilities":{}}),
+        )
+        .await;
+    assert_eq!(v["result"]["protocolVersion"], 1);
+    let v = client
+        .request(2, "session/new", json!({"cwd":"/tmp","mcpServers":[]}))
+        .await;
+    assert_eq!(v["result"]["sessionId"], "visp-new");
+
+    // 第一回合:daemon 以 SessionBusy 拒绝 → 必须以错误收尾,不悬挂
+    client
+        .send(&json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"visp-new","prompt":[{"type":"text","text":"hi"}]}}))
+        .await;
+    let (chunks, resp) = client.recv_turn(3).await;
+    assert_eq!(
+        resp["result"]["stopReason"], "refusal",
+        "忙拒绝应以错误收尾"
+    );
+    assert!(
+        chunks.iter().any(|c| c.contains("正在生成")),
+        "忙错误文本应作为 chunk 可见:{chunks:?}"
+    );
+
+    // 第二回合:能被受理并正常收尾 → 无残留忙状态、无第二个在途 pump
+    client
+        .send(&json!({"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"visp-new","prompt":[{"type":"text","text":"again"}]}}))
+        .await;
+    let (_, resp2) = client.recv_turn(4).await;
+    assert_eq!(resp2["result"]["stopReason"], "end_turn");
 }
 
 /// 审批回填:client 选择 allow_once → daemon 收到 selected_index = 0(V4 映射)。
