@@ -261,7 +261,7 @@ curl -fsSL https://github.com/laonger/visp/releases/latest/download/install.sh |
 安装指定版本时，用同一份 `install.sh` 加 `--tag`（管道模式下选项需经 `bash -s --` 传入）：
 
 ```bash
-curl -fsSL https://github.com/laonger/visp/releases/latest/download/install.sh | bash -s -- --tag v0.5.3
+curl -fsSL https://github.com/laonger/visp/releases/latest/download/install.sh | bash -s -- --tag v0.5.4
 ```
 
 也可手动从 [GitHub Releases](https://github.com/laonger/visp/releases) 下载预编译二进制包（tar.gz）：
