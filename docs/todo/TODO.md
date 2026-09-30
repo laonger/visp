@@ -294,8 +294,9 @@ Agent 循环在等待 UserQuery 确认时 panic，mpsc sender 被 drop，daemon 
 
 **残余 / 未做**：
 1. **未抓到原始 SSE**：因此无法确证用户那次命中的是缺口 1 还是缺口 3（两者均已修）；F4 作为兜底，遇到未知形态会给出明确错误而非空转。
-2. 「provider 声称 `tool_calls`，但既无正文也无思考块」的变体仍会落到空响应分支：`output_tokens > 0` 会报错，`== 0` 仅告警后 `Done`（静默）——未处理。
-3. **连续 thinking-only 续跑仍无上限**（本次靠手动取消；上限为软 50 / 硬 200）。
+2. ~~「provider 声称 `tool_calls` 但既无正文也无思考块」会静默 `Done`~~ → **复核后更正**：**不是缺口**——F4 检查虽在空响应分支之后，但空响应分支并不 `return`，该情形本就会命中 F4 明确失败。已在空响应分支内**再加同源检查**（与 F4 共用 `provider_claims_tool_calls()`）作为防御/可读性增强（提交 `0bea6805`）。
+3. **连续 thinking-only 续跑已加上限**（提交 `0bea6805`）：`MAX_CONSECUTIVE_THINKING_ONLY = 3`，超限明确失败。**注意这是行为变化**——若某模型确实需要 >3 轮「仅思考」才能产出正文，现在会直接报错（阈值可按需调整）。
+4. **第三条潜在静默路径（新发现，未修）**：`ChatEvent::UsageInfo { tool_calls, .. }` 与 `UsageDelta` 里的 `tool_calls` 计数**未被任何一致性检查使用**。若 provider 只通过 usage 上报 `tool_calls > 0`、而 `finish_reasons` 不含 `tool_calls`，仍可能静默走到 `Done`。建议把该计数也纳入一致性判断。
 
 ### 可观测性 / 运维缺口（本次排查付出代价才发现）
 
