@@ -24,6 +24,14 @@ use crate::provider::LlmProvider;
 /// 避免 agent loop 因审批弹窗无人响应而无限挂起。
 const APPROVAL_TIMEOUT_SECS: u64 = 120;
 
+/// 连续 thinking-only（有思考、无正文、无工具）轮次的容忍上限。
+///
+/// provider 在思考预算耗尽后通常 1–2 轮即产出正文，因此 3 轮足够宽松；
+/// 超过则几乎必然是异常（thinking 被 redacted、上游空转、解析缺口），继续
+/// `Continue` 只会把一次对话拖成几十轮、耗时上百秒的空转。达到此上限后
+/// 明确失败，不再续跑。
+const MAX_CONSECUTIVE_THINKING_ONLY: u32 = 3;
+
 use crate::rules::RuleEngine;
 use crate::session::SessionManager;
 use crate::session::SessionStatus;
@@ -627,7 +635,23 @@ enum StreamDecision {
     UserQuery {
         response_rx: mpsc::Receiver<UserQueryResult>,
     },
+    /// 有工具调用，需执行后继续循环。
     Continue,
+    /// 仅思考、无正文/工具（provider 明确结束了一轮），按既有语义继续循环，
+    /// 但由调用方对其连续次数计数以触发 F5 上限。
+    ThinkingOnly,
+}
+
+/// provider 元数据是否声称本轮以工具调用结束。
+///
+/// provider/parser 一致性检查共用此判据（空响应分支、F4 分支），避免多处
+/// 就地重写 `finish_reasons` 字符串判断而漂移。
+fn provider_claims_tool_calls(meta: Option<&ProviderMetadata>) -> bool {
+    meta.is_some_and(|m| {
+        m.finish_reasons
+            .iter()
+            .any(|r| r == "tool_calls" || r == "function_call")
+    })
 }
 
 /// Drain pending sub-agent spawns into error ToolExecResults.
@@ -750,6 +774,34 @@ async fn handle_stream_result(
 
         // No [USER_QUERY] marker: done
         if text_buffer.is_empty() && tool_calls.is_empty() && thinking_blocks.is_empty() {
+            // Provider/parser consistency: an empty response that nonetheless
+            // claims a tool-call finish reason means parsing and the provider's
+            // shape disagree. Fail loudly rather than silently complete Done.
+            if provider_claims_tool_calls(provider_metadata.as_ref()) {
+                tracing::error!(
+                    session_id = %sid,
+                    input_tokens,
+                    output_tokens,
+                    finish_reasons = ?provider_metadata.as_ref().map(|m| &m.finish_reasons),
+                    "empty response but provider reported a tool-call finish reason; \
+                     stream parsing and provider shape are inconsistent"
+                );
+                send_event(
+                    tx,
+                    sm,
+                    sid,
+                    &ctx.global_tx,
+                    &ctx.session_id,
+                    AgentEvent::Error {
+                        code: AgentErrorCode::Internal,
+                        message: "provider 报告 tool_calls 但未解析到任何工具调用（SSE 解析与 provider 形态不一致）"
+                            .into(),
+                    },
+                )
+                .await?;
+                let _ = sm.finish_loop(sid, SessionStatus::Error);
+                return Err(());
+            }
             if output_tokens > 0 {
                 tracing::error!(
                     session_id = %sid,
@@ -819,11 +871,7 @@ async fn handle_stream_result(
         // would silently Continue until the iteration limit — the observed
         // no-op spin where tool calls were requested but never executed. Fail
         // loudly with a diagnosable error instead.
-        let claims_tool_calls = provider_metadata.as_ref().is_some_and(|m| {
-            m.finish_reasons
-                .iter()
-                .any(|r| r == "tool_calls" || r == "function_call")
-        });
+        let claims_tool_calls = provider_claims_tool_calls(provider_metadata.as_ref());
         if claims_tool_calls && tool_calls.is_empty() {
             tracing::error!(
                 session_id = %sid,
@@ -889,7 +937,7 @@ async fn handle_stream_result(
                     return Err(());
                 }
             }
-            return Ok(StreamDecision::Continue);
+            return Ok(StreamDecision::ThinkingOnly);
         }
 
         let thinking_text = extract_thinking_text(thinking_blocks);
@@ -1759,6 +1807,9 @@ pub async fn run_agent_loop(
 
         let mut total_tool_calls: u32 = 0;
         let mut iteration: u32 = 1;
+        // F5：连续 thinking-only 轮次计数。进入 thinking-only 分支 +1，任何
+        // 非 thinking-only 的轮次清零；超过 MAX_CONSECUTIVE_THINKING_ONLY 即中止。
+        let mut consecutive_thinking_only: u32 = 0;
         let mut doom_loop_window: Vec<Vec<(String, serde_json::Value)>> = Vec::new();
         let mut doom_loop_warned = false;
         loop {
@@ -1980,13 +2031,55 @@ pub async fn run_agent_loop(
                         let _ = sm.finish_loop(&sid, SessionStatus::Error);
                         return;
                     }
+                    // 非 thinking-only 的轮次：清零连续计数。
+                    consecutive_thinking_only = 0;
                     continue;
                 }
                 Ok(StreamDecision::Continue) => {
+                    // 有真实工具调用：清零连续 thinking-only 计数。
+                    consecutive_thinking_only = 0;
                     tracing::info!(
                         session_id = %sid,
                         iteration,
                         "run_agent_loop: StreamDecision::Continue, continuing to next iteration"
+                    );
+                }
+                Ok(StreamDecision::ThinkingOnly) => {
+                    consecutive_thinking_only += 1;
+                    if consecutive_thinking_only > MAX_CONSECUTIVE_THINKING_ONLY {
+                        tracing::error!(
+                            session_id = %sid,
+                            consecutive_thinking_only,
+                            iteration,
+                            finish_reasons = ?output
+                                .provider_metadata
+                                .as_ref()
+                                .map(|m| &m.finish_reasons),
+                            "consecutive thinking-only responses exceeded limit; \
+                             aborting to avoid spinning"
+                        );
+                        let _ = send_event(
+                            &tx,
+                            &sm,
+                            &sid,
+                            &ctx.global_tx,
+                            &ctx.session_id,
+                            AgentEvent::Error {
+                                code: AgentErrorCode::Internal,
+                                message: format!(
+                                    "连续 {consecutive_thinking_only} 轮仅思考无正文/工具，已中止以免空转"
+                                ),
+                            },
+                        )
+                        .await;
+                        let _ = sm.finish_loop(&sid, SessionStatus::Error);
+                        return;
+                    }
+                    tracing::info!(
+                        session_id = %sid,
+                        iteration,
+                        consecutive_thinking_only,
+                        "run_agent_loop: thinking-only response, continuing to next iteration"
                     );
                 }
                 Err(()) => {
@@ -5759,6 +5852,274 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::TextDelta(t) if t.contains("after retry"))),
             "length thinking-only must still continue and produce text"
+        );
+    }
+
+    // ── F5：连续 thinking-only 续跑上限 ────────────────────────────────────
+
+    /// 构造一轮「仅思考、无正文/工具」的响应（含 metadata，finish_reason=stop）。
+    fn thinking_only_phase(text: &str) -> Vec<ChatEvent> {
+        vec![
+            thinking_snapshot(text),
+            ChatEvent::OutputMetadata(ProviderMetadata {
+                model: "test".into(),
+                finish_reasons: vec!["stop".into()],
+                input_tokens: 10,
+                output_tokens: 50,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+                latency_ms: 100,
+            }),
+            ChatEvent::Done,
+        ]
+    }
+
+    /// 用例 F5-1：provider 连续多轮（12 轮，足够撞 hard_limit）只思考不产出
+    /// 正文/工具，必须在**连续上限**处明确失败，而不是续跑到迭代上限空转。
+    #[serial]
+    #[tokio::test]
+    async fn test_consecutive_thinking_only_aborts_at_limit() {
+        let (session_mgr, sid, ctx) = make_loop_env();
+        let phases: Vec<Vec<ChatEvent>> = (0..12)
+            .map(|i| thinking_only_phase(&format!("t{i}")))
+            .collect();
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(phases));
+
+        let events = run_loop_capture(
+            provider,
+            StdArc::new(ToolRegistry::new()),
+            session_mgr.clone(),
+            ctx,
+            AgentConfig {
+                hard_limit: 12,
+                ..Default::default()
+            },
+            Message::user("think"),
+            ApprovalAction::Ignore,
+        )
+        .await;
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::Error { message, .. } if message.contains("仅思考")
+            )),
+            "连续 thinking-only 必须给出含「仅思考」的可诊断 Error"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                AgentEvent::Error {
+                    code: AgentErrorCode::MaxIterations,
+                    ..
+                }
+            )),
+            "F5 必须在迭代上限之前拦截，不得跑到 MaxIterations"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Done)),
+            "被 F5 中止的会话不得报 Done"
+        );
+        assert_eq!(
+            session_mgr.get(&sid).unwrap().status,
+            SessionStatus::Error,
+            "会话终态必须是 Error"
+        );
+    }
+
+    /// 用例 F5-2（不误伤）：2 轮 thinking-only 后正常产出正文，应正常完成。
+    #[serial]
+    #[tokio::test]
+    async fn test_two_thinking_only_rounds_then_text_completes() {
+        let (session_mgr, sid, ctx) = make_loop_env();
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![
+            thinking_only_phase("t1"),
+            thinking_only_phase("t2"),
+            vec![ChatEvent::TextDelta("final answer".into()), ChatEvent::Done],
+        ]));
+
+        let events = run_loop_capture(
+            provider,
+            StdArc::new(ToolRegistry::new()),
+            session_mgr.clone(),
+            ctx,
+            AgentConfig::default(),
+            Message::user("think"),
+            ApprovalAction::Ignore,
+        )
+        .await;
+
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
+            "2 轮 thinking-only 不得触发 F5"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TextDelta(t) if t.contains("final answer"))),
+            "最终正文必须产出"
+        );
+        assert_eq!(
+            session_mgr.get(&sid).unwrap().status,
+            SessionStatus::Completed,
+            "会话应正常完成"
+        );
+    }
+
+    /// 用例 F5-3（计数清零）：2 轮 thinking-only → 普通（工具）轮 → 再 2 轮
+    /// thinking-only，仍应正常结束；若计数不清零，累计到第 4 轮会被 F5 误杀。
+    #[serial]
+    #[tokio::test]
+    async fn test_thinking_only_counter_resets_after_normal_round() {
+        let (session_mgr, sid, ctx) = make_loop_env();
+        let registry = StdArc::new(ToolRegistry::new());
+        registry
+            .register(StdArc::new(MockTestTool { name: "noargs" }))
+            .unwrap();
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![
+            thinking_only_phase("t1"),
+            thinking_only_phase("t2"),
+            vec![
+                ChatEvent::ToolCall {
+                    id: "call_1".into(),
+                    name: "noargs".into(),
+                    arguments: "{}".into(),
+                },
+                ChatEvent::Done,
+            ],
+            thinking_only_phase("t3"),
+            thinking_only_phase("t4"),
+            vec![ChatEvent::TextDelta("done".into()), ChatEvent::Done],
+        ]));
+
+        let events = run_loop_capture(
+            provider,
+            registry,
+            session_mgr.clone(),
+            ctx,
+            AgentConfig::default(),
+            Message::user("go"),
+            ApprovalAction::Ignore,
+        )
+        .await;
+
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
+            "普通轮次必须清零计数，避免跨轮累计触发 F5"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TextDelta(t) if t.contains("done"))),
+            "最终正文必须产出"
+        );
+        assert_eq!(
+            session_mgr.get(&sid).unwrap().status,
+            SessionStatus::Completed
+        );
+    }
+
+    /// 用例空响应一致性：空流（无 text/tool/thinking）但 provider 声称
+    /// `tool_calls` 且 `output_tokens==0`，必须明确失败，不得静默 Done。
+    #[serial]
+    #[tokio::test]
+    async fn test_empty_response_claiming_tool_calls_fails_loudly() {
+        let (session_mgr, sid, ctx) = make_loop_env();
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![vec![
+            ChatEvent::OutputMetadata(ProviderMetadata {
+                model: "empty-mismatch".into(),
+                finish_reasons: vec!["tool_calls".into()],
+                input_tokens: 10,
+                // output_tokens 未经 UsageInfo 上报，保持 0。
+                output_tokens: 0,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+                latency_ms: 100,
+            }),
+            ChatEvent::Done,
+        ]]));
+
+        let events = run_loop_capture(
+            provider,
+            StdArc::new(ToolRegistry::new()),
+            session_mgr.clone(),
+            ctx,
+            AgentConfig::default(),
+            Message::user("do something"),
+            ApprovalAction::Ignore,
+        )
+        .await;
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::Error { message, .. }
+                    if message.contains("provider 报告 tool_calls 但未解析到任何工具调用")
+            )),
+            "空响应且声称 tool_calls 必须明确失败"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Done)),
+            "空响应声称 tool_calls 不得静默 Done"
+        );
+        assert_eq!(session_mgr.get(&sid).unwrap().status, SessionStatus::Error);
+    }
+
+    /// 用例 F5-5（回归）：普通工具调用 + 普通正文回答，行为不变。
+    #[serial]
+    #[tokio::test]
+    async fn test_normal_tool_call_and_text_answer_unchanged() {
+        let (session_mgr, sid, ctx) = make_loop_env();
+        let registry = StdArc::new(ToolRegistry::new());
+        registry
+            .register(StdArc::new(MockTestTool { name: "noargs" }))
+            .unwrap();
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![
+            vec![
+                ChatEvent::ToolCall {
+                    id: "call_1".into(),
+                    name: "noargs".into(),
+                    arguments: "{}".into(),
+                },
+                ChatEvent::Done,
+            ],
+            vec![
+                ChatEvent::TextDelta("normal answer".into()),
+                ChatEvent::Done,
+            ],
+        ]));
+
+        let events = run_loop_capture(
+            provider,
+            registry,
+            session_mgr.clone(),
+            ctx,
+            AgentConfig::default(),
+            Message::user("go"),
+            ApprovalAction::Ignore,
+        )
+        .await;
+
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
+            "普通流程不得报错"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::ToolCallResult { content, .. } if content == "ok"
+            )),
+            "工具照常执行"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TextDelta(t) if t.contains("normal answer"))),
+            "正文照常产出"
+        );
+        assert_eq!(
+            session_mgr.get(&sid).unwrap().status,
+            SessionStatus::Completed
         );
     }
 
