@@ -2,7 +2,7 @@
 #
 # visp 一键安装 / 卸载脚本
 # ---------------------------------------------------------------------------
-# 从 GitHub Releases 下载预编译二进制（visp / visp-daemon / visp-tui），
+# 从 GitHub Releases 下载预编译二进制（visp / visp-daemon / visp-tui / visp-acp），
 # 安装到指定目录，并可选地初始化配置骨架与安装 herdr hook。
 # 亦支持 --uninstall 卸载二进制、--purge-config 清理配置目录。
 #
@@ -70,7 +70,7 @@ visp 安装 / 卸载脚本 —— 从 GitHub Releases 安装预编译二进制�
                     非交互环境（如 curl|bash）未提供时保持骨架默认、不提问
 
 卸载选项：
-  --uninstall       删除 <bin-dir> 下的 visp / visp-daemon / visp-tui
+  --uninstall       删除 <bin-dir> 下的 visp / visp-daemon / visp-tui / visp-acp
   --purge-config    配合 --uninstall，额外删除整个配置目录（含 daemon.toml、hooks/）
                     tty 下需确认；非 tty 必须显式 --yes，否则跳过
   --yes             跳过删除配置目录的确认
@@ -267,7 +267,7 @@ install_binaries() {
 
     mkdir -p "$BIN_DIR"
     local b src dest
-    for b in visp visp-daemon visp-tui; do
+    for b in visp visp-daemon visp-tui visp-acp; do
         src="$srcdir/$b"
         [ -f "$src" ] || die "解包结果缺少二进制：$src"
         dest="$BIN_DIR/$b"
@@ -493,7 +493,7 @@ purge_config_dir() {
 do_uninstall() {
     info "卸载 visp（二进制目录：${BIN_DIR}）"
     local any=0 b dest
-    for b in visp visp-daemon visp-tui; do
+    for b in visp visp-daemon visp-tui visp-acp; do
         dest="$BIN_DIR/$b"
         if [ -e "$dest" ]; then
             any=1
@@ -559,7 +559,7 @@ main() {
 
     if [ "$DRY_RUN" -eq 1 ]; then
         info "[dry-run] 下载 $url -> $archive_path"
-        info "[dry-run] 解包并安装 visp / visp-daemon / visp-tui -> $BIN_DIR"
+        info "[dry-run] 解包并安装 visp / visp-daemon / visp-tui / visp-acp -> $BIN_DIR"
     else
         if ! has_downloader; then
             die "未找到 curl 或 wget，无法下载。请先安装其中之一。"

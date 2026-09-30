@@ -50,6 +50,7 @@ jobs:
           cp target/${{ matrix.target }}/release/visp        visp-${{ matrix.target }}/
           cp target/${{ matrix.target }}/release/visp-daemon visp-${{ matrix.target }}/
           cp target/${{ matrix.target }}/release/visp-tui    visp-${{ matrix.target }}/
+          cp target/${{ matrix.target }}/release/visp-acp    visp-${{ matrix.target }}/
           tar czf visp-${{ matrix.target }}.tar.gz visp-${{ matrix.target }}
 
       - name: Upload artifacts
@@ -88,7 +89,7 @@ jobs:
 
           # Create release
           if [ -s /tmp/notes.md ]; then
-            gh release create "${{ github.ref_name }}" artifacts/* --notes-file /tmp/notes.md
+            gh release create "${{ github.ref_name }}" artifacts/* install.sh --notes-file /tmp/notes.md
           else
-            gh release create "${{ github.ref_name }}" artifacts/* --generate-notes
+            gh release create "${{ github.ref_name }}" artifacts/* install.sh --generate-notes
           fi
