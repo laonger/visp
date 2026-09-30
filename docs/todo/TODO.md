@@ -296,7 +296,8 @@ Agent 循环在等待 UserQuery 确认时 panic，mpsc sender 被 drop，daemon 
 1. **未抓到原始 SSE**：因此无法确证用户那次命中的是缺口 1 还是缺口 3（两者均已修）；F4 作为兜底，遇到未知形态会给出明确错误而非空转。
 2. ~~「provider 声称 `tool_calls` 但既无正文也无思考块」会静默 `Done`~~ → **复核后更正**：**不是缺口**——F4 检查虽在空响应分支之后，但空响应分支并不 `return`，该情形本就会命中 F4 明确失败。已在空响应分支内**再加同源检查**（与 F4 共用 `provider_claims_tool_calls()`）作为防御/可读性增强（提交 `0bea6805`）。
 3. **连续 thinking-only 续跑已加上限**（提交 `0bea6805`）：`MAX_CONSECUTIVE_THINKING_ONLY = 3`，超限明确失败。**注意这是行为变化**——若某模型确实需要 >3 轮「仅思考」才能产出正文，现在会直接报错（阈值可按需调整）。
-4. **第三条潜在静默路径（新发现，未修）**：`ChatEvent::UsageInfo { tool_calls, .. }` 与 `UsageDelta` 里的 `tool_calls` 计数**未被任何一致性检查使用**。若 provider 只通过 usage 上报 `tool_calls > 0`、而 `finish_reasons` 不含 `tool_calls`，仍可能静默走到 `Done`。建议把该计数也纳入一致性判断。
+4. ~~第三条潜在静默路径（usage 的 `tool_calls` 计数未被检查）~~ → **复核后关闭：不是缺口**。该计数与 `ChatEvent::ToolCall` **同源同帧**：`crates/visp-llm/src/openai.rs` 的 `flush_tool_acc()` 在同一次调用里既设 `tool_call_count = calls.len()` 又设 `pending_tool_calls`；发射顺序为 ToolCall(`:1155`) → UsageInfo(`:1175`)；`collect_stream_events` 对 ToolCall 无条件收集（`agent_loop.rs:565-566`）；`StreamState` 每次响应新建（`tool_count: 0`，`:1070`）故不跨轮累计。⇒「`usage_tool_calls > 0` 且解析不到任何工具调用」对仓内所有 provider **结构上不可达**；只有未来引入的、违反发射契约的外部 provider 才可能触发（当前 `LlmProvider` 无插件/动态注册机制）。**按「不为修而修」停止实施，未改代码。**
+   - 若将来引入外部/动态 provider，可再启用 defense-in-depth：判据扩为 `tool_calls.is_empty() && (provider_claims_tool_calls(meta) || (usage_tool_calls > 0 && text_buffer.is_empty()))`——usage 项带 `text_buffer.is_empty()` 护栏，正常正文回合不会被误杀。
 
 ### 可观测性 / 运维缺口（本次排查付出代价才发现）
 
