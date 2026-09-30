@@ -812,6 +812,45 @@ async fn handle_stream_result(
         // we treat the thinking-only response as complete.
         let has_metadata = provider_metadata.is_some();
 
+        // Provider/parser consistency check (must run BEFORE the thinking-only
+        // branch below). If the provider reports a tool-call finish reason but
+        // the stream parser yielded no tool calls, the SSE parsing and the
+        // provider's shape disagree. Falling through to the thinking-only branch
+        // would silently Continue until the iteration limit — the observed
+        // no-op spin where tool calls were requested but never executed. Fail
+        // loudly with a diagnosable error instead.
+        let claims_tool_calls = provider_metadata.as_ref().is_some_and(|m| {
+            m.finish_reasons
+                .iter()
+                .any(|r| r == "tool_calls" || r == "function_call")
+        });
+        if claims_tool_calls && tool_calls.is_empty() {
+            tracing::error!(
+                session_id = %sid,
+                finish_reasons = ?provider_metadata.as_ref().map(|m| &m.finish_reasons),
+                thinking_block_count = thinking_blocks.len(),
+                has_text = !text_buffer.is_empty(),
+                output_tokens,
+                "provider reported a tool-call finish reason but no tool calls were parsed; \
+                 stream parsing and provider shape are inconsistent"
+            );
+            send_event(
+                tx,
+                sm,
+                sid,
+                &ctx.global_tx,
+                &ctx.session_id,
+                AgentEvent::Error {
+                    code: AgentErrorCode::Internal,
+                    message: "provider 报告 tool_calls 但未解析到任何工具调用（SSE 解析与 provider 形态不一致）"
+                        .into(),
+                },
+            )
+            .await?;
+            let _ = sm.finish_loop(sid, SessionStatus::Error);
+            return Err(());
+        }
+
         if text_buffer.is_empty()
             && tool_calls.is_empty()
             && !thinking_blocks.is_empty()
@@ -5504,6 +5543,222 @@ mod tests {
                 }
             )),
             "thinking-only iterations must not trigger StuckInLoop error event"
+        );
+    }
+
+    /// Provider 声称 `finish_reasons=["tool_calls"]`，但流里只有 thinking、没有
+    /// 任何 tool_calls——复现 SSE 解析缺口导致 provider 与解析器不一致的形态。
+    struct ClaimsToolCallsButParsesNoneProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for ClaimsToolCallsButParsesNoneProvider {
+        async fn chat_stream(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _config: &LlmConfig,
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>
+        {
+            let events: Vec<Result<ChatEvent, LlmError>> = vec![
+                Ok(ChatEvent::ThinkingBlock(serde_json::json!({
+                    "type": "thinking",
+                    "thinking": "I should call a tool here"
+                }))),
+                Ok(ChatEvent::OutputMetadata(ProviderMetadata {
+                    model: "mismatch-test".into(),
+                    finish_reasons: vec!["tool_calls".into()],
+                    input_tokens: 10,
+                    output_tokens: 20,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    latency_ms: 100,
+                })),
+                Ok(ChatEvent::Done),
+            ];
+            Ok(Box::pin(stream::iter(events)))
+        }
+    }
+
+    /// 用例 1：provider 元数据声称 `tool_calls`，但解析到的 tool_calls 为空。
+    /// 这是 provider/解析器不一致，必须明确失败并给出可诊断信息，绝不能再当成
+    /// thinking-only 续跑到迭代上限（此前会连续空转）。
+    #[serial]
+    #[tokio::test]
+    async fn test_tool_calls_claimed_but_none_parsed_fails_loudly() {
+        let (session_mgr, sid, ctx) = make_loop_env();
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(ClaimsToolCallsButParsesNoneProvider);
+        let config = AgentConfig {
+            hard_limit: 3,
+            ..Default::default()
+        };
+
+        let events = run_loop_capture(
+            provider,
+            StdArc::new(ToolRegistry::new()),
+            session_mgr.clone(),
+            ctx,
+            config,
+            Message::user("do something"),
+            ApprovalAction::Ignore,
+        )
+        .await;
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::Error { message, .. }
+                    if message.contains("provider 报告 tool_calls 但未解析到任何工具调用")
+            )),
+            "provider/parser mismatch must surface a diagnosable Error"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Done)),
+            "mismatch must not complete as Done"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                AgentEvent::Error {
+                    code: AgentErrorCode::MaxIterations,
+                    ..
+                }
+            )),
+            "mismatch must fail immediately, not spin until the iteration limit"
+        );
+        assert_eq!(
+            session_mgr.get(&sid).unwrap().status,
+            SessionStatus::Error,
+            "session must end in Error"
+        );
+    }
+
+    /// 用例 2（回归）：`finish_reasons=["stop"]` 的 thinking-only 响应仍按既有
+    /// 逻辑 Continue，不被新的一致性检查误伤。
+    #[serial]
+    #[tokio::test]
+    async fn test_stop_finish_reason_thinking_only_still_continues() {
+        use crate::ProviderMetadata;
+
+        let (session_mgr, _sid, ctx) = make_loop_env();
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![
+            vec![
+                thinking_snapshot("thinking before stopping"),
+                ChatEvent::OutputMetadata(ProviderMetadata {
+                    model: "test".into(),
+                    finish_reasons: vec!["stop".into()],
+                    input_tokens: 10,
+                    output_tokens: 50,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    latency_ms: 100,
+                }),
+                ChatEvent::Done,
+            ],
+            vec![ChatEvent::TextDelta("final answer".into()), ChatEvent::Done],
+        ]));
+        let events = run_loop_capture(
+            provider,
+            StdArc::new(ToolRegistry::new()),
+            session_mgr,
+            ctx,
+            AgentConfig::default(),
+            Message::user("think"),
+            ApprovalAction::Ignore,
+        )
+        .await;
+
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
+            "stop thinking-only must not error"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TextDelta(t) if t.contains("final answer"))),
+            "stop thinking-only must still continue and produce text"
+        );
+    }
+
+    /// 用例 3（回归）：正常带 tool_calls 的响应照常执行工具，不受一致性检查影响。
+    #[serial]
+    #[tokio::test]
+    async fn test_normal_tool_calls_still_execute() {
+        let (session_mgr, _sid, ctx) = make_loop_env();
+        let registry = StdArc::new(ToolRegistry::new());
+        registry
+            .register(StdArc::new(MockTestTool { name: "noargs" }))
+            .unwrap();
+        let provider = one_tool_then_done("noargs", "{}".into());
+
+        let events = run_loop_capture(
+            provider,
+            registry,
+            session_mgr,
+            ctx,
+            AgentConfig::default(),
+            Message::user("call the tool"),
+            ApprovalAction::Ignore,
+        )
+        .await;
+
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
+            "normal tool-call flow must not error"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::ToolCallResult { content, .. } if content == "ok"
+            )),
+            "tool must still execute in the normal tool-call flow"
+        );
+    }
+
+    /// 用例 4（回归）：`finish_reasons=["length"]` 的既有 thinking-only 续跑路径
+    /// 不变（既有 `test_thinking_only_snapshot_round_still_continues` 亦覆盖）。
+    #[serial]
+    #[tokio::test]
+    async fn test_length_finish_reason_thinking_only_still_continues() {
+        use crate::ProviderMetadata;
+
+        let (session_mgr, _sid, ctx) = make_loop_env();
+        let provider: StdArc<dyn LlmProvider> = StdArc::new(SimpleProvider::new(vec![
+            vec![
+                thinking_snapshot("exhausted budget while thinking"),
+                ChatEvent::OutputMetadata(ProviderMetadata {
+                    model: "test".into(),
+                    finish_reasons: vec!["length".into()],
+                    input_tokens: 10,
+                    output_tokens: 4096,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    latency_ms: 100,
+                }),
+                ChatEvent::Done,
+            ],
+            vec![ChatEvent::TextDelta("after retry".into()), ChatEvent::Done],
+        ]));
+        let events = run_loop_capture(
+            provider,
+            StdArc::new(ToolRegistry::new()),
+            session_mgr,
+            ctx,
+            AgentConfig::default(),
+            Message::user("think"),
+            ApprovalAction::Ignore,
+        )
+        .await;
+
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error { .. })),
+            "length thinking-only must not error"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TextDelta(t) if t.contains("after retry"))),
+            "length thinking-only must still continue and produce text"
         );
     }
 
