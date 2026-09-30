@@ -854,6 +854,124 @@ fn test_parse_string_content_backward_compat() {
     }
 }
 
+// --- 缺口修复：按 chunk 收集事件（F1/F2/F3）---
+
+/// 缺口一：同一 chunk 同时含 reasoning_content 与 tool_calls 时，
+/// 两种事件都必须产出（此前 reasoning 分支提前 return 吞掉 tool_calls）。
+#[test]
+fn test_parse_reasoning_and_tool_call_same_chunk() {
+    let data = r#"{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"thinking...","tool_calls":[{"index":0,"id":"call_x","type":"function","function":{"name":"read_file","arguments":""}}]},"finish_reason":null}]}"#;
+    let events = parse_openai_sse_data(data).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, OpenAiStreamEvent::ReasoningDelta(t) if t == "thinking...")),
+        "reasoning delta must be emitted, got: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            OpenAiStreamEvent::ToolCallStart { id, name, .. } if id == "call_x" && name == "read_file"
+        )),
+        "tool call start must also be emitted, got: {events:?}"
+    );
+}
+
+/// 缺口二：单个 chunk 的 tool_calls 含多个元素时，每个元素都要产出事件。
+#[test]
+fn test_parse_multiple_tool_calls_single_chunk() {
+    let data = r#"{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"read_file","arguments":""}},{"index":1,"id":"call_b","type":"function","function":{"name":"write_file","arguments":""}}]},"finish_reason":null}]}"#;
+    let events = parse_openai_sse_data(data).unwrap();
+    let starts: Vec<(&str, &str)> = events
+        .iter()
+        .filter_map(|e| match e {
+            OpenAiStreamEvent::ToolCallStart { id, name, .. } => Some((id.as_str(), name.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        starts,
+        vec![("call_a", "read_file"), ("call_b", "write_file")],
+        "both tool calls must be emitted, got: {events:?}"
+    );
+}
+
+/// 缺口三：旧式 function_call（无 id）要能被解析为 ToolCallStart（合成 id）+ ToolCallDelta。
+#[test]
+fn test_parse_legacy_function_call() {
+    let start = r#"{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"function_call":{"name":"read_file","arguments":""}},"finish_reason":null}]}"#;
+    let args = r#"{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"function_call":{"arguments":"{\"path\":\"a\"}"}},"finish_reason":null}]}"#;
+
+    let start_events = parse_openai_sse_data(start).unwrap();
+    assert_eq!(start_events.len(), 1, "expected one ToolCallStart");
+    match &start_events[0] {
+        OpenAiStreamEvent::ToolCallStart { index, id, name } => {
+            assert_eq!(*index, 0);
+            assert_eq!(id, "call_legacy_0");
+            assert_eq!(name, "read_file");
+        }
+        other => panic!("expected ToolCallStart, got {other:?}"),
+    }
+
+    let arg_events = parse_openai_sse_data(args).unwrap();
+    assert_eq!(arg_events.len(), 1, "expected one ToolCallDelta");
+    match &arg_events[0] {
+        OpenAiStreamEvent::ToolCallDelta { index, arguments } => {
+            assert_eq!(*index, 0);
+            assert_eq!(arguments, "{\"path\":\"a\"}");
+        }
+        other => panic!("expected ToolCallDelta, got {other:?}"),
+    }
+}
+
+/// 回归：同一 chunk 同时含 content、reasoning、tool_calls、finish_reason 与 usage，
+/// 全部事件都要产出，且 finish_reason 在 tool 事件之后处理。
+#[test]
+fn test_parse_all_fields_same_chunk() {
+    let data = r#"{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi","reasoning":"r","tool_calls":[{"index":0,"id":"call_z","type":"function","function":{"name":"f","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":2}}"#;
+    let events = parse_openai_sse_data(data).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, OpenAiStreamEvent::TextDelta(t) if t == "hi"))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, OpenAiStreamEvent::ReasoningDelta(t) if t == "r"))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, OpenAiStreamEvent::ToolCallStart { id, .. } if id == "call_z"))
+    );
+    assert!(events.iter().any(
+        |e| matches!(e, OpenAiStreamEvent::ToolCallDelta { arguments, .. } if arguments == "{}")
+    ));
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            OpenAiStreamEvent::Usage {
+                output_tokens: 2,
+                ..
+            }
+        )),
+        "usage must still be recorded, got: {events:?}"
+    );
+    let finish_pos = events
+        .iter()
+        .position(|e| matches!(e, OpenAiStreamEvent::Finish { .. }))
+        .expect("finish event must be present");
+    let text_pos = events
+        .iter()
+        .position(|e| matches!(e, OpenAiStreamEvent::TextDelta(_)))
+        .unwrap();
+    assert!(
+        finish_pos > text_pos,
+        "finish_reason should be processed after delta fields, got: {events:?}"
+    );
+}
+
 // --- byte_stream_to_chat_events 测试 ---
 
 /// 构建单条 SSE data 行（自动追加 \n\n）
@@ -1178,6 +1296,55 @@ async fn test_byte_stream_tool_call() {
     assert!(matches!(&events[1], ChatEvent::UsageInfo { .. }));
     assert!(matches!(&events[2], ChatEvent::OutputMetadata(_)));
     assert!(matches!(&events[3], ChatEvent::Done));
+}
+
+/// 端到端（缺口一）：首帧同时含 reasoning_content 与 tool_calls，
+/// 后续帧补参数 —— 最终必须解析出 ChatEvent::ToolCall。
+#[tokio::test]
+async fn test_byte_stream_reasoning_and_tool_call_same_chunk() {
+    let first = serde_json::json!({
+        "id": "chatcmpl",
+        "object": "chat.completion.chunk",
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "reasoning_content": "let me think...",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_abc",
+                    "type": "function",
+                    "function": { "name": "read_file", "arguments": "" }
+                }]
+            },
+            "finish_reason": null
+        }]
+    });
+    let arg = make_tool_delta_chunk(0, "{\"path\":\"test.txt\"}");
+    let sse = format!(
+        "{}{}{}{}",
+        make_sse(&first),
+        make_sse(&arg),
+        make_sse(&make_stop_chunk("tool_calls")),
+        sse_line("[DONE]"),
+    );
+    let events = collect_events(vec![sse]).await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ChatEvent::ThinkingBlock(_))),
+        "reasoning must still be surfaced, got: {events:?}"
+    );
+    let tool = events.iter().find_map(|e| match e {
+        ChatEvent::ToolCall {
+            name, arguments, ..
+        } => Some((name.clone(), arguments.clone())),
+        _ => None,
+    });
+    let (name, arguments) =
+        tool.expect("tool call must be parsed from same-chunk reasoning+tool_calls chunk");
+    assert_eq!(name, "read_file");
+    assert!(arguments.contains("test.txt"), "got: {arguments}");
 }
 
 #[tokio::test]

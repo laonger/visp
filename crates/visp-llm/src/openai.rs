@@ -590,20 +590,20 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<Vec<OpenAiStreamEvent>
     let finish_reason = choice["finish_reason"].as_str().map(|s| s.to_string());
     let index = choice["index"].as_u64().unwrap_or(0) as usize;
 
-    // 检查文本/图片 delta（content 可以是字符串或数组）
+    // 按 chunk 收集事件：同一个 delta 中可能同时存在 content / reasoning /
+    // tool_calls / 旧式 function_call，必须各自 push 而非提前 return。
+    // 语义约定：所有 delta 字段处理完毕后统一追加 usage，最后返回一次。
+    let mut events: Vec<OpenAiStreamEvent> = Vec::new();
+
+    // content（可以是字符串或数组：text + image_url）
     if let Some(content) = delta.get("content") {
         // 字符串形式（常规流式文本）
         if let Some(text) = content.as_str()
             && !text.is_empty()
         {
-            let mut events = vec![OpenAiStreamEvent::TextDelta(text.to_string())];
-            events.extend(usage_events);
-            return Ok(events);
-        }
-
-        // 数组形式（OpenAI 图片输出：text + image_url 块）
-        if let Some(items) = content.as_array() {
-            let mut image_events: Vec<OpenAiStreamEvent> = Vec::new();
+            events.push(OpenAiStreamEvent::TextDelta(text.to_string()));
+        } else if let Some(items) = content.as_array() {
+            // 数组形式（OpenAI 图片输出：text + image_url 块）
             let mut text_parts: Vec<String> = Vec::new();
             for item in items {
                 match item.get("type").and_then(|t| t.as_str()) {
@@ -621,7 +621,7 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<Vec<OpenAiStreamEvent>
                         if url.starts_with("data:") {
                             // data URI：提取 mime + base64，由调用方保存到磁盘
                             if let Some((mime, base64_data)) = image_util::parse_data_uri(url) {
-                                image_events.push(OpenAiStreamEvent::ImageBlock {
+                                events.push(OpenAiStreamEvent::ImageBlock {
                                     data: Some(base64_data),
                                     mime_type: mime,
                                     remote_url: None,
@@ -629,7 +629,7 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<Vec<OpenAiStreamEvent>
                             }
                         } else if url.starts_with("http://") || url.starts_with("https://") {
                             // 远程 URL：不下载，透传给上层
-                            image_events.push(OpenAiStreamEvent::ImageBlock {
+                            events.push(OpenAiStreamEvent::ImageBlock {
                                 data: None,
                                 mime_type: String::new(),
                                 remote_url: Some(url.to_string()),
@@ -640,82 +640,95 @@ pub(crate) fn parse_openai_sse_data(data: &str) -> Result<Vec<OpenAiStreamEvent>
                 }
             }
             if !text_parts.is_empty() {
-                image_events.insert(0, OpenAiStreamEvent::TextDelta(text_parts.join("")));
-            }
-            if !image_events.is_empty() {
-                image_events.extend(usage_events);
-                return Ok(image_events);
+                // 文本块排在图片事件之前，保持既有事件顺序
+                events.insert(0, OpenAiStreamEvent::TextDelta(text_parts.join("")));
             }
         }
     }
 
-    // 检查 reasoning_content（DeepSeek 等模型发送推理内容）
+    // reasoning_content（DeepSeek 等模型发送推理内容）
     if let Some(reasoning) = delta.get("reasoning_content").and_then(|c| c.as_str())
         && !reasoning.is_empty()
     {
-        let mut events = vec![OpenAiStreamEvent::ReasoningDelta(reasoning.to_string())];
-        events.extend(usage_events);
-        return Ok(events);
+        events.push(OpenAiStreamEvent::ReasoningDelta(reasoning.to_string()));
     }
     // 部分提供商使用 "reasoning" 字段
     if let Some(reasoning) = delta.get("reasoning").and_then(|c| c.as_str())
         && !reasoning.is_empty()
     {
-        let mut events = vec![OpenAiStreamEvent::ReasoningDelta(reasoning.to_string())];
-        events.extend(usage_events);
-        return Ok(events);
+        events.push(OpenAiStreamEvent::ReasoningDelta(reasoning.to_string()));
     }
 
-    // 检查 tool_calls delta
+    // tool_calls delta：数组内每个元素都要处理（不得只取第一个）
     if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
         for tc in tool_calls {
             let tc_index = tc["index"].as_u64().unwrap_or(0) as usize;
             let func = &tc["function"];
 
-            // 有 id 表示新的工具调用开始
+            // 有非空 id 表示新的工具调用开始
             if let Some(id) = tc.get("id").and_then(|i| i.as_str())
                 && !id.is_empty()
             {
                 let name = func["name"].as_str().unwrap_or("").to_string();
-                // arguments 在首个 delta 中总是空的，后续通过 ToolCallDelta 累积
-                let mut events = vec![OpenAiStreamEvent::ToolCallStart {
+                events.push(OpenAiStreamEvent::ToolCallStart {
                     index: tc_index,
                     id: id.to_string(),
                     name,
-                }];
-                events.extend(usage_events);
-                return Ok(events);
+                });
             }
 
-            // 参数增量
+            // 参数增量（可能与 id 同帧出现，此时两者都产出）
             if let Some(arguments) = func.get("arguments").and_then(|a| a.as_str())
                 && !arguments.is_empty()
             {
-                let mut events = vec![OpenAiStreamEvent::ToolCallDelta {
+                events.push(OpenAiStreamEvent::ToolCallDelta {
                     index: tc_index,
                     arguments: arguments.to_string(),
-                }];
-                events.extend(usage_events);
-                return Ok(events);
+                });
             }
         }
     }
 
-    // 检查 finish_reason
-    if let Some(reason) = finish_reason {
-        let mut events = vec![OpenAiStreamEvent::Finish {
-            index,
-            reason: Some(reason),
-        }];
-        events.extend(usage_events);
-        return Ok(events);
+    // 旧式 function_call（无 id）：首帧给 name，后续帧给 arguments。
+    // 合成一个稳定 id，使状态机可正常累积与发射。
+    if let Some(fc) = delta.get("function_call") {
+        if let Some(name) = fc.get("name").and_then(|n| n.as_str())
+            && !name.is_empty()
+        {
+            events.push(OpenAiStreamEvent::ToolCallStart {
+                index: 0,
+                id: "call_legacy_0".to_string(),
+                name: name.to_string(),
+            });
+        }
+        if let Some(arguments) = fc.get("arguments").and_then(|a| a.as_str())
+            && !arguments.is_empty()
+        {
+            events.push(OpenAiStreamEvent::ToolCallDelta {
+                index: 0,
+                arguments: arguments.to_string(),
+            });
+        }
     }
 
-    Ok(if usage_events.is_empty() {
-        vec![OpenAiStreamEvent::Skip]
-    } else {
-        usage_events
-    })
+    // finish_reason 最后处理
+    if let Some(reason) = finish_reason {
+        events.push(OpenAiStreamEvent::Finish {
+            index,
+            reason: Some(reason),
+        });
+    }
+
+    // 统一追加 usage 事件并返回一次
+    if events.is_empty() {
+        return Ok(if usage_events.is_empty() {
+            vec![OpenAiStreamEvent::Skip]
+        } else {
+            usage_events
+        });
+    }
+    events.extend(usage_events);
+    Ok(events)
 }
 
 /// 按字符边界安全截取，最多取 `max_chars` 个字符。
