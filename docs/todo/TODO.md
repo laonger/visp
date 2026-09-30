@@ -275,6 +275,35 @@ Agent 循环在等待 UserQuery 确认时 panic，mpsc sender 被 drop，daemon 
 18. **显示层反例缺断言**：设计 §4.4 已记录两类显示层已知差异（回退时的显示残留 `ABCAB`；前缀碰撞导致块合并），但**当前没有显示层用例覆盖**；如需防回归，应在 TUI / ACP 侧补显示断言。
 19. **测试代码的潜在 lint**：`crates/visp-daemon/src/service.rs` 测试模块内有一处 `while_let_loop`（约 :5946，来自忙拒绝 e2e 用例）。CI 门禁的 `cargo clippy` 不带 `--all-targets`、不检查测试代码，故**不影响门禁**；但 `cargo clippy --all-targets` 会报。建议顺手修掉。
 
+---
+
+## 2026-09-30 新增（二）：工具调用被 SSE 解析丢弃 —— 根因与修复
+
+> 现象：模型思考里"说要使用工具"，但**工具从未执行**；表现为 15 轮空转、约 124 秒、15 次 LLM 调用，最终由用户手动取消，且每轮思考被追加显示，看起来像"重复推理"。
+
+**根因（日志实证）**：provider 元数据报告 `finish_reasons = ["tool_calls"]`、`is_token_limit = false`，而 agent loop 解析到的 `tool_calls` 为空 → 被归类为 **thinking-only → `Continue`**。
+证据原文（`~/.visp/logs/visp-daemon.log.<date>`）：
+`"message":"LLM produced thinking-only response (no text/tool calls), continuing loop","output_tokens":169,"is_token_limit":false,"finish_reasons":"Some([\"tool_calls\"])"`
+
+**解析层缺口（`crates/visp-llm/src/openai.rs` 的 delta 解析，均已修）**：
+1. 逐字段提前 `return`：同一 chunk 同时含 `reasoning_content`/`reasoning` 与 `tool_calls` 时，工具调用被吞；
+2. `tool_calls` 数组内「匹配到第一个就 `return`」：一个 chunk 含多个 tool_call 时只处理第一个；
+3. 完全不认旧式 `function_call` 字段。
+
+**已落地修复**：`db2c762d`（按 chunk 收集事件 + 处理全部 tool_call + 兼容 `function_call`）、`886723f2`（provider 声称 `tool_calls` 却解析不到时**明确失败**，不再空转续跑）。
+
+**残余 / 未做**：
+1. **未抓到原始 SSE**：因此无法确证用户那次命中的是缺口 1 还是缺口 3（两者均已修）；F4 作为兜底，遇到未知形态会给出明确错误而非空转。
+2. 「provider 声称 `tool_calls`，但既无正文也无思考块」的变体仍会落到空响应分支：`output_tokens > 0` 会报错，`== 0` 仅告警后 `Done`（静默）——未处理。
+3. **连续 thinking-only 续跑仍无上限**（本次靠手动取消；上限为软 50 / 硬 200）。
+
+### 可观测性 / 运维缺口（本次排查付出代价才发现）
+
+1. **ACP 自拉起 daemon 的日志文件恒为 0 字节**：`visp-acp` 把子进程 stdout/stderr 重定向到 `~/.visp/logs/daemon-*.log`，但 daemon 的日志实际写自己的滚动文件 `~/.visp/logs/visp-daemon.log.<date>`（`[observability] log_file`，默认 `~/.visp/logs`）。两套路径没对齐，现场排查时"看不到日志"。
+2. **孤儿 daemon**：`visp-acp` 非正常退出（被 Zed 终止/超时）时不回收它自拉起的 daemon；实测 50051 / 50052 / 50053 各残留一个。
+3. **端口探测疑似 TOCTOU**：Zed 日志多次记录 `starting daemon addr=[::1]:50051`，即使该端口当时已被上一轮 daemon 占用——建议复核 `find_available_addr` 的「试绑后立即释放」在 macOS 上的行为，或改为「失败即换端口」。
+4. **`Incoming transport closed: session/new`（未定位）**：手工复现 `initialize + session/new` 两次均正常；Zed 日志显示 agent 只输出一行 `starting daemon` 后**静默死亡、无 stderr 错误**，且失败前后 Zed 自身在重启（`ERROR timed out waiting on app_will_quit` → `crash handler registered`）。怀疑是 Zed 侧退出/线程重建把 agent 子进程整体终止，但**缺实锤**。
+
 ### 发布说明条目（草案）
 
 > **行为变更**：`ThinkingBlock.thinking` 的语义由「累积全文快照」改为「**增量**」（相对同一思考块上一帧的新增部分）。这是 proto 契约的**静默语义变更**——字段名与编号未变，消费方应改为「**追加**」消费（ACP 的 `agent_thought_chunk` 消费方式天然正确；TUI 已同步改为追加）。若存在与本仓库**不同批构建**的旧客户端，其思考显示会降级为只显示最后一片。
