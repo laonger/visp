@@ -94,11 +94,36 @@ pub fn resolve_bin(name: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// daemon 日志文件路径(`{log_dir}/daemon-{timestamp}.log`)。
+/// 子进程早期输出捕获文件路径(`{log_dir}/daemon-{timestamp}.log`)。
+///
+/// 该文件只承接 daemon 的 stdout/stderr(panic/早期错误,以及显式关闭
+/// 文件日志时的全部输出);daemon 自身的 tracing 滚动日志另见
+/// [`daemon_log_notice`]。
 pub fn daemon_log_path() -> anyhow::Result<PathBuf> {
     let dir = visp_config::path::log_dir().unwrap_or_else(std::env::temp_dir);
     let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
     Ok(dir.join(format!("daemon-{timestamp}.log")))
+}
+
+/// 构造「daemon 真实日志位置」提示文本,用于替掉误导性的重定向文件提示。
+///
+/// daemon 自身把 tracing 日志写入 `[observability] log_file` 目录下的滚动文件
+/// `visp-daemon.log.<date>`(默认 `~/.visp/logs`,见
+/// `crates/visp-daemon/src/observability/init.rs`);而 `redirect_path`
+/// 对应的 `daemon-<ts>.log` **不是** daemon 的日志,只捕获其 stdout/stderr。
+///
+/// 之所以不把两者合一:`observability.log_file` 没有 CLI/环境变量注入点
+/// (仅 `daemon.toml` 可配置,见 `visp-config` 的 `load_config`),无法让 daemon
+/// 直接写到 `daemon-<ts>.log`。
+pub fn daemon_log_notice(redirect_path: &Path) -> String {
+    let dir = visp_config::path::log_dir().unwrap_or_else(std::env::temp_dir);
+    format!(
+        "daemon rolling log: {}/visp-daemon.log.<date> \
+         (default [observability] log_file; set log_file in daemon.toml to change); \
+         early stdout/stderr captured in {}",
+        dir.display(),
+        redirect_path.display()
+    )
 }
 
 /// 启动 daemon:注入 `VISP_LISTEN_ADDR`,stdout/stderr 重定向到日志文件,
@@ -268,6 +293,57 @@ pub async fn kill(child: &mut Child) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 等待终止信号(SIGTERM/SIGINT),返回触发退出的信号名用于日志。
+///
+/// 非 Unix 平台退化为 Ctrl-C(SIGINT)。信号注册失败时返回的 future 永不就绪,
+/// 避免误退出。
+pub async fn termination_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let (mut sigterm, mut sigint) = match (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        ) {
+            (Ok(t), Ok(i)) => (t, i),
+            _ => {
+                // 注册失败:永不就绪,避免误退出
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
+        };
+        tokio::select! {
+            _ = sigterm.recv() => "SIGTERM",
+            _ = sigint.recv() => "SIGINT",
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        "SIGINT"
+    }
+}
+
+/// 终止信号到达后的收尾入口:复用 [`exit_daemon`](§6.1 步骤 6)语义,
+/// 自拉起模式向 daemon 发 Shutdown(超时强杀),直连模式默认不打扰。
+///
+/// **局限**:若父进程(如 Zed)以 SIGKILL 终止本进程,信号不可捕获,本函数
+/// 不会执行,自拉起的 daemon 仍可能残留为孤儿;彻底解法是 daemon 侧
+/// 「父进程死亡自退」(设计级改动,不属本函数职责)。
+pub async fn handle_termination(
+    child: Option<&mut Child>,
+    addr: &str,
+    mode: LaunchMode,
+    shutdown_on_exit: bool,
+) -> anyhow::Result<()> {
+    let policy = shutdown_policy(mode, shutdown_on_exit);
+    tracing::info!(
+        ?policy,
+        "termination signal received; running shutdown cleanup"
+    );
+    exit_daemon(child, addr, policy).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,5 +506,218 @@ mod tests {
             shutdown_policy(LaunchMode::Attached, true),
             ShutdownPolicy::SendOnly
         );
+    }
+
+    // ===== A:用户可见日志位置与 daemon 实际写入位置对齐 =====
+
+    #[tokio::test]
+    async fn daemon_log_notice_reports_real_rolling_log_not_redirect_file() {
+        let dir = std::env::temp_dir().join(format!("visp-acp-sup-log-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let redirect = dir.join("daemon-2026-01-01_00-00-00.log");
+
+        // 假 daemon:确认 spawn_daemon 的重定向确实捕获子进程 stdout/stderr
+        let mut child = spawn_daemon(
+            Path::new("/bin/bash"),
+            &["-c".into(), "echo early".into()],
+            "127.0.0.1:59941",
+            &redirect,
+            None,
+        )
+        .await
+        .unwrap();
+        child.wait().await.unwrap();
+        let captured = tokio::fs::read_to_string(&redirect).await.unwrap();
+        assert!(
+            captured.contains("early"),
+            "重定向文件应捕获子进程早期输出, got: {captured}"
+        );
+
+        let notice = daemon_log_notice(&redirect);
+
+        // 1) 报告的是 daemon 真实滚动日志的命名与目录(init.rs 写 {log_file}/visp-daemon.log.<date>)
+        assert!(
+            notice.contains("visp-daemon.log"),
+            "应报告 daemon 真实滚动日志命名, got: {notice}"
+        );
+        if let Some(real_dir) = visp_config::path::log_dir() {
+            assert!(
+                notice.contains(&real_dir.display().to_string()),
+                "应报告 daemon 真实日志目录, got: {notice}"
+            );
+        }
+
+        // 2) 不再把重定向空文件谎称为日志(log= 提示)
+        assert!(
+            !notice.contains(&format!("log={}", redirect.display())),
+            "不得再以 log= 指向只含早期输出的重定向文件, got: {notice}"
+        );
+
+        // 3) 明确标注重定向文件仅承接 stdout/stderr
+        assert!(
+            notice.contains(&redirect.display().to_string()),
+            "应说明重定向捕获文件位置, got: {notice}"
+        );
+        assert!(
+            notice.contains("stdout/stderr"),
+            "应说明重定向文件仅用于早期 stdout/stderr, got: {notice}"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // ===== B:终止信号收尾 harness(断言 Shutdown 被调用 + 子进程被回收) =====
+
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tonic::{Request, Response, Status, Streaming};
+    use visp_proto::visp::ClientMessage;
+    use visp_proto::visp::ServerMessage;
+    use visp_proto::visp::coder_daemon_server::{CoderDaemon, CoderDaemonServer};
+
+    type StubChatStream =
+        Pin<Box<dyn futures::Stream<Item = Result<ServerMessage, Status>> + Send>>;
+
+    /// 仅记录 `Shutdown` 调用的最小 CoderDaemon stub。
+    struct ShutdownStub {
+        shutdowns: Arc<AtomicUsize>,
+    }
+
+    #[tonic::async_trait]
+    impl CoderDaemon for ShutdownStub {
+        type ChatStream = StubChatStream;
+
+        async fn chat(
+            &self,
+            _request: Request<Streaming<ClientMessage>>,
+        ) -> Result<Response<Self::ChatStream>, Status> {
+            Err(Status::unimplemented("stub"))
+        }
+        async fn create_session(
+            &self,
+            _request: Request<visp_proto::visp::CreateSessionRequest>,
+        ) -> Result<Response<visp_proto::visp::Session>, Status> {
+            Err(Status::unimplemented("stub"))
+        }
+        async fn list_sessions(
+            &self,
+            _request: Request<()>,
+        ) -> Result<Response<visp_proto::visp::ListSessionsResponse>, Status> {
+            Err(Status::unimplemented("stub"))
+        }
+        async fn delete_session(
+            &self,
+            _request: Request<visp_proto::visp::DeleteSessionRequest>,
+        ) -> Result<Response<()>, Status> {
+            Err(Status::unimplemented("stub"))
+        }
+        async fn get_session(
+            &self,
+            _request: Request<visp_proto::visp::GetSessionRequest>,
+        ) -> Result<Response<visp_proto::visp::Session>, Status> {
+            Err(Status::unimplemented("stub"))
+        }
+        async fn read_file(
+            &self,
+            _request: Request<visp_proto::visp::ReadFileRequest>,
+        ) -> Result<Response<visp_proto::visp::ReadFileResponse>, Status> {
+            Err(Status::unimplemented("stub"))
+        }
+        async fn search_symbols(
+            &self,
+            _request: Request<visp_proto::visp::SearchSymbolsRequest>,
+        ) -> Result<Response<visp_proto::visp::SearchSymbolsResponse>, Status> {
+            Err(Status::unimplemented("stub"))
+        }
+        async fn get_symbol_details(
+            &self,
+            _request: Request<visp_proto::visp::GetSymbolDetailsRequest>,
+        ) -> Result<Response<visp_proto::visp::SymbolDetails>, Status> {
+            Err(Status::unimplemented("stub"))
+        }
+        async fn health_check(
+            &self,
+            _request: Request<()>,
+        ) -> Result<Response<visp_proto::visp::HealthStatus>, Status> {
+            Err(Status::unimplemented("stub"))
+        }
+        async fn shutdown(
+            &self,
+            _request: Request<ShutdownRequest>,
+        ) -> Result<Response<()>, Status> {
+            self.shutdowns.fetch_add(1, Ordering::SeqCst);
+            Ok(Response::new(()))
+        }
+        async fn reload_config(
+            &self,
+            _request: Request<visp_proto::visp::ReloadConfigRequest>,
+        ) -> Result<Response<visp_proto::visp::ReloadConfigResponse>, Status> {
+            Err(Status::unimplemented("stub"))
+        }
+        async fn get_hook_stats(
+            &self,
+            _request: Request<visp_proto::visp::GetHookStatsRequest>,
+        ) -> Result<Response<visp_proto::visp::HookStatsResponse>, Status> {
+            Err(Status::unimplemented("stub"))
+        }
+    }
+
+    async fn spawn_shutdown_stub() -> (String, Arc<AtomicUsize>) {
+        let shutdowns = Arc::new(AtomicUsize::new(0));
+        let stub = ShutdownStub {
+            shutdowns: shutdowns.clone(),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(CoderDaemonServer::new(stub))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+        (addr.to_string(), shutdowns)
+    }
+
+    /// 自拉起模式的终止信号收尾 → 向 daemon 发 Shutdown 并回收子进程。
+    #[tokio::test]
+    async fn handle_termination_spawned_sends_shutdown_and_reaps_child() {
+        let (addr, shutdowns) = spawn_shutdown_stub().await;
+        // 假 daemon:短暂存活后自行退出 → 优雅窗口内 child.wait() 成功回收
+        let mut child = Command::new("sleep").arg("0.3").spawn().unwrap();
+
+        handle_termination(Some(&mut child), &addr, LaunchMode::Spawned, false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            shutdowns.load(Ordering::SeqCst),
+            1,
+            "自拉起模式收到终止信号必须向 daemon 发 Shutdown"
+        );
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "收尾后子进程应已被回收"
+        );
+    }
+
+    /// 直连默认(Leave)不打扰既有 daemon:不发 Shutdown、不动子进程。
+    #[tokio::test]
+    async fn handle_termination_attached_default_leaves_daemon() {
+        let (addr, shutdowns) = spawn_shutdown_stub().await;
+        let mut child = Command::new("sleep").arg("0.3").spawn().unwrap();
+
+        handle_termination(Some(&mut child), &addr, LaunchMode::Attached, false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            shutdowns.load(Ordering::SeqCst),
+            0,
+            "直连默认不应向既有 daemon 发 Shutdown"
+        );
+        let _ = kill(&mut child).await;
     }
 }

@@ -70,7 +70,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         None => {
             let addr = supervisor::find_available_addr(supervisor::DEFAULT_LISTEN_ADDR)?;
             let log_path = supervisor::daemon_log_path()?;
-            tracing::info!(%addr, log = %log_path.display(), "starting daemon");
+            tracing::info!(%addr, "starting daemon: {}", supervisor::daemon_log_notice(&log_path));
             let daemon_bin = supervisor::resolve_bin("visp-daemon");
             let mut child = supervisor::spawn_daemon(
                 &daemon_bin,
@@ -91,13 +91,28 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         }
     };
 
-    // 2. ACP agent 事件循环(stdout 仅协议消息)
-    let session = crate::grpc::GrpcSession::connect(&addr).await?;
-    let (outbound, inbound, client) = session.into_parts();
-    let state = Arc::new(agent::AgentState::new(outbound, inbound, client));
-    let result = agent::run_agent(Stdio::new(), state).await;
+    // 2. ACP agent 事件循环(stdout 仅协议消息);同时监听 SIGTERM/SIGINT
+    let result = tokio::select! {
+        r = async {
+            let session = crate::grpc::GrpcSession::connect(&addr).await?;
+            let (outbound, inbound, client) = session.into_parts();
+            let state = Arc::new(agent::AgentState::new(outbound, inbound, client));
+            agent::run_agent(Stdio::new(), state).await
+        } => r,
+        signal = supervisor::termination_signal() => {
+            tracing::info!(signal = %signal, "received termination signal; shutting down");
+            // 信号路径收尾:自拉起发 Shutdown(超时强杀);直连默认不动(§6.1 步骤 6)
+            return supervisor::handle_termination(
+                child.as_mut(),
+                &addr,
+                launch_mode,
+                cli.shutdown_on_exit,
+            )
+            .await;
+        }
+    };
 
-    // 3. 退出收尾:自拉起发 Shutdown(超时强杀);直连默认不动(§6.1 步骤 6)
+    // 3. 正常结束收尾:自拉起发 Shutdown(超时强杀);直连默认不动(§6.1 步骤 6)
     if let Some(child) = child.as_mut() {
         supervisor::exit_daemon(
             Some(child),
