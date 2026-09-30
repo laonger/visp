@@ -250,9 +250,21 @@ Sub-Agent 委托时自动创建独立 Tab，实时展示每个 Agent 的运行�
 - macOS / Linux
 - `ANTHROPIC_API_KEY` 环境变量
 
-### 下载
+### 安装
 
-从 [GitHub Releases](https://github.com/laonger/visp/releases) 下载预编译二进制包（tar.gz）：
+一键安装（从[最新 Release](https://github.com/laonger/visp/releases/latest) 获取 `install.sh`：下载预编译二进制、初始化配置骨架、安装 herdr hook）：
+
+```bash
+curl -fsSL https://github.com/laonger/visp/releases/latest/download/install.sh | bash
+```
+
+安装指定版本时，用同一份 `install.sh` 加 `--tag`（管道模式下选项需经 `bash -s --` 传入）：
+
+```bash
+curl -fsSL https://github.com/laonger/visp/releases/latest/download/install.sh | bash -s -- --tag v0.5.3
+```
+
+也可手动从 [GitHub Releases](https://github.com/laonger/visp/releases) 下载预编译二进制包（tar.gz）：
 
 | 平台 | 包名 |
 |------|------|
@@ -260,12 +272,6 @@ Sub-Agent 委托时自动创建独立 Tab，实时展示每个 Agent 的运行�
 | macOS ARM | `visp-aarch64-apple-darwin.tar.gz` |
 
 解压后包含 `visp`（启动器）、`visp-daemon`（后台服务）、`visp-tui`（终端界面）、`visp-acp`（ACP 适配器，供 Zed 等编辑器接入）四个二进制文件，可直接运行。
-
-也可以一键安装（下载预编译二进制、初始化配置骨架、安装 herdr hook）：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/laonger/visp/master/install.sh | bash
-```
 
 可用选项：`--bin-dir DIR`（安装目录，默认 `~/.local/bin`）、`--tag TAG`（指定 Release 版本，默认 `latest`）、`--model MODEL` / `--api-key KEY`（非交互写入配置，仅在本次新建 `daemon.toml` 时生效，也可用环境变量 `VISP_MODEL` / `VISP_API_KEY`；优先级为命令行 > 环境变量 > 交互提问 > 骨架默认）、`--no-config`（跳过配置初始化）、`--no-herdr`（跳过 herdr hook 安装）、`--uninstall`（卸载二进制，可配 `--purge-config` 一并删除配置目录）、`--yes`（跳过删除配置的确认）、`--dry-run`（仅打印动作）。完整选项见 `install.sh --help`。
 
