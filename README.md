@@ -61,6 +61,10 @@ visp 采用 **前后端分离的 daemon 架构**，核心决策是让后端（Da
 |-------|------|------|
 | [visp](crates/visp/) | Launcher — 一键启动 daemon + CLI | [README](crates/visp/README.md) |
 | [visp-core](crates/visp-core/) | 核心抽象层 — Agent/Session/Tool/Prompt/Rules | [README](crates/visp-core/README.md) |
+| [visp-config](crates/visp-config/) | 配置加载/合并/持久化 + Rules/Skills/Hooks 定义（daemon.toml 真源） | - |
+| [visp-hooks](crates/visp-hooks/) | Hook 契约层与执行决策内核 — 事件模型/匹配排序/cooldown（零 IO） | - |
+| [visp-db](crates/visp-db/) | SQLite 会话存储 — SessionStore 实现 + schema 迁移 + message/session 仓储 | - |
+| [visp-fs](crates/visp-fs/) | 跨平台文件监听 — 路径规范化 + 事件类型契约 | - |
 | [visp-agent](crates/visp-agent/) | Multi-Agent 编排 - Orchestrator + Sub-Agent 生命周期 | - |
 | [visp-command](crates/visp-command/) | CLI 命令系统 - 命令注册/解析/Tab 补全 | - |
 | [visp-proto](crates/visp-proto/) | gRPC 协议定义 + 代码生成 | [README](crates/visp-proto/README.md) |
