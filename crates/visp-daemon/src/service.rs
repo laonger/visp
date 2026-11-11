@@ -5943,14 +5943,13 @@ mod tests {
 
         // 收集放行后帧：唯一回合恰好一条 TextDelta + 一条 Done，无交错重复。
         let (mut done, mut text) = (0usize, 0usize);
-        loop {
-            match tokio::time::timeout(Duration::from_millis(300), inbound.message()).await {
-                Ok(Ok(Some(msg))) => match msg.payload {
-                    Some(proto::server_message::Payload::Done(_)) => done += 1,
-                    Some(proto::server_message::Payload::TextDelta(_)) => text += 1,
-                    _ => {}
-                },
-                _ => break,
+        while let Ok(Ok(Some(msg))) =
+            tokio::time::timeout(Duration::from_millis(300), inbound.message()).await
+        {
+            match msg.payload {
+                Some(proto::server_message::Payload::Done(_)) => done += 1,
+                Some(proto::server_message::Payload::TextDelta(_)) => text += 1,
+                _ => {}
             }
         }
         assert_eq!(done, 1, "唯一终态回合应恰好一条 Done");
