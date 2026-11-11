@@ -70,6 +70,32 @@ fn fmt_layer_filter(log_level: &str) -> EnvFilter {
     EnvFilter::new(format!("{base},opentelemetry_sdk=warn"))
 }
 
+/// Build the OTel + Metrics layer filter from `observability.level`.
+///
+/// Export is restricted to the `visp` target prefix, i.e. the workspace's own
+/// crates (`visp_core`, `visp_agent`, `visp_daemon`, `visp_llm`, ...).  Their
+/// module paths all start with `visp`, so a single `visp={level}` directive
+/// covers them via `EnvFilter`'s prefix matching.
+///
+/// Third-party dependencies (`h2`, `hyper`, `tonic`, `reqwest`,
+/// `opentelemetry`, ...) are thereby excluded from OTLP export; without the
+/// target restriction a bare `LevelFilter` would forward their debug/trace
+/// events to the exporter.
+///
+/// `observability.level` is parsed independently of `log_level`: an invalid
+/// value falls back to `info` and reports a warning on stderr.  This helper
+/// runs before the global subscriber is installed, so `tracing` macros cannot
+/// be used here.
+fn otel_layer_filter(level: &str) -> EnvFilter {
+    match LevelFilter::from_str(level) {
+        Ok(level) => EnvFilter::new(format!("visp={level}")),
+        Err(_) => {
+            eprintln!("visp-daemon: invalid observability.level {level:?}; falling back to info");
+            EnvFilter::new("visp=info")
+        }
+    }
+}
+
 /// Initialise the tracing subscriber stack from configuration.
 ///
 /// Assembly order: EnvFilter → ParentLinkLayer → MetricsLayer → fmt layer.
@@ -97,9 +123,10 @@ pub fn init_observability(cfg: &ObservabilityConfig, log_level: &str) -> Observa
     }
 
     // 1. Per-layer level filters: fmt layer (file/stdout) uses `log_level`;
-    //    OTel export + metrics use `cfg.level` (observability.level).
+    //    OTel export + metrics use `cfg.level` (observability.level) and are
+    //    restricted to the `visp` target prefix.
     let log_filter = fmt_layer_filter(log_level);
-    let otel_filter = LevelFilter::from_str(&cfg.level).unwrap_or(LevelFilter::INFO);
+    let otel_filter = otel_layer_filter(&cfg.level);
 
     // 2. Always create layers (lightweight noops when unused).
     let parent_link = if cfg.otlp.enabled {
@@ -164,11 +191,14 @@ pub fn init_observability(cfg: &ObservabilityConfig, log_level: &str) -> Observa
     // Install globally so all threads (including tokio worker threads) see
     // the subscriber.  Use `ok()` to ignore "already set" — in tests the
     // first call wins and subsequent tests silently re-use that subscriber.
+    //
+    // `EnvFilter` is not `Copy`, so each layer gets its own clone of the
+    // shared OTel/Metrics filter.
     let _ = if cfg.format == "json" {
         tracing_subscriber::registry()
-            .with(otel_layer.with_filter(otel_filter))
+            .with(otel_layer.with_filter(otel_filter.clone()))
             .with(parent_link.clone())
-            .with(metrics.clone().with_filter(otel_filter))
+            .with(metrics.clone().with_filter(otel_filter.clone()))
             .with(
                 tracing_subscriber::fmt::layer()
                     .json()
@@ -178,9 +208,9 @@ pub fn init_observability(cfg: &ObservabilityConfig, log_level: &str) -> Observa
             .try_init()
     } else {
         tracing_subscriber::registry()
-            .with(otel_layer.with_filter(otel_filter))
+            .with(otel_layer.with_filter(otel_filter.clone()))
             .with(parent_link.clone())
-            .with(metrics.clone().with_filter(otel_filter))
+            .with(metrics.clone().with_filter(otel_filter.clone()))
             .with(
                 tracing_subscriber::fmt::layer()
                     .pretty()
@@ -236,9 +266,10 @@ where
         };
     }
 
-    // Per-layer level filters: fmt layer uses `log_level`, OTel + metrics use cfg.level.
+    // Per-layer level filters: fmt layer uses `log_level`, OTel + metrics use
+    // cfg.level restricted to the `visp` target prefix.
     let log_filter = fmt_layer_filter(log_level);
-    let otel_filter = LevelFilter::from_str(&cfg.level).unwrap_or(LevelFilter::INFO);
+    let otel_filter = otel_layer_filter(&cfg.level);
     let parent_link = if cfg.otlp.enabled {
         ParentLinkLayer::with_otel_mode(true)
     } else {
@@ -258,11 +289,12 @@ where
     };
 
     // Install globally so spawned tasks on other threads see the subscriber.
+    // `EnvFilter` is not `Copy`, so each layer gets its own clone.
     let _ = if cfg.format == "json" {
         tracing_subscriber::registry()
-            .with(otel_layer.with_filter(otel_filter))
+            .with(otel_layer.with_filter(otel_filter.clone()))
             .with(parent_link.clone())
-            .with(metrics.clone().with_filter(otel_filter))
+            .with(metrics.clone().with_filter(otel_filter.clone()))
             .with(
                 tracing_subscriber::fmt::layer()
                     .json()
@@ -272,9 +304,9 @@ where
             .try_init()
     } else {
         tracing_subscriber::registry()
-            .with(otel_layer.with_filter(otel_filter))
+            .with(otel_layer.with_filter(otel_filter.clone()))
             .with(parent_link.clone())
-            .with(metrics.clone().with_filter(otel_filter))
+            .with(metrics.clone().with_filter(otel_filter.clone()))
             .with(
                 tracing_subscriber::fmt::layer()
                     .pretty()
@@ -332,9 +364,10 @@ where
         };
     }
 
-    // Per-layer level filters: fmt layer uses `log_level`, OTel + metrics use cfg.level.
+    // Per-layer level filters: fmt layer uses `log_level`, OTel + metrics use
+    // cfg.level restricted to the `visp` target prefix.
     let log_filter = fmt_layer_filter(log_level);
-    let otel_filter = LevelFilter::from_str(&cfg.level).unwrap_or(LevelFilter::INFO);
+    let otel_filter = otel_layer_filter(&cfg.level);
     let parent_link = if cfg.otlp.enabled {
         ParentLinkLayer::with_otel_mode(true)
     } else {
@@ -353,11 +386,12 @@ where
         None::<OpenTelemetryLayer<_, _>>
     };
 
+    // `EnvFilter` is not `Copy`, so each layer gets its own clone.
     let set_default = if cfg.format == "json" {
         tracing_subscriber::registry()
-            .with(otel_layer.with_filter(otel_filter))
+            .with(otel_layer.with_filter(otel_filter.clone()))
             .with(parent_link.clone())
-            .with(metrics.clone().with_filter(otel_filter))
+            .with(metrics.clone().with_filter(otel_filter.clone()))
             .with(
                 tracing_subscriber::fmt::layer()
                     .json()
@@ -367,9 +401,9 @@ where
             .set_default()
     } else {
         tracing_subscriber::registry()
-            .with(otel_layer.with_filter(otel_filter))
+            .with(otel_layer.with_filter(otel_filter.clone()))
             .with(parent_link.clone())
-            .with(metrics.clone().with_filter(otel_filter))
+            .with(metrics.clone().with_filter(otel_filter.clone()))
             .with(
                 tracing_subscriber::fmt::layer()
                     .pretty()
@@ -417,9 +451,10 @@ where
         };
     }
 
-    // Per-layer level filters: fmt layer uses `log_level`, OTel + metrics use cfg.level.
+    // Per-layer level filters: fmt layer uses `log_level`, OTel + metrics use
+    // cfg.level restricted to the `visp` target prefix.
     let log_filter = fmt_layer_filter(log_level);
-    let otel_filter = LevelFilter::from_str(&cfg.level).unwrap_or(LevelFilter::INFO);
+    let otel_filter = otel_layer_filter(&cfg.level);
     let parent_link = if cfg.otlp.enabled {
         ParentLinkLayer::with_otel_mode(true)
     } else {
@@ -439,11 +474,12 @@ where
     };
 
     // Install globally — use ok() to ignore "already set" error.
+    // `EnvFilter` is not `Copy`, so each layer gets its own clone.
     let _ = if cfg.format == "json" {
         tracing_subscriber::registry()
-            .with(otel_layer.with_filter(otel_filter))
+            .with(otel_layer.with_filter(otel_filter.clone()))
             .with(parent_link.clone())
-            .with(metrics.clone().with_filter(otel_filter))
+            .with(metrics.clone().with_filter(otel_filter.clone()))
             .with(
                 tracing_subscriber::fmt::layer()
                     .json()
@@ -453,9 +489,9 @@ where
             .try_init()
     } else {
         tracing_subscriber::registry()
-            .with(otel_layer.with_filter(otel_filter))
+            .with(otel_layer.with_filter(otel_filter.clone()))
             .with(parent_link.clone())
-            .with(metrics.clone().with_filter(otel_filter))
+            .with(metrics.clone().with_filter(otel_filter.clone()))
             .with(
                 tracing_subscriber::fmt::layer()
                     .pretty()
@@ -548,7 +584,7 @@ mod tests {
         cfg: &ObservabilityConfig,
     ) -> tracing::subscriber::DefaultGuard {
         let log_filter = fmt_layer_filter(log_level);
-        let otel_filter = LevelFilter::from_str(&cfg.level).unwrap_or(LevelFilter::INFO);
+        let otel_filter = otel_layer_filter(&cfg.level);
 
         let parent_link = ParentLinkLayer::new();
         let metrics = MetricsLayer::new();
@@ -962,6 +998,121 @@ mod tests {
             finished[0].name.as_ref(),
             "test_otel_span",
             "span name should match"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // OTel 导出只放行 visp target
+    // ------------------------------------------------------------------
+
+    /// 验证 OTel/Metrics 层过滤器把导出范围限制在 `visp` target 前缀：
+    /// 工作区自身 crate（`visp_core`/`visp_daemon`/...）的 span 正常导出，
+    /// 而第三方依赖（h2/hyper/opentelemetry_sdk/...）即使级别达到阈值，
+    /// 也不会产生 OTel span。
+    #[test]
+    #[serial]
+    fn test_otel_filter_only_exports_visp_targets() {
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let writer = TestVecWriter::new();
+        let cfg = ObservabilityConfig {
+            enabled: true,
+            level: "debug".into(),
+            otlp: OtlpConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            format: "json".into(),
+            parent_link: false,
+            metrics_summary: false,
+            log_file: None,
+            ..Default::default()
+        };
+        let _guard = init_observability_with_exporter(&cfg, &cfg.level, writer, exporter.clone());
+
+        // visp target：debug 级别的事件也应导出。
+        drop(tracing::debug_span!(target: "visp_core::agent", "visp.debug.span"));
+        drop(tracing::info_span!(target: "visp_daemon", "visp_info_span"));
+        // 第三方 target：即使 error 级别也必须被过滤。
+        drop(tracing::error_span!(target: "h2::codec", "h2_error_span"));
+        drop(tracing::info_span!(target: "hyper::proto", "hyper_info_span"));
+        drop(tracing::error_span!(
+            target: "opentelemetry_sdk",
+            "otel_sdk_error_span"
+        ));
+
+        let finished = exporter
+            .get_finished_spans()
+            .expect("get_finished_spans should succeed");
+        let names: Vec<&str> = finished.iter().map(|s| s.name.as_ref()).collect();
+
+        assert!(
+            names.contains(&"visp.debug.span"),
+            "visp-target debug span should be exported, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"visp_info_span"),
+            "visp-target info span should be exported, got: {names:?}"
+        );
+        for dep in ["h2_error_span", "hyper_info_span", "otel_sdk_error_span"] {
+            assert!(
+                !names.contains(&dep),
+                "third-party target span {dep:?} must not be exported, got: {names:?}"
+            );
+        }
+    }
+
+    /// 验证 span 内部的 event 也按 target 过滤：挂在 visp span 上的
+    /// 第三方 target 事件不会进入 OTel span events。
+    #[test]
+    #[serial]
+    fn test_otel_filter_drops_non_visp_events_inside_span() {
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let writer = TestVecWriter::new();
+        let cfg = ObservabilityConfig {
+            enabled: true,
+            otlp: OtlpConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            format: "json".into(),
+            parent_link: false,
+            metrics_summary: false,
+            log_file: None,
+            ..Default::default()
+        };
+        let _guard = init_observability_with_exporter(&cfg, &cfg.level, writer, exporter.clone());
+
+        let span = tracing::info_span!(target: "visp_daemon", "visp.parent");
+        {
+            let _enter = span.enter();
+            tracing::info!(target: "h2::codec", "dependency noise");
+            tracing::info!(target: "visp_core::llm", "own event");
+        }
+        drop(span);
+
+        let finished = exporter
+            .get_finished_spans()
+            .expect("get_finished_spans should succeed");
+        let parent = finished
+            .iter()
+            .find(|s| s.name.as_ref() == "visp.parent")
+            .expect("visp.parent span should be exported");
+
+        let event_targets: Vec<String> = parent
+            .events
+            .iter()
+            .filter_map(|e| {
+                e.attributes
+                    .iter()
+                    .find(|kv| kv.key.as_str() == "target")
+                    .map(|kv| kv.value.to_string())
+            })
+            .collect();
+
+        assert_eq!(
+            event_targets,
+            vec!["visp_core::llm".to_string()],
+            "only visp-target events may be attached to exported spans, got: {event_targets:?}"
         );
     }
 

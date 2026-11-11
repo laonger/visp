@@ -166,7 +166,7 @@ load_config(config_path: Option<&Path>) -> Result<DaemonConfig, String>
    - VISP_LISTEN_ADDR -> 覆盖 daemon.listen_addr
    - OPENAI_API_KEY -> 回退填充 llm.models[*].api_key（当 api_key 为 None 时）
    - ANTHROPIC_API_KEY -> 同上（protocol 为 anthropic 时）
-   - RUST_LOG -> 覆盖 observability.level
+   - RUST_LOG -> 覆盖 daemon.log_level（fmt 层；不影响 observability.level）
 ```
 
 优先级从高到低：环境变量 > CLI 指定 > 项目配置 > 全局配置。
@@ -404,7 +404,7 @@ visp-config 对外暴露：
 | visp-daemon | config.rs | 类型迁移走，保留 re-export 或直接引用 |
 | visp-daemon | main.rs | `load_config` 调用改为 `visp_config::load_config`；agents 目录路径改用 `visp_config::path::agents_dir_*`；`ModelInfo` 构造改为 `visp_config::model_config_to_info`；移除 `VISP_LISTEN_ADDR` 环境变量覆盖逻辑（已由 `load_config` 处理）；`create_llm_provider` 移除 API Key 环境变量回退逻辑（已由 `load_config` 处理） |
 | visp-daemon | service.rs | 类型引用改为 `visp_config::`；`create_llm_provider` 移除 API Key 环境变量回退逻辑；`default_llm_config` 构造改为调用 `visp_config::build_llm_config_from_model`；`create_session` 配置合并改为调用 `visp_config::merge_session_config`；`ConfigUpdate` 改为调用 `visp_config::apply_config_update`；删除 `map_llm_config` |
-| visp-daemon | observability/init.rs | `ObservabilityConfig` 引用改为 `visp_config::`；移除 `RUST_LOG` 环境变量覆盖逻辑，直接使用 `cfg.level`（已由 `load_config` 处理）；`~/` 路径展开改用 `visp_config::path::expand_home` |
+| visp-daemon | observability/init.rs | `ObservabilityConfig` 引用改为 `visp_config::`；移除 `RUST_LOG` 环境变量覆盖逻辑：`RUST_LOG` 只覆盖 `daemon.log_level`（fmt 层），OTel/Metrics 使用 `observability.level` 且仅导出 `visp` target 的事件（已由 `load_config` 处理）；`~/` 路径展开改用 `visp_config::path::expand_home` |
 | visp-core | provider.rs | `LlmConfig`、`ModelInfo` 迁移走，保留 re-export |
 | visp-llm | openai.rs, anthropic.rs, mock.rs | `LlmConfig`、`ModelInfo` 引用改为 `visp_config::`，不再通过 visp-core re-export |
 | visp-core | rules.rs | 迁移走，保留 re-export |

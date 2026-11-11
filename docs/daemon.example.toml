@@ -153,7 +153,11 @@ max_context_tokens = 128000
 # 是否启用 observability 初始化。关闭后不会安装 tracing subscriber，也不会导出 OTLP。
 # enabled = true
 
-# tracing 过滤级别；也可用 RUST_LOG 环境变量覆盖。
+# OTel/Metrics 导出过滤级别（默认 info）。仅作用于 target 以 `visp` 开头的
+# 工作区事件（visp_core、visp_agent、visp_daemon、visp_llm 等）；第三方依赖
+# （h2、hyper、tonic、reqwest、opentelemetry 等）的日志不会进入 OTel。
+# 注意：控制台/文件日志（fmt 层）级别由 daemon.log_level 控制，可被 RUST_LOG
+# 覆盖；RUST_LOG 不影响本字段。
 # level = "info"
 
 # 控制台/文件日志格式：json 或 pretty。
