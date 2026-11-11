@@ -3001,6 +3001,55 @@ fn test_scrollbar_drag_preserves_grab_offset() {
 }
 
 #[test]
+fn test_scrollbar_drag_bottom_reaches_max_scroll() {
+    // 会触发反向映射低估的参数组合：thumb_len 经四舍五入/最小 1 钳制后，
+    // 可拖动区间 (track - thumb_len) 明显短于整条轨道。
+    for (total, visible, track) in [
+        (500u16, 25u16, 25u16),
+        (1000u16, 24u16, 24u16),
+        (1996u16, 10u16, 10u16),
+    ] {
+        let max_scroll = total - visible;
+        let (start_max, len) = scrollbar_thumb_geometry(total, visible, max_scroll, track);
+        assert_eq!(start_max + len, track, "滚到底时滑块应贴住轨道底部");
+        assert_eq!(
+            scrollbar_scroll_from_thumb(start_max, track, visible, max_scroll),
+            max_scroll,
+            "total={total} visible={visible} track={track}: 滑块拉到底应滚到底"
+        );
+    }
+}
+
+#[test]
+fn test_scrollbar_round_trip_from_geo() {
+    // 滑块行分辨率高于滚动行分辨率（max_scroll 远小于 track）时，
+    // 正向 → 反向往返误差应 ≤ 1 行；两端必须精确。
+    let (total, visible, track) = (100u16, 90u16, 90u16);
+    let max_scroll = total - visible;
+    let (start0, len) = scrollbar_thumb_geometry(total, visible, 0, track);
+    assert_eq!(start0, 0);
+    assert_eq!(
+        scrollbar_scroll_from_thumb(start0, track, visible, max_scroll),
+        0
+    );
+    let (start_max, len_max) = scrollbar_thumb_geometry(total, visible, max_scroll, track);
+    assert_eq!(len, len_max);
+    assert_eq!(start_max + len, track);
+    assert_eq!(
+        scrollbar_scroll_from_thumb(start_max, track, visible, max_scroll),
+        max_scroll
+    );
+    for s in 0..=max_scroll {
+        let (start, _) = scrollbar_thumb_geometry(total, visible, s, track);
+        let back = scrollbar_scroll_from_thumb(start, track, visible, max_scroll);
+        assert!(
+            (back as i32 - s as i32).abs() <= 1,
+            "scroll={s} round-trip={back}"
+        );
+    }
+}
+
+#[test]
 fn test_scrollbar_drag_monotonic_and_bounded() {
     let (total, visible, track) = (300u16, 20u16, 20u16);
     let max_scroll = total - visible;

@@ -84,19 +84,33 @@ pub(crate) fn scrollbar_thumb_geometry(
     (thumb_start as u16, thumb_len as u16)
 }
 
-/// 由目标滑块顶部偏移反推滚动偏移（拖拽映射，`scrollbar_thumb_geometry` 的逆运算）
+/// 由目标滑块顶部偏移反推滚动偏移（拖拽映射，`scrollbar_thumb_geometry` 的逆运算）。
+///
+/// 滑块可拖动区间是 `track - thumb_len`（`thumb_len` 经四舍五入/最小 1 钳制），
+/// 因此反向映射必须按该区间缩放，而不是按整条轨道；否则拖到底部时
+/// `thumb_start = track - thumb_len` 会低估滚动偏移，文本无法滚到底。
 pub(crate) fn scrollbar_scroll_from_thumb(
     thumb_start: u16,
     track: u16,
     visible: u16,
     max_scroll: u16,
 ) -> u16 {
-    let (track, visible) = (track as u32, visible as u32);
-    let max_vp = max_scroll as u32 + visible;
-    if track == 0 || max_vp == 0 {
+    let (track, visible) = (track as u64, visible as u64);
+    let max_scroll_u = max_scroll as u64;
+    if track == 0 || max_scroll_u == 0 {
         return 0;
     }
-    let scroll = (thumb_start as u32 * max_vp + track / 2) / track;
+    // 与正向映射一致的滑块长度（保持渲染与拖拽语义相同）
+    let max_vp = max_scroll_u + visible;
+    let rd = |n: u64, d: u64| (n + d / 2) / d;
+    let thumb_len = rd(visible * track, max_vp).clamp(1, track);
+    let draggable = track.saturating_sub(thumb_len);
+    if draggable == 0 {
+        return max_scroll;
+    }
+    // 按可拖动区间线性缩放，四舍五入；thumb_start 到达 draggable 时正好得到 max_scroll
+    let start = (thumb_start as u64).min(draggable);
+    let scroll = rd(start * max_scroll_u, draggable);
     (scroll as u16).min(max_scroll)
 }
 
