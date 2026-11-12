@@ -4,7 +4,7 @@
 
 将子 Agent 从 `task` 元工具改为一等工具直接暴露给 LLM。核心变更：agent 工具 `execute()` 内部 spawn 子 Agent 并等待完成，agent_loop 移除 task 拦截和 pending_spawns 逻辑。
 
-设计文档：`docs/design/visp-design-agent-tools.md`
+设计文档：`docs/design/2026-07-13-visp-design-agent-tools.md`
 
 ---
 

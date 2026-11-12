@@ -1,6 +1,6 @@
 # 工作计划：并行 sub-agent 可观测性与 panic 兜底（策略 A）
 
-对应设计：`docs/design/visp-design-parallel-subagent-observability.md`
+对应设计：`docs/design/2026-06-18-visp-design-parallel-subagent-observability.md`
 
 ## 总原则
 

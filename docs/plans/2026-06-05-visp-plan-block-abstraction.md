@@ -2,7 +2,7 @@
 
 ## 概述
 
-基于 `visp-design-block-abstraction.md`，将 `render_chat_area` 中的分散 if-else 渲染逻辑替换为统一的 `BlockStyle` + `render_block()` 抽象，删除 `build_text_stack`。
+基于 `2026-06-05-visp-design-block-abstraction.md`，将 `render_chat_area` 中的分散 if-else 渲染逻辑替换为统一的 `BlockStyle` + `render_block()` 抽象，删除 `build_text_stack`。
 
 改动范围：ui.rs（核心）、app.rs（清理）。event.rs 不动。
 

@@ -447,7 +447,7 @@ CodeGraph 只需要读取源码文件，不需要在容器内执行命令。因�
 |---|---|
 | `crates/visp-executor/` | Executor trait + LocalExecutor + ContainerExecutor |
 | `crates/visp-container/` | ContainerManager + 容器生命周期管理 |
-| `docs/design/visp-design-container.md` | 本设计文档 |
+| `docs/design/2026-07-31-visp-design-container.md` | 本设计文档 |
 | `Dockerfile` | visp daemon 容器镜像（Phase 3） |
 
 ### 修改文件

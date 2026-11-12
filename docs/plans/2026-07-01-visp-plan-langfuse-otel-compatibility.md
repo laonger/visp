@@ -2,7 +2,7 @@
 
 ## 概述
 
-基于 `docs/design/visp-design-langfuse-otel-compatibility.md` 实施 P0：补齐 Langfuse 语义配置、trace 级字段、LLM generation 字段、tool observation 字段、错误语义和 Collector 示例。P1 的 input/output capture、tool args/results capture、统一截断和脱敏不在本轮实现。
+基于 `docs/design/2026-07-01-visp-design-langfuse-otel-compatibility.md` 实施 P0：补齐 Langfuse 语义配置、trace 级字段、LLM generation 字段、tool observation 字段、错误语义和 Collector 示例。P1 的 input/output capture、tool args/results capture、统一截断和脱敏不在本轮实现。
 
 执行原则：每个子步骤先写测试并确认失败，再写最小实现；只改相关文件；最终通过 Rust 质量门禁。实际提交需用户另行明确授权。
 

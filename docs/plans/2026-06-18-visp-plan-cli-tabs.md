@@ -2,7 +2,7 @@
 
 ## 前置条件
 
-- 设计文档已 4 轮 oracle 审核通过：`docs/design/visp-design-cli-tabs.md`（405 行）
+- 设计文档已 4 轮 oracle 审核通过：`docs/design/2026-06-18-visp-design-cli-tabs.md`（405 行）
 - 当前分支：`agents`
 - proto 已含 `agent_name` 字段（5 处消息）；本计划**不改 proto**
 - 主 session_id 通过 `ChatHandle.session_id`（`crates/visp-tui/src/client.rs:19`）获得

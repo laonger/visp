@@ -1,6 +1,6 @@
 # visp 工作计划：visp-acp（ACP agent 接入 M1）
 
-> 输入：[`docs/design/visp-design-acp.md`](../design/visp-design-acp.md)（已定稿，§13 十项 2026-09-23 逐项确认）
+> 输入：[`docs/design/2026-09-28-visp-design-acp.md`](../design/2026-09-28-visp-design-acp.md)（已定稿，§13 十项 2026-09-23 逐项确认）
 > 范围：§13.10 core 前置修复 + M1 全量（`initialize`/`session/new`/`session/prompt`/`session/cancel` + 审批桥接 + elicitation）+ 集成测试
 > 不含：`session/load`、`fs/*`、`terminal/*`、`mcpServers[]` 转发、`usage_update`（M2/M3）
 > 质量门：`cargo test && cargo clippy -- -D warnings && cargo fmt -- --check`（与 CI 一致）

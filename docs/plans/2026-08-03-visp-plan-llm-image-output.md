@@ -2,7 +2,7 @@
 
 ## 概述
 
-基于设计文档 `docs/design/visp-design-llm-image-output.md`，实现 LLM 响应中图片内容的端到端处理：Provider 解析 -> 事件传播 -> CLI 渲染 + 地址展示 + URL 懒加载。
+基于设计文档 `docs/design/2026-08-03-visp-design-llm-image-output.md`，实现 LLM 响应中图片内容的端到端处理：Provider 解析 -> 事件传播 -> CLI 渲染 + 地址展示 + URL 懒加载。
 
 ## 依赖关系总览
 

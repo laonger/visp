@@ -4,7 +4,7 @@
 
 将分散在 visp-daemon、visp-core、visp-mcp、visp-llm、visp-tools、visp-command、visp、visp-tui、visp-db 中的配置管理逻辑，统一迁移到新建的 `visp-config` crate。涵盖配置的读、写、优先级、传递四个维度。
 
-设计文档：`docs/design/visp-config.md`
+设计文档：`docs/design/2026-08-07-visp-config.md`
 
 ---
 

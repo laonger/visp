@@ -557,7 +557,7 @@ cargo fmt -- --check
 **变更职责**：
 
 1. 把设计 §9 的三条「另立项」（回放不下发思考块、Anthropic `signature_delta` 未解析、多块完整性与签名回传）写入 `docs/todo/TODO.md`，并与既有 `docs/todo/thinking-history-issues.md` **互相引用**。
-2. 把设计 §12.3 的「文档同步」立为独立条目：`docs/design/visp-design-acp.md` 的 V10/V11、§6.6、§13.10、§13 风险表已与代码过时。
+2. 把设计 §12.3 的「文档同步」立为独立条目：`docs/design/2026-09-28-visp-design-acp.md` 的 V10/V11、§6.6、§13.10、§13 风险表已与代码过时。
 3. 把本计划「备注 3 已知限制」的条目（增量不自愈、回放不含思考、语义静默变更、多块显示多于持久化、跨轮同一行）登记到 `docs/todo/TODO.md`；并注明**本方案不触及** `docs/todo/thinking-history-issues.md` 记录的「thinking 双存储重复发送」路径，两者无交集。
 4. 为「`ThinkingBlock.thinking` 语义由快照改为增量」补一条**发布说明条目**（契约静默变更 + 旧客户端降级表现）。
 

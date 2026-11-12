@@ -1,7 +1,7 @@
 # Wave 1 Step 2 — tokio::spawn 审计清单
 
-对应工作计划：`docs/plans/visp-plan-self-observability.md` §Step 2
-对应设计：`docs/design/visp-design-self-observability.md` §11.2
+对应工作计划：`docs/plans/2026-06-23-visp-plan-self-observability.md` §Step 2
+对应设计：`docs/design/2026-06-23-visp-design-self-observability.md` §11.2
 
 ## 总览
 

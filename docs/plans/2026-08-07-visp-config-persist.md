@@ -4,7 +4,7 @@
 
 为 visp-config 加入项目级配置写入能力。将 `DaemonConfig` 全量序列化为 TOML，原子写入 `{project}/.visp/daemon.toml`。
 
-设计文档：`docs/design/visp-config-persist.md`
+设计文档：`docs/design/2026-08-07-visp-config-persist.md`
 
 改动范围：`crates/visp-config/src/config.rs`、`crates/visp-config/src/lib.rs`
 

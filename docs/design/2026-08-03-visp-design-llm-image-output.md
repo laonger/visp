@@ -19,13 +19,13 @@
 - 图片编辑 / 标注
 - 远程图片 URL 的本地持久化缓存策略（当前每次回放重新下载，内存级缓存）
 - OpenAI Responses API 的 `image_generation` tool 流式部分图片（partial_images）
-- 将图片作为输入发送给多模态模型（已有独立设计文档 `visp-design-multimodal-cli-image.md` 的后续阶段）
+- 将图片作为输入发送给多模态模型（已有独立设计文档 `2026-08-02-visp-design-multimodal-cli-image.md` 的后续阶段）
 
 ## 2. 背景
 
 ### 2.1 现有图片处理架构
 
-visp 已有一套基于 `<image: path>` 文本标记的图片处理机制（见 `visp-design-multimodal-cli-image.md`）：
+visp 已有一套基于 `<image: path>` 文本标记的图片处理机制（见 `2026-08-02-visp-design-multimodal-cli-image.md`）：
 
 - **用户输入**：用户输入 `@path/to/image.png`，CLI 替换为 `<image: path>` 标记，随 `UserInput.text` 发送
 - **工具结果**：`read_file` 等工具遇到图片文件时，在结果中插入 `<image: path>` 标记

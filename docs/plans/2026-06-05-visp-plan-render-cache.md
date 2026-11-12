@@ -2,7 +2,7 @@
 
 ## 概述
 
-基于 `visp-design-render-cache.md` 设计文档，实现按消息粒度的渲染缓存系统，为后续 Markdown 解析和代码高亮预留扩展点。
+基于 `2026-06-05-visp-design-render-cache.md` 设计文档，实现按消息粒度的渲染缓存系统，为后续 Markdown 解析和代码高亮预留扩展点。
 
 改动范围：app.rs（核心）、ui.rs（组装流程）。event.rs 仅需小幅适配（1 行改动）。
 

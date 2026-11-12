@@ -4,7 +4,7 @@
 
 实现 `visp -s <main-id>` 或 `/sessions <id>` 切换会话时，daemon 递归回放所有后代子 agent 的历史，CLI 以 ViewOnly tab 展示。涉及 5 个 crate：visp-proto / visp-core / visp-db / visp-daemon / visp-tui。
 
-设计文档：`docs/design/visp-design-resume-subagent-tabs.md`（第四版）。
+设计文档：`docs/design/2026-06-20-visp-design-resume-subagent-tabs.md`（第四版）。
 
 ### 设计文档笔误修正（计划阶段确认）
 

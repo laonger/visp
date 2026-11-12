@@ -115,7 +115,7 @@ Agent Loop 迭代开始
 | Prompt Builder | visp-core | 拼接 system prompt + 过滤 skip_context + 调用 trimmer + 组装最终消息列表 |
 | 配置层 | visp-core/visp-daemon | daemon.toml → proto → LlmConfig → AgentLoopContext 的传递与合并 |
 
-**注入关系**：daemon 创建 `DefaultContextTrimmer`（visp-context），通过 `Arc<dyn ContextTrimmer>` 注入 `AgentLoopContext`。core 只依赖 trait，不依赖具体实现。详见 [Phase 2 设计文档](visp-design-context-management-phase2.md)。
+**注入关系**：daemon 创建 `DefaultContextTrimmer`（visp-context），通过 `Arc<dyn ContextTrimmer>` 注入 `AgentLoopContext`。core 只依赖 trait，不依赖具体实现。详见 [Phase 2 设计文档](2026-06-10-visp-design-context-management-phase2.md)。
 
 ## 触发点
 
@@ -137,8 +137,8 @@ HEAD (5 turns) | MIDDLE (可裁剪) | TAIL (10 turns)
 
 ## 参考文档
 
-- `docs/design/visp-design-context-management-phase1.md` — Phase 1 实现细节（Token 估算、预算公式、裁剪算法、配置、文件改动清单）
-- `docs/design/visp-design-context-management-phase2.md` — Phase 2 架构演进（visp-context crate 抽取、ContextTrimmer trait、依赖倒置）
+- `docs/design/2026-06-10-visp-design-context-management-phase1.md` — Phase 1 实现细节（Token 估算、预算公式、裁剪算法、配置、文件改动清单）
+- `docs/design/2026-06-10-visp-design-context-management-phase2.md` — Phase 2 架构演进（visp-context crate 抽取、ContextTrimmer trait、依赖倒置）
 - `docs/context_management_suggestions.md` — Context Engine 完整架构愿景（远期参考）
 
 ## 术语表

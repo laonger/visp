@@ -580,7 +580,7 @@ pub(crate) fn render_tool_error(msg: &ChatLine, width: u16) -> Vec<Line<'static>
 /// Check if a mouse click at the given virtual_row hits the clickable header region of a
 /// tool/agent call block. If so, returns the call_id to toggle. Returns None otherwise.
 ///
-/// 可点击区域（仅 block 内容区的前两行，见 ui.md 设计）：
+/// 可点击区域（仅 block 内容区的前两行，见 2026-07-27-ui.md 设计）：
 /// - ToolCall：header 摘要行（过长换行时最多前两行）
 /// - AgentCall：agent_name 行 + agent prompt 第一行
 ///

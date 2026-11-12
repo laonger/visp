@@ -3063,7 +3063,7 @@ fn test_scrollbar_drag_monotonic_and_bounded() {
 }
 
 // ════════════════════════════════════════════════════════════
-// 流式输出速率（ui.md 输入栏设计）
+// 流式输出速率（2026-07-27-ui.md 输入栏设计）
 // ════════════════════════════════════════════════════════════
 
 #[test]
@@ -3317,7 +3317,7 @@ fn test_stream_output_tokens_reset_with_timer() {
     assert_eq!(app.active_tab().stream_output_tokens, 0);
 }
 
-// ── assistant 块：统计行拆分与格式（ui.md 对话栏设计） ──────────
+// ── assistant 块：统计行拆分与格式（2026-07-27-ui.md 对话栏设计） ──────────
 
 #[test]
 fn test_split_assistant_footer() {
@@ -3346,7 +3346,7 @@ fn test_split_assistant_footer_not_misdetected() {
 
 #[test]
 fn test_consume_pending_usage_footer_format() {
-    // ui.md 对话栏设计：`[time | Tokens in / out on tps t/s | Tools: n]`，无 Cache
+    // 2026-07-27-ui.md 对话栏设计：`[time | Tokens in / out on tps t/s | Tools: n]`，无 Cache
     let mut tab = TabEntry::new("s", "a");
     tab.streaming_text = "answer".into();
     tab.pending_usage = Some((100, 50, 3, 0, 0));
@@ -3375,7 +3375,7 @@ fn test_consume_pending_usage_tps_placeholder() {
 
 #[test]
 fn test_consume_pending_usage_final_stat_speed() {
-    // ui.md 对话栏设计：统计行速率为最终统计速度 = 结算输出 tokens / 总耗时，
+    // 2026-07-27-ui.md 对话栏设计：统计行速率为最终统计速度 = 结算输出 tokens / 总耗时，
     // 与输入栏实时速率（stream_output_tokens 流式估算）是两个不同指标
     let mut tab = TabEntry::new("s", "a");
     tab.streaming_text = "answer".into();

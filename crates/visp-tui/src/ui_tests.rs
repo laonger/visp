@@ -866,7 +866,7 @@ fn test_block_rows_rebuilt_each_render() {
 #[test]
 fn test_tool_call_clickable_only_first_two_rows() {
     // 回归：展开态下点击完整 args / results 区域不应触发折叠，
-    // 可点击区域仅限 block 内容区前两行（ui.md）。
+    // 可点击区域仅限 block 内容区前两行（2026-07-27-ui.md）。
     let mut app = AppState::new("main".into(), "m".into(), "".into(), String::new());
     app.add_message(
         LineType::ToolCall {

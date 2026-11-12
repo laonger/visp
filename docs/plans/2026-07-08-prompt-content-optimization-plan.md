@@ -1,6 +1,6 @@
 # DEFAULT_SYSTEM_PROMPT 内容质量优化 — 实施计划
 
-> 对应设计文档：`docs/design/visp-design-prompt-content-optimization.md`
+> 对应设计文档：`docs/design/2026-07-08-visp-design-prompt-content-optimization.md`
 > 实施文件：`crates/visp-core/src/prompt.rs`
 > 日期：2026-07-08
 

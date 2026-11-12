@@ -196,7 +196,7 @@ agent 循环内三类 span（tool / run / iteration）统一由 **`init_span!` �
 文档：
 
 - `docs/otel-langfuse-trace-fields.md` — 导出的 trace/span 结构与 Langfuse 字段说明。
-- `docs/design/visp-design-langfuse-otel-compatibility.md` + `docs/plans/visp-plan-langfuse-otel-compatibility.md` — 兼容设计与实施计划。
+- `docs/design/2026-07-01-visp-design-langfuse-otel-compatibility.md` + `docs/plans/2026-07-01-visp-plan-langfuse-otel-compatibility.md` — 兼容设计与实施计划。
 - `docs/otel-collector-langfuse.example.yaml` — Collector 参考配置（visp 不管理 Collector）。
 - `docs/daemon.example.toml:149-209` — 可观测性配置示例。
 - `README.md:240, 466` — OTel 集成特性与技术栈描述。

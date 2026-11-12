@@ -4,7 +4,7 @@
 
 实现 `-s <session_id>` 参数恢复历史会话功能。Session ID 保持 UUID v4 格式，CLI 和 daemon 支持前缀匹配。同时补充会话浏览（`--list`）、agent 异常终止恢复、项目路径校验等边界处理。
 
-**设计文档**: `docs/design/visp-design-session-resume.md`
+**设计文档**: `docs/design/2026-06-13-visp-design-session-resume.md`
 
 **涉及 crate**: visp-proto, visp-daemon, visp-tui, visp (launcher), visp-core
 

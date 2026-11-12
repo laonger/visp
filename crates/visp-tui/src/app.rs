@@ -380,7 +380,7 @@ pub struct TabEntry {
     pub last_stream_tps: Option<f64>,
     /// 流结束时冻结的总耗时（秒）。assistant 统计行的速率是**最终统计
     /// 速度** = 结算输出 tokens（UsageInfo）/ 本次流总耗时，与输入栏的
-    /// 实时速率（`tokens_per_second`，流式估算）是两个不同指标（ui.md）。
+    /// 实时速率（`tokens_per_second`，流式估算）是两个不同指标（2026-07-27-ui.md）。
     pub last_stream_elapsed: Option<f64>,
     pub pending_usage: Option<(u32, u32, u32, u32, u32)>,
     pub next_message_id: u64,
@@ -527,7 +527,7 @@ impl TabEntry {
         self.stream_output_tokens = 0;
     }
 
-    /// 输出速率（ui.md 输入栏设计）：取「provider 上报的输出增量」
+    /// 输出速率（2026-07-27-ui.md 输入栏设计）：取「provider 上报的输出增量」
     /// （`AppState::apply_usage_delta` 累加的 `stream_output_tokens`）与
     /// 「字符数 / 4 ≈ token 数」估算的**较大者**，而非上报值短路。
     /// 融合的原因：
@@ -564,7 +564,7 @@ impl TabEntry {
         }
     }
 
-    /// 最终统计速度（ui.md 对话栏设计）：assistant 统计行的速率取
+    /// 最终统计速度（2026-07-27-ui.md 对话栏设计）：assistant 统计行的速率取
     /// 「结算输出 tokens（UsageInfo 的 output）」/「本次流总耗时」，
     /// 与输入栏的实时速率（[`Self::tokens_per_second`]，流式估算）是
     /// 两个不同指标。不受实时速率 0.5s 防尖峰守卫影响（快速回复也有值）。
@@ -588,7 +588,7 @@ impl TabEntry {
     pub fn consume_pending_usage(&mut self) {
         if let Some((it, ot, tc, ..)) = self.pending_usage.take() {
             let time = chrono::Local::now().format("%H:%M:%S");
-            // ui.md 对话栏设计：统计行速率为最终统计速度（结算输出 tokens /
+            // 2026-07-27-ui.md 对话栏设计：统计行速率为最终统计速度（结算输出 tokens /
             // 总耗时），与输入栏实时速率是两个指标；两者都不可得（如历史
             // 回放）时显示 "--"
             let tps = match self.final_token_speed(ot) {

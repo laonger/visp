@@ -174,11 +174,11 @@ visp/
 │
 └── docs/
     ├── design/
-    │   ├── visp-design.md      # ✅ 总设计文档
-    │   └── visp-design-phase1.md # ✅ 当前文件
+    │   ├── 2026-06-04-visp-design.md      # ✅ 总设计文档
+    │   └── 2026-06-04-visp-design-phase1.md # ✅ 当前文件
     └── plans/
-        ├── visp-master-plan.md  # ✅ 总计划
-        └── visp-plan-phase1.md  # Phase 1 计划（下一步）
+        ├── 2026-06-04-visp-master-plan.md  # ✅ 总计划
+        └── 2026-06-04-visp-plan-phase1.md  # Phase 1 计划（下一步）
 ```
 
 ## 4. 依赖关系

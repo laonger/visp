@@ -1,6 +1,6 @@
 # 工作计划：Ctrl-C 取消彻底级联到 sub-agent
 
-**关联设计文档**：`docs/design/visp-design-cancel-cascade-fix.md`
+**关联设计文档**：`docs/design/2026-06-18-visp-design-cancel-cascade-fix.md`
 **日期**：2026-06-18
 **状态**：草案，待审核
 

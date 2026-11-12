@@ -125,15 +125,15 @@ cargo build      unit tests         首条 gRPC 连通      用户可交互     
 ```
 docs/
 ├── design/
-│   ├── visp-design.md              # ✅ 总设计文档 (已完成)
-│   ├── visp-design-phase1.md       # Phase 1 阶段设计
-│   ├── visp-design-phase2.md       # Phase 2 阶段设计
+│   ├── 2026-06-04-visp-design.md              # ✅ 总设计文档 (已完成)
+│   ├── 2026-06-04-visp-design-phase1.md       # Phase 1 阶段设计
+│   ├── 2026-06-04-visp-design-phase2.md       # Phase 2 阶段设计
 │   ├── ...
 │
 └── plans/
-    ├── visp-master-plan.md         # ✅ 总计划文档 (当前文件)
-    ├── visp-plan-phase1.md         # Phase 1 阶段计划
-    ├── visp-plan-phase2.md         # Phase 2 阶段计划
+    ├── 2026-06-04-visp-master-plan.md         # ✅ 总计划文档 (当前文件)
+    ├── 2026-06-04-visp-plan-phase1.md         # Phase 1 阶段计划
+    ├── 2026-06-04-visp-plan-phase2.md         # Phase 2 阶段计划
     └── ...
 ```
 

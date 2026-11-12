@@ -2,7 +2,7 @@
 
 ## 概述
 
-基于设计文档 `docs/design/visp-design-multimodal-cli-image.md`，实现 CLI TUI 中的图片展示功能。改动涉及 `visp-tui`（主要）、`visp-tools`、`visp-mcp` 三个 crate。
+基于设计文档 `docs/design/2026-08-02-visp-design-multimodal-cli-image.md`，实现 CLI TUI 中的图片展示功能。改动涉及 `visp-tui`（主要）、`visp-tools`、`visp-mcp` 三个 crate。
 
 核心链路：用户输入 `@path` -> 替换为 `<image: path>` 标记 -> gRPC 纯文本传输 -> CLI `render_pending`/`flush_streaming` 拆分为 `LineType::Image` ChatLine -> `render_chat_area` 两阶段渲染（文本走 `render_block`，图片走 `StatefulImage`）。
 

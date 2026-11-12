@@ -4,7 +4,7 @@
 
 新增 `visp-db` crate（SqliteSessionStore + schema 迁移 + DAO），扩展 visp-core 的 Message/Session 字段和 SessionStore trait，daemon 集成。
 
-基于设计文档：docs/design/visp-design-persistence.md
+基于设计文档：docs/design/2026-06-13-visp-design-persistence.md
 
 ---
 

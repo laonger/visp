@@ -2,7 +2,7 @@
 
 > 本文档基于对 `crates/visp-core/src/prompt.rs` 中 `DEFAULT_SYSTEM_PROMPT`（第 89-261 行）的 prompt engineering 审核，给出内容质量优化方案。
 >
-> 与 `visp-design-prompt-optimization.md` 的区别：前者是**首次创建** `DEFAULT_SYSTEM_PROMPT` 的架构性设计（已完成实施）；本文档是针对**已实施提示词**的内容质量二次优化。
+> 与 `2026-06-09-visp-design-prompt-optimization.md` 的区别：前者是**首次创建** `DEFAULT_SYSTEM_PROMPT` 的架构性设计（已完成实施）；本文档是针对**已实施提示词**的内容质量二次优化。
 
 ## 1. 背景
 

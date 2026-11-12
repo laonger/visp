@@ -2,7 +2,7 @@
 
 ## 概述
 
-基于设计文档 `visp-design-mcp.md`，将 MCP 支持拆分为 6 个 Wave、11 个子步骤。
+基于设计文档 `2026-06-09-visp-design-mcp.md`，将 MCP 支持拆分为 6 个 Wave、11 个子步骤。
 
 **影响范围**：visp-core（修改）、visp-mcp（新建）、visp-daemon（扩展）
 

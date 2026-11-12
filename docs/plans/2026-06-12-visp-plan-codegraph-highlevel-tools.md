@@ -2,7 +2,7 @@
 
 ## 概述
 
-基于设计文档 `docs/design/visp-design-codegraph-highlevel-tools.md`，实施 3 个新 CodeGraph 工具、3 个现有工具改进、以及 prompt 引导调整。
+基于设计文档 `docs/design/2026-06-12-visp-design-codegraph-highlevel-tools.md`，实施 3 个新 CodeGraph 工具、3 个现有工具改进、以及 prompt 引导调整。
 
 ## Wave 并行策略
 

@@ -4,7 +4,7 @@
 
 Phase 1 解决最紧迫的问题：对话历史无 token 计数和裁剪。实现轻量级方案，不引入新依赖。
 
-> 参考：`docs/design/visp-design-context-management.md` 总纲中的 Phase 1 定义。
+> 参考：`docs/design/2026-06-10-visp-design-context-management.md` 总纲中的 Phase 1 定义。
 
 ## 1. Token 估算
 

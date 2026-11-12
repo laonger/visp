@@ -1,6 +1,6 @@
 # 多 Agent 工作计划
 
-> 基于 `docs/design/visp-design-multi-agent.md`，TDD 五步循环驱动。
+> 基于 `docs/design/2026-06-15-visp-design-multi-agent.md`，TDD 五步循环驱动。
 >
 > **每步循环**：🔴 编写测试 → 🟢 实现 → 🧪 执行测试 → ♻️ 重构 → 👁️ 代码审核 → 📦 提交
 

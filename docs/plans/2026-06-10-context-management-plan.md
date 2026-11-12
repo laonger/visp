@@ -4,7 +4,7 @@
 
 实现对话历史的 token 估算、预算计算和裁剪机制。涉及 7 个文件，按 Wave 分 4 批实现。
 
-参考设计：`docs/design/visp-design-context-management.md`（总纲）、`docs/design/visp-design-context-management-phase1.md`（细则）
+参考设计：`docs/design/2026-06-10-visp-design-context-management.md`（总纲）、`docs/design/2026-06-10-visp-design-context-management-phase1.md`（细则）
 
 ## 依赖关系总览
 

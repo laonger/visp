@@ -75,7 +75,7 @@ CLI proxy that reduces LLM token consumption by 60-90% on common dev commands. S
 
 **问题**：CodeGraph 搜索仅使用 SQLite FTS5 全文搜索，LLM 生成的工具调用参数（符号名）与索引中的符号名必须精确匹配。如果 LLM 猜错符号名（如大小写不对、拼写近似），搜不到结果。
 
-**状态**：`crates/visp-codegraph/` 中无 fuzzy/levenshtein/edit_distance/jaccard 等模糊匹配实现。`visp-plan-codegraph-highlevel-tools.md` 末尾已标记此 TODO。
+**状态**：`crates/visp-codegraph/` 中无 fuzzy/levenshtein/edit_distance/jaccard 等模糊匹配实现。`2026-06-12-visp-plan-codegraph-highlevel-tools.md` 末尾已标记此 TODO。
 
 **方案参考**：实现编辑距离 + token 重叠度评分，对 FTS5 结果退化为模糊匹配，按相似度排序返回 top-k。
 
@@ -152,7 +152,7 @@ CLI proxy that reduces LLM token consumption by 60-90% on common dev commands. S
 
 ### P2：工具审批 `reject_always` 语义（core — 来自 visp-acp 设计未决 5，2026-09-23 拍板本期降级）
 
-**问题**：审批答复 `selected_index` 仅支持 `0`（允许）/`2`（始终允许）/其他（拒绝，`agent_loop.rs:1216-1244`），无「永久拒绝某工具」的会话内存储位。ACP 适配器（`visp-acp`，见 `docs/design/visp-design-acp.md` §6.5）收到客户端 `reject_always` 只能降级为 `reject_once`（`selected_index = 1`），用户选"永久拒绝"后同类工具仍会再弹窗。
+**问题**：审批答复 `selected_index` 仅支持 `0`（允许）/`2`（始终允许）/其他（拒绝，`agent_loop.rs:1216-1244`），无「永久拒绝某工具」的会话内存储位。ACP 适配器（`visp-acp`，见 `docs/design/2026-09-28-visp-design-acp.md` §6.5）收到客户端 `reject_always` 只能降级为 `reject_once`（`selected_index = 1`），用户选"永久拒绝"后同类工具仍会再弹窗。
 
 **影响**：安全方向（多弹窗不会误放行），功能保真度缺失。
 
@@ -214,7 +214,7 @@ Agent 循环在等待 UserQuery 确认时 panic，mpsc sender 被 drop，daemon 
 
 ## 📋 终端通知：v1 不做项与未来扩展（notification）
 
-> 登记于计划 `docs/plans/visp-plan-notification.md` 步骤 6c；来源 `docs/design/notification.md` §5（不做项）与 §7（未来扩展）。
+> 登记于计划 `docs/plans/2026-09-16-visp-plan-notification.md` 步骤 6c；来源 `docs/design/2026-09-16-notification.md` §5（不做项）与 §7（未来扩展）。
 
 ### v1 不做项（设计已拍板，本期不实现）
 
@@ -236,7 +236,7 @@ Agent 循环在等待 UserQuery 确认时 panic，mpsc sender 被 drop，daemon 
 
 **问题**：rmux / tmux 等复用器可能拦截或丢弃 OSC 9/777/99 通知序列（rmux 的 `osc_notification` 为空实现），导致通知完全静默。
 
-**状态**：未识别终端（含 rmux / tmux 等复用器）统一回退 BEL（`0x07`）兜底——保响铃/🔔 提示，无文本横幅。**已修订进设计正文**：`docs/design/notification.md` §1「实现偏离说明（2026-09-18）」，原决策「未知终端盲发 OSC 9」作废。该兜底属事实上的复用器适配（不特殊识别某个复用器，通用「未识别 → BEL」）。已识别终端仍按 OSC 9/777/99 发送；复用器拦截 OSC 时不做绕行，是否透传由复用器自身负责（tmux 的 allow-passthrough、rmux 的透传实现）。
+**状态**：未识别终端（含 rmux / tmux 等复用器）统一回退 BEL（`0x07`）兜底——保响铃/🔔 提示，无文本横幅。**已修订进设计正文**：`docs/design/2026-09-16-notification.md` §1「实现偏离说明（2026-09-18）」，原决策「未知终端盲发 OSC 9」作废。该兜底属事实上的复用器适配（不特殊识别某个复用器，通用「未识别 → BEL」）。已识别终端仍按 OSC 9/777/99 发送；复用器拦截 OSC 时不做绕行，是否透传由复用器自身负责（tmux 的 allow-passthrough、rmux 的透传实现）。
 
 **后续方案**：系统通知 fallback 后端（协议不可用或复用器拦截场景）。
 
@@ -268,7 +268,7 @@ Agent 循环在等待 UserQuery 确认时 panic，mpsc sender 被 drop，daemon 
 ### 工程卫生（本次实施发现）
 
 13. **既有 flaky 测试**（core）：`crates/visp-core/src/session.rs` 中 `unsafe { std::env::set_var("HOME", ...) }` 与并行测试竞态，导致 `agent_loop::tests::test_agent_run_carries_session_id_field` **间歇失败**；因测试过滤是子串匹配，`cargo test -p visp-core session` 会把它捞进来。→ 建议加互斥，或实施时改用 `session::tests` 精确过滤。
-14. **文档同步**：`docs/design/visp-design-acp.md` 已与代码过时——仍把「LLM 提问等待中取消无收尾信号」列为 V10 例外，而 `agent_loop` 已补发 `Error{Cancelled}` 并收尾（§13.10 方案 A 已落地）；V10/V11、§6.6、§13 风险表等条目需同步修订。
+14. **文档同步**：`docs/design/2026-09-28-visp-design-acp.md` 已与代码过时——仍把「LLM 提问等待中取消无收尾信号」列为 V10 例外，而 `agent_loop` 已补发 `Error{Cancelled}` 并收尾（§13.10 方案 A 已落地）；V10/V11、§6.6、§13 风险表等条目需同步修订。
 15. **Polyglot 提醒**：`ThinkingBlock` 语义变更的机器可检测护栏是两条 core 契约测试（「连续同块快照 → 只发增量」与「流式期间不产生快照变体」）；proto 注释已指向它们，改动语义须同步更新。
 16. **G5 判据的理论窗口（可达性极低，记录备查）**：G5 以「当前状态是否为 `Running`」近似「是否已被新回合改写」。若旧回合收尾迟到到**新回合自身也已走到终态**，判据不生效，旧收尾会以错误的终态发布会话级 `Stop`，并抢先移除（此刻属于新回合的）registration。需 orchestrator 被饥饿整个新回合才可能触发。
 17. **死变体待清理**：`AgentEvent::ThinkingBlock` 已**无生产者**（唯一发射点是新增的 `AgentEvent::ThinkingDelta`），其 `event_to_msg` 与 daemon 映射臂仅为维持穷尽匹配而保留。确认无其它路径后应删除该变体与其映射臂。

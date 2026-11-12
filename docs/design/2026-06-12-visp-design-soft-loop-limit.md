@@ -1,4 +1,4 @@
-# visp-design-soft-loop-limit.md
+# 2026-06-12-visp-design-soft-loop-limit.md
 
 ## 1. 目标
 

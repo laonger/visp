@@ -1,6 +1,6 @@
 # 工作计划：visp 自观测平台（tracing + OTel 方案）
 
-对应设计：`docs/design/visp-design-self-observability.md`
+对应设计：`docs/design/2026-06-23-visp-design-self-observability.md`
 
 ## 0. 总原则
 
@@ -332,7 +332,7 @@ cargo fmt -- --check
   3. daemon gRPC `Chat` 流入口的 per-stream spawn
   4. agent_loop 内部异步任务（如有）
   5-8. 待审计补全
-- **产出文件**：`docs/plans/visp-plan-self-observability-spawn-audit.md`
+- **产出文件**：`docs/plans/2026-06-23-visp-plan-self-observability-spawn-audit.md`
 
 ### W1-S2-2：审核 + 提交
 - 用户审核审计表完整性

@@ -4,7 +4,7 @@
 
 将 context 裁剪逻辑从 `visp-core/src/prompt.rs` 抽离为独立 crate `visp-context`。core 定义 `ContextTrimmer` trait，visp-context 实现具体策略，daemon 组装注入。
 
-基于设计文档：[visp-design-context-management-phase2.md](../design/visp-design-context-management-phase2.md)
+基于设计文档：[2026-06-10-visp-design-context-management-phase2.md](../design/2026-06-10-visp-design-context-management-phase2.md)
 
 ---
 
